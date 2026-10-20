@@ -1595,9 +1595,17 @@ class ArtifactsSettings(BaseModel):
         default=None,
         description=(
             "Local Azurite connection string only; BlobEndpoint must match the loopback "
-            "endpoint_url. Leave unset on Azure: DefaultAzureCredential uses AZURE_CLIENT_ID "
-            "for a user-assigned managed identity and signs user-delegation SAS "
+            "endpoint_url. Leave unset on Azure; managed identity signs user-delegation SAS "
             "without account keys."
+        ),
+    )
+    azure_client_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "User-assigned managed identity client id; required for azure_blob except local "
+            "Azurite. ManagedIdentityCredential uses only this identity, with no environment "
+            "service-principal or developer-login fallback."
         ),
     )
     region: str = Field(
@@ -1621,6 +1629,24 @@ class ArtifactsSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_backend(self) -> ArtifactsSettings:
+        if self.backend == "azure_blob":
+            if self.access_key_id.get_secret_value() or self.secret_access_key.get_secret_value():
+                raise ValueError(
+                    "azure_blob artifacts reject S3 access_key_id and secret_access_key"
+                )
+            if (
+                self.endpoint_url.query is not None
+                or self.endpoint_url.fragment is not None
+                or self.endpoint_url.username is not None
+                or self.endpoint_url.password is not None
+                or (
+                    self.azure_connection_string is None
+                    and self.endpoint_url.path not in {None, "/"}
+                )
+            ):
+                raise ValueError(
+                    "Azure endpoint_url must be an account URL without path, query or userinfo"
+                )
         if self.backend == "s3":
             if (
                 not self.access_key_id.get_secret_value()
@@ -1647,6 +1673,8 @@ class ArtifactsSettings(BaseModel):
                 raise ValueError("Azurite BlobEndpoint must match the loopback endpoint_url")
         elif self.endpoint_url.scheme != "https":
             raise ValueError("Azure Blob managed identity requires an HTTPS endpoint_url")
+        elif not self.azure_client_id:
+            raise ValueError("azure_blob artifacts require DAIMON_ARTIFACTS__AZURE_CLIENT_ID")
         return self
 
 

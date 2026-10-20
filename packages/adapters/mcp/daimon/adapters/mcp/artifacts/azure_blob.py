@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from urllib.parse import quote
 
-from azure.identity import DefaultAzureCredential
+from azure.identity import ManagedIdentityCredential
 from azure.storage.blob import (
     BlobSasPermissions,
     BlobServiceClient,
@@ -93,7 +93,7 @@ class AzureBlobArtifactStore:
 
 
 def build_azure_blob_store(settings: ArtifactsSettings) -> AzureBlobArtifactStore:
-    """Build without I/O; AZURE_CLIENT_ID selects the user-assigned identity."""
+    """Build without I/O, using only the configured user-assigned identity."""
     connection_string = (
         settings.azure_connection_string.get_secret_value()
         if settings.azure_connection_string is not None
@@ -118,7 +118,7 @@ def build_azure_blob_store(settings: ArtifactsSettings) -> AzureBlobArtifactStor
                 yield client
         else:
             with (
-                DefaultAzureCredential() as credential,
+                ManagedIdentityCredential(client_id=settings.azure_client_id) as credential,
                 BlobServiceClient(str(settings.endpoint_url).rstrip("/"), credential) as client,
             ):
                 yield client

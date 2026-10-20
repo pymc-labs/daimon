@@ -1500,8 +1500,15 @@ S3 secret access key; required only for the s3 backend.
 `SecretStr | None` · optional · default unset · secret
 
 Local Azurite connection string only; BlobEndpoint must match the loopback endpoint_url.
-Leave unset on Azure: DefaultAzureCredential uses AZURE_CLIENT_ID for a user-assigned
-managed identity and signs user-delegation SAS without account keys.
+Leave unset on Azure; managed identity signs user-delegation SAS without account keys.
+
+### `DAIMON_ARTIFACTS__AZURE_CLIENT_ID`
+
+`str | None` · optional · default unset
+
+User-assigned managed identity client id; required for azure_blob except local Azurite.
+ManagedIdentityCredential uses only this identity, with no environment service-principal
+or developer-login fallback.
 
 ### `DAIMON_ARTIFACTS__REGION`
 

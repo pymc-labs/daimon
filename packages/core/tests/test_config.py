@@ -1232,11 +1232,13 @@ def test_malformed_microsoft_tenant_id_names_the_variable(
 def test_azure_artifacts_parse_without_s3_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
     monkeypatch.setenv("DAIMON_ARTIFACTS__BACKEND", "azure_blob")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__AZURE_CLIENT_ID", "charts-identity")
     monkeypatch.setenv("DAIMON_ARTIFACTS__ENDPOINT_URL", "https://example.blob.core.windows.net")
     monkeypatch.setenv("DAIMON_ARTIFACTS__BUCKET", "charts")
     settings = load_settings(_env_file=None).artifacts
     assert settings is not None
     assert settings.backend == "azure_blob"
+    assert settings.azure_client_id == "charts-identity"
     assert settings.azure_connection_string is None
     assert settings.url_ttl_seconds == 600
 
@@ -1284,4 +1286,56 @@ def test_azurite_rejects_endpoint_overrides(extra: str) -> None:
             bucket="charts",
             azure_connection_string="AccountName=local;AccountKey=local;BlobEndpoint=http://127.0.0.1:10000/local"
             + extra,
+        )
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"access_key_id": "old-s3-key"},
+        {"secret_access_key": "old-s3-secret"},
+    ],
+)
+def test_azure_artifacts_reject_s3_secrets(credentials: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="reject S3"):
+        ArtifactsSettings(
+            backend="azure_blob",
+            endpoint_url="https://example.blob.core.windows.net",
+            bucket="charts",
+            azure_client_id="charts-identity",
+            **credentials,
+        )
+
+
+@pytest.mark.parametrize("suffix", ["/charts", "/charts/blob.png", "?sig=canary", "#fragment"])
+def test_azure_artifacts_reject_non_account_urls(suffix: str) -> None:
+    with pytest.raises(ValidationError, match="account URL"):
+        ArtifactsSettings(
+            backend="azure_blob",
+            endpoint_url="https://example.blob.core.windows.net" + suffix,
+            bucket="charts",
+            azure_client_id="charts-identity",
+        )
+
+
+def test_azure_artifacts_reject_endpoint_userinfo() -> None:
+    with pytest.raises(ValidationError, match="account URL"):
+        ArtifactsSettings(
+            backend="azure_blob",
+            endpoint_url="https://user:password@example.blob.core.windows.net",
+            bucket="charts",
+            azure_client_id="charts-identity",
+        )
+
+
+def test_azure_artifacts_require_explicit_identity_despite_ambient_principals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_CLIENT_ID", "ambient-principal")
+    monkeypatch.setenv("AZURE_CLIENT_SECRET", "ambient-secret")
+    with pytest.raises(ValidationError, match="DAIMON_ARTIFACTS__AZURE_CLIENT_ID"):
+        ArtifactsSettings(
+            backend="azure_blob",
+            endpoint_url="https://example.blob.core.windows.net",
+            bucket="charts",
         )

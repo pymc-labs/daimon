@@ -105,10 +105,13 @@ async def test_failed_upload_does_not_issue_a_capability_and_closes_client() -> 
 
 async def test_factory_selects_managed_identity_and_closes_credential() -> None:
     settings = ArtifactsSettings(
-        backend="azure_blob", endpoint_url="https://example.blob.core.windows.net", bucket="charts"
+        backend="azure_blob",
+        endpoint_url="https://example.blob.core.windows.net",
+        bucket="charts",
+        azure_client_id="charts-identity",
     )
     with (
-        patch("daimon.adapters.mcp.artifacts.azure_blob.DefaultAzureCredential") as credential,
+        patch("daimon.adapters.mcp.artifacts.azure_blob.ManagedIdentityCredential") as credential,
         patch("daimon.adapters.mcp.artifacts.azure_blob.BlobServiceClient") as service,
     ):
         client = FakeBlobService()
@@ -119,6 +122,7 @@ async def test_factory_selects_managed_identity_and_closes_credential() -> None:
         await store.upload_and_presign(
             key="chart.png", content=b"png", content_type="image/png", ttl_seconds=600
         )
+        credential.assert_called_once_with(client_id="charts-identity")
         service.assert_called_once_with(
             "https://example.blob.core.windows.net", credential.return_value.__enter__.return_value
         )

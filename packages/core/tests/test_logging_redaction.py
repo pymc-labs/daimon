@@ -160,3 +160,23 @@ def test_rich_handler_tracebacks_are_redacted_and_carry_no_locals(
     assert "Error calling tool" in logged
     assert text_canary not in logged
     assert local_canary not in logged
+
+
+@pytest.mark.parametrize(
+    "name", ["AccountKey", "accountkey", "ACCOUNTKEY", "SharedAccessSignature"]
+)
+def test_azure_connection_string_secrets_are_redacted(
+    name: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from daimon.core.observability import redact_log_text
+
+    canary = _canary() + "=="
+    connection = f"AccountName=local;{name}={canary};BlobEndpoint=http://127.0.0.1:10000/local"
+    assert canary not in redact_log_text(connection)
+    configure_log_level("INFO")
+    structlog.get_logger("daimon.test").info(
+        "storage.failed", detail=connection, credentials={name: canary}
+    )
+    rendered = capsys.readouterr().out
+    assert "storage.failed" in rendered
+    assert canary not in rendered

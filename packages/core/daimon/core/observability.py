@@ -98,6 +98,7 @@ _SECRET_NAME_EXACT: frozenset[str] = frozenset(
         "proxy-authorization",
         "set-cookie",
         "x-api-key",
+        "accountkey",
     }
 )
 _SECRET_NAME_PATTERN = re.compile(

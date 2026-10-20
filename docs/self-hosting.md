@@ -951,17 +951,22 @@ For Azure Blob Storage, set the following on the MCP service:
 DAIMON_ARTIFACTS__BACKEND=azure_blob
 DAIMON_ARTIFACTS__ENDPOINT_URL=https://<account>.blob.core.windows.net
 DAIMON_ARTIFACTS__BUCKET=charts
-AZURE_CLIENT_ID=<user-assigned-managed-identity-client-id>
+DAIMON_ARTIFACTS__AZURE_CLIENT_ID=<user-assigned-managed-identity-client-id>
 ```
 
 `BUCKET` names the private Blob container for this backend. Provision the
 container in advance and disable anonymous blob access on the storage account.
-Assign the managed identity **Storage Blob Data Contributor** at storage-account
-scope: it needs both blob write/read permissions and permission to generate a
-user-delegation key. Container-scoped data permissions alone cannot mint that
-key. No account key or S3 credential is needed. `DefaultAzureCredential` uses
-`AZURE_CLIENT_ID` to select a user-assigned managed identity; locally it can
-also use an Azure CLI login. See Microsoft's
+Assign **Storage Blob Delegator** to the managed identity at storage-account
+scope, and **Storage Blob Data Contributor** scoped to the charts container
+(or a custom container-scoped data role with read/write but no delete).
+The account role permits generating a user-delegation key; the container role
+limits blob data access to charts. Container-scoped data permissions alone
+cannot mint the delegation key. No account key or S3 credential is needed.
+`ManagedIdentityCredential` uses only `DAIMON_ARTIFACTS__AZURE_CLIENT_ID`, which
+is required outside Azurite. There is no fallback to environment service
+principals, CLI logins, or other developer credentials. `ENDPOINT_URL` must
+be the account URL, without a container path, query, fragment or userinfo.
+See Microsoft's
 [user-delegation SAS guide](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-user-delegation-sas-create-python).
 
 Blob links are HTTPS-only, read-only SAS capabilities for one blob, with the
@@ -973,8 +978,10 @@ and SVGs are served as `application/octet-stream`.
 For local Azurite only, set `DAIMON_ARTIFACTS__AZURE_CONNECTION_STRING` with an
 explicit `BlobEndpoint` matching `DAIMON_ARTIFACTS__ENDPOINT_URL`, for example
 `http://127.0.0.1:10000/devstoreaccount1`. Connection strings are rejected for
-non-loopback endpoints. Azurite uses a shared-key service SAS because it does
-not support Entra user-delegation keys. Never set this option in Azure.
+non-loopback endpoints, including Compose service hostnames such as `azurite`;
+use a loopback endpoint on the host for local tests. Its account-name path is
+the only allowed exception to the account-URL path restriction. Azurite uses
+a shared-key service SAS because it does not support Entra user-delegation keys. Never set this option in Azure.
 The optional Docker-backed test runs a disposable emulator:
 `uv run pytest packages/adapters/mcp/tests/artifacts/test_azurite.py`.
 
