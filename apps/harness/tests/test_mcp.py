@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -43,9 +44,50 @@ async def test_mcp_tool_executes_after_confirmation(
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
-    server = uvicorn.Server(
-        uvicorn.Config(mcp.http_app(path="/mcp", stateless_http=True), log_level="error")
+    certificate, private_key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+            "-keyout",
+            str(private_key),
+            "-out",
+            str(certificate),
+        ],
+        check=True,
+        capture_output=True,
     )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            mcp.http_app(path="/mcp", stateless_http=True),
+            log_level="error",
+            ssl_certfile=str(certificate),
+            ssl_keyfile=str(private_key),
+        )
+    )
+
+    def local_tls_client(headers=None, timeout=None, auth=None):
+        import ssl
+
+        return httpx.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+            verify=ssl.create_default_context(cafile=str(certificate)),
+            follow_redirects=False,
+        )
+
+    monkeypatch.setattr(model_adapter, "bound_mcp_http_client", local_tls_client)
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     calls = 0
 
@@ -117,14 +159,20 @@ async def test_mcp_tool_executes_after_confirmation(
     request.mcp_servers = [
         MCPServer(
             name="sample",
-            url=f"http://127.0.0.1:{port}/mcp",
+            url=f"https://127.0.0.1:{port}/mcp",
             headers_env={"Authorization": "HARNESS_MCP_CRED_SAMPLE"},
         )
     ]
     monkeypatch.setenv(
         "HARNESS_MCP_CRED_BINDINGS",
         json.dumps(
-            {"HARNESS_MCP_CRED_SAMPLE": {"origin": f"http://127.0.0.1:{port}", "tenants": ["*"]}}
+            [
+                {
+                    "name": "HARNESS_MCP_CRED_SAMPLE",
+                    "origin": f"https://127.0.0.1:{port}",
+                    "tenants": ["*"],
+                }
+            ]
         ),
     )
     context = TurnContext(

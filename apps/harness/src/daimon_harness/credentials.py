@@ -44,32 +44,30 @@ def mcp_origin(url: str) -> str:
 
 def load_bindings() -> dict[str, str]:
     """Validate operator-owned bindings; tenant authorization happens in the host."""
-    raw: JsonValue = JSON.validate_json(os.environ.get("HARNESS_MCP_CRED_BINDINGS", "{}"))
-    if not isinstance(raw, dict):
-        raise ValueError("MCP credential bindings must be an object")
+    raw: JsonValue = JSON.validate_json(os.environ.get("HARNESS_MCP_CRED_BINDINGS", "[]"))
+    if not isinstance(raw, list):
+        raise ValueError("MCP credential bindings must be a list")
     bindings: dict[str, str] = {}
-    for name, binding in raw.items():
+    for binding in raw:
+        if not isinstance(binding, dict) or set(binding) != {"name", "origin", "tenants"}:
+            raise ValueError("invalid MCP credential binding")
+        name = binding["name"]
         if (
-            not name.startswith("HARNESS_MCP_CRED_")
+            not isinstance(name, str)
+            or not name.startswith("HARNESS_MCP_CRED_")
             or name == "HARNESS_MCP_CRED_BINDINGS"
-            or not isinstance(binding, dict)
-            or set(binding) != {"origin", "tenants"}
+            or name in bindings
         ):
             raise ValueError("invalid MCP credential binding")
         origin = binding["origin"]
         tenants = binding["tenants"]
         if (
             not isinstance(origin, str)
-            or urlsplit(origin).path not in {"", "/"}
+            or urlsplit(origin).path
             or mcp_origin(origin) != normalized_mcp_url(origin)
         ):
             raise ValueError("credential binding must specify an origin only")
-        parsed = urlsplit(origin)
-        try:
-            loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
-        except ValueError:
-            loopback = parsed.hostname == "localhost"
-        if parsed.scheme != "https" and not loopback:
+        if urlsplit(origin).scheme != "https":
             raise ValueError("credential binding requires HTTPS")
         if not isinstance(tenants, list) or not tenants:
             raise ValueError("credential binding requires tenant UUIDs")

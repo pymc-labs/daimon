@@ -27,7 +27,7 @@ must isolate sandboxes and scope access to the correct sandbox.
 | --- | --- |
 | `HARNESS_AUTH_MODE` | `bearer` (default), `entra`, or private `foundry_gateway` |
 | `HARNESS_TOKEN` | Local/direct HTTP bearer secret; no default |
-| `HARNESS_MCP_CRED_BINDINGS` | Required for operator MCP credentials: JSON map from full env name to `{origin, tenants}` |
+| `HARNESS_MCP_CRED_BINDINGS` | Required for operator MCP credentials: JSON list of `{name, origin, tenants}` objects |
 | `HARNESS_DAIMON_MCP_URL` | Approved URL (normalized before comparison) for the reserved `daimon-mcp` server |
 | `HARNESS_ALLOWED_CALLERS` | Required in Entra/gateway modes: permitted object IDs or Entra app IDs |
 | `HARNESS_ENTRA_TENANT_ID`, `HARNESS_ENTRA_AUDIENCE` | Tenant-bound validation in `HARNESS_AUTH_MODE=entra` |
@@ -217,10 +217,10 @@ are refused. Message deltas and their final snapshot share a session-unique
 
 
 Every operator MCP credential must have an entry in `HARNESS_MCP_CRED_BINDINGS`:
-`{"HARNESS_MCP_CRED_SAMPLE":{"origin":"https://tools.example","tenants":["11111111-1111-1111-1111-111111111111"]}}`.
-The harness captures this map at startup and refuses unbound names or a server URL
+`[{"name":"HARNESS_MCP_CRED_SAMPLE","origin":"https://tools.example","tenants":["11111111-1111-1111-1111-111111111111"]}]`.
+The harness captures this list at startup and refuses unbound names or a server URL
 whose normalized scheme, host or port differs. Paths may vary within the bound
-origin. HTTPS is required, with the same explicit loopback exception as MCP URLs.
+origin. Operator bindings require an exact HTTPS origin.
 Tenant UUIDs are checked by the host builder; `["*"]` is for single-tenant installs
-only. Provision host and harness maps from the same operator source. The virtual
+only. Provision host and harness lists from the same operator source. The virtual
 Daimon credential continues to use its separate reserved-URL binding.

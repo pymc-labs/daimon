@@ -166,12 +166,12 @@ def test_non_loopback_credentials_require_https(monkeypatch, url):
     "url",
     [
         "https://external.example/mcp",
-        "http://localhost/mcp",
-        "http://127.0.0.1/mcp",
-        "http://[::1]/mcp",
+        "https://localhost/mcp",
+        "https://127.0.0.1/mcp",
+        "https://[::1]/mcp",
     ],
 )
-def test_scoped_credentials_and_loopback_are_supported(monkeypatch, url):
+def test_operator_bindings_support_https_origins(monkeypatch, url):
     from mux.drivers.selfhosted.wire import MCPServer
 
     monkeypatch.setenv("HARNESS_MCP_CRED_TEST", "operator-value")
@@ -182,7 +182,9 @@ def test_scoped_credentials_and_loopback_are_supported(monkeypatch, url):
     request.mcp_servers = [server]
     monkeypatch.setenv(
         "HARNESS_MCP_CRED_BINDINGS",
-        json.dumps({"HARNESS_MCP_CRED_TEST": {"origin": mcp_origin(url), "tenants": ["*"]}}),
+        json.dumps(
+            [{"name": "HARNESS_MCP_CRED_TEST", "origin": mcp_origin(url), "tenants": ["*"]}]
+        ),
     )
     resolved = turn_credentials(request, None)
     assert resolved == {"HARNESS_MCP_CRED_TEST": "operator-value"}
@@ -232,7 +234,13 @@ def test_bound_credentials_never_attach_to_another_origin(monkeypatch, url):
     monkeypatch.setenv(
         "HARNESS_MCP_CRED_BINDINGS",
         json.dumps(
-            {"HARNESS_MCP_CRED_TEST": {"origin": "https://allowed.example", "tenants": ["*"]}}
+            [
+                {
+                    "name": "HARNESS_MCP_CRED_TEST",
+                    "origin": "https://allowed.example",
+                    "tenants": ["*"],
+                }
+            ]
         ),
     )
     request = TurnRequest.model_validate(turn())
@@ -257,18 +265,19 @@ def test_unbound_credentials_are_refused_and_same_origin_paths_are_allowed(monke
         headers_env={"Authorization": "HARNESS_MCP_CRED_TEST"},
     )
     request.mcp_servers = [server]
-    monkeypatch.setenv("HARNESS_MCP_CRED_BINDINGS", "{}")
+    monkeypatch.setenv("HARNESS_MCP_CRED_BINDINGS", "[]")
     with pytest.raises(ValueError, match="unbound"):
         turn_credentials(request, None)
     monkeypatch.setenv(
         "HARNESS_MCP_CRED_BINDINGS",
         json.dumps(
-            {
-                "HARNESS_MCP_CRED_TEST": {
+            [
+                {
+                    "name": "HARNESS_MCP_CRED_TEST",
                     "origin": "https://allowed.example",
                     "tenants": ["11111111-1111-1111-1111-111111111111"],
                 }
-            }
+            ]
         ),
     )
     credentials = turn_credentials(request, None)
@@ -280,7 +289,13 @@ async def test_mismatched_binding_refuses_turn_before_model_io(tmp_path, monkeyp
     monkeypatch.setenv(
         "HARNESS_MCP_CRED_BINDINGS",
         json.dumps(
-            {"HARNESS_MCP_CRED_TEST": {"origin": "https://allowed.example", "tenants": ["*"]}}
+            [
+                {
+                    "name": "HARNESS_MCP_CRED_TEST",
+                    "origin": "https://allowed.example",
+                    "tenants": ["*"],
+                }
+            ]
         ),
     )
     adapter = FakeModelAdapter()
@@ -305,3 +320,35 @@ async def test_mismatched_binding_refuses_turn_before_model_io(tmp_path, monkeyp
         assert response.status_code == 422
         assert adapter.calls == 0
         assert "private-value" not in response.text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        [{"name": "HARNESS_MCP_CRED_TEST", "origin": "http://localhost", "tenants": ["*"]}],
+        [
+            {
+                "name": "HARNESS_MCP_CRED_TEST",
+                "origin": "https://allowed.example/path",
+                "tenants": ["*"],
+            }
+        ],
+        [{"name": "HARNESS_MCP_CRED_TEST", "origin": "https://allowed.example", "tenants": []}],
+        [
+            {
+                "name": "HARNESS_MCP_CRED_TEST",
+                "origin": "https://allowed.example",
+                "tenants": ["invalid"],
+            }
+        ],
+        [{"name": "HARNESS_MCP_CRED_TEST", "origin": "https://allowed.example", "tenants": ["*"]}]
+        * 2,
+    ],
+)
+def test_invalid_operator_binding_configuration_refused(monkeypatch, raw):
+    from daimon_harness.credentials import load_bindings
+
+    monkeypatch.setenv("HARNESS_MCP_CRED_BINDINGS", json.dumps(raw))
+    with pytest.raises(ValueError):
+        load_bindings()
