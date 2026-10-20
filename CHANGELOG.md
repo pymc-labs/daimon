@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Teams, Microsoft 365 mail, calendar, OneNote, sending and file download links now need the current 1:1 chat named on every call (the `origin_context_id` that `microsoft_search`, `microsoft_get`, `microsoft_write` and `microsoft_send` take). Nothing changes for normal use. Without it the tool says what to pass and does nothing; it no longer guesses that the person's one running turn is the caller, and it no longer answers "ask them in the 1:1 chat" in a 1:1 chat. A scheduled routine, which runs on the person's chat credential but has no chat of its own, can no longer read the owner's mail or calendar or get a file download link while the owner happens to be chatting with the same agent.
+
 - In Teams, **Who answers where** and an agent's **Answers in** line now name each channel ("General → **qa-haiku**") instead of showing its raw conversation id in a code box with the agent name dangling below. A channel with no known name shows "Channel name unavailable".
 
 - On Teams, when Microsoft refuses a `microsoft_write` because the file is locked (usually open in a desktop Office app), the model is now told nothing was changed and to ask whoever has the file open to close it and try again, instead of just "refused (423)".
