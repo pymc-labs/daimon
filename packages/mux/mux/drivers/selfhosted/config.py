@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from contextlib import suppress
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, JsonValue, model_validator
 
@@ -14,7 +15,11 @@ from mux.contracts.resources import AgentSpec, EnvironmentSpec
 from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
 
-_URL: re.Pattern[str] = re.compile(r"https?://[^\s<>]+")
+_URL: re.Pattern[str] = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>]+")
+_PRIVATE_V4 = tuple(
+    ipaddress.ip_network(net) for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+_PRIVATE_V6 = ipaddress.ip_network("fc00::/7")
 _ENV = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MCP_CREDENTIAL_ENV = re.compile(r"HARNESS_MCP_CRED_[A-Za-z0-9_]+")
 _CREDENTIAL = re.compile(
@@ -54,15 +59,30 @@ def _url(value: str, *, allow_internal_http: bool = False, audience: bool = Fals
         return
     if parsed.scheme != "http":
         raise ValueError("routing URLs must use HTTPS")
-    if host in ("localhost", "127.0.0.1", "::1"):
-        return
-    internal = (
-        "." not in host
-        or host.endswith((".internal", ".svc.cluster.local"))
-        or (".internal." in host and host.endswith(".azurecontainerapps.io"))
-    )
+    address = None
     with suppress(ValueError):
-        internal = internal or ipaddress.ip_address(host).is_private
+        address = ipaddress.ip_address(host)
+    if address is None:
+        # inet_aton accepts the integer, octal, hex and shortened IPv4 forms
+        # that the HTTP resolver also accepts, without performing DNS I/O.
+        with suppress(OSError):
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if host == "localhost" or (address is not None and address.is_loopback):
+        return
+    if address is not None:
+        internal = (
+            any(address in network for network in _PRIVATE_V4)
+            if isinstance(address, ipaddress.IPv4Address)
+            else address in _PRIVATE_V6
+        )
+    else:
+        internal = not re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9.]+)", host) and (
+            "." not in host
+            or host.endswith((".internal", ".svc.cluster.local"))
+            or (".internal." in host and host.endswith(".azurecontainerapps.io"))
+        )
     if not (allow_internal_http and internal):
         raise ValueError("HTTP requires loopback or explicit permission for an internal endpoint")
 
@@ -76,6 +96,20 @@ def _reject_credentials(value: JsonValue) -> None:
             parsed = urlsplit(match.group(0))
             if parsed.username or parsed.password:
                 raise ValueError("URL credentials must be referenced, never embedded")
+            for key, child in parse_qsl(parsed.query) + parse_qsl(parsed.fragment):
+                if (
+                    key.lower().replace("-", "_")
+                    in _SECRET_KEYS
+                    | {
+                        "key",
+                        "auth",
+                        "sig",
+                        "signature",
+                        "credential",
+                    }
+                    and child
+                ):
+                    raise ValueError("URL credentials must be referenced, never embedded")
     elif isinstance(value, dict):
         for name, child in value.items():
             if name.lower().replace("-", "_") in _SECRET_KEYS and isinstance(child, str) and child:
@@ -153,6 +187,7 @@ def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
                 if server.tool_policy:
                     raise ValueError("MCP tool policies are not supported by selfhosted v1")
         else:
+            _reject_credentials(spec.model_dump(mode="json")["packages"])
             if spec.execution != "self_hosted" or spec.native_config is None:
                 raise ValueError("selfhosted environments require harness configuration")
             if (

@@ -541,3 +541,43 @@ async def test_account_erasure_serializes_resource_writes(
         await asyncio.gather(
             *(task for task in (first, second) if task is not None), return_exceptions=True
         )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "pkg @ https://user:opaque-value@packages.example/pkg.whl",
+        "--extra-index-url https://packages.example/simple?token=opaque-value",
+        "pkg @ git+https://user:opaque-value@git.example/repo.git",
+    ],
+)
+async def test_package_credentials_never_reach_resources_or_retry_receipts(
+    db_session, db_session_factory, requirement
+):
+    from daimon.core._models import SelfHostedEnvironmentRecord, SelfHostedResourceOperation
+    from sqlalchemy import func, select
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    authorized = scope(str(tenant.id), str(account.id))
+    environments = SelfHostedEnvironments(db_session_factory)
+    safe = environment_spec()
+    unsafe = safe.model_copy(update={"packages": {"python": (requirement,)}})
+    with pytest.raises(ProviderError) as error:
+        await environments.create(authorized, unsafe, key="unsafe-create")
+    assert error.value.category == "invalid_request"
+    record = await environments.create(authorized, safe, key="safe-create")
+    with pytest.raises(ProviderError) as error:
+        await environments.update(
+            authorized,
+            record.ref,
+            EnvironmentPatch(packages={"python": (requirement,)}),
+            expected=record.revision,
+            key="unsafe-update",
+        )
+    assert error.value.category == "invalid_request"
+    assert await environments.retrieve(authorized, record.ref) == record
+    async with db_session_factory() as db:
+        assert await db.scalar(select(func.count()).select_from(SelfHostedEnvironmentRecord)) == 1
+        assert await db.scalar(select(func.count()).select_from(SelfHostedResourceOperation)) == 1

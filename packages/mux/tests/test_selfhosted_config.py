@@ -253,3 +253,111 @@ def test_free_text_fields_accept_harmless_credential_prose(prose):
             ),
         )
     )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "pkg @ https://user:opaque-value@packages.example/pkg.whl",
+        "--index-url https://opaque-value@packages.example/simple",
+        "--extra-index-url https://packages.example/simple?token=opaque-value",
+        "--extra-index-url https://packages.example/simple?api_key=opaque-value",
+        "pkg @ git+https://user:opaque-value@git.example/repo.git",
+        "git+ssh://user:opaque-value@git.example/repo.git#egg=pkg",
+        "pkg @ https://packages.example/pkg.whl#access_token=opaque-value",
+        "--extra-index-url https://packages.example/sk-secret-marker",
+    ],
+)
+def test_package_credentials_are_rejected(requirement):
+    spec = EnvironmentSpec(
+        name="environment",
+        execution="self_hosted",
+        packages={"python": (requirement,)},
+        native_config=ExtensionConfig(
+            namespace="selfhosted.environment",
+            version=1,
+            value={"harness_url": "https://harness.example", "auth_ref": "TOKEN"},
+        ),
+    )
+    with pytest.raises(ProviderError) as error:
+        validate_resource_spec(spec)
+    assert error.value.category == "invalid_request"
+    assert "opaque-value" not in str(error.value)
+    assert "secret-marker" not in str(error.value)
+
+
+def test_public_package_references_remain_valid():
+    validate_resource_spec(
+        EnvironmentSpec(
+            name="environment",
+            execution="self_hosted",
+            packages={
+                "python": (
+                    "pymc>=5",
+                    "pkg @ https://packages.example/pkg.whl#sha256=abc123",
+                    "pkg @ git+https://git.example/repo.git#subdirectory=python",
+                    "--extra-index-url https://packages.example/simple",
+                )
+            },
+            native_config=ExtensionConfig(
+                namespace="selfhosted.environment",
+                version=1,
+                value={"harness_url": "https://harness.example", "auth_ref": "TOKEN"},
+            ),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "8.8.8.8",
+        "134744072",
+        "010.010.010.010",
+        "0x08080808",
+        "8.526344",
+        "[2606:4700:4700::1111]",
+        "[::ffff:8.8.8.8]",
+        "169.254.1.1",
+        "[fe80::1]",
+        "100.64.0.1",
+        "192.0.2.1",
+        "[2001:db8::1]",
+        "0",
+        "[::]",
+        "[ff02::1]",
+    ],
+)
+def test_internal_http_never_admits_public_reserved_or_link_local_addresses(host):
+    with pytest.raises(ValueError):
+        HarnessConfig(harness_url=f"http://{host}:8080", auth_ref="TOKEN", allow_insecure_http=True)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.1",
+        "167772161",
+        "0x0a000001",
+        "012.0.0.1",
+        "[fd00::1]",
+        "[fc00::1]",
+        "[::ffff:10.0.0.1]",
+        "harness",
+        "harness.svc.cluster.local",
+    ],
+)
+def test_explicit_internal_http_admits_rfc1918_ula_and_cluster_names(host):
+    config = HarnessConfig(
+        harness_url=f"http://{host}:8080", auth_ref="TOKEN", allow_insecure_http=True
+    )
+    assert config.allow_insecure_http
+    with pytest.raises(ValueError):
+        HarnessConfig(harness_url=f"http://{host}:8080", auth_ref="TOKEN")
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.1", "2130706433", "0x7f000001", "[::1]"])
+def test_loopback_http_remains_available_without_internal_override(host):
+    HarnessConfig(harness_url=f"http://{host}:8080", auth_ref="TOKEN")
