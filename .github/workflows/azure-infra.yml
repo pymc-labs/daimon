@@ -3,7 +3,7 @@ name: Azure infrastructure
 on:
   pull_request:
     paths:
-      - 'infra/azure/**'
+      - 'deploy/azure/**'
       - 'azure.yaml'
       - 'scripts/azure/**'
       - 'tests/test_azure_infra.py'
@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install standalone Bicep
         shell: bash
         run: |
@@ -30,6 +30,6 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build and lint offline
         run: scripts/azure/validate.sh
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Check deployment contracts
         run: uv run pytest tests/test_azure_infra.py

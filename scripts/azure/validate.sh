@@ -9,7 +9,7 @@ fi
 build_dir=$(mktemp -d)
 trap 'rm -rf -- "$build_dir"' EXIT
 while IFS= read -r template; do
-  relative=${template#"$repo_root/infra/azure/"}
+  relative=${template#"$repo_root/deploy/azure/"}
   mkdir -p -- "$build_dir/$(dirname -- "$relative")"
   if ! bicep build "$template" --outfile "$build_dir/${relative%.bicep}.json" --diagnostics-format sarif > "$build_dir/build.sarif" 2>&1; then
     cat "$build_dir/build.sarif" >&2
@@ -34,4 +34,4 @@ for path in sys.argv[1:]:
                 sys.exit(1)
 PY
   echo "Validated $relative"
-done < <(find "$repo_root/infra/azure" -name '*.bicep' -type f | sort)
+done < <(find "$repo_root/deploy/azure" -name '*.bicep' -type f | sort)

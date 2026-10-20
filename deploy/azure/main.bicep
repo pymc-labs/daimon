@@ -1,3 +1,5 @@
+import { validateNamePrefix } from './names.bicep'
+
 targetScope = 'resourceGroup'
 
 param location string = resourceGroup().location
@@ -27,6 +29,13 @@ param postgresAdministratorPassword string
 param containerImage string = ''
 @description('Enable only after the manual init job succeeds. Workers require one always-on replica.')
 param deployServices bool = false
+@description('Disable to deploy the existing backend before Azure OpenAI quota is available.')
+param deployAi bool = true
+@description('Enable for production/tenant-sealed installs. Cannot be disabled again on an existing vault.')
+param vaultPurgeProtection bool = false
+@allowed(['discord', 'teams', 'mcp', 'scheduler'])
+@description('Serving apps to create. Removing an entry does not stop an existing app.')
+param services array = ['discord', 'teams', 'mcp', 'scheduler']
 
 @description('Optional nonsecret environment variables, common to all services. Put credentials in secretNames instead.')
 param appEnvironment object = {}
@@ -35,20 +44,24 @@ param secretNames object = {}
 @description('Per-service nonsecret environment variables, keyed by discord/teams/mcp/scheduler/init.')
 param serviceEnvironment object = {}
 @description('Per-service environment variable -> Key Vault secret-name mappings.')
-param serviceSecretNames object = {
-  discord: { DAIMON_DISCORD__BOT_TOKEN: 'discord-bot-token' }
-  teams: { DAIMON_TEAMS__CLIENT_SECRET: 'teams-client-secret' }
-}
+param serviceSecretNames object = {}
 @description('Optional additional Postgres firewall ranges: [{name, startIpAddress, endIpAddress}]. Azure-service access is enabled for ACA.')
 param postgresFirewallRules array = []
 
+var checkedNamePrefix = validateNamePrefix(namePrefix)
 var suffix = uniqueString(resourceGroup().id)
-var stem = '${namePrefix}-${suffix}'
+var stem = '${checkedNamePrefix}-${suffix}'
 var tags = { application: 'daimon' }
 
 module foundation './modules/foundation.bicep' = {
   name: 'foundation'
-  params: { location: location, stem: stem, compactName: '${namePrefix}${suffix}', tags: tags }
+  params: {
+    location: location
+    stem: stem
+    compactName: '${checkedNamePrefix}${suffix}'
+    tags: tags
+    vaultPurgeProtection: vaultPurgeProtection
+  }
 }
 
 module database './modules/database.bicep' = {
@@ -63,7 +76,7 @@ module database './modules/database.bicep' = {
   }
 }
 
-module ai './modules/ai.bicep' = {
+module ai './modules/ai.bicep' = if (deployAi) {
   name: 'ai'
   params: {
     location: location
@@ -83,6 +96,7 @@ var commonEnvironment = union(
     // Four processes on a burstable database: bound their combined connection budget.
     DAIMON_DATABASE__POOL_SIZE: '3'
     DAIMON_DATABASE__MAX_OVERFLOW: '2'
+    PGSSLROOTCERT: '/etc/ssl/certs/ca-certificates.crt'
     AZURE_CLIENT_ID: foundation.outputs.identityClientId
   },
   appEnvironment
@@ -113,7 +127,20 @@ module init './modules/init.bicep' = if (!empty(containerImage)) {
   dependsOn: [database]
 }
 
-var services = [
+// MCP's channel tools need the same platform credentials as the selected gateways.
+var discordSecrets = {
+  DAIMON_DISCORD__BOT_TOKEN: serviceSecretNames.?discord.?DAIMON_DISCORD__BOT_TOKEN ?? 'discord-bot-token'
+}
+var teamsSecrets = {
+  DAIMON_TEAMS__CLIENT_SECRET: serviceSecretNames.?teams.?DAIMON_TEAMS__CLIENT_SECRET ?? 'teams-client-secret'
+}
+var defaultServiceSecrets = {
+  discord: discordSecrets
+  teams: teamsSecrets
+  mcp: union(contains(services, 'discord') ? discordSecrets : {}, contains(services, 'teams') ? teamsSecrets : {})
+}
+
+var serviceDefinitions = [
   { name: 'discord', command: ['python', '-m', 'daimon.adapters.discord'], port: 0 }
   { name: 'teams', command: ['python', '-m', 'daimon.adapters.teams'], port: 3978 }
   {
@@ -132,7 +159,7 @@ var services = [
   { name: 'scheduler', command: ['daimon-scheduler'], port: 0 }
 ]
 module apps './modules/app.bicep' = [
-  for service in services: if (deployServices && !empty(containerImage)) {
+  for service in serviceDefinitions: if (deployServices && !empty(containerImage) && contains(services, service.name)) {
     name: service.name
     params: {
       location: location
@@ -146,8 +173,16 @@ module apps './modules/app.bicep' = [
       image: containerImage
       command: service.command
       port: service.port
-      environment: union(commonEnvironment, serviceEnvironment[?service.name] ?? {})
-      secretNames: union(commonSecrets, serviceSecretNames[?service.name] ?? {})
+      environment: union(
+        commonEnvironment,
+        service.name == 'mcp' && contains(services, 'teams') ? (serviceEnvironment.?teams ?? {}) : {},
+        serviceEnvironment[?service.name] ?? {}
+      )
+      secretNames: union(
+        commonSecrets,
+        defaultServiceSecrets[?service.name] ?? {},
+        serviceSecretNames[?service.name] ?? {}
+      )
     }
     dependsOn: [database]
   }
@@ -159,18 +194,18 @@ output registryServer string = foundation.outputs.registryServer
 output keyVaultName string = foundation.outputs.vaultName
 output managedIdentityId string = foundation.outputs.identityId
 output initJobName string = '${stem}-init'
-output containerAppNames array = [for service in services: '${stem}-${service.name}']
+output containerAppNames array = [for service in services: '${stem}-${service}']
 output postgresHost string = database.outputs.host
 output chartsBlobEndpoint string = foundation.outputs.blobEndpoint
 output chartsContainerName string = 'charts'
-output foundryProjectId string = ai.outputs.projectId
+output foundryProjectId string = deployAi ? ai!.outputs.projectId : ''
 output daimonEnvironment object = commonEnvironment
 output daimonSecretNames object = commonSecrets
 output harnessEnvironment object = {
   AZURE_CLIENT_ID: foundation.outputs.identityClientId
-  AZURE_OPENAI_ENDPOINT: ai.outputs.openaiEndpoint
-  AZURE_OPENAI_DEPLOYMENT: gpt5DeploymentName
-  AZURE_OPENAI_API_VERSION: '2025-04-01-preview'
-  AZURE_AI_PROJECT_ENDPOINT: ai.outputs.projectEndpoint
+  AZURE_OPENAI_ENDPOINT: deployAi ? ai!.outputs.openaiEndpoint : ''
+  AZURE_OPENAI_DEPLOYMENT: deployAi ? gpt5DeploymentName : ''
+  AZURE_OPENAI_API_VERSION: deployAi ? '2025-04-01-preview' : ''
+  AZURE_AI_PROJECT_ENDPOINT: deployAi ? ai!.outputs.projectEndpoint : ''
 }
 output privateNetworkingEnabled bool = enablePrivateNetworking

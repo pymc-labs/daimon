@@ -27,10 +27,9 @@ site/
 
 # Local symlinks into the private companion repo. CLAUDE.md is tracked: it
 # carries the repo-wide conventions every contributor and coding agent needs.
-/infra/*
-!/infra/azure/
-/infra/azure/**/*.json
-!/infra/azure/azd/main.parameters.json
+/infra
+/deploy/azure/**/*.json
+!/deploy/azure/azd/main.parameters.json
 /AGENTS.md
 /.agents
 

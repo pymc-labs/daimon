@@ -65,7 +65,18 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
                   periodSeconds: 10
                 }
               ]
-            : []
+            : contains(['discord', 'scheduler'], serviceName)
+                ? [
+                    {
+                      type: 'Liveness'
+                      httpGet: { path: '/healthz', port: serviceName == 'discord' ? 8081 : 8082 }
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 3
+                    }
+                  ]
+                : []
         }
       ]
       // Gateway and scheduler processes cannot wake on HTTP. Keep one replica each.

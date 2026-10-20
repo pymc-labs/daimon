@@ -1,3 +1,5 @@
+import { validateNamePrefix } from '../names.bicep'
+
 targetScope = 'subscription'
 param environmentName string
 param location string
@@ -8,6 +10,13 @@ param namePrefix string = 'daimon'
 param postgresAdministratorPassword string
 param containerImage string = ''
 param deployServices bool = false
+@description('Disable to deploy the existing backend before Azure OpenAI quota is available.')
+param deployAi bool = true
+@description('Enable for production/tenant-sealed installs. Cannot be disabled again on an existing vault.')
+param vaultPurgeProtection bool = false
+@allowed(['discord', 'teams', 'mcp', 'scheduler'])
+@description('Serving apps to create. Removing an entry does not stop an existing app.')
+param services array = ['discord', 'teams', 'mcp', 'scheduler']
 param gpt5DeploymentName string = 'gpt-5'
 param gpt5Capacity int = 1
 param gpt5Sku string = 'GlobalStandard'
@@ -17,14 +26,13 @@ param enablePrivateNetworking bool = false
 param appEnvironment object = {}
 param serviceEnvironment object = {}
 param secretNames object = {}
-param serviceSecretNames object = {
-  discord: { DAIMON_DISCORD__BOT_TOKEN: 'discord-bot-token' }
-  teams: { DAIMON_TEAMS__CLIENT_SECRET: 'teams-client-secret' }
-}
+param serviceSecretNames object = {}
 param postgresFirewallRules array = []
 
+var checkedNamePrefix = validateNamePrefix(namePrefix)
+
 resource group 'Microsoft.Resources/resourceGroups@2024-03-01' = {
-  name: 'rg-${namePrefix}-${environmentName}'
+  name: 'rg-${checkedNamePrefix}-${environmentName}'
   location: location
   tags: { 'azd-env-name': environmentName }
 }
@@ -33,10 +41,13 @@ module stack '../main.bicep' = {
   scope: group
   params: {
     location: location
-    namePrefix: namePrefix
+    namePrefix: checkedNamePrefix
     postgresAdministratorPassword: postgresAdministratorPassword
     containerImage: containerImage
     deployServices: deployServices
+    deployAi: deployAi
+    vaultPurgeProtection: vaultPurgeProtection
+    services: services
     gpt5DeploymentName: gpt5DeploymentName
     gpt5Capacity: gpt5Capacity
     gpt5Sku: gpt5Sku
@@ -53,7 +64,7 @@ output AZURE_RESOURCE_GROUP string = group.name
 output AZURE_CONTAINER_REGISTRY_NAME string = stack.outputs.registryName
 output AZURE_KEY_VAULT_NAME string = stack.outputs.keyVaultName
 output AZURE_INIT_JOB_NAME string = stack.outputs.initJobName
-output AZURE_AI_PROJECT_ENDPOINT string = stack.outputs.harnessEnvironment.AZURE_AI_PROJECT_ENDPOINT
-output AZURE_OPENAI_ENDPOINT string = stack.outputs.harnessEnvironment.AZURE_OPENAI_ENDPOINT
-output AZURE_OPENAI_DEPLOYMENT string = stack.outputs.harnessEnvironment.AZURE_OPENAI_DEPLOYMENT
+output AZURE_AI_PROJECT_ENDPOINT string = deployAi ? stack.outputs.harnessEnvironment.AZURE_AI_PROJECT_ENDPOINT : ''
+output AZURE_OPENAI_ENDPOINT string = deployAi ? stack.outputs.harnessEnvironment.AZURE_OPENAI_ENDPOINT : ''
+output AZURE_OPENAI_DEPLOYMENT string = deployAi ? stack.outputs.harnessEnvironment.AZURE_OPENAI_DEPLOYMENT : ''
 output AZURE_CLIENT_ID string = stack.outputs.harnessEnvironment.AZURE_CLIENT_ID

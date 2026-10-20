@@ -4,6 +4,7 @@ param stem string
 @maxLength(23)
 param compactName string
 param tags object
+param vaultPurgeProtection bool
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${stem}-runtime'
@@ -51,9 +52,8 @@ resource vault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     sku: { family: 'A', name: 'standard' }
     enableRbacAuthorization: true
     enableSoftDelete: true
-    enablePurgeProtection: true
+    enablePurgeProtection: vaultPurgeProtection
     softDeleteRetentionInDays: 90
-    enabledForTemplateDeployment: true
     publicNetworkAccess: 'Enabled'
     accessPolicies: []
   }

@@ -17,12 +17,23 @@ it has no automatic build/deploy hooks.
 | Serving apps | Discord, Teams, MCP and scheduler, each 0.5 vCPU / 1 GiB, exactly one replica, 90-second shutdown grace |
 | Init | Manual Container Apps Job, same image, migrations followed by defaults; no automatic execution or retries |
 | PostgreSQL | Flexible Server, PostgreSQL 17, Burstable B1ms, 32 GiB with autogrow, seven-day backup, no HA |
-| Key Vault | RBAC, purge protection, 90-day soft delete; database URL stored as a secret |
+| Key Vault | RBAC, optional purge protection (off for dev), 90-day soft delete; database URL stored as a secret |
 | Storage | LRS Blob, private `charts` container, versioning and seven-day soft delete, shared keys disabled |
 | ACR | Basic, admin credentials disabled, image pulls via managed identity |
 | Logs | 30-day retention, 1 GiB/day ingestion cap (enforcement can lag) |
-| AI | AIServices account supporting Azure OpenAI and Foundry projects, GPT-5 deployment, `daimon` project with system identity |
+| AI | Optional (`deployAi=true` by default): AIServices account, GPT-5 deployment, `daimon` Foundry project with system identity |
 
+The `services` array defaults to `['discord', 'teams', 'mcp', 'scheduler']`.
+For a Discord-only install, use `['discord', 'mcp', 'scheduler']`; for Teams only,
+use `['teams', 'mcp', 'scheduler']`. Only selected apps and their platform secret
+references are created. MCP receives the selected gateways' credentials and
+inherits `serviceEnvironment.teams` when Teams is selected, so channel tools
+register with the same platform settings. Per-service overrides still apply.
+Removing a service from the array does not stop/delete an existing app in an
+incremental deployment.
+
+Discord and scheduler have HTTP liveness probes on their event-loop responders,
+ports 8081 and 8082 respectively. These ports have no public ingress.
 MCP (8765) and Teams (3978) have public HTTPS ingress; Discord and scheduler
 have none. Serving commands override the image entrypoint, matching Compose:
 seeding belongs to the init job. No notebook/report host, Slack, Teams Bot
@@ -56,8 +67,8 @@ as well as errors, and removes generated ARM JSON from its temporary directory.
 It never invokes Azure. For individual checks:
 
 ```bash
-bicep build infra/azure/main.bicep --outfile /tmp/daimon-azure.json
-bicep lint infra/azure/main.bicep
+bicep build deploy/azure/main.bicep --outfile /tmp/daimon-azure.json
+bicep lint deploy/azure/main.bicep
 ```
 
 ## Subscription prerequisites
@@ -107,6 +118,23 @@ Choose lowercase letters/digits for `namePrefix` (3–8 characters); resource
 names include a deterministic group-specific suffix. Keep the same group,
 prefix and location for later stages.
 
+Set `vaultPurgeProtection=true` for M3/Coke and other production installs.
+The default false supports development teardown; once enabled on an existing
+vault, Azure will not let it be disabled. Deleting a vault reserves its name
+until recovery or purge; with protection enabled it cannot be purged for the
+90-day retention period. After teardown, recover the old vault or use a new
+environment name/group or `namePrefix`; do not assume the same deterministic
+name can be recreated. An unprotected development vault still needs recovery
+or an authorized purge before reusing its name. AI account soft deletion can
+also reserve the custom subdomain; recover/purge it or rename the deployment.
+
+If GPT-5 quota/entitlement is pending, set `deployAi=false` in your local
+parameter file **before** the first provision. This omits the entire AI module
+and returns empty AI endpoint/deployment/project outputs. The existing-backend
+M1 foundation can then provision without AI quota. Keep other parameters stable
+and rerun with `deployAi=true` after approval to add AI resources. Turning it
+false later does not delete already deployed AI resources.
+
 For azd, from the repository root:
 
 ```bash
@@ -114,6 +142,8 @@ az login
 azd auth login
 azd env new azure-dev
 azd env set AZURE_LOCATION eastus2
+# For M1 without GPT-5 quota, first add "deployAi": {"value": false}
+# under parameters in deploy/azure/azd/main.parameters.json (local edit only).
 azd up
 ```
 
@@ -157,10 +187,10 @@ this stack creates. Keep parameter files outside the repository.
 az account set --subscription '<subscription-id>'
 az group create --name rg-daimon-azure-dev --location eastus2
 az deployment group what-if --resource-group rg-daimon-azure-dev \
-  --template-file infra/azure/main.bicep --parameters @/secure/azure.parameters.json
+  --template-file deploy/azure/main.bicep --parameters @/secure/azure.parameters.json
 az deployment group create --name daimon-foundation \
   --resource-group rg-daimon-azure-dev \
-  --template-file infra/azure/main.bicep --parameters @/secure/azure.parameters.json
+  --template-file deploy/azure/main.bicep --parameters @/secure/azure.parameters.json
 ```
 
 Use either azd or the group route consistently. For the remaining commands,
@@ -174,7 +204,8 @@ outputs into local environment state.
 
 Grant the operator data-plane roles described above and wait for RBAC to
 propagate. Supply secret **values from protected files** (no trailing newline),
-using `--output none` so the CLI does not print them:
+using `--output none` so the CLI does not print them. Populate only the
+selected gateways' platform secrets (MCP shares them):
 
 ```bash
 az keyvault secret set --vault-name "$VAULT" --name mcp-jwt-secret \
@@ -190,8 +221,10 @@ az keyvault secret set --vault-name "$VAULT" --name teams-client-secret \
 `mcp-jwt-secret` is the shared signing secret. `crypto-keys` is a Fernet key
 ring in the format described in [self-hosting](../../docs/self-hosting.md).
 The database URL is written to Key Vault by the database module, with TLS
-required; it is never a deployment output. The administrator password is
-supplied only to PostgreSQL and this secure URL construction.
+and hostname verification required; every process and init receives
+`PGSSLROOTCERT=/etc/ssl/certs/ca-certificates.crt` to load the image's system CA
+bundle. No `sslrootcert` keyword is added to the SQLAlchemy URL. The URL is
+never a deployment output. The administrator password is supplied only to PostgreSQL and this secure URL construction.
 
 Build the **current checkout** using the root Dockerfile and publish it to ACR:
 
@@ -206,28 +239,53 @@ IMAGE="$ACR.azurecr.io/daimon@$IMAGE_DIGEST"
 ```
 
 Add `containerImage` = `$IMAGE` to your local parameters; keep `deployServices`
-false. Add these **nonsecret** values under `serviceEnvironment.teams`:
+false. When Teams is selected, add these **nonsecret** values under `serviceEnvironment.teams`:
 `DAIMON_TEAMS__CLIENT_ID` and `DAIMON_TEAMS__TENANT_ID` for an existing single-tenant
 Bot registration. Use port 3978. The code creates no Entra application or Bot
 registration. An operator must set the Bot messaging endpoint to the Teams
 app's HTTPS URL plus `/api/messages` once serving is enabled.
 
+**M1 on the existing backend requires Anthropic configuration before init.**
+Map `DAIMON_ANTHROPIC__API_KEY` to `anthropic-api-key` in the common `secretNames`
+parameter and populate that secret before running the init job:
+
+```bash
+az keyvault secret set --vault-name "$VAULT" --name anthropic-api-key \
+  --file /secure/anthropic-api-key --output none
+```
+
+Add this entry inside your parameter file's `parameters` object:
+
+```json
+"secretNames": {
+  "value": { "DAIMON_ANTHROPIC__API_KEY": "anthropic-api-key" }
+}
+```
+
+Without that key, the current image's defaults command can succeed while
+skipping default agents/environments, and M1 cannot answer a turn. If the key
+was added after init, redeploy the job with its secret reference and rerun init
+before enabling services. The later selfhosted path has separate agent and
+environment initialization and does not use this M1 provider configuration.
+
 Additional provider credentials go through `secretNames` (all processes) or
 `serviceSecretNames` (one process), as maps of environment-variable names to
 Key Vault secret names. For example, an existing Anthropic deployment can map
 `DAIMON_ANTHROPIC__API_KEY` to an operator-populated `anthropic-api-key` secret.
-The templates themselves require no Anthropic key. Do not put secret values in
+The infrastructure templates accept no Anthropic key by default; the M1
+existing-backend runtime requires the mapping described above. Do not put secret values in
 `appEnvironment` or `serviceEnvironment`, and do not duplicate environment
-names between plain and secret maps. A supplied `serviceSecretNames` object
-replaces its defaults; retain the Discord/Teams mappings if those apps need them.
+names between plain and secret maps. Custom `serviceSecretNames` are merged over built-in platform mappings.
+MCP inherits selected gateways' token/secret-name overrides; it can also have
+its own explicit overrides.
 
 On the existing-group route:
 
 ```bash
-az deployment group what-if -g "$RG" --template-file infra/azure/main.bicep \
+az deployment group what-if -g "$RG" --template-file deploy/azure/main.bicep \
   --parameters @/secure/azure.parameters.json
 az deployment group create --name daimon-init -g "$RG" \
-  --template-file infra/azure/main.bicep --parameters @/secure/azure.parameters.json
+  --template-file deploy/azure/main.bicep --parameters @/secure/azure.parameters.json
 az containerapp job start --name "$INIT_JOB" --resource-group "$RG"
 az containerapp job execution list --name "$INIT_JOB" --resource-group "$RG" \
   --query '[].{name:name,status:properties.status}' --output table
@@ -238,7 +296,7 @@ before enabling services. The deployment itself does not wait for, start or
 check the job. Azure deployments have no Compose-style dependency on job
 completion. Run only one init execution at a time.
 
-For azd stages, update `infra/azure/azd/main.parameters.json` **locally** with the
+For azd stages, update `deploy/azure/azd/main.parameters.json` **locally** with the
 same nonsecret parameters (`containerImage`, `serviceEnvironment` and later
 `deployServices`), then run `azd provision`; do not commit installation-specific
 edits. Keep the secure password input or Key Vault reference on each invocation.
@@ -272,7 +330,8 @@ maps from your parameters as well. `harnessEnvironment` contains:
   deployment name) and `AZURE_OPENAI_API_VERSION`.
 - `AZURE_CLIENT_ID` for the user-assigned identity and `AZURE_AI_PROJECT_ENDPOINT`.
 
-No Azure OpenAI API key is produced: local authentication is disabled; attach
+With `deployAi=false`, AI endpoints/deployment names and `foundryProjectId`
+are empty strings. With AI enabled, no Azure OpenAI API key is produced: local authentication is disabled; attach
 an inference-authorized managed identity to the harness. The Foundry project
 resource ID is also an output. Hosted-agent image deployment, its platform
 identity permissions and its invocation endpoint are separate from this stack.

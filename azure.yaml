@@ -2,4 +2,4 @@
 name: daimon
 infra:
   provider: bicep
-  path: infra/azure/azd
+  path: deploy/azure/azd
