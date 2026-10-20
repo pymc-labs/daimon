@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind the self-hosted harness to one session by default; require verified process and temporary-file isolation for multi-session service.
 
 - Require separate service/tool identities in the self-hosted harness, refuse unsigned gateway authentication, isolate file operations and redact SDK failure logs.
+- Verify the self-hosted driver and harness together over HTTP, including approval execution, cancellation, replay and narrowed tool permissions.
 
 ### Added
 

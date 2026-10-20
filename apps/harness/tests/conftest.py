@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import socket
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 import uvicorn
+from daimon_harness.model_adapter import ModelAdapter
 from daimon_harness.runtime import TurnContext
 from daimon_harness.service import create_app
 from pydantic import JsonValue
@@ -71,13 +73,11 @@ class FakeModelAdapter:
         ]
 
 
-@pytest.fixture
-async def harness(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[tuple[httpx.AsyncClient, FakeModelAdapter, Path]]:
-    monkeypatch.setenv("HARNESS_CONFIRM_TOOLS", "")
-    model = FakeModelAdapter()
-    app = create_app(home=tmp_path, token="test-token", adapter=model)
+@asynccontextmanager
+async def serve_harness[M: ModelAdapter](
+    home: Path, model: M
+) -> AsyncIterator[tuple[httpx.AsyncClient, M, Path]]:
+    app = create_app(home=home, token="test-token", adapter=model)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
@@ -94,11 +94,20 @@ async def harness(
             headers={"Authorization": "Bearer test-token"},
             timeout=10,
         ) as client:
-            yield client, model, tmp_path
+            yield client, model, home
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, timeout=10)
         listener.close()
+
+
+@pytest.fixture
+async def harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[httpx.AsyncClient, FakeModelAdapter, Path]]:
+    monkeypatch.setenv("HARNESS_CONFIRM_TOOLS", "")
+    async with serve_harness(tmp_path, FakeModelAdapter()) as running:
+        yield running
 
 
 def turn(mode: str = "hello", *, turn_id: str = "turn-1", key: str = "key-1") -> dict[str, object]:
