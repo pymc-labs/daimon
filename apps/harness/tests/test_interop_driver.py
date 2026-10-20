@@ -10,6 +10,32 @@ from mux.contracts.actions import UserToolConfirmation
 from .interop_support import SCOPE, collect, driver_session, message, workspace
 
 
+async def test_fresh_driver_opens_stream_before_first_send(harness):
+    client, model, _ = harness
+    driver, session = await driver_session(client)
+    source = await driver.events.open_stream(SCOPE, session.ref, previews=True)
+    first = asyncio.create_task(anext(source))
+    try:
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert model.calls == 0
+        sent = await driver.events.send(SCOPE, session.ref, [message("hello")], key="send")
+        async with asyncio.timeout(10):
+            events = [await first, *[event async for event in source]]
+        assert events[0].type == "session.status_running"
+        assert events[-1].type == "session.turn_ended"
+        assert events[-1].payload["outcome"] == "completed"
+        assert all(event.turn_id == sent.turn_id for event in events)
+        assert len({event.id for event in events}) == len(events)
+        assert sum(event.type == "usage.observed" for event in events) == 1
+        assert model.calls == 1
+    finally:
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        await source.aclose()
+        await driver.aclose()
+
+
 async def test_stream_tool_usage_and_resend(harness):
     client, model, home = harness
     driver, session = await driver_session(client)
