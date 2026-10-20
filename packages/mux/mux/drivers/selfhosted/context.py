@@ -34,7 +34,10 @@ class Context:
             or ref.kind != kind
             or ref.account_scope_id != self.account_scope_id
             or ref.tenant_id != scope.tenant_id
-            or ref.account_id != scope.account_id
+            or (
+                ref.account_id != scope.account_id
+                and not (kind in ("agent", "environment") and ref.account_id is None)
+            )
             or not self.authorization(scope, kind, ref.id)
         ):
             raise ScopeViolation(ref.id, "self-hosted resource is outside authorized scope")
@@ -46,7 +49,7 @@ class Context:
             provider="selfhosted",
             account_scope_id=self.account_scope_id,
             tenant_id=scope.tenant_id,
-            account_id=scope.account_id,
+            account_id=scope.account_id if kind == "session" else None,
         )
 
     def binding(self, scope: Scope, ref: ResourceRef) -> ProviderBinding:

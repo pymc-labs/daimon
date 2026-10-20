@@ -1137,12 +1137,14 @@ at a sequence cursor without running the turn again.
 Usage identities include the session, turn and model request, so replay preserves
 one observation per request. Missing measurements are unknown observations when
 the harness explicitly reports `usage_unavailable`/`usage_missing`; a terminal
-turn with no measured, unavailable or started request is refused. Unmatched
+turn with no measured, unavailable or started request is retained as errored
+and unresolved for operator reconciliation without blocking later turns. Unmatched
 request starts remain unknown observations; measured revision 2 supersedes an
 unknown revision 1 under the same observation id. Tokens are never
 inferred as zero. Agent/environment revision changes require a new binding.
-Artifacts, session listing/deletion, native skill administration and agent tool-policy
-narrowing are not supported by this driver yet and refuse explicitly.
+Artifacts, session listing/deletion and native skill administration refuse
+explicitly. Built-in and MCP tool policies support `auto` and `ask`, including
+multiple pending approvals.
 
 `mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
 turn requests, approval decisions, durable event replay and typed event data.
@@ -1178,3 +1180,24 @@ MCP server/tool components use letters, digits, underscores, hyphens and dots.
 An exact key overrides `<server>/*`, which overrides the default `auto`.
 For example, `{"sample/*": "deny", "sample/search": "ask"}` exposes only
 `sample/search` from that server and requires approval before it runs.
+The driver uses the agent deployment unless `model` is explicitly overridden.
+The host supplies `deployment` for its selected environment; a mismatching
+request refuses before submission. Transport token providers are awaited on
+every HTTP call (use an expiry-aware Entra credential provider). Pass
+`mcp_authorization` per `driver.events.send`, never at transport construction.
+Foundry calls include configurable `api_version` (default `v1`). Authenticated
+HTTP endpoints require HTTPS except on loopback. Replay uses `after_seq` with
+jittered exponential polling and retries 429/502/503/504 with `Retry-After`.
+
+The real harness/driver interop suite must cover:
+
+1. Cancel before the first model request, then a second turn on that session.
+2. MCP or skill setup failure before model I/O.
+3. Harness restart mid-turn and reconcile of unmatched request usage.
+4. Dropped stream reopened at the last sequence across the terminal event, without gaps or duplicates.
+5. Idempotent resend from a fresh driver, one execution, and changed-payload conflict.
+6. Approval that executes a write, denial, and host result substitution.
+7. Per-turn MCP headers absent from journals/logs, with a different token on the second turn.
+8. Foundry invocation envelope with string `query.after_seq`.
+9. Concurrent second send receiving 409.
+10. Two sequential turns on one session.

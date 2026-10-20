@@ -151,6 +151,8 @@ def check_backend(
     revision: ConfigRevision, *, enabled_backends: tuple[Provider, ...] | None = None
 ) -> BackendAdmission:
     """Admit `revision`, or raise `BackendUnsupported`."""
+    if revision.backend == "selfhosted":
+        raise BackendUnsupported("selfhosted.loop is not runnable in this release")
     if enabled_backends is not None and not backend_is_enabled(revision.backend, enabled_backends):
         log_backend_unsupported("workspace_policy", reason="backend_not_enabled", revision=revision)
         raise BackendUnsupported("That model provider isn't turned on here. Pick another.")

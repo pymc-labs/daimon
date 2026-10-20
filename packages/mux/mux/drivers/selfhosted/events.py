@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import ValidationError
 
 from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation, UserToolResult
-from mux.contracts.events import Event, ImagePart, RequiresActionPayload, TextPart, TurnEndedPayload
+from mux.contracts.events import (
+    Event,
+    ImagePart,
+    RequiredAction,
+    RequiresActionPayload,
+    TextPart,
+    TurnEndedPayload,
+)
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope, SkillRef
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
 from mux.contracts.resources import AgentSpec, ProjectionSnapshot
@@ -21,6 +29,7 @@ from mux.drivers.selfhosted import wire
 from mux.drivers.selfhosted.context import Context
 from mux.drivers.selfhosted.normalize import normalize, usage
 from mux.drivers.selfhosted.sessions import SelfHostedSessions
+from mux.drivers.selfhosted.transport import secure_url
 from mux.errors import ContinuityLost, OperationConflict, ProviderError, ScopeViolation
 from mux.state.operations import request_digest
 
@@ -50,12 +59,16 @@ class SelfHostedEvents:
         sessions: SelfHostedSessions,
         *,
         model: str | None = None,
+        deployment: str | None = None,
         max_tool_calls: int = 100,
         deadline_s: float = 300,
         skill_resolver: SkillResolver | None = None,
         tools_resolver: ToolsResolver | None = None,
     ) -> None:
         self._c, self._sessions = context, sessions
+        self._deployment = deployment
+        self._normalized: dict[ResourceRef, dict[int, Event]] = {}
+        self.unresolved_turns: dict[ResourceRef, set[str]] = {}
         self._skill_resolver = skill_resolver
         self._tools_resolver = tools_resolver
         if max_tool_calls < 0 or deadline_s <= 0:
@@ -83,20 +96,23 @@ class SelfHostedEvents:
                         raise ProviderError(
                             "upstream", retryable=False, native_code="duplicate_usage"
                         )
-        if raw.type == "turn_ended" and not any(
-            (
-                event.type in ("usage", "model_request_started")
-                or (
-                    event.type == "error"
-                    and event.data.get("kind") in ("usage_unavailable", "usage_missing")
-                )
-            )
-            and event.turn_id == raw.turn_id
-            for event in history.values()
-        ):
-            raise ProviderError("upstream", retryable=False, native_code="turn_usage_required")
         normalized = normalize(raw, ref)
         history[raw.seq] = raw
+        if raw.type == "turn_ended" and not any(
+            observation.turn_id == raw.turn_id for observation in self.observations(ref)
+        ):
+            self.unresolved_turns.setdefault(ref, set()).add(raw.turn_id)
+            payload = TurnEndedPayload(
+                root_turn_id=raw.turn_id, outcome="errored", native_reason="turn_usage_required"
+            )
+            normalized = normalized.model_copy(update={"payload": payload.model_dump(mode="json")})
+        if raw.type == "requires_action":
+            prior_events = tuple(self._normalized.get(ref, {}).values()) + (normalized,)
+            actions = self.projection(ref, prior_events, False).required_actions
+            normalized = normalized.model_copy(
+                update={"payload": RequiresActionPayload(actions=actions).model_dump(mode="json")}
+            )
+        self._normalized.setdefault(ref, {})[raw.seq] = normalized
         return normalized
 
     async def replay(self, scope: Scope, ref: ResourceRef) -> tuple[tuple[Event, ...], bool]:
@@ -120,12 +136,12 @@ class SelfHostedEvents:
         for event in response.events:
             if event.seq <= last:
                 raise ProviderError("upstream", retryable=False, native_code="unordered_replay")
-            result.append(self._remember(ref, event))
+            if event.seq not in self._history.get(ref, {}):
+                result.append(self._remember(ref, event))
+            elif self._history[ref][event.seq] != event:
+                raise ContinuityLost(ref.id, ("harness changed a committed event",))
             last = event.seq
-        result = [
-            normalize(event, ref)
-            for event in sorted(self._history.get(ref, {}).values(), key=lambda event: event.seq)
-        ]
+        result = list(self._normalized.get(ref, {}).values())
         pending = {
             receipt.turn_id
             for (session, _), (_, receipt) in self._sends.items()
@@ -138,31 +154,53 @@ class SelfHostedEvents:
     def projection(ref: ResourceRef, events: Sequence[Event], complete: bool) -> ProjectionSnapshot:
         state = "idle" if complete else "running"
         active: str | None = None
-        actions = ()
+        actions: dict[str, RequiredAction] = {}
         for event in events:
             if event.type == "session.status_running":
-                state, active, actions = "running", event.turn_id, ()
+                if active != event.turn_id:
+                    actions.clear()
+                state, active = "running", event.turn_id
             elif event.type == "session.requires_action":
                 state, active = "requires_action", event.turn_id
-                actions = RequiresActionPayload.model_validate(event.payload).actions
+                for action in RequiresActionPayload.model_validate(event.payload).actions:
+                    actions[action.id] = action
             elif event.type == "session.turn_ended":
-                state, active, actions = "idle", None, ()
-            elif event.type in ("agent.tool_use", "agent.tool_result", "agent.message"):
-                state, active, actions = "running", event.turn_id, ()
+                state, active = "idle", None
+                actions.clear()
+            elif event.type in ("agent.tool_use", "agent.tool_result"):
+                call_id = event.payload.get("call_id")
+                actions = {
+                    key: action for key, action in actions.items() if action.call_id != call_id
+                }
+                state, active = "running", event.turn_id
         return ProjectionSnapshot.model_validate(
             {
                 "session": ref,
                 "cursor": str(events[-1].sequence) if events else "0",
-                "state": state,
+                "state": "requires_action" if actions else state,
                 "active_root_turn": active,
-                "required_actions": actions,
+                "required_actions": tuple(actions.values()),
                 "taken_at": datetime.now(UTC),
             }
         )
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         events, complete = await self.replay(scope, session)
-        return self.projection(session, events, complete)
+        snapshot = self.projection(session, events, complete)
+        ended = {event.turn_id for event in events if event.type == "session.turn_ended"}
+        accepted = next(
+            (
+                receipt.turn_id
+                for (ref, _), (_, receipt) in self._sends.items()
+                if ref == session and receipt.turn_id not in ended
+            ),
+            None,
+        )
+        if snapshot.active_root_turn is None and accepted is not None:
+            snapshot = snapshot.model_copy(
+                update={"state": "running", "active_root_turn": accepted}
+            )
+        return snapshot
 
     async def _request(
         self, scope: Scope, session: ResourceRef, message: UserMessage, key: str
@@ -194,10 +232,21 @@ class SelfHostedEvents:
             raise self._c.unsupported("agent_options_or_extensions")
         if agent.spec.tools is not None:
             builtins = {tool.name for tool in agent.spec.tools if tool.kind == "builtin"}
-            if builtins != {"bash", "read", "write", "edit"} or any(
-                tool.permission != "auto" or tool.kind == "custom" for tool in agent.spec.tools
+            if not builtins.issubset({"bash", "read", "write", "edit"}) or any(
+                tool.kind == "custom" for tool in agent.spec.tools
             ):
                 raise self._c.unsupported("custom_tools_or_tool_permissions")
+        policy: dict[str, Literal["auto", "ask"]] = {
+            tool.name: tool.permission for tool in agent.spec.tools or ()
+        }
+        for connection in agent.spec.mcp_servers or ():
+            for name, permission in connection.tool_policy.items():
+                if permission not in ("auto", "ask"):
+                    raise self._c.unsupported("mcp_tool_policy")
+                policy[name] = permission
+        model = self._model or agent.spec.model.id
+        if self._deployment is not None and model != self._deployment:
+            raise self._c.unsupported("model_deployment_mismatch")
         parts: list[wire.Part] = []
         for part in message.content:
             if isinstance(part, TextPart):
@@ -212,7 +261,7 @@ class SelfHostedEvents:
         else:
             servers: list[wire.MCPServer] = []
             for connection in agent.spec.mcp_servers or ():
-                if connection.tool_policy or connection.transport != "streamable_http":
+                if connection.transport != "streamable_http":
                     raise self._c.unsupported("mcp_policy_or_transport")
                 headers: dict[str, str] = {}
                 if connection.credential_ref is not None:
@@ -232,11 +281,16 @@ class SelfHostedEvents:
         names: set[str] = set()
         for server in servers:
             if server.name in names or any(
-                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+                not (
+                    re.fullmatch(r"HARNESS_MCP_CRED_[A-Za-z0-9_]+", name)
+                    or name == "DAIMON_MCP_AUTHORIZATION"
+                )
                 for name in server.headers_env.values()
             ):
                 raise self._c.unsupported("mcp_server_names_or_credential_references")
             names.add(server.name)
+            if (server.headers_env or server.name == "daimon-mcp") and not secure_url(server.url):
+                raise self._c.unsupported("credential_mcp_requires_https")
             if (
                 "DAIMON_MCP_AUTHORIZATION" in server.headers_env.values()
                 and server.name != "daimon-mcp"
@@ -247,12 +301,23 @@ class SelfHostedEvents:
                 and server.headers_env.get("Authorization") != "DAIMON_MCP_AUTHORIZATION"
             ):
                 raise self._c.unsupported("reserved_mcp_credential")
+        total_bytes = 0
+        for skill in skills:
+            if not isinstance(skill, wire.InlineSkill):
+                raise self._c.unsupported("unbounded_url_skill")
+            size = sum(map(len, skill.decoded_files().values()))
+            if size > wire.SKILL_MAX_BYTES:
+                raise self._c.unsupported("skill_size_limit")
+            total_bytes += size
+        if total_bytes > wire.TURN_SKILLS_MAX_BYTES:
+            raise self._c.unsupported("turn_skills_size_limit")
         turn_id = "sh_turn_" + str(uuid5(NAMESPACE_URL, session.model_dump_json() + key))
         return wire.TurnRequest(
             session_id=session.id,
             turn_id=turn_id,
             idempotency_key=turn_id,
-            model=self._model or agent.spec.model.id,
+            model=model,
+            tool_policy=policy,
             instructions=agent.spec.system or "",
             input=parts,
             mcp_servers=servers,
@@ -268,10 +333,18 @@ class SelfHostedEvents:
         *,
         key: str,
         expected_turn: str | None = None,
+        mcp_authorization: str | None = None,
     ) -> SendReceipt:
         self._c.binding(scope, session)
         async with self._locks.setdefault(session, asyncio.Lock()):
-            return await self._send(scope, session, events, key=key, expected_turn=expected_turn)
+            return await self._send(
+                scope,
+                session,
+                events,
+                key=key,
+                expected_turn=expected_turn,
+                mcp_authorization=mcp_authorization,
+            )
 
     async def _send(
         self,
@@ -281,6 +354,7 @@ class SelfHostedEvents:
         *,
         key: str,
         expected_turn: str | None,
+        mcp_authorization: str | None,
     ) -> SendReceipt:
         if len(events) != 1:
             raise self._c.unsupported("batched_inputs")
@@ -308,15 +382,29 @@ class SelfHostedEvents:
                 raise ProviderError(
                     "conflict", retryable=False, native_code="expected_turn_mismatch"
                 )
-            raw = await self._c.transport.request(
-                "POST", "/v0/turns", session_id=session.id, body=request.model_dump(mode="json")
-            )
+            try:
+                raw = await self._c.transport.request(
+                    "POST",
+                    "/v0/turns",
+                    session_id=session.id,
+                    body=request.model_dump(mode="json"),
+                    mcp_authorization=mcp_authorization,
+                )
+            except ProviderError as error:
+                if error.native_code != "malformed_response":
+                    raise
+                raw = None
             if (
                 not isinstance(raw, dict)
                 or raw.get("accepted") is not True
                 or raw.get("turn_id") != request.turn_id
             ):
-                raise ProviderError("upstream", retryable=False, native_code="invalid_turn_ack")
+                return SendReceipt(
+                    operation_id=key,
+                    status="outcome_unknown",
+                    input_ids=(key,),
+                    turn_id=request.turn_id,
+                )
             turn_id = request.turn_id
         elif isinstance(event, UserToolConfirmation | UserToolResult):
             snapshot = await self.reconcile(scope, session)
@@ -369,6 +457,7 @@ class SelfHostedEvents:
             nonlocal cursor
             replayed, done = initial, complete
             observed_end = False
+            delay = 0.1
             while True:
                 for event in replayed:
                     if event.sequence > cursor:
@@ -384,8 +473,13 @@ class SelfHostedEvents:
                 }
                 if done and observed_end and pending.issubset(ended):
                     return
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(random.uniform(0.1, delay))
                 replayed, done = await self.replay(scope, session)
+                delay = (
+                    0.1
+                    if any(event.sequence > cursor for event in replayed)
+                    else min(2.0, delay * 2)
+                )
 
         return iterate()
 

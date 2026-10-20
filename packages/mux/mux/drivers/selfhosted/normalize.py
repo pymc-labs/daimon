@@ -104,12 +104,17 @@ def normalize(event: wire.Event, session: ResourceRef) -> mux.Event:
         case wire.AgentMessageDeltaData():
             type_, authority = "agent.message.delta", "preview"
             payload = mux.AgentMessageDeltaPayload(
-                item_id=item_id, content_index=0, text=data.text, preview_sequence=event.seq
+                item_id=str(event.data["message_id"]),
+                content_index=0,
+                text=data.text,
+                preview_sequence=event.seq,
             )
         case wire.AgentMessageData():
             type_, payload = (
                 "agent.message",
-                mux.AgentMessagePayload(item_id=item_id, content=parts(data.parts)),
+                mux.AgentMessagePayload(
+                    item_id=str(event.data["message_id"]), content=parts(data.parts)
+                ),
             )
         case wire.ToolUseData():
             type_, payload = (
@@ -187,7 +192,9 @@ def normalize(event: wire.Event, session: ResourceRef) -> mux.Event:
         sequence=event.seq,
         turn_id=event.turn_id,
         type=type_,
-        item_id=item_id,
+        item_id=str(event.data["message_id"])
+        if event.type in ("agent_message", "agent_message_delta")
+        else item_id,
         observed_at=event.at,
         occurred_at=event.at,
         authority=authority,

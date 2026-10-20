@@ -36,6 +36,8 @@ class Harness:
         self.request = None
 
     def emit(self, type_, data):
+        if type_ in ("agent_message", "agent_message_delta"):
+            data = {"message_id": self.request["turn_id"] + ":message", **data}
         self.events.append(
             dict(
                 seq=len(self.events) + 1,
@@ -60,6 +62,7 @@ class Harness:
         if self.foundry:
             assert method == "POST"
             assert path == "/project/agents/agent/endpoint/protocols/invocations"
+            assert request.url.params["api-version"] == "v1"
             sandbox = request.url.params["agent_session_id"]
             envelope = body["c3"]
             method, path, body = envelope["method"], envelope["path"], envelope["body"]
@@ -84,7 +87,7 @@ class Harness:
                 self.requests[key] = body
                 self.executions += 1
                 self.emit("status_running", {})
-                if self.mode != "unmetered":
+                if self.mode not in ("unmetered", "pre_model"):
                     self.emit(
                         "usage",
                         dict(
@@ -107,8 +110,9 @@ class Harness:
                             input={"command": "echo hi"},
                         ),
                     )
-                elif self.mode != "running":
-                    self.emit("agent_message_delta", {"text": "done"})
+                elif self.mode not in ("running", "pre_model"):
+                    self.emit("agent_message_delta", {"text": "do"})
+                    self.emit("agent_message_delta", {"text": "ne"})
                     self.emit(
                         "tool_use",
                         dict(
@@ -156,7 +160,7 @@ async def setup(client, harness, **options):
             provider="selfhosted",
             account_scope_id="tenant",
             tenant_id=SCOPE.tenant_id,
-            account_id=SCOPE.account_id,
+            account_id=None,
         )
 
     agents = cast(
@@ -224,6 +228,7 @@ async def test_stream_tools_usage_and_idempotent_resend(foundry):
         assert [e.type for e in events] == [
             "session.status_running",
             "usage.observed",
+            "agent.message.delta",
             "agent.message.delta",
             "agent.tool_use",
             "agent.tool_result",
@@ -301,13 +306,20 @@ async def test_cancel_wait_and_foreign_scope_refusal():
             await driver.events.reconcile(foreign, session.ref)
 
 
-async def test_unmetered_completion_is_refused():
+async def test_unmetered_completion_is_retained_unresolved_and_next_turn_works():
     fake = Harness("unmetered")
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
         driver, session = await setup(client, fake)
-        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
-        with pytest.raises(ProviderError, match="turn_usage_required"):
-            await driver.events.open_stream(SCOPE, session.ref)
+        receipt = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="first")
+        events = [event async for event in await driver.events.open_stream(SCOPE, session.ref)]
+        assert events[-1].payload["outcome"] == "errored"
+        assert events[-1].payload["native_reason"] == "turn_usage_required"
+        assert driver.events.unresolved_turns[session.ref] == {receipt.turn_id}
+        assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
+        fake.mode = "complete"
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="second")
+        assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
+        assert fake.executions == 2
 
 
 async def test_restart_resend_replays_one_turn_and_usage_identity():
@@ -474,7 +486,7 @@ async def test_real_driver_passes_existing_mux_conformance_probes(fixture_id):
             provider="selfhosted",
             account_scope_id="tenant",
             tenant_id=SCOPE.tenant_id,
-            account_id=SCOPE.account_id,
+            account_id=None,
         )
 
     fake = ConformanceHarness("running")
@@ -569,18 +581,20 @@ async def test_mcp_credential_only_appears_in_turn_header_and_never_invocation_j
                 project_endpoint="https://harness/project",
                 agent_name="agent",
                 token="gateway-token",
-                mcp_authorization=credential,
             )
             if foundry
             else DirectTransport(
                 client,
                 base_url="https://harness",
                 token="harness-token",
-                mcp_authorization=credential,
             )
         )
         await transport.request(
-            "POST", "/v0/turns", session_id="session", body={"session_id": "session"}
+            "POST",
+            "/v0/turns",
+            session_id="session",
+            body={"session_id": "session"},
+            mcp_authorization=credential,
         )
         await transport.request(
             "GET", "/v0/sessions/session/events?after_seq=0", session_id="session"
@@ -625,7 +639,9 @@ async def test_host_tools_resolver_inlines_skills_and_seals_virtual_mcp_env(rese
                 "Authorization": "DAIMON_MCP_AUTHORIZATION"
             }
             assert fake.request["skills"] == [
-                {"name": "analysis", "files": {"SKILL.md": "analysis skill"}}
+                wire.InlineSkill(name="analysis", files={"SKILL.md": "analysis skill"}).model_dump(
+                    mode="json"
+                )
             ]
 
 
@@ -652,3 +668,432 @@ async def test_accepted_turn_with_lost_ack_replays_without_second_execution_or_c
         await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
         assert fake.executions == 1
         assert len(await driver.usage.reconcile(SCOPE, session.ref)) == 1
+
+
+@pytest.mark.parametrize(
+    "override, deployment, expected",
+    [(None, None, "tenant-gpt5"), ("other", "other", "other"), (None, "wrong", None)],
+)
+async def test_agent_deployment_is_honored_and_environment_mismatch_refuses(
+    override, deployment, expected
+):
+    from mux.errors import UnsupportedCapability
+
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake, model=override, deployment=deployment)
+        resources = driver.agents
+        resources.value = resources.value.model_copy(
+            update={
+                "spec": resources.value.spec.model_copy(
+                    update={"model": ModelRef(provider="selfhosted", id="tenant-gpt5")}
+                )
+            }
+        )
+        if expected is None:
+            with pytest.raises(UnsupportedCapability, match="model_deployment_mismatch"):
+                await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+            assert fake.executions == 0
+        else:
+            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+            assert fake.request["model"] == expected
+
+
+async def test_multiple_message_deltas_and_snapshot_share_identity():
+    from mux.contracts.events import AgentMessageDeltaPayload, AgentMessagePayload
+
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        messages = [
+            event
+            async for event in await driver.events.open_stream(SCOPE, session.ref, previews=True)
+            if event.type.startswith("agent.message")
+        ]
+        deltas = [AgentMessageDeltaPayload.model_validate(event.payload) for event in messages[:-1]]
+        snapshot = AgentMessagePayload.model_validate(messages[-1].payload)
+        assert len(deltas) == 2
+        assert "".join(delta.text for delta in deltas) == "done"
+        assert {delta.item_id for delta in deltas} == {snapshot.item_id}
+        assert all(event.item_id == snapshot.item_id for event in messages)
+        assert len({event.id for event in messages}) == 3
+
+
+@pytest.mark.parametrize(
+    "binary, per_turn", [(False, False), (True, False), (False, True), (True, True)]
+)
+async def test_decoded_skill_caps_refuse_before_any_post(binary, per_turn):
+    import base64
+    from types import SimpleNamespace
+
+    from mux.drivers.selfhosted import wire
+    from mux.errors import UnsupportedCapability
+
+    data = b"a" * (wire.SKILL_MAX_BYTES if per_turn else wire.SKILL_MAX_BYTES + 1)
+
+    async def tools(scope, agent):
+        # model_construct also exercises the driver against a mutated/unvalidated bundle.
+        return SimpleNamespace(
+            mcp_servers=(),
+            skills=tuple(
+                wire.InlineSkill.model_construct(
+                    name=f"skill{i}",
+                    files={} if binary else {"SKILL.md": data.decode()},
+                    binary_files={"asset.bin": base64.b64encode(data).decode()} if binary else {},
+                    sha256="",
+                )
+                for i in range(4 if per_turn else 1)
+            ),
+        )
+
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake, tools_resolver=tools)
+        with pytest.raises((ValueError, UnsupportedCapability)):
+            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert fake.executions == 0
+
+
+async def test_cancel_before_first_model_request_preserves_session():
+    fake = Harness("pre_model")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        receipt = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="first")
+        cancel = await driver.events.cancel(
+            SCOPE, session.ref, turn_id=receipt.turn_id, key="cancel"
+        )
+        assert (
+            await driver.events.wait_stopped(
+                SCOPE, cancel, deadline=datetime.now(UTC) + timedelta(seconds=1)
+            )
+        ).stopped
+        assert receipt.turn_id in driver.events.unresolved_turns[session.ref]
+        assert await driver.usage.reconcile(SCOPE, session.ref) == ()
+        fake.mode = "complete"
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="second")
+        assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
+        assert len(await driver.usage.reconcile(SCOPE, session.ref)) == 1
+
+
+@pytest.mark.parametrize("foundry", [False, True])
+async def test_refreshing_harness_token_and_per_call_mcp_credentials(foundry):
+    requests = []
+    minted = 0
+
+    async def token_provider():
+        nonlocal minted
+        minted += 1
+        return f"fresh-{minted}"
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        transport = (
+            FoundryInvocationsTransport(
+                client,
+                project_endpoint="https://harness/project",
+                agent_name="agent",
+                token_provider=token_provider,
+                api_version="custom",
+            )
+            if foundry
+            else DirectTransport(client, base_url="https://harness", token_provider=token_provider)
+        )
+        for credential in ("Bearer caller-one", "Bearer caller-two"):
+            await transport.request(
+                "POST", "/v0/turns", session_id="session", body={}, mcp_authorization=credential
+            )
+        await transport.request(
+            "GET", "/v0/sessions/session/events?after_seq=9", session_id="session"
+        )
+    assert [request.headers["authorization"] for request in requests] == [
+        "Bearer fresh-1",
+        "Bearer fresh-2",
+        "Bearer fresh-3",
+    ]
+    assert [request.headers.get("X-Daimon-MCP-Authorization") for request in requests] == [
+        "Bearer caller-one",
+        "Bearer caller-two",
+        None,
+    ]
+    assert all(b"caller-" not in request.content for request in requests)
+    if foundry:
+        assert all(
+            request.url.query.decode()
+            == f"api-version=custom&agent_session_id={sandbox_id('session')}"
+            for request in requests
+        )
+        assert json.loads(requests[-1].content)["c3"]["query"] == {"after_seq": "9"}
+
+
+@pytest.mark.parametrize("ack", [None, {}, {"accepted": True, "turn_id": "wrong"}, "not-json"])
+async def test_ambiguous_ack_is_retryable_with_same_intent_and_one_execution(ack):
+    fake = Harness()
+    fail = True
+
+    def handle(request):
+        response = fake.handle(request)
+        if request.url.path == "/v0/turns" and fail:
+            return (
+                httpx.Response(202, content=b"malformed")
+                if ack == "not-json"
+                else httpx.Response(202, json=ack)
+            )
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        driver, session = await setup(client, fake)
+        receipt = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert receipt.status == "outcome_unknown"
+        fail = False
+        retried = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert retried.turn_id == receipt.turn_id
+        assert retried.status == "queued"
+        assert fake.executions == 1
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+async def test_poll_retries_honor_retry_after_and_keep_cursor(status, monkeypatch):
+    from mux.drivers.selfhosted import transport as module
+
+    delays, requests = [], []
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)
+
+    def handle(request):
+        requests.append(request)
+        return (
+            httpx.Response(status, headers={"Retry-After": "0.25"})
+            if len(requests) == 1
+            else httpx.Response(200, json={"events": [], "complete": False})
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        transport = DirectTransport(client, base_url="https://harness", token="token")
+        await transport.request(
+            "GET", "/v0/sessions/session/events?after_seq=12", session_id="session"
+        )
+    assert delays == [0.25]
+    assert [str(request.url) for request in requests] == [
+        "https://harness/v0/sessions/session/events?after_seq=12"
+    ] * 2
+    response = httpx.Response(503)
+    for attempt in range(8):
+        assert 0.1 <= module.retry_delay(response, attempt) <= min(2, 0.1 * 2**attempt)
+
+
+@pytest.mark.parametrize(
+    "url, credential, allowed",
+    [
+        ("https://mcp", "OTHER_ENV", False),
+        ("http://mcp", "HARNESS_MCP_CRED_SERVER", False),
+        ("http://127.0.0.1/mcp", "HARNESS_MCP_CRED_SERVER", True),
+        ("https://mcp", "HARNESS_MCP_CRED_SERVER", True),
+    ],
+)
+async def test_mcp_credentials_require_reserved_prefix_and_secure_transport(
+    url, credential, allowed
+):
+    from types import SimpleNamespace
+
+    from mux.drivers.selfhosted import wire
+    from mux.errors import UnsupportedCapability
+
+    async def tools(scope, agent):
+        return SimpleNamespace(
+            mcp_servers=(
+                wire.MCPServer(name="server", url=url, headers_env={"Authorization": credential}),
+            ),
+            skills=(),
+        )
+
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake, tools_resolver=tools)
+        if allowed:
+            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        else:
+            with pytest.raises(UnsupportedCapability):
+                await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+            assert fake.executions == 0
+
+
+@pytest.mark.parametrize("permission", ["auto", "ask"])
+async def test_tool_policy_and_multiple_pending_approvals(permission):
+    from mux.contracts.resources import ToolSpec
+
+    fake = Harness("approval")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        resource = driver.agents
+        resource.value = resource.value.model_copy(
+            update={
+                "spec": resource.value.spec.model_copy(
+                    update={
+                        "tools": (ToolSpec(name="write", kind="builtin", permission=permission),)
+                    }
+                )
+            }
+        )
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert fake.request["tool_policy"] == {"write": permission}
+        fake.emit(
+            "requires_action",
+            dict(action_id="second", call_id="second-call", name="write", input={}),
+        )
+        snapshot = await driver.events.reconcile(SCOPE, session.ref)
+        assert {action.id for action in snapshot.required_actions} == {"approval", "second"}
+        fake.emit("tool_result", dict(call_id="call", output="denied", is_error=True))
+        snapshot = await driver.events.reconcile(SCOPE, session.ref)
+        assert snapshot.state == "requires_action"
+        assert [action.id for action in snapshot.required_actions] == ["second"]
+
+
+@pytest.mark.parametrize(
+    "url, allowed",
+    [
+        ("http://harness", False),
+        ("http://localhost:8000", True),
+        ("http://127.0.0.1:8000", True),
+        ("http://[::1]:8000", True),
+        ("https://harness", True),
+    ],
+)
+async def test_bearer_transport_only_allows_plain_http_on_loopback(url, allowed):
+    async with httpx.AsyncClient() as client:
+        if allowed:
+            DirectTransport(client, base_url=url, token="token")
+        else:
+            with pytest.raises(ValueError, match="HTTPS"):
+                DirectTransport(client, base_url=url, token="token")
+
+
+async def test_accepted_turn_has_active_identity_before_first_polled_event():
+    fake = Harness("running")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        receipt = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        fake.events = []
+        snapshot = await driver.events.reconcile(SCOPE, session.ref)
+        assert snapshot.state == "running"
+        assert snapshot.active_root_turn == receipt.turn_id
+
+
+@pytest.mark.parametrize("foundry", [False, True])
+async def test_reused_driver_sends_distinct_mcp_tokens_on_consecutive_turns(foundry):
+    fake, headers = Harness(foundry=foundry), []
+
+    def handle(request):
+        body = json.loads(request.content) if request.content else None
+        path = body["c3"]["path"] if foundry else request.url.path
+        if path == "/v0/turns":
+            headers.append(request.headers.get("X-Daimon-MCP-Authorization"))
+        return fake.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        driver, session = await setup(client, fake)
+        for key, credential in (("one", "Bearer caller-one"), ("two", "Bearer caller-two")):
+            await driver.events.send(
+                SCOPE, session.ref, [MESSAGE], key=key, mcp_authorization=credential
+            )
+            await driver.events.reconcile(SCOPE, session.ref)
+        assert headers == ["Bearer caller-one", "Bearer caller-two"]
+        assert fake.executions == 2
+        assert all("caller-" not in json.dumps(body) for body in fake.requests.values())
+
+
+async def test_polling_only_fetches_and_normalizes_new_cursor_events(monkeypatch):
+    from mux.drivers.selfhosted import events as module
+
+    fake, cursors, normalized = Harness(), [], []
+    original = module.normalize
+
+    def normalize(event, session):
+        normalized.append(event.seq)
+        return original(event, session)
+
+    monkeypatch.setattr(module, "normalize", normalize)
+
+    def handle(request):
+        if request.method == "GET":
+            cursors.append(request.url.params["after_seq"])
+        return fake.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        driver, session = await setup(client, fake)
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="one")
+        await driver.events.reconcile(SCOPE, session.ref)
+        first_end = len(fake.events)
+        await driver.events.reconcile(SCOPE, session.ref)
+        assert cursors[-1] == str(first_end)
+        assert normalized == list(range(1, first_end + 1))
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="two")
+        await driver.events.reconcile(SCOPE, session.ref)
+        assert normalized == list(range(1, len(fake.events) + 1))
+
+
+async def test_two_pending_approvals_can_be_answered_independently():
+    fake, decisions = Harness("approval"), []
+
+    def handle(request):
+        if request.url.path.endswith("/actions"):
+            body = json.loads(request.content)
+            decisions.append((body["action_id"], body["decision"]))
+            call_id = "call" if body["action_id"] == "approval" else "second-call"
+            fake.emit(
+                "tool_result",
+                dict(call_id=call_id, output=body["decision"], is_error=body["decision"] == "deny"),
+            )
+            if len(decisions) == 2:
+                fake.finish()
+            return httpx.Response(200, json={"ok": True})
+        return fake.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        driver, session = await setup(client, fake)
+        receipt = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        fake.emit(
+            "requires_action",
+            dict(action_id="second", call_id="second-call", name="write", input={}),
+        )
+        await driver.events.send(
+            SCOPE,
+            session.ref,
+            [UserToolConfirmation(action_id="approval", decision="allow")],
+            key="first-action",
+            expected_turn=receipt.turn_id,
+        )
+        assert [
+            action.id
+            for action in (await driver.events.reconcile(SCOPE, session.ref)).required_actions
+        ] == ["second"]
+        await driver.events.send(
+            SCOPE,
+            session.ref,
+            [UserToolConfirmation(action_id="second", decision="deny")],
+            key="second-action",
+            expected_turn=receipt.turn_id,
+        )
+        assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
+        assert decisions == [("approval", "allow"), ("second", "deny")]
+
+
+def test_retry_after_accepts_http_date_and_invalid_value_uses_backoff():
+    from email.utils import format_datetime
+
+    from mux.drivers.selfhosted.transport import retry_delay
+
+    response = httpx.Response(
+        429,
+        headers={
+            "Retry-After": format_datetime(datetime.now(UTC) + timedelta(seconds=60), usegmt=True)
+        },
+    )
+    assert 58 <= retry_delay(response, 0) <= 60
+    assert retry_delay(httpx.Response(503, headers={"Retry-After": "invalid"}), 0) == 0.1

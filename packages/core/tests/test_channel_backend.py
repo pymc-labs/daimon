@@ -255,3 +255,10 @@ async def test_with_the_flag_on_an_unrunnable_configuration_is_refused_before_an
     assert calls == []
     # Another channel of the same tenant is not affected.
     assert (await _admit(replace(on), tenant, "chan-2")).backend_revision is None
+
+
+def test_selfhosted_admission_stays_closed_until_native_core_integration():
+    with pytest.raises(BackendUnsupported, match="not runnable"):
+        check_backend(
+            _revision(BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"))
+        )

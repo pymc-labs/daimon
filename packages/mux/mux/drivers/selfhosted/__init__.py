@@ -31,7 +31,8 @@ class SelfHostedDriver:
         environments: Environments,
         authorization: Authorization,
         binding_lookup: BindingLookup | None = None,
-        model: str = "gpt-5",
+        model: str | None = None,
+        deployment: str | None = None,
         max_tool_calls: int = 100,
         deadline_s: float = 300,
         skill_resolver: SkillResolver | None = None,
@@ -47,6 +48,7 @@ class SelfHostedDriver:
             context,
             self.sessions,
             model=model,
+            deployment=deployment,
             max_tool_calls=max_tool_calls,
             deadline_s=deadline_s,
             skill_resolver=skill_resolver,
@@ -54,7 +56,7 @@ class SelfHostedDriver:
         )
         self.sessions.events = self.events
         self.usage = SelfHostedUsage(self.events)
-        self.models = SelfHostedModels((model,))
+        self.models = SelfHostedModels((deployment or model or "gpt-5",))
 
     @property
     def artifacts(self) -> Artifacts:

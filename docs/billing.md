@@ -1301,3 +1301,16 @@ the maximum applicable input/cache-write rate and every output token at the
 output rate. Cache discounts can reduce actual cost but cannot expand the
 worker's token authority. Existing worker cash holds, funding checks and
 unknown-usage handling remain authoritative.
+
+## Self-hosted request reconciliation
+
+The self-hosted driver records each durable `model_request_started` as a pending
+request with unknown usage (revision 1). A later measurement supersedes it as
+revision 2 under the same observation id; replay never creates another charge.
+An explicit `usage_unavailable` also keeps that request pending. Missing token
+counts remain unknown, including after cancellation or a harness restart.
+
+A terminal turn with no request inventory or usage is reported as errored and
+retained for operator reconciliation. Its terminal event remains replayable,
+and later turns can use the session. Operators must investigate these unresolved
+turns rather than treating them as zero-cost work.
