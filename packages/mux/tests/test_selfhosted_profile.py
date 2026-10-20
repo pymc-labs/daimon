@@ -1,4 +1,4 @@
-"""Self-hosted registration remains fail-closed until driver evidence exists."""
+"""Self-hosted profile selection and unwaivable metering."""
 
 import pytest
 from mux.contracts.admission import admit
@@ -29,7 +29,7 @@ def test_selfhosted_selection_requires_explicit_profile_and_allows_deployment_na
         resolve_default(BackendConfig(backend="selfhosted", model="gpt-5"))
 
 
-def test_selfhosted_scaffold_refuses_unmetered_turns() -> None:
+def test_selfhosted_refuses_profiles_without_usage() -> None:
     profile = get_profile("selfhosted.loop")
     assert not profile.core
     for capability in (
@@ -47,4 +47,9 @@ def test_selfhosted_scaffold_refuses_unmetered_turns() -> None:
         backend_selection("selfhosted"),
     )
     with pytest.raises(UnsupportedCapability, match="usage_observations"):
-        admit(config, profile)
+        admit(
+            config,
+            profile.model_copy(
+                update={"support": {**profile.support, "usage_observations": "unsupported"}}
+            ),
+        )

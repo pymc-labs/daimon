@@ -1120,13 +1120,29 @@ requests. `RetainedSkillDeployments` implements the existing publisher contract
 for independently provisioned immutable GCS directories, verifying the complete
 scope, version and every retained file digest without making storage writes.
 
-The `selfhosted.loop` profile reserves the `selfhosted` provider for the
-`daimon-harness/0` HTTP protocol. It is non-core, uses per-caller threads and
-selects `gpt-5` by default; an environment may use another deployment name.
-The driver namespace is a scaffold. Runtime capabilities remain unknown and
-admission refuses turns until usage observations have driver evidence. Steer,
-multiagent, vaults, memory stores, workspace export/import and native skill
-versions are explicitly unsupported.
+The opt-in `selfhosted.loop` profile uses per-caller threads and selects
+`gpt-5` by default; an environment may use another deployment name. It is
+non-core. Steer, multiagent, vaults, memory stores, workspace export/import and
+native skill versions are explicitly unsupported.
+
+The self-hosted driver's `SelfHostedDriver` takes injected `Agents` and
+`Environments` ports, an authorization callback and an optional durable binding
+lookup. `DirectTransport` calls the harness `/v0` endpoints;
+`FoundryInvocationsTransport` wraps those same calls in `/invocations` and sends
+one deterministic sandbox id on every call. Both submit turns with JSON
+acknowledgements and poll the durable event log. `open_stream` opens the first
+HTTP replay request before returning its iterator. A lost reader can reconnect
+at a sequence cursor without running the turn again.
+
+Usage identities include the session, turn and model request, so replay preserves
+one observation per request. Missing measurements are unknown observations when
+the harness explicitly reports `usage_unavailable`/`usage_missing`; a terminal
+turn with no measured, unavailable or started request is refused. Unmatched
+request starts remain unknown observations; measured revision 2 supersedes an
+unknown revision 1 under the same observation id. Tokens are never
+inferred as zero. Agent/environment revision changes require a new binding.
+Artifacts, session listing/deletion, native skill administration and agent tool-policy
+narrowing are not supported by this driver yet and refuse explicitly.
 
 `mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
 turn requests, approval decisions, durable event replay and typed event data.
