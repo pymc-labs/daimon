@@ -210,3 +210,74 @@ def test_cli_invalid_config_does_not_echo_credentials(option):
     assert "Invalid harness configuration" in result.output
     assert secret not in result.output
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+asyncpg://user:DbPasswordMarker927",
+        "://user:DbPasswordMarker927@host/database",
+        "postgresql+asyncpg://user:DbPasswordMarker927@host:invalid/database",
+        "unsupported+asyncpg://user:DbPasswordMarker927@host/database",
+    ],
+)
+def test_main_invalid_database_url_never_echoes_password(monkeypatch, capsys, database_url):
+    from daimon.adapters.cli.main import main
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "daimon",
+            "selfhosted",
+            "init",
+            "--tenant-id",
+            "11111111-2222-3333-4444-555555555555",
+            "--harness-url",
+            "https://harness.example",
+            "--database-url",
+            database_url,
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "database configuration invalid (scheme/host/port check)" in output.err
+    assert "DbPasswordMarker927" not in output.err
+    assert database_url not in output.err
+    assert "Traceback" not in output.err
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, TypeError, OSError])
+def test_cli_unexpected_engine_construction_errors_do_not_echo_input(
+    monkeypatch, capsys, error_type
+):
+    from daimon.adapters.cli.main import main
+
+    def fail_engine(url):
+        raise error_type(f"DbPasswordMarker927: {url}")
+
+    monkeypatch.setattr(selfhosted, "build_engine", fail_engine)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "daimon",
+            "selfhosted",
+            "init",
+            "--tenant-id",
+            "11111111-2222-3333-4444-555555555555",
+            "--harness-url",
+            "https://harness.example",
+            "--database-url",
+            "postgresql+asyncpg://user:DbPasswordMarker927@host/database",
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "database configuration invalid (scheme/host/port check)" in output.err
+    assert "DbPasswordMarker927" not in output.err
+    assert "Traceback" not in output.err

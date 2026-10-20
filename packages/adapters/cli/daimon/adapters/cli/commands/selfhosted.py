@@ -167,7 +167,15 @@ def selfhosted_init_command(
         ) from None
 
     async def run() -> tuple[str, str]:
-        engine = build_engine(database_url)
+        try:
+            engine = build_engine(database_url)
+        except Exception:
+            # URL/dialect errors can contain isolated password fragments that
+            # credential redactors cannot identify without the original DSN.
+            raise typer.BadParameter(
+                "database configuration invalid (scheme/host/port check)",
+                param_hint="--database-url",
+            ) from None
         try:
             return await initialize(
                 async_sessionmaker(engine, expire_on_commit=False),
