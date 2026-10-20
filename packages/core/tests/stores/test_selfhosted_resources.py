@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import pytest
 from daimon.core.stores.selfhosted_resources import (
-    HarnessConfig,
     SelfHostedAgents,
     SelfHostedEnvironments,
 )
@@ -26,6 +25,7 @@ from mux.contracts.resources import (
     MCPConnection,
     SkillRef,
 )
+from mux.drivers.selfhosted.config import HarnessConfig
 from mux.errors import OperationConflict, ProviderError, ScopeViolation
 from mux.profiles.selfhosted import LOOP
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
