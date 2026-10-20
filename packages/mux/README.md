@@ -12,6 +12,8 @@ revisions and lifecycle timestamps. Active names are unique within a tenant;
 archived names can be reused, and name/ID resolution excludes archived rows.
 Mutations use account- and resource-kind-scoped keys, with principal ownership.
 Receipts contain only resource references/revisions and expire after seven days.
+Account erasure previews and deletes its receipts while retaining tenant-shared
+agent and environment records.
 Resource retries reread the row and refuse deleted or changed revisions. Writes
 prune expired receipts for their tenant; operators can prune idle tenants with
 `cleanup_expired_receipts` in the store module. Archive preserves historical

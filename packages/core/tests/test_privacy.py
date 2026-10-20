@@ -808,6 +808,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "github_user_links": "github_user_links",
         "mcp_tokens": "mcp_tokens",
         "gemini_records": "gemini_records",
+        "selfhosted_operations": "selfhosted_operations",
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
         "direct_message_conversations": "direct_message_conversations",
@@ -855,6 +856,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     """
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
+        "selfhosted_resource_operations": "account UUID stored as account_id text",
         "neutral_agent_revisions": "accounts.id FK cascade",
         "neutral_skill_versions": "accounts.id FK cascade",
         "cli_principals": "account_id FK -> accounts.id",
@@ -978,3 +980,46 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         f"into purge.py (+ PurgeReport/PurgePreview) or add the table to the allowlist "
         f"in this test with a justification. In-scope because: {uncovered}"
     )
+
+
+async def test_account_purge_removes_selfhosted_receipts_and_keeps_shared_resources(
+    db_session, db_session_factory
+):
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+    from mux.contracts.ids import ModelRef, PageRequest, Scope
+    from mux.contracts.resources import AgentFilter, AgentSpec
+    from mux.profiles.selfhosted import LOOP
+
+    tenant = await make_tenant(db_session)
+    first = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    agents = SelfHostedAgents(db_session_factory)
+    for account, name in ((first, "first"), (other, "other")):
+        caller = Scope(
+            tenant_id=str(tenant.id),
+            account_id=str(account.id),
+            principal_id=name,
+            authorization_id="test",
+        )
+        await agents.create(
+            caller,
+            AgentSpec(name=name, model=ModelRef(provider=LOOP.provider, id="gpt-5")),
+            key="create",
+        )
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=first.id)
+    assert preview.selfhosted_operations.count == 1
+    report = await purge_account(sm=db_session_factory, account_id=first.id)
+    assert report.db.selfhosted_operations == 1
+    remaining = await collect_purge_preview(sm=db_session_factory, account_id=other.id)
+    assert remaining.selfhosted_operations.count == 1
+    caller = Scope(
+        tenant_id=str(tenant.id),
+        account_id=str(other.id),
+        principal_id="other",
+        authorization_id="test",
+    )
+    assert len((await agents.list(caller, filters=AgentFilter(), page=PageRequest())).data) == 2
+    assert (
+        await purge_account(sm=db_session_factory, account_id=first.id)
+    ).db.selfhosted_operations == 0

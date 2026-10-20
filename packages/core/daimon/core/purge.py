@@ -132,6 +132,7 @@ from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import security_audit as security_audit_store
+from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
@@ -165,6 +166,7 @@ class PurgeReport(BaseModel):
     github_user_links: int = 0
     mcp_tokens: int = 0
     gemini_records: int = 0
+    selfhosted_operations: int = 0
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
     direct_message_conversations: int = 0
@@ -194,6 +196,7 @@ class PurgeReport(BaseModel):
             github_user_links=self.github_user_links + other.github_user_links,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
             gemini_records=self.gemini_records + other.gemini_records,
+            selfhosted_operations=self.selfhosted_operations + other.selfhosted_operations,
             slack_user_tokens=self.slack_user_tokens + other.slack_user_tokens,
             slack_turn_contexts=self.slack_turn_contexts + other.slack_turn_contexts,
             direct_message_conversations=(
@@ -511,6 +514,9 @@ async def purge_account(
         gemini_records_count = await gemini_state_store.delete_records_for_account(
             session, account_id=account_id
         )
+        selfhosted_operations_count = await selfhosted_store.delete_operations_for_account(
+            session, account_id=account_id
+        )
         # Account-scoped (keyed by account_id, not principal): delete the
         # per-agent MCP token rows BEFORE delete_account — they reference
         # accounts.id, so leaving them trips the FK and rolls back the purge.
@@ -572,6 +578,7 @@ async def purge_account(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
                 gemini_records=gemini_records_count,
+                selfhosted_operations=selfhosted_operations_count,
                 github_connect_requests=github_connect_requests_count,
                 github_connect_click_intents=github_connect_click_intents_count,
                 message_feedback=message_feedback_count,

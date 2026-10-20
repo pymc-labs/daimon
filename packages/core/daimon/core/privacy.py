@@ -40,6 +40,7 @@ from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
+from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
@@ -83,6 +84,7 @@ class PurgePreview(BaseModel):
     github_connect_click_intents: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
     gemini_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    selfhosted_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mcp_tokens: PurgePreviewRow
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
@@ -110,6 +112,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.github_user_links, "linked GitHub account"),
         (preview.mcp_tokens, "Daimon access token"),
         (preview.gemini_records, "Gemini conversation record"),
+        (preview.selfhosted_operations, "self-hosted retry record"),
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
@@ -281,6 +284,9 @@ async def collect_purge_preview(
         )
 
         gemini_records_count = await gemini_state_store.count_records_for_account(
+            session, account_id=account_id
+        )
+        selfhosted_operations_count = await selfhosted_store.count_operations_for_account(
             session, account_id=account_id
         )
         # 9. mcp_tokens — account-scoped (keyed by account_id, not principal), so
@@ -472,6 +478,7 @@ async def collect_purge_preview(
         github_user_links=github_user_links,
         mcp_tokens=mcp_tokens,
         gemini_records=PurgePreviewRow(count=gemini_records_count, example=None),
+        selfhosted_operations=PurgePreviewRow(count=selfhosted_operations_count, example=None),
         slack_user_tokens=slack_user_tokens,
         slack_turn_contexts=slack_turn_contexts,
         credential_requests=credential_requests,

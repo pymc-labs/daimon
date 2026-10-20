@@ -59,6 +59,26 @@ async def cleanup_expired_receipts(
         return len(list(removed))
 
 
+async def count_operations_for_account(session: AsyncSession, *, account_id: UUID) -> int:
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(SelfHostedResourceOperation)
+            .where(SelfHostedResourceOperation.account_id == str(account_id))
+        )
+        or 0
+    )
+
+
+async def delete_operations_for_account(session: AsyncSession, *, account_id: UUID) -> int:
+    removed = await session.scalars(
+        delete(SelfHostedResourceOperation)
+        .where(SelfHostedResourceOperation.account_id == str(account_id))
+        .returning(SelfHostedResourceOperation.key)
+    )
+    return len(list(removed))
+
+
 class _Resources[
     Spec: (AgentSpec, EnvironmentSpec),
     Patch: (AgentPatch, EnvironmentPatch),
