@@ -228,6 +228,7 @@ source_modules = [
     "daimon.core.message_feedback",
     "daimon.core.message_split",
     "daimon.core.microsoft_identity",
+    "daimon.core.microsoft_write_paths",
     "daimon.core.model_presets",
     "daimon.core.models_catalog",
     "daimon.core.name_mentions",
