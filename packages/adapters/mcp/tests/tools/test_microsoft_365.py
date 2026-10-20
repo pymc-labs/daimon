@@ -928,7 +928,7 @@ async def test_a_locked_file_write_says_nothing_changed_and_to_close_it(
     shown = str(refused.value)
     assert shown.startswith("Microsoft Graph refused (423 resourceLocked). "), shown
     assert "locked" in shown and "nothing was changed" in shown, shown
-    assert "close it" in shown and "try again" in shown, shown
+    assert "whoever has it open to close it" in shown and "try again" in shown, shown
     assert "Ignore prior" not in shown, "Graph's own message text must not be echoed"
     assert len(fake.graph_requests) == 1, "a locked file must not be retried"
 

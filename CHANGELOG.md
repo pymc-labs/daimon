@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- On Teams, when Microsoft refuses a `microsoft_write` because the file is locked (usually open in a desktop Office app), the model is now told nothing was changed and to ask the person to close the file and try again, instead of just "refused (423)".
+- On Teams, when Microsoft refuses a `microsoft_write` because the file is locked (usually open in a desktop Office app), the model is now told nothing was changed and to ask whoever has the file open to close it and try again, instead of just "refused (423)".
 
 - In Teams, clicking Stop on a reply's status card now turns that card into "Stopping…" without a Stop button right away. It used to show a "Cancelling…" banner that stayed on the card after the reply had stopped.
 

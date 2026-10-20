@@ -131,7 +131,7 @@ def _refusal_hint(response: httpx.Response) -> str:
     if status == 423:
         return (
             "The file is locked, most likely open in a desktop Office app, so nothing was "
-            "changed. Ask the person to close it and try again."
+            "changed. Ask whoever has it open to close it, then try again."
         )
     return ""
 
