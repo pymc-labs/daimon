@@ -106,6 +106,20 @@ async def main() -> None:
         )
         pid = process.pid
         try:
+            own = subprocess.run(
+                ["/bin/bash", "-c", f"cat /proc/{pid}/cmdline; cat {first.home}/tmp/report"],
+                user=first.tool_uid,
+                group=first.tool_uid,
+                extra_groups=[],
+                env={},
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=True,
+            ).stdout
+            assert "private-command-marker" in own, own
+            assert "private-tmp" in own, own
+            assert process.poll() is None
             output = await second.bash(
                 f"cat {first.home}/tmp/report /proc/{pid}/cmdline 2>/dev/null; "
                 "test -w /tmp && echo global-tmp-writable; echo isolated"
