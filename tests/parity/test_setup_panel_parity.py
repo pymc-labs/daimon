@@ -83,7 +83,8 @@ _CHANNEL_LABEL: Final = "#here"
 #: How each sentence names the place the panel is in, per `_DIVERGENCES["channel"]`.
 _NOTE_LABEL: Final[Mapping[str, str | None]] = {"teams": None}
 _REQUEST_LABEL: Final[Mapping[str, str]] = {"teams": "a channel"}
-_HERE: Final[Mapping[str, str]] = {"teams": "Channel here"}
+#: Teams names a channel, never its id; the parity driver stores no channel names.
+_HERE: Final[Mapping[str, str]] = {"teams": "Channel name unavailable"}
 
 _ANSWERING = "answers-here"
 _BUILT_IN = "daimon"
