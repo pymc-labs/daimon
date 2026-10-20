@@ -54,6 +54,10 @@ class TurnContext:
     state_dir: Path | None = None
     model_input: list[JsonValue] = field(default_factory=list[JsonValue], repr=False)
     process_groups: set[int] = field(default_factory=set[int], repr=False)
+    workers: set[asyncio.Task[JsonValue]] = field(
+        default_factory=set[asyncio.Task[JsonValue]], repr=False
+    )
+    stopping: bool = False
 
     def __post_init__(self) -> None:
         tool_identity(self.home, self.tool_uid)
@@ -74,6 +78,51 @@ class TurnContext:
         execute: Callable[[], Awaitable[JsonValue]],
         *,
         mcp: bool = False,
+    ) -> JsonValue:
+        """Own SDK tool workers even if the SDK abandons its invocation task."""
+        if self.stopping:
+            raise HarnessError("turn_stopped", "Turn no longer accepts tools")
+        worker = asyncio.create_task(self._tool(call_id, name, arguments, execute, mcp=mcp))
+        self.workers.add(worker)
+
+        def finished(task: asyncio.Task[JsonValue]) -> None:
+            self.workers.discard(task)
+            if not task.cancelled():
+                task.exception()  # Retrieve failures even if the SDK abandoned its caller.
+
+        worker.add_done_callback(finished)
+        return await worker
+
+    async def stop_workers(self) -> None:
+        """Drain workers before publishing a terminal event or reusing a session."""
+        self.stopping = True
+        workers = set(self.workers)
+        for worker in workers:
+            worker.cancel()
+        pending: set[asyncio.Task[JsonValue]]
+        if workers:
+            _, pending = await asyncio.wait(workers, timeout=2)
+        else:
+            pending = set()
+        self.stop_processes()
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=5)
+        if pending:
+            # Do not journal turn_ended: the durable active claim blocks reuse.
+            raise HarnessError(
+                "workers_active", "Tool cleanup did not finish; session remains sealed"
+            )
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    async def _tool(
+        self,
+        call_id: str,
+        name: str,
+        arguments: dict[str, JsonValue],
+        execute: Callable[[], Awaitable[JsonValue]],
+        *,
+        mcp: bool,
     ) -> JsonValue:
         """Observe and authorize tools before any side effect, including MCP calls."""
         self.tool_calls += 1
@@ -261,6 +310,75 @@ class TurnContext:
             for pid in self.process_groups:
                 with suppress(ProcessLookupError):
                     os.killpg(pid, signal.SIGKILL)
+
+    async def async_file_operation(
+        self, operation: str, path: str, *, content: str = "", old: str = "", new: str = ""
+    ) -> str:
+        """Use a cancellable helper process instead of an unkillable file thread."""
+        if self.stopping:
+            raise HarnessError("turn_stopped", "Turn no longer accepts file operations")
+        uid, gid, groups = tool_identity(self.home, self.tool_uid)
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                str(Path(__file__).with_name("file_exec.py")),
+                str(self.home),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                user=uid,
+                group=gid,
+                extra_groups=groups,
+                cwd=self.home,
+                start_new_session=True,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(self.work),
+                    "TMPDIR": str(self.home / "tmp"),
+                    "LANG": "C.UTF-8",
+                },
+            )
+        )
+        reader: asyncio.Task[tuple[bytes, bytes]] | None = None
+
+        async def cleanup() -> None:
+            child = await spawn
+            try:
+                with suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
+                if reader is not None:
+                    await reader
+                await child.wait()
+            finally:
+                self.process_groups.discard(child.pid)
+
+        try:
+            child = await asyncio.shield(spawn)
+            self.process_groups.add(child.pid)
+            payload = json.dumps(
+                {"operation": operation, "path": path, "content": content, "old": old, "new": new}
+            ).encode()
+            reader = asyncio.create_task(child.communicate(payload))
+            async with asyncio.timeout(5):
+                output, _ = await asyncio.shield(reader)
+            if child.returncode != 0:
+                raise ValueError("File operation refused or failed")
+            value: object = json.loads(output).get("output")
+            if not isinstance(value, str):
+                raise ValueError("Invalid file operation response")
+            return value
+        finally:
+            finalization = asyncio.create_task(cleanup())
+            interrupted = False
+            while not finalization.done():
+                try:
+                    await asyncio.shield(finalization)
+                except asyncio.CancelledError:
+                    interrupted = True
+            await finalization
+            if interrupted:
+                raise asyncio.CancelledError
 
     def file_operation(
         self, operation: str, path: str, *, content: str = "", old: str = "", new: str = ""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,51 @@ async def test_bash_cwd_credentials_and_cancel(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 3)
+
+
+async def test_async_file_helpers_execute_and_refuse_unsafe_paths(tmp_path):
+    runtime = context(tmp_path)
+    assert (
+        await runtime.async_file_operation("write", "nested/file", content="one two") == "written"
+    )
+    assert await runtime.async_file_operation("read", "nested/file") == "one two"
+    assert (
+        await runtime.async_file_operation("edit", "nested/file", old="two", new="three")
+        == "edited"
+    )
+    assert await runtime.async_file_operation("read", "nested/file") == "one three"
+    with pytest.raises(ValueError):
+        await runtime.async_file_operation("write", "../escape", content="bad")
+    (runtime.work / "link").symlink_to(tmp_path)
+    with pytest.raises(ValueError):
+        await runtime.async_file_operation("read", "link/secret")
+    assert not runtime.process_groups
+
+
+async def test_unjoined_worker_bounds_cleanup_and_refuses_further_tools(tmp_path):
+    runtime = context(tmp_path)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def uncooperative():
+        started.set()
+        while not release.is_set():
+            with suppress(asyncio.CancelledError):
+                await release.wait()
+        return "finished"
+
+    invocation = asyncio.create_task(runtime.tool("stuck", "write", {}, uncooperative))
+    try:
+        await started.wait()
+        async with asyncio.timeout(10):
+            with pytest.raises(HarnessError, match="session remains sealed"):
+                await runtime.stop_workers()
+        assert runtime.workers
+        with pytest.raises(HarnessError, match="no longer accepts tools"):
+            await runtime.tool("late", "write", {}, uncooperative)
+    finally:
+        release.set()
+        await invocation
+    assert not runtime.workers
 
 
 async def test_tool_limit_blocks_execution(tmp_path: Path) -> None:
@@ -189,6 +235,9 @@ async def test_builtin_tools_default_to_auto_and_explicit_ask_is_required(tmp_pa
     pending = asyncio.create_task(runtime.tool("ask-call", "write", {}, execute))
     await asyncio.sleep(0)
     assert not (runtime.work / "approved.txt").exists()
+    async with asyncio.timeout(2):
+        while not runtime.pending:
+            await asyncio.sleep(0)
     action_id = next(iter(runtime.pending))
     runtime.pending[action_id].set_result(ActionRequest(action_id=action_id, decision="allow"))
     assert await pending == "written"

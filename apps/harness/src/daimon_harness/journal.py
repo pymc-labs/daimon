@@ -188,6 +188,14 @@ class Journal:
     def append(self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]) -> Event:
         db = self.connection(request.session_id)
         with db:
+            if (
+                kind in {"tool_use", "tool_result", "requires_action"}
+                and db.execute(
+                    "SELECT 1 FROM events WHERE turn_id=? AND type='turn_ended' LIMIT 1",
+                    (request.turn_id,),
+                ).fetchone()
+            ):
+                raise ConflictError("turn already ended; tool events refused")
             seq = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
             event = Event(
                 seq=seq,

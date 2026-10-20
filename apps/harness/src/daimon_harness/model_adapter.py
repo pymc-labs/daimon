@@ -289,15 +289,13 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
                     match tool_name:
                         case "bash":
                             return await context.bash(str(args["command"]))
-                        case "read":
-                            return await asyncio.to_thread(context.read, str(args["path"]))
-                        case "write":
-                            return await asyncio.to_thread(
-                                context.write, str(args["path"]), str(args["content"])
-                            )
-                        case "edit":
-                            return await asyncio.to_thread(
-                                context.edit, str(args["path"]), str(args["old"]), str(args["new"])
+                        case "read" | "write" | "edit":
+                            return await context.async_file_operation(
+                                tool_name,
+                                str(args["path"]),
+                                content=str(args.get("content", "")),
+                                old=str(args.get("old", "")),
+                                new=str(args.get("new", "")),
                             )
                         case _:
                             raise ValueError("unknown builtin tool")
@@ -485,8 +483,9 @@ class AzureModelAdapter:
                         and cause.code in {"context_length_exceeded", "context_window_exceeded"}
                     ):
                         raise
-                    # Preserve calls/results from this turn so recovery cannot repeat
-                    # completed side effects. Each attempt retains its usage inventory.
+                    # Preserve reasoning and paired calls/results so the stateless
+                    # retry stays valid and cannot repeat completed side effects.
+                    # Each attempt retains its usage inventory.
                     await context.emit(
                         "error",
                         {
@@ -498,8 +497,6 @@ class AzureModelAdapter:
                     recent = context.model_input[len(history) :]
                     compact: list[JsonValue] = []
                     for item in recent:
-                        if isinstance(item, dict) and item.get("type") == "reasoning":
-                            continue
                         if isinstance(item, dict) and item.get("type") == "function_call_output":
                             item = dict(item)
                             output = item.get("output")

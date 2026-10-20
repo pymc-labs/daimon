@@ -92,7 +92,12 @@ The model's file tools use isolated Python helper processes under the session
 UID. Descriptor-relative traversal refuses symlinks at every component; open
 file descriptors are checked for regular files and used for ownership changes.
 FIFOs/devices are refused without waiting. Helpers have wall/CPU/memory limits,
-and the SDK offloads file operations from the service event loop. SDK/MCP logs,
+and the SDK awaits these subprocesses without file-operation threads. Every turn
+owns its tool workers, including invocations abandoned by the SDK. Cancellation
+signals and joins them, then kills remaining session-UID processes before
+`turn_ended` or successful cancellation acknowledgment. Cleanup waits are bounded;
+if a worker cannot be joined, the session remains active and refuses another turn.
+The journal refuses tool events for an ended turn. SDK/MCP logs,
 including connection failures and tracebacks, are redacted against all active
 turn credentials before handlers receive them.
 
@@ -136,7 +141,8 @@ and is committed at successful turn completion. User input and redacted tool
 side-effect summaries are checkpointed during the turn, so interrupted turns
 remain in future context. A context-window rejection retries once after removing
 older history and compacting large tool outputs, with a `context_truncated`
-notice; completed calls/results from the current turn are retained.
+notice; reasoning items and their paired calls/results from the current turn
+are retained together.
 
 ## Foundry hosted-agent deployment
 

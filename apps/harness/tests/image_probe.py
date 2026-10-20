@@ -82,6 +82,10 @@ async def main() -> None:
         context.write("file.txt", name)
         contexts.append(context)
     first = contexts[0]
+    assert await first.async_file_operation("write", "async.txt", content="one two") == "written"
+    assert await first.async_file_operation("edit", "async.txt", old="two", new="three") == "edited"
+    assert await first.async_file_operation("read", "async.txt") == "one three"
+    assert not first.process_groups
     if mode == "single":
         # Exercise the production supervisor, including a binding surviving restart.
         journal.bind_session("first")

@@ -281,13 +281,19 @@ async def test_sdk_context_overflow_truncates_history_and_inventories_retry(
                     "status": "completed",
                     "output": [
                         {
+                            "type": "reasoning",
+                            "id": "reasoning-for-write",
+                            "summary": [],
+                            "encrypted_content": "opaque-required-reasoning",
+                        },
+                        {
                             "type": "function_call",
                             "id": "f",
                             "call_id": "write",
                             "name": "write",
                             "status": "completed",
                             "arguments": '{"path":"once.txt","content":"once"}',
-                        }
+                        },
                     ],
                     "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
                     "parallel_tool_calls": False,
@@ -308,6 +314,16 @@ async def test_sdk_context_overflow_truncates_history_and_inventories_retry(
                 },
             )
         assert "old-history-marker" not in str(body["input"])
+        if after_tool:
+            retained = body["input"]
+            reasoning = next(item for item in retained if item.get("type") == "reasoning")
+            assert reasoning["id"] == "reasoning-for-write"
+            assert reasoning["encrypted_content"] == "opaque-required-reasoning"
+            call = next(item for item in retained if item.get("type") == "function_call")
+            result = next(item for item in retained if item.get("type") == "function_call_output")
+            assert call["call_id"] == result["call_id"] == "write"
+            assert retained.index(reasoning) < retained.index(call) < retained.index(result)
+
         return httpx.Response(
             200,
             json={
@@ -450,38 +466,6 @@ async def test_denied_call_retains_reasoning_and_paired_output_in_next_turn(tmp_
     assert result["call_id"] == "denied-call" and result["is_error"] is True
 
 
-async def test_file_tools_execute_off_the_event_loop(tmp_path, monkeypatch):
-    import threading
-
-    from agents.tool import FunctionTool
-    from agents.tool_context import ToolContext
-    from daimon_harness.runtime import discard_event
-
-    runtime = TurnContext(TurnRequest.model_validate(turn()), tmp_path, discard_event)
-    main_thread = threading.get_ident()
-    called = []
-
-    def file_operation(*args):
-        assert threading.get_ident() != main_thread
-        called.append(args)
-        return "file-result"
-
-    for name in ("read", "write", "edit"):
-        monkeypatch.setattr(runtime, name, file_operation)
-    arguments = {"path": "file", "content": "content", "old": "old", "new": "new"}
-    for tool in model_adapter.builtin_tools(runtime):
-        if tool.name in {"read", "write", "edit"}:
-            assert isinstance(tool, FunctionTool)
-            context = ToolContext(
-                context=runtime,
-                tool_call_id=tool.name,
-                tool_name=tool.name,
-                tool_arguments=json.dumps(arguments),
-            )
-            assert "file-result" in await tool.on_invoke_tool(context, json.dumps(arguments))
-    assert len(called) == 3
-
-
 @pytest.mark.parametrize(
     "status,reason",
     [
@@ -601,4 +585,132 @@ async def test_noncompleted_response_preserves_usage_and_ends_errored(
         if not tool_call and status != "failed":
             assert any(event.type == "agent_message" for event in events)
     finally:
+        await supervisor.close()
+
+
+@pytest.mark.parametrize("tool_name", ["write", "bash"])
+@pytest.mark.parametrize("spawned", [False, True])
+async def test_sdk_cancel_joins_tool_workers_before_terminal_and_session_reuse(
+    tmp_path, monkeypatch, tool_name, spawned
+):
+    import asyncio
+
+    from daimon_harness.journal import ConflictError
+    from daimon_harness.service import Supervisor
+
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        value = "old" if len(calls) == 1 else "new"
+        output = (
+            [
+                {
+                    "type": "function_call",
+                    "id": f"f{len(calls)}",
+                    "call_id": f"c{len(calls)}",
+                    "name": tool_name,
+                    "status": "completed",
+                    "arguments": json.dumps(
+                        {"path": "victim.txt", "content": value}
+                        if tool_name == "write"
+                        else {"command": f"sleep 0.1; printf {value} > victim.txt"}
+                    ),
+                }
+            ]
+            if len(calls) < 3
+            else [
+                {
+                    "id": "done",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": f"response{len(calls)}",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-5",
+                "status": "completed",
+                "output": output,
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    def azure_client(**kwargs):
+        return AsyncAzureOpenAI(
+            azure_endpoint="https://unit-test.openai.azure.com",
+            api_key="test",
+            api_version="2025-04-01-preview",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        )
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", azure_client)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    started, release = asyncio.Event(), asyncio.Event()
+    create = asyncio.create_subprocess_exec
+    children = []
+    held = False
+
+    async def delayed_spawn(*args, **kwargs):
+        nonlocal held
+        if held:
+            return await create(*args, **kwargs)
+        held = True
+        if spawned:
+            child = await create(*args, **kwargs)
+            children.append(child)
+        started.set()
+        await release.wait()
+        if not spawned:
+            child = await create(*args, **kwargs)
+            children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    supervisor = Supervisor(tmp_path, AzureModelAdapter())
+    first = TurnRequest.model_validate(turn())
+    second = TurnRequest.model_validate(turn(turn_id="second", key="second"))
+    try:
+        await supervisor.submit(first)
+        await asyncio.wait_for(started.wait(), 5)
+        context = supervisor.contexts[first.turn_id]
+        assert context.workers
+        supervisor.tasks[first.turn_id].cancel()
+        await asyncio.sleep(0.05)
+        assert not supervisor.journal.ended(first.turn_id)
+        with pytest.raises(ConflictError, match="active turn"):
+            await supervisor.submit(second)
+        # Repeated cancellation cannot cut cleanup short.
+        supervisor.tasks[first.turn_id].cancel()
+        release.set()
+        await asyncio.wait_for(supervisor.tasks[first.turn_id], 5)
+        assert not context.workers and not context.process_groups
+        assert all(child.returncode is not None for child in children)
+        events = supervisor.journal.events(first.session_id)
+        assert events[-1].type == "turn_ended" and events[-1].data["outcome"] == "interrupted"
+        terminal_seq = events[-1].seq
+        await supervisor.submit(second)
+        await asyncio.wait_for(supervisor.tasks[second.turn_id], 5)
+        assert (context.work / "victim.txt").read_text() == "new"
+        assert not any(
+            event.turn_id == first.turn_id
+            for event in supervisor.journal.events(first.session_id, terminal_seq)
+        )
+        with pytest.raises(ConflictError, match="already ended"):
+            supervisor.journal.append(
+                first, "tool_result", {"call_id": "late", "output": "late", "is_error": False}
+            )
+        assert supervisor.journal.events(first.session_id)[-1].turn_id == second.turn_id
+    finally:
+        release.set()
         await supervisor.close()

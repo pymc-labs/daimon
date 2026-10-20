@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Join harness tool workers before completing cancellation or accepting another turn, and retain reasoning alongside tool calls during context-overflow recovery.
+
 - Refuse tool-readable files on external harness mounts regardless of filename, and preserve usage while reporting all non-completed model response statuses as errors.
 
 - Restrict harness credentials to API keys or header-protected managed identity, refuse file-backed credentials, and preserve usage while marking incomplete model responses as errored.

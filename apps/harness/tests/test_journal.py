@@ -8,13 +8,29 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon_harness.journal import Journal
+from daimon_harness.journal import ConflictError, Journal
 from daimon_harness.runtime import TurnContext
 from daimon_harness.service import create_app
 from mux.drivers.selfhosted.wire import TurnRequest
 from pydantic import JsonValue
 
 from .conftest import FakeModelAdapter, turn
+
+
+@pytest.mark.parametrize("kind", ["tool_use", "tool_result", "requires_action"])
+def test_ended_turn_refuses_tool_events_without_changing_history(tmp_path, kind):
+    journal = Journal(tmp_path)
+    request = TurnRequest.model_validate(turn())
+    try:
+        journal.claim(request)
+        journal.append(request, "turn_ended", {"outcome": "interrupted"})
+        events, history = journal.events(request.session_id), journal.history(request.session_id)
+        with pytest.raises(ConflictError, match="already ended"):
+            journal.append(request, kind, {})
+        assert journal.events(request.session_id) == events
+        assert journal.history(request.session_id) == history
+    finally:
+        journal.close()
 
 
 def test_polling_indexes_and_wal_durability(tmp_path: Path) -> None:

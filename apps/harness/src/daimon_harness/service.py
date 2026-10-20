@@ -202,7 +202,7 @@ class Supervisor:
             async def finalize() -> None:
                 nonlocal failure
                 if context is not None:
-                    context.stop_processes()
+                    await context.stop_workers()
                 original_failure = failure
                 for request_id in await self.io(self.journal.pending_requests, request):
                     await emit(
@@ -406,6 +406,8 @@ def create_app(
         if not task.cancelling():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        if not await supervisor.io(supervisor.journal.ended, turn_id):
+            raise HTTPException(status_code=503, detail="Tool cleanup incomplete; session sealed")
         return CancelResponse(cancelled=True)
 
     async def events(session_id: str, after_seq: int = Query(default=0, ge=0)) -> EventsResponse:
