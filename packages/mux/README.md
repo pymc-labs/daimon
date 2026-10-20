@@ -22,6 +22,8 @@ resources; hard deletion invalidates any session still referring to that ID.
 The shared resource validator rejects credential-shaped values, credential
 URLs, arbitrary extensions and MCP tool-policy dictionaries. Bearer references
 must name environment variables; Entra references must be audience URIs.
+MCP credential references must start with `HARNESS_MCP_CRED_`; credentialed
+MCP endpoints require HTTPS except on loopback.
 Routing uses HTTPS, with loopback HTTP accepted for local use. Direct HTTP on
 internal service names/private addresses requires `allow_insecure_http=true`;
 this permits the in-cluster ACA fallback explicitly. Foundry fields are accepted

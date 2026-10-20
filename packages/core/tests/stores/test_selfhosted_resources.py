@@ -44,7 +44,9 @@ def agent_spec(name: str = "daimon") -> AgentSpec:
         system="Be helpful.",
         mcp_servers=(
             MCPConnection(
-                name="tools", url="https://tools.example/mcp", credential_ref="MCP_TOKEN"
+                name="tools",
+                url="https://tools.example/mcp",
+                credential_ref="HARNESS_MCP_CRED_TOOLS",
             ),
         ),
         skills=(SkillRef(id="analysis"),),

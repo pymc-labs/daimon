@@ -16,6 +16,7 @@ from mux.profiles.selfhosted import LOOP
 
 _URL: re.Pattern[str] = re.compile(r"https?://[^\s<>]+")
 _ENV = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_MCP_CREDENTIAL_ENV = re.compile(r"HARNESS_MCP_CRED_[A-Za-z0-9_]+")
 _CREDENTIAL = re.compile(
     r"(?i)\bBearer\s+\S+|\b(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|"
     r"github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"
@@ -141,9 +142,11 @@ def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
             if spec.model.provider != LOOP.provider or spec.extensions:
                 raise ValueError("selfhosted agents require their own model and no extensions")
             for server in spec.mcp_servers or ():
-                _url(server.url, allow_internal_http=True)
-                if server.credential_ref is not None and not _ENV.fullmatch(server.credential_ref):
-                    raise ValueError("MCP credential_ref must be an environment variable name")
+                _url(server.url, allow_internal_http=server.credential_ref is None)
+                if server.credential_ref is not None and not _MCP_CREDENTIAL_ENV.fullmatch(
+                    server.credential_ref
+                ):
+                    raise ValueError("MCP credential_ref must name a HARNESS_MCP_CRED_ variable")
                 if server.tool_policy:
                     raise ValueError("MCP tool policies are not supported by selfhosted v1")
         else:

@@ -150,3 +150,51 @@ def test_internal_http_requires_explicit_permission_and_foundry_uses_one_schema(
     )
     assert local.transport == internal.transport == "direct"
     assert HarnessConfig.model_validate(foundry.model_dump()) == foundry
+
+
+@pytest.mark.parametrize(
+    "credential_ref", ["MCP_TOKEN", "PATH", "DAIMON_MCP_AUTHORIZATION", "HARNESS_MCP_CRED_"]
+)
+def test_mcp_credentials_require_operator_scoped_environment_names(credential_ref):
+    spec = AgentSpec.model_validate(
+        {
+            "name": "agent",
+            "model": {"provider": LOOP.provider, "id": "gpt-5"},
+            "mcp_servers": [
+                {
+                    "name": "tools",
+                    "url": "https://tools.example/mcp",
+                    "credential_ref": credential_ref,
+                }
+            ],
+        }
+    )
+    with pytest.raises(ProviderError) as error:
+        validate_resource_spec(spec)
+    assert error.value.category == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("http://tools.internal/mcp", False),
+        ("https://tools.example/mcp", True),
+        ("http://127.0.0.1:8080/mcp", True),
+    ],
+)
+def test_credentialed_mcp_requires_https_except_loopback(url, allowed):
+    spec = AgentSpec.model_validate(
+        {
+            "name": "agent",
+            "model": {"provider": LOOP.provider, "id": "gpt-5"},
+            "mcp_servers": [
+                {"name": "tools", "url": url, "credential_ref": "HARNESS_MCP_CRED_TOOLS"}
+            ],
+        }
+    )
+    if allowed:
+        validate_resource_spec(spec)
+    else:
+        with pytest.raises(ProviderError) as error:
+            validate_resource_spec(spec)
+        assert error.value.category == "invalid_request"
