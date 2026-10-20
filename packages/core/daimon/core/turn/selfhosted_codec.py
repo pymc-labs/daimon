@@ -133,6 +133,14 @@ def display_event(event: Event, *, session_id: str) -> DisplayEvent | None:
             "input": dict(payload.input),
             "evaluated_permission": "ask" if payload.permission == "ask" else "allow",
         }
+        server, separator, name = payload.tool_name.partition("/")
+        if payload.mcp_server is not None or (payload.executor == "mcp" and separator):
+            raw.update(
+                type="agent.mcp_tool_use",
+                mcp_server_name=payload.mcp_server or server,
+                name=name if separator else payload.tool_name,
+            )
+            return BetaManagedAgentsAgentMCPToolUseEvent.model_validate(raw)
         return BetaManagedAgentsAgentToolUseEvent.model_validate(raw)
     if isinstance(payload, ToolResultPayload):
         return BetaManagedAgentsAgentToolResultEvent.model_validate(
@@ -195,13 +203,21 @@ def display_batch(event: Event, *, session_id: str) -> tuple[DisplayEvent, ...]:
         return (displayed,)
     requests: list[DisplayEvent] = []
     for action in payload.actions:
+        qualified = str(action.payload.get("name", "tool"))
+        server, separator, name = qualified.partition("/")
+        event_class = (
+            BetaManagedAgentsAgentMCPToolUseEvent
+            if separator
+            else BetaManagedAgentsAgentToolUseEvent
+        )
         requests.append(
-            BetaManagedAgentsAgentToolUseEvent.model_validate(
+            event_class.model_validate(
                 {
                     "id": tool_display_id(action.id),
-                    "type": "agent.tool_use",
+                    "type": "agent.mcp_tool_use" if separator else "agent.tool_use",
+                    **({"mcp_server_name": server} if separator else {}),
                     "processed_at": event.occurred_at or event.observed_at,
-                    "name": action.payload.get("name", "tool"),
+                    "name": name if separator else qualified,
                     "input": _action_input(action),
                     "evaluated_permission": "ask",
                 }

@@ -122,7 +122,16 @@ class SelfHostedEvents:
     async def replay(
         self, scope: Scope, ref: ResourceRef, *, deadline: datetime | None = None
     ) -> tuple[tuple[Event, ...], bool]:
-        self._c.binding(scope, ref)
+        binding = self._c.binding(scope, ref)
+        spec = await self._sessions.spec(scope, ref)
+        if spec.environment is None:
+            raise self._c.unsupported("selfhosted_environment_required")
+        environment = await self._c.environments.retrieve(scope, spec.environment)
+        if environment.lifecycle != "active" or environment.revision != self._c.revision(
+            binding, "environment"
+        ):
+            raise ContinuityLost(binding.id, ("environment changed since session creation",))
+        self._c.check_environment(environment)
         after = max(self._history.get(ref, {}), default=0)
         raw = await self._c.transport.request(
             "GET",

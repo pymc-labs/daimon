@@ -1234,6 +1234,12 @@ class McpCredentialBinding(BaseModel):
         return value
 
 
+class HarnessAuthBinding(McpCredentialBinding):
+    """Operator authority for a harness bearer token and its destination."""
+
+    name: str = Field(pattern=r"^DAIMON_SELFHOSTED__HARNESS_TOKEN_[A-Za-z0-9_]+$")
+
+
 class SelfHostedSettings(BaseModel):
     """Operator opt-in for the self-hosted turn runtime."""
 
@@ -1262,6 +1268,24 @@ class SelfHostedSettings(BaseModel):
         ),
     )
 
+    harness_auth_bindings: tuple[HarnessAuthBinding, ...] = Field(
+        default=(),
+        description=(
+            "JSON list of harness bearer bindings: name (DAIMON_SELFHOSTED__HARNESS_TOKEN_*), "
+            "origin (exact HTTPS origin), tenants (UUID list). Unbound names and destinations "
+            "are refused before credential resolution. Wildcards require single_tenant."
+        ),
+    )
+
+    @field_validator("harness_auth_bindings")
+    @classmethod
+    def unique_harness_names(
+        cls, value: tuple[HarnessAuthBinding, ...]
+    ) -> tuple[HarnessAuthBinding, ...]:
+        if len({binding.name for binding in value}) != len(value):
+            raise ValueError("Harness credential binding names must be unique")
+        return value
+
     mcp_credential_bindings: tuple[McpCredentialBinding, ...] = Field(
         default=(),
         description=(
@@ -1285,7 +1309,8 @@ class SelfHostedSettings(BaseModel):
     @model_validator(mode="after")
     def wildcard_requires_single_tenant(self) -> SelfHostedSettings:
         if not self.single_tenant and any(
-            b.tenants == ("*",) for b in self.mcp_credential_bindings
+            b.tenants == ("*",)
+            for b in (*self.mcp_credential_bindings, *self.harness_auth_bindings)
         ):
             raise ValueError(
                 "Wildcard MCP credential bindings require a single-tenant installation"

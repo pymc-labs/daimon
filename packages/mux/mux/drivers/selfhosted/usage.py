@@ -13,6 +13,16 @@ class SelfHostedUsage:
         await self._events.replay(scope, session)
         return self._events.observations(session)
 
+    async def reconcile_turn(
+        self, scope: Scope, session: ResourceRef, turn_id: str
+    ) -> tuple[UsageObservation, ...]:
+        """Filter at the source before the host applies its per-turn bound."""
+        return tuple(
+            value
+            for value in await self.reconcile(scope, session)
+            if value.turn_id == turn_id and value.thread_id is None
+        )
+
     async def list(
         self, scope: Scope, session: ResourceRef, *, page: PageRequest
     ) -> Page[UsageObservation]:

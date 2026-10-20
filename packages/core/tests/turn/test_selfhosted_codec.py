@@ -59,3 +59,36 @@ def test_foreign_provider_is_refused():
     value = event("session.status_running", {"root_turn_id": "turn"}, provider="openai")
     with pytest.raises(ScopeViolation):
         display_batch(value, session_id="session")
+
+
+@pytest.mark.parametrize("authority", ["record", "reconciled"])
+def test_mcp_confirmation_preserves_server_and_denied_tool(authority):
+    from daimon.core.tool_safety import ToolSafetyPolicy, decide_tool_call
+    from daimon.core.turn.approvals import tool_calls_for
+    from daimon.core.turn.reducers import apply
+    from daimon.core.turn.state import TurnState
+
+    value = event(
+        "session.requires_action",
+        RequiresActionPayload(
+            actions=(
+                RequiredAction(
+                    id="approval",
+                    kind="tool_confirmation",
+                    call_id="call",
+                    payload={"name": "reports/delete_report", "input": {"id": "report"}},
+                ),
+            )
+        ).model_dump(mode="json"),
+    ).model_copy(update={"authority": authority})
+    tool, pause = display_batch(value, session_id="session")
+    assert tool.type == "agent.mcp_tool_use"
+    assert tool.mcp_server_name == "reports"
+    assert tool.name == "delete_report"
+    state = apply(TurnState(), tool)
+    (call,) = tool_calls_for(state, [tool.id])
+    verdict = decide_tool_call(
+        ToolSafetyPolicy(enabled=True, denied=("reports/delete_report",)), call, attended=True
+    )
+    assert verdict.outcome == "deny"
+    assert decide_tool_call(ToolSafetyPolicy(enabled=True), call, attended=True).outcome == "ask"

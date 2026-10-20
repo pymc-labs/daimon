@@ -1161,7 +1161,7 @@ async def test_renewed_grant_create_replays_durable_identity_and_conflicts_on_ch
             )
 
 
-async def test_create_reconstruction_keeps_original_environment_pin():
+async def test_create_reconstruction_keeps_original_environment_pin(monkeypatch):
     from mux.errors import ContinuityLost
 
     fake = Harness()
@@ -1182,6 +1182,17 @@ async def test_create_reconstruction_keeps_original_environment_pin():
         replay = await fresh.sessions.create(SCOPE, spec, key="create")
         assert replay.binding == session.binding
         assert replay.binding.native_refs["environment_revision"] == "1"
+        requests = []
+
+        async def forbidden_transport(*args, **kwargs):
+            requests.append((args, kwargs))
+            raise AssertionError("changed environment must fail before credential/HTTP resolution")
+
+        monkeypatch.setattr(driver.events._c.transport, "request", forbidden_transport)
+        for call in (fresh.events.reconcile, fresh.sessions.retrieve, fresh.usage.reconcile):
+            with pytest.raises(ContinuityLost, match="environment changed"):
+                await call(SCOPE, replay.ref)
+        assert requests == []
         with pytest.raises(ContinuityLost, match="environment changed"):
             await fresh.events.send(SCOPE, replay.ref, [MESSAGE], key="send")
         assert fake.executions == 0

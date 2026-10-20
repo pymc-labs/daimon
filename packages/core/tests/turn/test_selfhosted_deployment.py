@@ -142,3 +142,97 @@ def test_installed_tariffs_load_without_database_or_provider_credentials(tmp_pat
     prices = channel_runtime_prices()
     assert prices[("selfhosted", "offline-deployment")].input == 2
     assert ("selfhosted", "unknown-model") not in prices
+
+
+@pytest.mark.parametrize(
+    "auth_ref,url,tenant",
+    [
+        ("DAIMON_MCP__JWT_SECRET", "https://attacker.example", SCOPE.tenant_id),
+        ("DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST", "https://attacker.example", SCOPE.tenant_id),
+        ("DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST", "https://harness", "foreign"),
+    ],
+)
+def test_harness_binding_refuses_secret_exfiltration_before_resolution(
+    monkeypatch, auth_ref, url, tenant
+):
+    from daimon.core.config import HarnessAuthBinding, SelfHostedSettings
+    from daimon.core.turn.selfhosted_deployment import validate_harness_auth
+    from mux.drivers.selfhosted.config import HarnessConfig
+
+    settings = SelfHostedSettings(
+        harness_auth_bindings=(
+            HarnessAuthBinding(
+                name="DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
+                origin="https://harness",
+                tenants=(SCOPE.tenant_id,),
+            ),
+        )
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("must not resolve secrets or contact HTTP")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", forbidden)
+    monkeypatch.setattr("daimon.core.turn.selfhosted_deployment.os.environ.get", forbidden)
+    with pytest.raises(AdmissionDenied):
+        validate_harness_auth(
+            HarnessConfig(harness_url=url, auth_mode="bearer_env", auth_ref=auth_ref),
+            settings,
+            tenant,
+        )
+
+
+def test_host_policy_keeps_stricter_agent_and_operator_rules():
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.selfhosted_deployment import host_tool_policy, merge_tool_policy
+
+    host = host_tool_policy(
+        ToolSafetyPolicy(enabled=True, denied=("reports/delete_report",)),
+        ("reports",),
+        asks_before_publishing=False,
+        rule_tools=frozenset(),
+    )
+    merged = merge_tool_policy(
+        {"reports/delete_report": "auto", "reports/read_report": "deny"}, host
+    )
+    assert merged["reports/delete_report"] == "deny"
+    assert merged["reports/read_report"] == "deny"
+    assert merged["reports/*"] == "ask"
+    assert merged["daimon-mcp/add_skill"] == "ask"
+    assert (
+        merge_tool_policy({"reports/write": "auto"}, {"reports/*": "deny"})["reports/write"]
+        == "deny"
+    )
+
+
+async def test_entra_refresh_failure_is_retryable_and_credential_is_reused(monkeypatch):
+    import time
+
+    from azure.core.credentials import AccessToken
+    from daimon.core.turn.selfhosted_deployment import EntraTokenProvider
+    from mux.errors import ProviderError
+
+    created, requests, closed = [], [], []
+
+    class Credential:
+        def __init__(self):
+            created.append(self)
+
+        async def get_token(self, scope):
+            requests.append(scope)
+            if len(requests) > 1:
+                raise RuntimeError("expired identity provider unavailable")
+            return AccessToken("offline", int(time.time()) + 30)
+
+        async def close(self):
+            closed.append(self)
+
+    monkeypatch.setattr("azure.identity.aio.DefaultAzureCredential", Credential)
+    provider = EntraTokenProvider("https://harness")
+    assert await provider() == "offline"
+    with pytest.raises(ProviderError) as error:
+        await provider()
+    assert error.value.retryable and error.value.category == "transient_network"
+    assert requests == ["https://harness/.default"] * 2
+    await provider.close()
+    assert created == closed and len(created) == 1

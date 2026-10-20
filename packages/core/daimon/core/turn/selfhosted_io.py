@@ -38,6 +38,7 @@ from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, OperationStatus, SendReceipt, StopObservation
 from mux.contracts.usage import UsageObservation
+from mux.drivers.selfhosted.usage import SelfHostedUsage
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
@@ -520,6 +521,10 @@ class SelfHostedTurnIO:
         if self._root is None:
             return ()
         async with asyncio.timeout(_timeout(timeout_s)):
+            if isinstance(self._backend.usage, SelfHostedUsage):
+                return await _edge(
+                    self._backend.usage.reconcile_turn(self._scope, self._session, self._root)
+                )
             values: list[UsageObservation] = []
             cursor: str | None = None
             seen: set[str] = set()

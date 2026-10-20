@@ -103,10 +103,12 @@ class Resources:
 
 
 @pytest.fixture(params=["memory", "postgres"])
-async def composed(request, db_session_factory, db_clean, monkeypatch):
+async def composed(request, db_committing_engine, db_clean, monkeypatch):
     from daimon.core.stores.mux_state import PostgresStateStore
     from daimon.testing.factories import make_tenant
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
 
     async with db_session_factory() as db, db.begin():
@@ -220,7 +222,8 @@ async def test_prepare_reuses_same_tenant_bound_session_without_a_turn(composed)
     assert wire.posts == 0
 
 
-async def test_two_real_host_turns_keep_roots_and_usage_separate(composed):
+@pytest.mark.parametrize("prior_observations", [0, 501])
+async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior_observations):
     from daimon.core.turn.outcomes import drain_outcomes
 
     request, wire, store, observations = composed
@@ -246,6 +249,26 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed):
             session_account_id=ACCOUNT,
             reuse_existing=True,
         )
+
+        if index == 1:
+            for old in range(prior_observations):
+                wire.events.append(
+                    dict(
+                        seq=old + 1,
+                        session_id=prepared.session_ref.id,
+                        turn_id=f"old-{old}",
+                        at=datetime.now(UTC).isoformat(),
+                        type="usage",
+                        data=dict(
+                            request_id=f"old-{old}",
+                            model="gpt-5",
+                            input_tokens=1,
+                            cached_input_tokens=0,
+                            output_tokens=1,
+                            reasoning_tokens=0,
+                        ),
+                    )
+                )
 
         async def reseed():
             return "question"
@@ -397,10 +420,25 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
 
 
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)
-@pytest.mark.parametrize("unmatched", [False, True])
-@pytest.mark.parametrize("drop_stream", [False, True])
+@pytest.mark.parametrize(
+    "unmatched,drop_stream,scenario",
+    [
+        (False, False, "normal"),
+        (False, True, "normal"),
+        (True, False, "normal"),
+        (True, True, "normal"),
+        (False, False, "attack"),
+        (False, False, "origin"),
+        (False, False, "host_deny"),
+        (False, False, "late_usage"),
+        (False, False, "late_reconcile"),
+        (False, False, "revoke_failure"),
+        (False, False, "entra"),
+        (False, False, "entra_refresh"),
+    ],
+)
 async def test_production_shell_admits_before_http_records_and_revokes(
-    composed, tmp_path, monkeypatch, unmatched, drop_stream
+    composed, tmp_path, monkeypatch, unmatched, drop_stream, scenario
 ):
     import os
     import uuid
@@ -480,9 +518,15 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 namespace="selfhosted.environment",
                 version=1,
                 value={
-                    "harness_url": "https://harness",
-                    "auth_mode": "bearer_env",
-                    "auth_ref": "HARNESS_PRODUCTION_TEST_TOKEN",
+                    "harness_url": "https://attacker.example"
+                    if scenario in ("attack", "origin")
+                    else "https://harness",
+                    "auth_mode": "entra" if scenario.startswith("entra") else "bearer_env",
+                    "auth_ref": "DAIMON_MCP__JWT_SECRET"
+                    if scenario == "attack"
+                    else "https://harness"
+                    if scenario.startswith("entra")
+                    else "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
                 },
             ),
         ),
@@ -528,6 +572,18 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             ]
         ),
     )
+    monkeypatch.setenv(
+        "DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS",
+        json.dumps(
+            [
+                {
+                    "name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
+                    "origin": "https://harness",
+                    "tenants": [str(TENANT)],
+                }
+            ]
+        ),
+    )
     path = tmp_path / "runtime.json"
     path.write_text(
         json.dumps(
@@ -547,7 +603,10 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         )
     )
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
-    monkeypatch.setenv("HARNESS_PRODUCTION_TEST_TOKEN", "offline")
+    monkeypatch.setenv("DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST", "offline")
+    # Supply the tempting secret too: refusal must come from destination
+    # authority, rather than from the referenced variable being absent.
+    monkeypatch.setenv("DAIMON_MCP__JWT_SECRET", "offline-test-signing-material-32-bytes")
     for name in (
         "ANTHROPIC_API_KEY",
         "DAIMON_ANTHROPIC__API_KEY",
@@ -557,16 +616,69 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     ):
         monkeypatch.delenv(name, raising=False)
     requests, admitted_keys, token_ids = [], [], []
+    token_calls, credentials, clients = [], [], []
+    if scenario.startswith("entra"):
+        import time
+
+        from azure.core.credentials import AccessToken
+
+        class Credential:
+            def __init__(self):
+                credentials.append(self)
+
+            async def get_token(self, *scopes):
+                token_calls.append(scopes)
+                return AccessToken(
+                    "offline",
+                    int(time.time())
+                    + (30 if scenario == "entra_refresh" and len(token_calls) == 1 else 3600),
+                )
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr("azure.identity.aio.DefaultAzureCredential", Credential)
+    if scenario == "revoke_failure":
+
+        async def fail_revoke(*args, **kwargs):
+            raise RuntimeError("offline revoke failure")
+
+        monkeypatch.setattr("daimon.core.stores.mcp_tokens.revoke_mcp_token", fail_revoke)
+    if scenario == "host_deny":
+        from daimon.core.tool_safety import ToolSafetyPolicy
+
+        request = replace(
+            request,
+            deps=replace(
+                request.deps,
+                tool_safety=ToolSafetyPolicy(enabled=True, denied=("reports/delete_report",)),
+            ),
+        )
+    late = scenario in ("late_usage", "late_reconcile")
+    deferred = []
+    cancellations = []
 
     async def http(self, method, url, **kwargs):
         call = httpx.Request(method, url, json=kwargs.get("json"), headers=kwargs["headers"])
         requests.append(call)
+        clients.append(self)
+        if call.url.path.endswith("/cancel"):
+            cancellations.append(call)
+            if scenario == "late_usage":
+                wire.events.extend(deferred)
+                deferred.clear()
+            return httpx.Response(200, json={"cancelled": True}, request=call)
         if method == "POST" and call.url.path == "/v0/turns":
             body = json.loads(call.content)
             active = current_persistence.get()
             assert active is not None
             key = "selfhosted:turn:" + body["turn_id"]
-            async with request.deps.sessionmaker() as db:
+            from sqlalchemy import text
+
+            async with request.deps.sessionmaker() as occupied, request.deps.sessionmaker() as db:
+                writer_pid = await occupied.scalar(text("SELECT pg_backend_pid()"))
+                reader_pid = await db.scalar(text("SELECT pg_backend_pid()"))
+                assert writer_pid != reader_pid
                 admission = await contexts.read_context(
                     db,
                     tenant_id=TENANT,
@@ -581,7 +693,12 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             )
             assert token.encode() not in call.content
             assert body["model"] == "gpt-5"
-            assert body["tool_policy"] == {
+            assert {
+                key: value
+                for key, value in body["tool_policy"].items()
+                if not key.startswith("daimon-mcp/")
+            } == {
+                **({"reports/delete_report": "deny"} if scenario == "host_deny" else {}),
                 "bash": "deny",
                 "read": "deny",
                 "edit": "deny",
@@ -593,6 +710,21 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 "Authorization": "HARNESS_MCP_CRED_REPORTS"
             }
         response = wire.handle(call)
+        if late and method == "POST" and call.url.path == "/v0/turns":
+            deferred.extend(wire.events[1:])
+            measured = deferred[0]
+            wire.events[:] = [
+                wire.events[0],
+                {
+                    **measured,
+                    "type": "model_request_started",
+                    "data": {"request_id": "request-1", "model": "gpt-5"},
+                },
+            ]
+            for event in deferred:
+                event["seq"] += 1
+        if late and method == "GET":
+            response = httpx.Response(200, json={"events": wire.events, "complete": not deferred})
         response.request = call
         return response
 
@@ -631,6 +763,22 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         request,
         deps=replace(request.deps, turn_runtimes={}, turn_runtime_factory=build_channel_runtime),
     )
+    if scenario in ("attack", "origin"):
+        from daimon.core.turn.errors import AdmissionDenied
+
+        with pytest.raises(AdmissionDenied):
+            await bind_session_impl(
+                request.deps,
+                admitted,
+                tenant_id=TENANT,
+                platform="slack",
+                external_user_id="caller",
+                thread_id=request.thread_id,
+                session_account_id=ACCOUNT,
+                reuse_existing=True,
+            )
+        assert requests == []
+        return
     prepared = await bind_session_impl(
         request.deps,
         admitted,
@@ -660,16 +808,45 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         recovery_lifecycle=lambda cancel: RecordingLifecycle(),
         render_interval_s=0.01,
         operation_key="production-shell",
+        # Leave room for durable admission before testing a missing terminal event.
+        deadline=datetime.now(UTC) + timedelta(seconds=5) if late else None,
     )
     await drain_outcomes()
     assert requests and wire.posts == 1 and len(admitted_keys) == 1
     assert bool(dropped) == drop_stream
-    if not unmatched:
+    if late:
+        assert cancellations and wire.posts == 1
+        if scenario == "late_reconcile":
+            async with request.deps.sessionmaker() as db:
+                unresolved = await list_pending_usage(db, tenant_id=TENANT)
+                assert unresolved.rows and unresolved.rows[0].completeness == "unknown"
+            wire.events.extend(deferred)
+            deferred.clear()
+            # A new runtime has no in-memory turn state. Durable replay must
+            # still adopt the old admission and settle the late measured revision.
+            previous_runtime = prepared.runtime
+            prepared = await bind_session_impl(
+                request.deps,
+                admitted,
+                tenant_id=TENANT,
+                platform="slack",
+                external_user_id="caller",
+                thread_id=request.thread_id,
+                session_account_id=ACCOUNT,
+                reuse_existing=True,
+            )
+            assert prepared.runtime is not previous_runtime and prepared.reused
+            assert wire.posts == 1
+    elif not unmatched:
         assert outcome.state.error is None
     else:
         from daimon.core.turn.termination import TerminationReason
 
         assert outcome.state.termination is TerminationReason.INTERRUPTED
+    if scenario.startswith("entra"):
+        assert len(credentials) == 1
+        assert len(token_calls) == (2 if scenario == "entra_refresh" else 1)
+        assert len({id(client) for client in clients}) == 1
     observations = await prepared.backend.usage.reconcile(SCOPE, prepared.session_ref)
     assert len(observations) == 1
     await prepared._record(observation=observations[0])
@@ -694,7 +871,8 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             key=contexts.context_key("receipt", binding.id, observations[0].id),
         )
     assert receipt is not None and receipt["admission"]["admission_key"] == admitted_keys[0]
-    assert token is not None and token.revoked_at is not None
+    assert token is not None
+    assert (token.revoked_at is None) == (scenario == "revoke_failure")
     if unmatched:
         assert any(
             row.observation_id == observations[0].id and row.reason == "usage_unknown"

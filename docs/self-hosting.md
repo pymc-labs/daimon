@@ -37,15 +37,15 @@ with a new active record.
 # DAIMON_DATABASE__URL contains the Postgres connection URL.
 daimon selfhosted init \
   --tenant-id <tenant-uuid> \
-  --harness-url http://harness:8080 --allow-insecure-http \
+  --harness-url https://harness.example \
   --model gpt-5 \
-  --auth-ref HARNESS_TOKEN
+  --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY
 ```
 
 The default names are `daimon` and `default`; override them with `--name` and
 `--environment-name`. `--system-file` reads the agent's system prompt from a
 UTF-8 file. `--model` is the Azure deployment name. The command records
-`HARNESS_TOKEN` as a variable name; it does not read or store its value.
+`DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` as a variable name; it does not read or store its value.
 `--packages-note` records an operator note without installing packages.
 
 The record schema also accepts Foundry routing with
@@ -397,8 +397,14 @@ Production uses `HarnessConfig.transport="direct"` with a private harness
 endpoint. Direct transport sends authenticated `/v0` requests to `harness_url`.
 The Foundry invocation adapter is retained for future platform validation;
 unsigned gateway identity headers do not authorize harness calls. `bearer_env`
-reads the named variable only in the host process; `entra` obtains a token for the configured audience with Azure
-DefaultAzureCredential. Configure ingress and the invoked identity's access
+only accepts operator variables named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
+Declare each in `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`, a JSON list of
+`{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY", "origin": "https://harness.example", "tenants": ["TENANT_UUID"]}`.
+The exact HTTPS origin and tenant must match before the host resolves the secret.
+Wildcard tenants require `DAIMON_SELFHOSTED__SINGLE_TENANT=true`.
+Environment revision pins are checked before replay and credential resolution.
+`entra` reuses one Azure DefaultAzureCredential and token per runtime, refreshing
+before expiry. Transport errors during refresh remain retryable. Configure ingress and the invoked identity's access
 for the chosen transport. Both transports use JSON acknowledgements and durable
 event polling, including after a dropped connection.
 
@@ -406,6 +412,12 @@ Daimon's MCP public URL and JWT secret must be configured. Each turn receives a
 caller-bound MCP token only in `X-Daimon-MCP-Authorization`; it never enters the
 manifest or turn JSON and is revoked when the turn ends. Third-party MCP
 credentials are operator-provisioned environment references on the harness.
+Host tool-safety denies and confirmation gates merge with the pinned agent's
+tool policy; the stricter effective permission wins, including server defaults.
+MCP approvals retain their server and tool names during live delivery and replay.
+On a deadline or abandonment the finalizer attempts bounded cancellation and
+replays usage. Unmatched requests remain pending under their original admission;
+subsequent session replay also records late receipts from earlier turns.
 Unavailable skills are reported once in the bound thread. A changed agent or
 environment revision requires a fresh session binding.
 

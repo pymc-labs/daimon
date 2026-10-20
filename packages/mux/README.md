@@ -1253,3 +1253,9 @@ model-request usage through the shared accounting outbox. Its turn codec keeps
 canonical events and fenced idempotency receipts while rendering adapter DTOs;
 no Anthropic API is used for these turns. The MCP credential stays in a turn
 transport closure and is revoked by the prepared-turn finalizer.
+
+Self-hosted replay validates the environment revision pin before transport I/O.
+The usage adapter also exposes `reconcile_turn` for host readers, filtering by
+root turn before applying host bounds, so prior session observations do not
+consume the current turn's usage budget. MCP approval display preserves the
+qualified server/tool identity.

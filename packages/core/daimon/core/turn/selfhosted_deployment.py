@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 import httpx
 from daimon.core.turn.errors import AdmissionDenied
@@ -19,7 +22,8 @@ from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, SessionSpec
 from mux.drivers.selfhosted.transport import DirectTransport, FoundryInvocationsTransport
-from mux.errors import ScopeViolation
+from mux.errors import ProviderError, ScopeViolation
+from mux.profiles.anthropic import MANAGED_AGENTS
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -29,8 +33,107 @@ from pydantic import (
     ValidationError,
 )
 
+if TYPE_CHECKING:
+    from daimon.core.config import SelfHostedSettings
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from mux.drivers.selfhosted.config import HarnessConfig
+
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
+
+
+class EntraTokenProvider:
+    """One credential and expiring token for an admitted deployment transport."""
+
+    def __init__(self, audience: str) -> None:
+        from azure.core.credentials import AccessToken
+        from azure.identity.aio import DefaultAzureCredential
+
+        self._credential = DefaultAzureCredential()
+        audience = audience.rstrip("/")
+        self._scope = audience if audience.endswith("/.default") else audience + "/.default"
+        self._token: AccessToken | None = None
+        self._lock = asyncio.Lock()
+
+    async def __call__(self) -> str:
+        async with self._lock:
+            try:
+                if self._token is None or self._token.expires_on <= time.time() + 60:
+                    self._token = await self._credential.get_token(self._scope)
+                return self._token.token
+            except Exception:
+                raise ProviderError(
+                    "transient_network", retryable=True, native_code="entra_token"
+                ) from None
+
+    async def close(self) -> None:
+        await self._credential.close()
+
+
+def validate_harness_auth(config: HarnessConfig, settings: SelfHostedSettings, tenant: str) -> None:
+    """Validate operator authority before looking up any bearer secret."""
+    if config.auth_mode != "bearer_env":
+        return
+    bindings = {binding.name: binding for binding in settings.harness_auth_bindings}
+    binding = bindings.get(config.auth_ref)
+    parsed = urlsplit(config.harness_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if (
+        not config.auth_ref.startswith("DAIMON_SELFHOSTED__HARNESS_TOKEN_")
+        or binding is None
+        or origin != binding.origin
+        or not (
+            tenant in tuple(map(str, binding.tenants))
+            or (settings.single_tenant and binding.tenants == ("*",))
+        )
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+
+
+def host_tool_policy(
+    safety: ToolSafetyPolicy,
+    servers: tuple[str, ...],
+    *,
+    asks_before_publishing: bool,
+    rule_tools: frozenset[str],
+) -> dict[str, Literal["auto", "ask", "deny"]]:
+    """Project host gates so every guarded invocation reaches host approval."""
+    from daimon.core.tool_safety import CONFIRMED_DAIMON_TOOLS, PUBLISH_TOOLS
+
+    policy: dict[str, Literal["auto", "ask", "deny"]] = {}
+    if safety.enabled:
+        policy.update({server + "/*": "ask" for server in servers if server != "daimon-mcp"})
+        for key in safety.denied:
+            policy[key if "/" in key else key + "/*"] = "deny"
+    asked = set(CONFIRMED_DAIMON_TOOLS) | set(rule_tools)
+    if asks_before_publishing:
+        asked.update(PUBLISH_TOOLS)
+    # The proxy must pause too: the host unwraps it before evaluating fixed gates.
+    asked.add("call_tool")
+    for name in asked:
+        policy.setdefault("daimon-mcp/" + name, "ask")
+    return policy
+
+
+def merge_tool_policy(
+    original: JsonValue,
+    host: Mapping[str, Literal["auto", "ask", "deny"]],
+) -> dict[str, JsonValue]:
+    """Combine effective permissions, including wildcard defaults, without widening."""
+    if not isinstance(original, dict):
+        raise ValueError("invalid driver tool policy")
+    rank = {"auto": 0, "ask": 1, "deny": 2}
+
+    def permission(policy: Mapping[str, JsonValue], key: str) -> str:
+        value = policy.get(key, policy.get(key.split("/")[0] + "/*", "auto"))
+        if not isinstance(value, str) or value not in rank:
+            raise ValueError("invalid driver permission")
+        return value
+
+    return {
+        key: max((permission(original, key), permission(host, key)), key=rank.__getitem__)
+        for key in original.keys() | host.keys()
+    }
 
 
 class SelfHostedDeployment(BaseModel):
@@ -138,6 +241,21 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     prepared_tools: TurnTools | None = None
     prepared_spec: AgentSpec | None = None
     minted: MintedMcpAuthorization | None = None
+    client: httpx.AsyncClient | None = None
+    from mux.contracts.ids import Revision
+
+    credential: EntraTokenProvider | None = None
+    transport_impl: DirectTransport | None = None
+    environment_pin: Revision | None = None
+    active_turn: tuple[str, str] | None = None
+    session_bindings: dict[str, str] = {}
+    ended_turns: set[str] = set()
+    host_policy: dict[str, Literal["auto", "ask", "deny"]] = {}
+    token_deadline_s = min(
+        deployment.deadline_s, (request.deadline - request.now()).total_seconds()
+    )
+    if token_deadline_s <= 0:
+        raise ValueError("self-hosted MCP token requires a positive remaining turn deadline")
 
     def check(configured: ConfigRevision, authorized: Scope) -> None:
         if configured != revision or authorized != scope:
@@ -146,7 +264,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             )
 
     async def plan(preparation: ProviderPreparationRequest) -> SessionSpec:
-        nonlocal config, prepared_tools, prepared_spec
+        nonlocal config, prepared_tools, prepared_spec, environment_pin, host_policy
         if preparation.admission.backend_revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
         check(preparation.admission.backend_revision, preparation.scope)
@@ -163,7 +281,15 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             or extension.version != 1
         ):
             raise AdmissionDenied(reason="backend_unsupported")
+        environment_pin = environment.revision
         config = HarnessConfig.model_validate(extension.value)
+        validate_harness_auth(config, settings.selfhosted, scope.tenant_id)
+        host_policy = host_tool_policy(
+            request.deps.tool_safety,
+            tuple(connection.name for connection in agent.spec.mcp_servers or ()),
+            asks_before_publishing=preparation.admission.asks_before_publishing,
+            rule_tools=preparation.admission.daimon_rule_tools,
+        )
         from daimon.core.channel_skills import platform_skill_refs
         from daimon.core.stores.channel_skills import list_channel_skills
         from daimon.core.turn.selfhosted_tools import (
@@ -178,7 +304,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             preparation.admission.agent, request.platform, request.deps.platform_skills
         )
         platform_refs = tuple(
-            SkillRef(id=skill.skill_id, source="anthropic" if skill.type != "custom" else None)
+            SkillRef(
+                id=skill.skill_id,
+                source=MANAGED_AGENTS.provider if skill.type != "custom" else None,
+            )
             for skill in platform_authored
         )
         async with request.deps.sessionmaker() as session:
@@ -213,6 +342,8 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             agent_names=names,
             skill_bundles=bundles,
             mcp_credential_bindings=settings.selfhosted.mcp_credential_bindings,
+            single_tenant=settings.selfhosted.single_tenant,
+            mcp_allowed_http_hosts=settings.selfhosted.mcp_allowed_http_hosts,
             # The driver compiles permissions from the original pinned spec;
             # this builder only resolves credential-free connection fields.
             mcp_servers=tuple(
@@ -242,13 +373,24 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             mcp_authorization: str | None = None,
             deadline: datetime | None = None,
         ) -> JsonValue:
-            nonlocal minted
+            nonlocal minted, client, credential, transport_impl, active_turn
             if config is None:
                 raise AdmissionDenied(reason="backend_unsupported")
+            environment = await environments.retrieve(scope, environment_ref)
+            if environment.lifecycle != "active" or environment.revision != environment_pin:
+                raise ScopeViolation(
+                    environment_ref.id, "self-hosted environment changed before transport"
+                )
+            validate_harness_auth(config, settings.selfhosted, scope.tenant_id)
             # Check before GET as well as POST. The paid send additionally
             # commits its immutable tariff under the same durable wire turn id.
             require_selfhosted_price(billing, model)
             if method == "POST" and path == "/v0/turns":
+                if body is not None:
+                    body = dict(body)
+                    body["tool_policy"] = merge_tool_policy(
+                        body.get("tool_policy", {}), host_policy
+                    )
                 from daimon.core.turn.persistence import current_persistence
                 from daimon.core.turn.selfhosted_tools import mint_turn_mcp_authorization
                 from mux.contracts.ids import ResourceRef
@@ -274,6 +416,8 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     deployment=model,
                     billing=billing,
                 )
+                active_turn = session_id, str(body["turn_id"])
+                session_bindings[session_id] = active.binding.id
                 if minted is None:
                     signing_secret = request.deps.mcp.jwt_secret
                     if signing_secret is None:
@@ -285,10 +429,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         agents=agents,
                         secret=signing_secret.get_secret_value().encode(),
                         now=request.now(),
-                        deadline_s=min(
-                            deployment.deadline_s,
-                            (request.deadline - request.now()).total_seconds(),
-                        ),
+                        deadline_s=token_deadline_s,
                         slack_turn_context_id=request.admission.slack_turn_context_id,
                     )
 
@@ -300,46 +441,99 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     if not token or not token.strip():
                         raise AdmissionDenied(reason="backend_unsupported")
                     return token
-                from azure.identity.aio import DefaultAzureCredential
+                nonlocal credential
+                if credential is None:
+                    credential = EntraTokenProvider(config.auth_ref)
+                return await credential()
 
-                try:
-                    async with DefaultAzureCredential() as credential:
-                        audience = config.auth_ref.rstrip("/")
-                        token_scope = (
-                            audience if audience.endswith("/.default") else audience + "/.default"
-                        )
-                        return (await credential.get_token(token_scope)).token
-                except Exception:
-                    raise AdmissionDenied(reason="backend_unsupported") from None
-
-            async with httpx.AsyncClient(timeout=30) as client:
+            if transport_impl is None:
+                client = httpx.AsyncClient(timeout=30)
                 if config.transport == "foundry_invocations":
                     if config.project_endpoint is None or config.agent_name is None:
                         raise AdmissionDenied(reason="backend_unsupported")
-                    transport = FoundryInvocationsTransport(
+                    transport_impl = FoundryInvocationsTransport(
                         client,
                         project_endpoint=config.project_endpoint,
                         agent_name=config.agent_name,
                         token_provider=token_provider,
                     )
                 else:
-                    transport = DirectTransport(
-                        client,
-                        base_url=config.harness_url,
-                        token_provider=token_provider,
+                    transport_impl = DirectTransport(
+                        client, base_url=config.harness_url, token_provider=token_provider
                     )
-                return await transport.request(
-                    method,
-                    path,
-                    session_id=session_id,
-                    body=body,
-                    deadline=min(request.deadline, deadline)
-                    if deadline is not None
-                    else request.deadline,
-                    mcp_authorization=minted.header.get_secret_value()
-                    if method == "POST" and path == "/v0/turns" and minted is not None
-                    else None,
+            # Cleanup and reconciliation need a small independent budget after the host deadline.
+            limit = (
+                request.deadline
+                if (method == "POST" and path == "/v0/turns")
+                or request.deadline > datetime.now(UTC)
+                else datetime.now(UTC) + timedelta(seconds=8)
+            )
+            result = await transport_impl.request(
+                method,
+                path,
+                session_id=session_id,
+                body=body,
+                deadline=min(limit, deadline) if deadline is not None else limit,
+                mcp_authorization=minted.header.get_secret_value()
+                if method == "POST" and path == "/v0/turns" and minted is not None
+                else None,
+            )
+            if method == "GET" and "/events?" in path:
+                await reconcile_receipts(session_id, result)
+            return result
+
+    async def reconcile_receipts(session_id: str, raw: JsonValue) -> None:
+        from daimon.core.turn.persistence import current_persistence
+        from mux.drivers.selfhosted import wire
+        from mux.drivers.selfhosted.normalize import usage
+
+        active = current_persistence.get()
+        binding_id = session_bindings.get(session_id)
+        if binding_id is None and active is not None:
+            binding_id = active.binding.id
+        if binding_id is None:
+            # Preparation may reconcile before entering the turn persistence shell.
+            from daimon.core.stores.mux_state import PostgresStateStore
+            from mux.contracts.ids import ThreadRef
+            from mux.state.lease import Slot
+
+            store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
+            binding = await store.get_binding(
+                Slot(
+                    thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
+                    account_id=scope.account_id,
                 )
+            )
+            if binding is None or binding.native_refs.get("session") != session_id:
+                return
+            binding_id = binding.id
+        session_bindings[session_id] = binding_id
+        native = ResourceRef(
+            id=session_id,
+            kind="session",
+            provider="selfhosted",
+            account_scope_id=scope.tenant_id,
+            tenant_id=scope.tenant_id,
+            account_id=scope.account_id,
+        )
+        receipts: dict[str, UsageObservation] = {}
+        for event in wire.EventsResponse.model_validate(raw).events:
+            if event.session_id != session_id:
+                raise ScopeViolation(session_id, "foreign usage replay")
+            if event.type == "turn_ended":
+                ended_turns.add(event.turn_id)
+            if event.type in ("usage", "model_request_started") or (
+                event.type == "error"
+                and event.data.get("kind") in ("usage_missing", "usage_unavailable")
+            ):
+                value = usage(event, native)
+                prior = receipts.get(value.id)
+                if prior is None or prior.revision < value.revision:
+                    receipts[value.id] = value
+        # Include earlier turns: a deadline can end the host reader before the
+        # harness durably reports usage. The original admission survives restart.
+        for value in receipts.values():
+            await record(value, binding_id)
 
     def transport(configured: ConfigRevision, authorized: Scope) -> ConfiguredTransport:
         check(configured, authorized)
@@ -378,13 +572,51 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         )
 
     async def finalize() -> None:
-        nonlocal minted
-        if minted is not None:
-            from daimon.core.stores.mcp_tokens import revoke_mcp_token
+        nonlocal minted, client, credential, transport_impl
+        try:
+            if active_turn is not None:
+                session_id, turn_id = active_turn
+                from mux.drivers.selfhosted.events import segment
 
-            async with request.deps.sessionmaker() as session, session.begin():
-                await revoke_mcp_token(session, jti=minted.jti, now=request.now())
-            minted = None
+                cleanup = ConfiguredTransport()
+                async with asyncio.timeout(8):
+                    if turn_id not in ended_turns:
+                        try:
+                            await cleanup.request(
+                                "POST",
+                                f"/v0/turns/{segment(turn_id)}/cancel",
+                                session_id=session_id,
+                            )
+                        except Exception:
+                            logging.getLogger(__name__).warning(
+                                "self-hosted cancellation unconfirmed"
+                            )
+                    await cleanup.request(
+                        "GET",
+                        f"/v0/sessions/{segment(session_id)}/events?after_seq=0",
+                        session_id=session_id,
+                    )
+        except Exception:
+            logging.getLogger(__name__).warning("self-hosted cleanup pending reconciliation")
+        try:
+            if minted is not None:
+                from daimon.core.stores.mcp_tokens import revoke_mcp_token
+
+                async with request.deps.sessionmaker() as session, session.begin():
+                    await revoke_mcp_token(session, jti=minted.jti, now=request.now())
+                minted = None
+        except Exception:
+            logging.getLogger(__name__).warning("self-hosted MCP token revocation failed")
+        for resource in (client, credential):
+            if resource is not None:
+                try:
+                    if isinstance(resource, httpx.AsyncClient):
+                        await resource.aclose()
+                    else:
+                        await resource.close()
+                except Exception:
+                    logging.getLogger(__name__).warning("self-hosted transport cleanup failed")
+        client = credential = transport_impl = None
 
     def skipped_notice() -> str:
         if prepared_tools is None or not prepared_tools.skipped:

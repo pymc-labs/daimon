@@ -127,8 +127,11 @@ def selfhosted_init_command(
         str, typer.Option("--auth-mode", help="bearer_env or entra.")
     ] = "bearer_env",
     auth_ref: Annotated[
-        str, typer.Option("--auth-ref", help="Environment variable name or Entra audience.")
-    ] = "HARNESS_TOKEN",
+        str,
+        typer.Option(
+            "--auth-ref", help="DAIMON_SELFHOSTED__HARNESS_TOKEN_* variable or Entra audience."
+        ),
+    ] = "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY",
     packages_note: Annotated[str | None, typer.Option("--packages-note")] = None,
     transport: Annotated[
         str, typer.Option("--transport", help="direct or foundry_invocations.")

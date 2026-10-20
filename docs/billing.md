@@ -1432,3 +1432,10 @@ observations is unresolved; turn completion does not supply token counts.
 Operators must reconcile these pending observations against provider usage
 before final settlement. The window between receiving provider usage and
 committing the usage event remains a known reconciliation gap.
+
+Self-hosted turn cleanup attempts bounded harness cancellation when the host
+reader ends before a terminal event. The frozen tariff admission remains durable.
+Replay records late receipts from earlier turns under their original turn
+admission key, including on a later invocation of the same session. A journaled
+model start without measured usage remains an unknown pending observation until
+its measured revision arrives; elapsed host deadlines do not discard it.
