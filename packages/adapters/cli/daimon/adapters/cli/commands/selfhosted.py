@@ -19,6 +19,7 @@ from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSp
 from mux.drivers.selfhosted.config import HarnessConfig
 from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 selfhosted_app = typer.Typer(help="Manage tenant-owned self-hosted agents and environments.")
@@ -147,18 +148,23 @@ def selfhosted_init_command(
     ] = None,
 ) -> None:
     """Create or reuse one agent and environment; stdout contains their IDs only."""
-    harness = HarnessConfig.model_validate(
-        {
-            "harness_url": harness_url,
-            "auth_mode": auth_mode,
-            "auth_ref": auth_ref,
-            "packages_note": packages_note,
-            "transport": transport,
-            "agent_name": agent_name,
-            "project_endpoint": project_endpoint,
-            "allow_insecure_http": allow_insecure_http,
-        }
-    )
+    try:
+        harness = HarnessConfig.model_validate(
+            {
+                "harness_url": harness_url,
+                "auth_mode": auth_mode,
+                "auth_ref": auth_ref,
+                "packages_note": packages_note,
+                "transport": transport,
+                "agent_name": agent_name,
+                "project_endpoint": project_endpoint,
+                "allow_insecure_http": allow_insecure_http,
+            }
+        )
+    except ValidationError:
+        raise typer.BadParameter(
+            "Invalid harness configuration; use credential references only."
+        ) from None
 
     async def run() -> tuple[str, str]:
         engine = build_engine(database_url)

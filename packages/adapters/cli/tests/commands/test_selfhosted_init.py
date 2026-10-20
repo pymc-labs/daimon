@@ -187,3 +187,26 @@ async def test_init_reuses_existing_environment_with_implicit_schema_defaults(
         harness=HarnessConfig(harness_url="https://harness.example", auth_ref="TOKEN"),
     )
     assert initialized[1] == env.ref.id
+
+
+@pytest.mark.parametrize("option", ["--auth-ref", "--harness-url"])
+def test_cli_invalid_config_does_not_echo_credentials(option):
+    from uuid import uuid4
+
+    secret = "sk-secret-marker-never-print"
+    args = [
+        "selfhosted",
+        "init",
+        "--tenant-id",
+        str(uuid4()),
+        "--database-url",
+        "postgresql+asyncpg://localhost/test",
+        "--harness-url",
+        "https://harness.example",
+    ]
+    args += [option, secret if option == "--auth-ref" else f"https://user:{secret}@harness.example"]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 2
+    assert "Invalid harness configuration" in result.output
+    assert secret not in result.output
+    assert result.stdout == ""
