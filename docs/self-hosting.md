@@ -292,7 +292,9 @@ Build it from the repository root with
 are exported from `uv.lock`; the image includes NumPy, pandas, PyMC and
 PyMC-Marketing. Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
 `AZURE_OPENAI_API_KEY` or managed identity credentials at runtime. Mount a
-persistent home directory at `/home/agent`; run one worker per session sandbox.
+persistent home directory at `/home/harness`; run one worker per HOME. Root mode
+assigns separate tool UIDs and work/skills directories to sessions; fixed-UID
+platforms require a separate HOME/sandbox for each session.
 Port 8088 serves authenticated `/v0/*` endpoints and `/invocations`. Model calls,
 tool execution and session files remain in the configured runtime and Azure
 model endpoint. The application README documents environment variables and

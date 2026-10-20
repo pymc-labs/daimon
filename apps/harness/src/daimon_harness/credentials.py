@@ -1,0 +1,170 @@
+"""Per-turn MCP credentials stay in memory and out of replayable request bodies."""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID
+
+from mux.drivers.selfhosted.wire import MCPServer, TurnRequest
+from pydantic import JsonValue, TypeAdapter
+
+JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+
+VIRTUAL_ENV = "DAIMON_MCP_AUTHORIZATION"
+RESERVED_SERVER = "daimon-mcp"
+
+
+def normalized_mcp_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or any(char.isspace() or ord(char) < 32 for char in url)
+    ):
+        raise ValueError("invalid MCP URL")
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parsed.port
+    if port is not None and port != (443 if parsed.scheme == "https" else 80):
+        host += f":{port}"
+    return urlunsplit((parsed.scheme, host, parsed.path.rstrip("/"), "", ""))
+
+
+def mcp_origin(url: str) -> str:
+    parsed = urlsplit(normalized_mcp_url(url))
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+def load_bindings() -> dict[str, str]:
+    """Validate operator-owned bindings; tenant authorization happens in the host."""
+    raw: JsonValue = JSON.validate_json(os.environ.get("HARNESS_MCP_CRED_BINDINGS", "{}"))
+    if not isinstance(raw, dict):
+        raise ValueError("MCP credential bindings must be an object")
+    bindings: dict[str, str] = {}
+    for name, binding in raw.items():
+        if (
+            not name.startswith("HARNESS_MCP_CRED_")
+            or name == "HARNESS_MCP_CRED_BINDINGS"
+            or not isinstance(binding, dict)
+            or set(binding) != {"origin", "tenants"}
+        ):
+            raise ValueError("invalid MCP credential binding")
+        origin = binding["origin"]
+        tenants = binding["tenants"]
+        if (
+            not isinstance(origin, str)
+            or urlsplit(origin).path not in {"", "/"}
+            or mcp_origin(origin) != normalized_mcp_url(origin)
+        ):
+            raise ValueError("credential binding must specify an origin only")
+        parsed = urlsplit(origin)
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
+        except ValueError:
+            loopback = parsed.hostname == "localhost"
+        if parsed.scheme != "https" and not loopback:
+            raise ValueError("credential binding requires HTTPS")
+        if not isinstance(tenants, list) or not tenants:
+            raise ValueError("credential binding requires tenant UUIDs")
+        if tenants != ["*"]:
+            for tenant in tenants:
+                if not isinstance(tenant, str):
+                    raise ValueError("credential binding requires tenant UUIDs")
+                UUID(tenant)
+        bindings[name] = mcp_origin(origin)
+    return bindings
+
+
+def validate_server(server: MCPServer) -> None:
+    normalized_mcp_url(server.url)
+    for env in server.headers_env.values():
+        if env == VIRTUAL_ENV:
+            if server.name != RESERVED_SERVER:
+                raise ValueError("reserved MCP credential referenced by another server")
+        elif not env.startswith("HARNESS_MCP_CRED_"):
+            raise ValueError("MCP credential references must start with HARNESS_MCP_CRED_")
+    if server.headers_env or server.name == RESERVED_SERVER:
+        parsed = urlsplit(server.url)
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
+        except ValueError:
+            loopback = parsed.hostname == "localhost"
+        if parsed.scheme != "https" and not loopback:
+            raise ValueError("credential-bearing MCP servers require HTTPS")
+    expected_url = os.environ.get("HARNESS_DAIMON_MCP_URL")
+    if server.name == RESERVED_SERVER:
+        if not expected_url or normalized_mcp_url(server.url) != normalized_mcp_url(expected_url):
+            raise ValueError("Daimon MCP URL does not match harness configuration")
+    elif expected_url and normalized_mcp_url(server.url) == normalized_mcp_url(expected_url):
+        raise ValueError("Daimon MCP URL requires its reserved server name")
+
+
+def turn_credentials(
+    request: TurnRequest,
+    authorization: str | None,
+    operator_credentials: dict[str, str] | None = None,
+    bindings: dict[str, str] | None = None,
+) -> dict[str, str]:
+    credentials: dict[str, str] = {}
+    bindings = load_bindings() if bindings is None else bindings
+    for server in request.mcp_servers:
+        validate_server(server)
+        if server.name == RESERVED_SERVER:
+            if not any(
+                header.lower() == "authorization" and env == VIRTUAL_ENV
+                for header, env in server.headers_env.items()
+            ):
+                raise ValueError("Daimon MCP requires its reserved credential reference")
+            if (
+                not authorization
+                or not authorization.startswith("Bearer ")
+                or not authorization[7:]
+            ):
+                raise ValueError("Daimon MCP credential is missing")
+            credentials[VIRTUAL_ENV] = authorization
+        for env in server.headers_env.values():
+            if env != VIRTUAL_ENV:
+                if bindings.get(env) != mcp_origin(server.url):
+                    raise ValueError("MCP credential is unbound or bound to a different origin")
+                value = (
+                    operator_credentials if operator_credentials is not None else os.environ
+                ).get(env)
+                if not value:
+                    raise ValueError("MCP credential is not configured")
+                credentials[env] = value
+    return credentials
+
+
+def mcp_headers(
+    server: MCPServer, credentials: dict[str, str], bindings: dict[str, str] | None = None
+) -> dict[str, str]:
+    # Repeat validation at the resolution boundary, even for direct adapter callers.
+    validate_server(server)
+    bindings = load_bindings() if bindings is None else bindings
+    for env in server.headers_env.values():
+        if env != VIRTUAL_ENV and bindings.get(env) != mcp_origin(server.url):
+            raise ValueError("MCP credential is unbound or bound to a different origin")
+    return {header: credentials[env] for header, env in server.headers_env.items()}
+
+
+def redact(value: JsonValue, credentials: dict[str, str]) -> JsonValue:
+    if isinstance(value, str):
+        for secret in credentials.values():
+            value = value.replace(secret, "[redacted]")
+            if secret.startswith("Bearer "):
+                value = value.replace(secret[7:], "[redacted]")
+        return value
+    if isinstance(value, list):
+        return [redact(item, credentials) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(redact(key, credentials)): redact(item, credentials) for key, item in value.items()
+        }
+    return value

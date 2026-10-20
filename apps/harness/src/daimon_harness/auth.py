@@ -28,8 +28,11 @@ class Authenticator:
                 "FOUNDRY_AGENT_SESSION_ID",
             )
         )
-        if self.mode not in {"bearer", "foundry_gateway"}:
+        if self.mode not in {"bearer", "entra", "foundry_gateway"}:
             raise ValueError("unknown HARNESS_AUTH_MODE")
+        if self.mode in {"entra", "foundry_gateway"} and not self.allowed:
+            raise ValueError("HARNESS_ALLOWED_CALLERS is required for Entra and gateway auth")
+        self.required_role = os.environ.get("HARNESS_REQUIRED_ROLE")
         self.token = token if token is not None else os.environ.get("HARNESS_TOKEN", "")
         self.audience = os.environ.get("HARNESS_ENTRA_AUDIENCE", "")
         tenant = os.environ.get("HARNESS_ENTRA_TENANT_ID", "")
@@ -43,7 +46,9 @@ class Authenticator:
                 cache_jwk_set=True,
                 lifespan=3600,
             )
-        if self.mode == "bearer" and not self.token and self.jwks is None:
+        if self.mode == "entra" and self.jwks is None:
+            raise ValueError("configure HARNESS_ENTRA_AUDIENCE and tenant id")
+        if self.mode == "bearer" and not self.token:
             raise ValueError("configure HARNESS_TOKEN or HARNESS_ENTRA_AUDIENCE and tenant id")
 
     async def verify(
@@ -61,12 +66,16 @@ class Authenticator:
         if authorization is None or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Unauthorized")
         value = authorization[7:]
-        if self.token and hmac.compare_digest(value.encode(), self.token.encode()):
+        if (
+            self.mode == "bearer"
+            and self.token
+            and hmac.compare_digest(value.encode(), self.token.encode())
+        ):
             return "bearer"
-        if self.jwks is not None:
+        if self.mode == "entra" and self.jwks is not None:
             try:
                 key = await asyncio.to_thread(self.jwks.get_signing_key_from_jwt, value)
-                jwt.decode(
+                claims = jwt.decode(
                     value,
                     key.key,
                     algorithms=["RS256"],
@@ -79,7 +88,19 @@ class Authenticator:
                     ],
                     options={"require": ["exp", "iat", "iss", "aud"]},
                 )
-                return "bearer"
+                principals = {
+                    value
+                    for name in ("oid", "appid", "azp")
+                    if isinstance(value := claims.get(name), str)
+                }
+                permitted = principals & self.allowed
+                roles = claims.get("roles", [])
+                if not permitted or (
+                    self.required_role
+                    and (not isinstance(roles, list) or self.required_role not in roles)
+                ):
+                    raise HTTPException(status_code=403, detail="Caller is not allowed")
+                return sorted(permitted)[0]
             except jwt.PyJWTError:
                 pass
         raise HTTPException(status_code=401, detail="Unauthorized")

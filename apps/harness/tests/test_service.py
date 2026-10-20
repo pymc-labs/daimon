@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 
 import httpx
@@ -46,7 +47,9 @@ async def test_tool_stream_replay_history_and_conflicts(
         "agent_message",
         "turn_ended",
     ]
-    assert (home / "work/result.txt").read_text() == "durable"
+    assert (
+        home / "sessions" / hashlib.sha256(b"session-1").hexdigest()[:32] / "work/result.txt"
+    ).read_text() == "durable"
     assert len([e for e in first if e.type == "usage"]) == 1
     replay = stream_events(await client.post("/v0/turns", json=turn("tool")))
     assert replay == first
@@ -86,7 +89,8 @@ async def test_cancel_and_active_session_conflict(
 
 
 @pytest.mark.parametrize(
-    "decision,result", [("allow", None), ("deny", None), ("allow", {"external": "result"})]
+    "decision,result",
+    [("allow", None), ("deny", None), ("result", {"external": "result"}), ("result", None)],
 )
 async def test_approval(
     harness: tuple[httpx.AsyncClient, FakeModelAdapter, Path],
@@ -94,9 +98,10 @@ async def test_approval(
     decision: str,
     result: object,
 ) -> None:
-    monkeypatch.setenv("HARNESS_CONFIRM_TOOLS", "write")
     client, _, home = harness
-    stream = asyncio.create_task(client.post("/v0/turns", json=turn("approval")))
+    body = turn("approval")
+    body["tool_policy"] = {"write": "ask"}
+    stream = asyncio.create_task(client.post("/v0/turns", json=body))
     async with asyncio.timeout(5):
         while True:
             response = (await client.get("/v0/sessions/session-1/events")).json()
@@ -104,17 +109,21 @@ async def test_approval(
             if pending:
                 break
             await asyncio.sleep(0.01)
-    assert not (home / "work/result.txt").exists()
+    assert not (
+        home / "sessions" / hashlib.sha256(b"session-1").hexdigest()[:32] / "work/result.txt"
+    ).exists()
     body = {"action_id": pending[0]["data"]["action_id"], "decision": decision}
-    if result is not None:
+    if decision == "result":
         body["result"] = result
     assert (await client.post("/v0/turns/turn-1/actions", json=body)).status_code == 200
     events = stream_events(await stream)
     assert events[-1].data["outcome"] == "completed"
-    assert (home / "work/result.txt").exists() == (decision == "allow" and result is None)
+    assert (
+        home / "sessions" / hashlib.sha256(b"session-1").hexdigest()[:32] / "work/result.txt"
+    ).exists() == (decision == "allow" and result is None)
     tool_result = next(e for e in events if e.type == "tool_result")
     assert tool_result.data["is_error"] == (decision == "deny")
-    if result is not None:
+    if decision == "result":
         assert tool_result.data["output"] == result
 
 
@@ -127,6 +136,15 @@ async def test_failure_never_claims_completion(
     events = stream_events(response)
     assert events[-1].data["outcome"] == "errored"
     assert "secret provider message" not in response.text
+    if mode == "unmetered":
+        assert events[-1].data["error"]["kind"] == "usage_missing"
+        unavailable = [
+            event
+            for event in events
+            if event.type == "error" and event.data["kind"] == "usage_unavailable"
+        ]
+        assert len(unavailable) == 1
+        assert unavailable[0].data["request_id"] == "req-1"
 
 
 async def test_restart_durability_and_no_rerun(tmp_path: Path) -> None:

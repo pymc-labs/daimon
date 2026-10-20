@@ -12,6 +12,8 @@ from fastapi import HTTPException
 async def test_entra_validates_signature_tenant_audience_and_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("HARNESS_AUTH_MODE", "entra")
+    monkeypatch.setenv("HARNESS_ALLOWED_CALLERS", "host-id")
     tenant = "11111111-1111-1111-1111-111111111111"
     monkeypatch.delenv("HARNESS_TOKEN", raising=False)
     monkeypatch.setenv("HARNESS_ENTRA_TENANT_ID", tenant)
@@ -23,6 +25,7 @@ async def test_entra_validates_signature_tenant_audience_and_expiry(
     monkeypatch.setattr(auth.jwks, "get_signing_key_from_jwt", lambda token: public_jwk)
     now = datetime.now(UTC)
     claims = {
+        "oid": "host-id",
         "aud": "https://ai.azure.com",
         "iss": f"https://login.microsoftonline.com/{tenant}/v2.0",
         "iat": now,
@@ -41,6 +44,34 @@ async def test_entra_validates_signature_tenant_audience_and_expiry(
         assert caught.value.status_code == 401
     with pytest.raises(HTTPException):
         await auth.verify("Bearer unsigned-or-invalid")
+    for identity in [{"oid": "other"}, {"oid": None}, {"oid": "other", "appid": "not-host"}]:
+        with pytest.raises(HTTPException) as caught:
+            await auth.verify(
+                "Bearer " + jwt.encode({**claims, **identity}, private_key, algorithm="RS256")
+            )
+        assert caught.value.status_code == 403
+    auth.required_role = "Harness.Invoke"
+    with pytest.raises(HTTPException) as caught:
+        await auth.verify("Bearer " + jwt.encode(claims, private_key, algorithm="RS256"))
+    assert caught.value.status_code == 403
+    assert (
+        await auth.verify(
+            "Bearer "
+            + jwt.encode({**claims, "roles": ["Harness.Invoke"]}, private_key, algorithm="RS256")
+        )
+        == "host-id"
+    )
+    assert (
+        await auth.verify(
+            "Bearer "
+            + jwt.encode(
+                {**claims, "oid": "other", "appid": "host-id", "roles": ["Harness.Invoke"]},
+                private_key,
+                algorithm="RS256",
+            )
+        )
+        == "host-id"
+    )
 
 
 def test_auth_fails_closed_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,3 +102,11 @@ async def test_foundry_gateway_requires_platform_context_and_allowed_caller(
         with pytest.raises(HTTPException) as caught:
             await auth.verify(None, caller, call_id)
         assert caught.value.status_code == status
+
+
+@pytest.mark.parametrize("mode", ["entra", "foundry_gateway"])
+def test_identity_auth_requires_a_caller_allowlist(monkeypatch, mode):
+    monkeypatch.setenv("HARNESS_AUTH_MODE", mode)
+    monkeypatch.delenv("HARNESS_ALLOWED_CALLERS", raising=False)
+    with pytest.raises(ValueError, match="HARNESS_ALLOWED_CALLERS"):
+        Authenticator()

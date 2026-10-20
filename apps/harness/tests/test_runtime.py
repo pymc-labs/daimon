@@ -4,7 +4,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from daimon_harness.runtime import TurnContext
+from daimon_harness.errors import HarnessError
+from daimon_harness.runtime import TurnContext, discard_event
 from mux.drivers.selfhosted.wire import InlineSkill, TurnRequest
 from pydantic import JsonValue
 
@@ -12,7 +13,7 @@ from .conftest import turn
 
 
 def context(home: Path) -> TurnContext:
-    return TurnContext(TurnRequest.model_validate(turn()), home, lambda kind, data: None)
+    return TurnContext(TurnRequest.model_validate(turn()), home, discard_event)
 
 
 async def test_workspace_tools_and_skills(tmp_path: Path) -> None:
@@ -63,6 +64,165 @@ async def test_tool_limit_blocks_execution(tmp_path: Path) -> None:
         called = True
         return "unexpected"
 
-    with pytest.raises(RuntimeError, match="maximum tool calls"):
+    with pytest.raises(HarnessError, match="Maximum tool calls"):
         await runtime.tool("c", "read", {}, execute)
     assert not called
+
+
+async def test_bash_bounds_output_and_cancels_a_flooded_pipe(tmp_path: Path) -> None:
+    runtime = context(tmp_path)
+    output = await runtime.bash("printf '%0400000d' 0")
+    assert output.startswith("exit_code=0\n")
+    assert len(output) < 262_244
+    assert "[output truncated]" in output
+    task = asyncio.create_task(runtime.bash("while true; do printf '%010000d' 0; done"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+
+
+async def test_binary_skill_cache_and_replacement(tmp_path: Path) -> None:
+    import base64
+
+    runtime = context(tmp_path)
+    skill = InlineSkill(
+        name="marimo_notebooks",
+        files={"SKILL.md": "first", "old.txt": "old"},
+        binary_files={"fonts/font.bin": base64.b64encode(b"\x00\xff").decode()},
+    )
+    runtime.request.skills = [skill]
+    await runtime.skills()
+    directory = tmp_path / "skills" / skill.name
+    binary = directory / "fonts/font.bin"
+    assert binary.read_bytes() == b"\x00\xff"
+    binary.stat()
+    before = binary.stat().st_mtime_ns
+    assert "first" in await runtime.skills()
+    assert binary.stat().st_mtime_ns == before
+    marker = tmp_path / ".daimon/skills" / (skill.name + ".sha256")
+    assert marker.read_text() == skill.sha256
+    runtime.request.skills = [InlineSkill(name=skill.name, files={"SKILL.md": "second"})]
+    assert "second" in await runtime.skills()
+    assert not binary.exists()
+    assert not (directory / "old.txt").exists()
+    assert marker.read_text() == runtime.request.skills[0].sha256
+
+
+async def test_skill_materialization_rejects_existing_symlinks(tmp_path: Path) -> None:
+    runtime = context(tmp_path)
+    runtime.request.skills = [InlineSkill(name="analysis", files={"SKILL.md": "safe"})]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "analysis").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        await runtime.skills()
+    assert list(outside.iterdir()) == []
+
+
+async def test_skill_digest_rechecked_before_materializing(tmp_path: Path) -> None:
+    runtime = context(tmp_path)
+    skill = InlineSkill(name="analysis", files={"SKILL.md": "safe"})
+    skill.files["SKILL.md"] = "tampered"
+    runtime.request.skills = [skill]
+    with pytest.raises(ValueError, match="sha256"):
+        await runtime.skills()
+    assert not (tmp_path / "skills/analysis").exists()
+
+
+async def test_builtin_tools_default_to_auto_and_explicit_ask_is_required(tmp_path: Path) -> None:
+    from mux.drivers.selfhosted.wire import ActionRequest
+
+    runtime = context(tmp_path)
+
+    async def execute() -> JsonValue:
+        return runtime.write("approved.txt", "yes")
+
+    assert await runtime.tool("auto-call", "write", {}, execute) == "written"
+    runtime.request.tool_policy = {"write": "ask"}
+    (runtime.work / "approved.txt").unlink()
+    pending = asyncio.create_task(runtime.tool("ask-call", "write", {}, execute))
+    await asyncio.sleep(0)
+    assert not (runtime.work / "approved.txt").exists()
+    action_id = next(iter(runtime.pending))
+    runtime.pending[action_id].set_result(ActionRequest(action_id=action_id, decision="allow"))
+    assert await pending == "written"
+    assert (runtime.work / "approved.txt").read_text() == "yes"
+
+
+async def test_tool_runtime_error_is_paired_and_next_call_runs(tmp_path: Path) -> None:
+    runtime = context(tmp_path)
+    events: list[tuple[str, dict[str, JsonValue]]] = []
+
+    async def emit(kind, data):
+        events.append((kind, data))
+
+    runtime.emit = emit
+
+    async def broken() -> JsonValue:
+        raise RuntimeError("private upstream details")
+
+    assert await runtime.tool("bad", "remote", {}, broken, mcp=True) == "Tool failed: RuntimeError"
+    assert events[-1] == (
+        "tool_result",
+        {"call_id": "bad", "output": "Tool failed: RuntimeError", "is_error": True},
+    )
+
+    async def working() -> JsonValue:
+        return "ok"
+
+    assert await runtime.tool("good", "read", {}, working) == "ok"
+    runtime.request.limits.max_tool_calls = 2
+    with pytest.raises(HarnessError, match="Maximum tool calls"):
+        await runtime.tool("limit", "read", {}, working)
+    assert events[-2][0] == "tool_use"
+    assert events[-1][1]["call_id"] == "limit"
+    assert events[-1][1]["is_error"] is True
+
+
+async def test_shell_deadline_and_success_reap_background_jobs(tmp_path: Path) -> None:
+    runtime = context(tmp_path)
+    runtime.request.limits.deadline_s = 0.1
+    with pytest.raises(TimeoutError):
+        await runtime.bash("sleep 60")
+    runtime.request.limits.deadline_s = 5
+    output = await runtime.bash("nohup sleep 60 >/dev/null 2>&1 & echo $!")
+    pid = int(output.splitlines()[-1])
+    async with asyncio.timeout(3):
+        while True:
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+            except FileNotFoundError:
+                break
+            if state == "Z":
+                break
+            await asyncio.sleep(0.01)
+
+
+async def test_denied_tools_are_hidden_and_refused_with_exact_precedence(tmp_path: Path) -> None:
+    from daimon_harness.model_adapter import builtin_tools
+
+    runtime = context(tmp_path)
+    runtime.request.tool_policy = {
+        "bash": "deny",
+        "sample/*": "deny",
+        "sample/search": "auto",
+        "sample/ask": "ask",
+    }
+    assert {tool.name for tool in builtin_tools(runtime)} == {"read", "write", "edit"}
+    assert runtime.permission("sample/search") == "auto"
+    assert runtime.permission("sample/ask") == "ask"
+    assert runtime.permission("sample/delete") == "deny"
+    assert runtime.permission("other/search") == "auto"
+    executed = False
+
+    async def execute() -> JsonValue:
+        nonlocal executed
+        executed = True
+        return "unexpected"
+
+    for name in ("bash", "sample/delete"):
+        assert await runtime.tool(name, name, {}, execute) == "Tool execution denied by policy"
+    assert not executed

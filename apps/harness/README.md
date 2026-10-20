@@ -15,35 +15,66 @@ uv sync --all-packages --all-extras
 uv run --package daimon-harness python -m daimon_harness
 docker build --platform linux/amd64 -f apps/harness/Dockerfile -t daimon-harness .
 docker run --rm -p 8088:8088 --env-file /path/to/private/harness.env \
-  --mount source=daimon-home,target=/home/agent daimon-harness
+  --mount source=daimon-home,target=/home/harness daimon-harness
 ```
 
-Run one worker and one session sandbox per persistent HOME. The service takes a
+Run one worker per persistent HOME. Root mode supports multiple isolated sessions. The service takes a
 process lease to prevent two workers from operating on the same journal. A
 shared worker/HOME is not a security boundary between tenants. The deployment
 must isolate sandboxes and scope access to the correct sandbox.
 
 | Variable | Purpose |
 | --- | --- |
-| `HARNESS_AUTH_MODE` | `bearer` (default) or `foundry_gateway` behind private platform ingress |
+| `HARNESS_AUTH_MODE` | `bearer` (default), `entra`, or private `foundry_gateway` |
 | `HARNESS_TOKEN` | Local/direct HTTP bearer secret; no default |
-| `HARNESS_ALLOWED_CALLERS` | Optional comma-separated platform caller IDs allowed in gateway mode |
-| `HARNESS_ENTRA_TENANT_ID`, `HARNESS_ENTRA_AUDIENCE` | Alternative tenant-bound Entra token validation |
+| `HARNESS_MCP_CRED_BINDINGS` | Required for operator MCP credentials: JSON map from full env name to `{origin, tenants}` |
+| `HARNESS_DAIMON_MCP_URL` | Approved URL (normalized before comparison) for the reserved `daimon-mcp` server |
+| `HARNESS_ALLOWED_CALLERS` | Required in Entra/gateway modes: permitted object IDs or Entra app IDs |
+| `HARNESS_ENTRA_TENANT_ID`, `HARNESS_ENTRA_AUDIENCE` | Tenant-bound validation in `HARNESS_AUTH_MODE=entra` |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource URL |
 | `AZURE_OPENAI_API_VERSION` | Defaults to `2025-04-01-preview` |
 | `AZURE_OPENAI_API_KEY` | Optional; absent means `DefaultAzureCredential` |
 | `AZURE_CLIENT_ID` | Optional user-assigned managed identity selection |
-| `HARNESS_CONFIRM_TOOLS` | Comma-separated builtins needing confirmation; default `bash,write,edit`; `*` means all; empty means none |
+| `HARNESS_REQUIRED_ROLE` | Optional Entra application role required in addition to caller identity |
 | `HARNESS_VERSION` | Image git SHA for the authenticated health response |
 
 The request's `model` is the Azure deployment name. MCP `headers_env` values
-are environment variable names, resolved only when connecting. Every MCP call
-requires confirmation. An explicit action `result` substitutes a host-executed
-function result; an omitted result executes the approved tool locally.
-Shell subprocesses receive a small environment without harness/model/MCP secrets.
-The shell has the privileges of the container user; filesystem checks on other
-tools are not an OS sandbox. Use VM/session isolation and restrictive network
-policy for untrusted workloads.
+are operator credential references, captured in memory before connecting. All
+tools default to automatic execution; `tool_policy: {"write": "ask"}` requests
+approval for a named tool (MCP names use `server/tool`). `deny` hides and refuses
+a tool. Exact keys override `server/*`, which overrides the default `auto`. Action decisions are explicit: `allow` executes the tool, `deny` refuses it,
+and `result` substitutes host-executed JSON (including null). Only `result`
+may carry a result field.
+The reserved `daimon-mcp` server references `DAIMON_MCP_AUTHORIZATION` as a
+virtual environment name. A fresh turn supplies its full bearer in
+`X-Daimon-MCP-Authorization`; the service resolves it in per-turn memory, never
+in `os.environ`. Other servers cannot use that reference. The credential is
+excluded from request bodies, replay claims, logs and history, and known token
+values are redacted if an upstream tool echoes them. A replay needs no header.
+The Foundry gateway's documented allowlist does not include this header. Deployment must verify forwarding live. If stripped, use direct ACA ingress for MCP
+turns until a credential-exchange route is provided.
+
+Startup credentials are captured in memory, removed from `os.environ`, and
+Linux `prctl(PR_SET_DUMPABLE, 0)` blocks same-UID reads of harness environment
+and memory through `/proc`. Startup refuses if this protection cannot be set.
+The image runs the harness supervisor as root and switches shell subprocesses
+to a persistent unprivileged UID for each session (starting at 10001). Only that
+session's `work` directory is writable under
+the harness HOME; the journal is private and skills are read-only to tools.
+Children receive only PATH, HOME (workspace), LANG and PYTHONUSERBASE under work.
+They have CPU (up to the turn deadline, capped at 300 seconds), 4 GiB address
+space, 1024 processes (16384 in fixed-UID mode, where the limit counts all processes of that UID), 256 open files and 256 MiB output-file limits; core dumps
+are disabled. Each command has a wall timeout (the turn deadline, capped at 300 seconds). Output
+is bounded to 256 KiB with a truncation marker. Every command exit kills its process
+group, and turn cleanup kills any remaining processes of that session UID.
+
+Foundry may impose a fixed non-root UID. In that case the harness cannot switch
+UIDs and uses scrubbed environment, non-dumpable process and the same resource
+limits, with reduced filesystem/signal isolation. Fixed-UID mode rejects a second
+session ID in the same HOME; use one platform sandbox per session. Verify the platform's UID and
+sandbox boundary live before accepting untrusted tenants. The container needs
+one isolated session HOME per tenant/session, plus restrictive network policy;
+process protections do not replace that platform boundary.
 
 ## Wire and persistence
 
@@ -57,9 +88,11 @@ Only one turn runs per session.
 
 `$HOME/.daimon/turns.sqlite3` owns unique turn/key claims; each session's
 `$HOME/.daimon/sessions/<id>/journal.sqlite3` holds its event log and conversation
-history. Writes use SQLite FULL durability. `$HOME/work` holds tool files and
-`$HOME/skills/<name>` holds skills (`SKILL.md` plus files). URL skills fetch a
-single SKILL.md, not an executable archive. Skill instructions are included in
+history. Writes use SQLite WAL with synchronous FULL. All runtime SQLite operations run
+on a serialized worker thread; indexed terminal state makes polls independent
+of prior turns. `$HOME/sessions/<sha256(session_id)[:32]>/work` holds tool files
+and the sibling `skills/<name>` holds skills (`SKILL.md` plus files). URL skills
+are refused in v1; provide an inline bundle. Skill instructions are included in
 the model instructions. Inline skill file paths cannot escape their directory.
 
 Disconnecting a stream does not cancel a turn. Cancellation and deadlines stop
@@ -77,14 +110,19 @@ per response. Missing usage fails the turn with `usage_missing`. A failed or
 cancelled request with no measurement emits `usage_unavailable` with its request
 identifier; no zero-token usage is invented. A hard crash between receiving a
 response and committing usage leaves its request start for host reconciliation. Conversation
-history is committed at successful turn completion; partial turns remain in the
-event journal for reconcile.
+history includes encrypted reasoning items requested for stateless Azure Responses
+continuity ([Azure reference](https://learn.microsoft.com/azure/cognitive-services/openai/quickstart#encrypted-reasoning-items))
+and is committed at successful turn completion. User input and redacted tool
+side-effect summaries are checkpointed during the turn, so interrupted turns
+remain in future context. A context-window rejection retries once after removing
+older history and compacting large tool outputs, with a `context_truncated`
+notice; completed calls/results from the current turn are retained.
 
 ## Foundry hosted-agent deployment
 
 The image is Linux amd64, serves port 8088, and exposes `/readiness` for platform
 health probes. Build it, publish it to ACR, then register an agent version using
-the image digest and the Invocations protocol. The Foundry project identity
+the image digest and the Invocations 2.0.0 protocol. The Foundry project identity
 needs image-pull permissions; the running agent identity needs model access.
 The deployment reference specifies the container contract, protocol versions,
 and environment injection. This image uses a custom FastAPI server rather than
@@ -133,8 +171,8 @@ Do not infer an HTTP timeout from the session idle timeout.
 The gateway strips `Authorization`. Set `HARNESS_AUTH_MODE=foundry_gateway`:
 this requires the injected project endpoint, agent name and sandbox ID plus
 `x-agent-user-id` and `x-agent-foundry-call-id` on each call. Configure Entra RBAC
-to grant invocation only to the Daimon host identity; optionally set
-`HARNESS_ALLOWED_CALLERS` to its platform user ID. The caller ID is logged with
+to grant invocation only to the Daimon host identity; set
+`HARNESS_ALLOWED_CALLERS` to its platform user ID (required at startup). The caller ID is logged with
 each submitted turn. This mode trusts private Foundry ingress and must never
 be exposed directly to the public network. Missing platform context is refused.
 [Gateway headers and runtime contract](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agent-contract).
@@ -158,3 +196,31 @@ The default suite uses a fake adapter and a mocked Azure HTTP transport under
 the real Agents SDK. The live Azure test is skipped unless `AZURE_OPENAI_ENDPOINT`
 and either `AZURE_OPENAI_API_KEY` or `AZURE_CLIENT_ID` are set; it uses
 `AZURE_OPENAI_DEPLOYMENT` (default `gpt-5`) and incurs model usage.
+
+
+MCP environment references must start with `HARNESS_MCP_CRED_`; the sole
+exception is the in-memory `DAIMON_MCP_AUTHORIZATION` reference reserved for
+`daimon-mcp`. Unscoped process variables are rejected before resolution.
+Credential-bearing servers require HTTPS, except literal loopback addresses or
+`localhost`. Daimon MCP URLs are compared after normalizing host/default port
+and trailing slashes; a different server name cannot alias the reserved URL.
+
+Inline skills support UTF-8 text and base64 binary files with a verified SHA-256
+digest (canonical encoding documented in the mux README). The harness rechecks
+8 MiB per-skill and 24 MiB per-turn decoded limits, stages complete bundles under
+the session's `skills` directory, and records digests under its private
+`$HOME/.daimon/sessions/<id>/skills` directory. An unchanged
+digest skips rewriting files; changed bundles replace all previous files. Seed
+names containing underscores remain valid. Symlink roots and traversal paths
+are refused. Message deltas and their final snapshot share a session-unique
+`message_id`.
+
+
+Every operator MCP credential must have an entry in `HARNESS_MCP_CRED_BINDINGS`:
+`{"HARNESS_MCP_CRED_SAMPLE":{"origin":"https://tools.example","tenants":["11111111-1111-1111-1111-111111111111"]}}`.
+The harness captures this map at startup and refuses unbound names or a server URL
+whose normalized scheme, host or port differs. Paths may vary within the bound
+origin. HTTPS is required, with the same explicit loopback exception as MCP URLs.
+Tenant UUIDs are checked by the host builder; `["*"]` is for single-tenant installs
+only. Provision host and harness maps from the same operator source. The virtual
+Daimon credential continues to use its separate reserved-URL binding.

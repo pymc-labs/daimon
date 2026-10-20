@@ -1409,3 +1409,22 @@ request intention before model I/O. On reconcile, an unmatched intention becomes
 an unknown observation with the same stable request ID. Retain it pending until
 authoritative usage is recovered; never infer token counts from a terminal turn
 or a missing receipt.
+
+## Self-hosted harness request accounting
+
+The Azure Responses harness durably records `model_request_started` with a
+stable request ID before model I/O. A response that reports usage produces
+exactly one `usage` event for that ID, with measured input, cached input, output
+and reasoning counts. Retries and separate tool-loop requests have distinct
+request IDs. Idempotent turn replay reads the journal without requesting a new
+model response or charging another observation.
+
+A failed or cancelled request with no reported usage closes with
+`error(kind="usage_unavailable", request_id=...)`. This is unknown usage, never
+invented zero tokens. A successful response without usage fails the turn with
+`usage_missing`. On recovery/reconcile, any start without a closing observation
+also remains unknown under its original ID. A terminal turn with no request
+observations is unresolved; turn completion does not supply token counts.
+Operators must reconcile these pending observations against provider usage
+before final settlement. The window between receiving provider usage and
+committing the usage event remains a known reconciliation gap.

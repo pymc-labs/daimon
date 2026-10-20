@@ -32,8 +32,15 @@ async def test_sdk_tool_loop_meters_each_request(
         assert committed[-1].type == "model_request_started"
         assert sum(event.type == "model_request_started" for event in committed) == len(requests)
         assert body["store"] is False
+        assert "reasoning.encrypted_content" in body["include"]
         if len(requests) == 1:
             output = [
+                {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "encrypted-reasoning",
+                },
                 {
                     "id": "fc_1",
                     "type": "function_call",
@@ -41,10 +48,16 @@ async def test_sdk_tool_loop_meters_each_request(
                     "name": "write",
                     "arguments": '{"path":"from-sdk.txt","content":"sdk"}',
                     "status": "completed",
-                }
+                },
             ]
         else:
             assert any(item.get("type") == "function_call_output" for item in body["input"])
+            assert (
+                next(item for item in body["input"] if item.get("type") == "reasoning")[
+                    "encrypted_content"
+                ]
+                == "encrypted-reasoning"
+            )
             output = [
                 {
                     "id": "msg_1",
@@ -92,8 +105,11 @@ async def test_sdk_tool_loop_meters_each_request(
     request = TurnRequest.model_validate(turn())
     journal.claim(request)
 
-    def emit(kind, data):
+    async def emit(kind, data):
         journal.append(request, kind, data)
+        events.append((kind, data))
+
+    async def collect(kind, data):
         events.append((kind, data))
 
     context = TurnContext(request, tmp_path, emit)
@@ -116,7 +132,7 @@ async def test_sdk_tool_loop_meters_each_request(
     ]
     assert journal.pending_requests(request) == {}
     journal.close()
-    assert len(history) == 4  # user, call, result, assistant
+    assert len(history) == 5  # user, encrypted reasoning, call, result, assistant
     assert [kind for kind, _ in events].count("tool_use") == 1
     assert [kind for kind, _ in events].count("tool_result") == 1
 
@@ -133,12 +149,18 @@ async def test_live_azure_responses(tmp_path: Path) -> None:
     body["model"] = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5")
     body["input"] = [{"type": "text", "text": "Reply with the word ready. Do not use tools."}]
     events: list[tuple[str, object]] = []
-    context = TurnContext(
-        TurnRequest.model_validate(body), tmp_path, lambda kind, data: events.append((kind, data))
-    )
+
+    async def collect(kind, data):
+        events.append((kind, data))
+
+    context = TurnContext(TurnRequest.model_validate(body), tmp_path, collect)
     await AzureModelAdapter().run(context, [])
     assert sum(kind == "usage" for kind, _ in events) == 1
-    assert any(kind == "agent_message" for kind, _ in events)
+    messages = [data for kind, data in events if kind == "agent_message"]
+    deltas = [data for kind, data in events if kind == "agent_message_delta"]
+    assert messages
+    assert len({data["message_id"] for data in messages}) == len(messages)
+    assert [data["message_id"] for data in deltas] == [data["message_id"] for data in messages]
 
 
 @pytest.mark.parametrize("failure", ["http", "missing_usage", "cancelled"])
@@ -198,9 +220,11 @@ async def test_sdk_unmeasured_request_never_invents_usage(
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
     events: list[tuple[str, dict[str, object]]] = []
-    context = TurnContext(
-        TurnRequest.model_validate(turn()), tmp_path, lambda kind, data: events.append((kind, data))
-    )
+
+    async def collect(kind, data):
+        events.append((kind, data))
+
+    context = TurnContext(TurnRequest.model_validate(turn()), tmp_path, collect)
     task = asyncio.create_task(AzureModelAdapter().run(context, []))
     await asyncio.wait_for(started.wait(), 5)
     if failure == "cancelled":
@@ -218,3 +242,162 @@ async def test_sdk_unmeasured_request_never_invents_usage(
     assert start["request_id"] == error["request_id"]
     assert error["request_id"]
     assert "private-error" not in str(events)
+
+
+@pytest.mark.parametrize("after_tool", [False, True])
+async def test_sdk_context_overflow_truncates_history_and_inventories_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_tool: bool
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if after_tool and len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "tool",
+                    "object": "response",
+                    "created_at": 1,
+                    "model": "gpt-5",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "f",
+                            "call_id": "write",
+                            "name": "write",
+                            "status": "completed",
+                            "arguments": '{"path":"once.txt","content":"once"}',
+                        }
+                    ],
+                    "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                    "parallel_tool_calls": False,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+            )
+        if len(requests) == 1 + int(after_tool):
+            assert "old-history-marker" in str(body["input"])
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "too long",
+                        "code": "context_length_exceeded",
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
+        assert "old-history-marker" not in str(body["input"])
+        return httpx.Response(
+            200,
+            json={
+                "id": "retry",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-5",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "m",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+                    }
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://unit-test.openai.azure.com",
+        api_key="test",
+        api_version="2025-04-01-preview",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def emit(kind, data):
+        events.append((kind, data))
+
+    runtime = TurnContext(TurnRequest.model_validate(turn()), tmp_path, emit)
+    history = await AzureModelAdapter().run(
+        runtime, [{"role": "user", "content": "old-history-marker"}]
+    )
+    assert len(requests) == 2 + int(after_tool)
+    if after_tool:
+        assert runtime.tool_calls == 1
+        assert "function_call_output" in str(requests[-1]["input"])
+        assert (runtime.work / "once.txt").read_text() == "once"
+    assert "old-history-marker" not in str(history)
+    starts = [data["request_id"] for kind, data in events if kind == "model_request_started"]
+    unknown = [
+        data["request_id"]
+        for kind, data in events
+        if kind == "error" and data["kind"] == "usage_unavailable"
+    ]
+    measured = [data["request_id"] for kind, data in events if kind == "usage"]
+    assert len(starts) == 2 + int(after_tool)
+    assert len(set(starts)) == len(starts)
+    assert set(starts) == set(unknown + measured)
+    assert any(kind == "error" and data["kind"] == "context_truncated" for kind, data in events)
+
+
+async def test_sdk_hallucinated_denied_tool_is_refused_with_a_paired_result(tmp_path, monkeypatch):
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert "bash" not in [tool["name"] for tool in json.loads(request.content)["tools"]]
+        return httpx.Response(
+            200,
+            json={
+                "id": "denied",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-5",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "f",
+                        "call_id": "denied-call",
+                        "name": "bash",
+                        "status": "completed",
+                        "arguments": '{"command":"touch forbidden"}',
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://unit-test.openai.azure.com",
+        api_key="test",
+        api_version="2025-04-01-preview",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    request = TurnRequest.model_validate(turn())
+    request.tool_policy = {"bash": "deny"}
+    events = []
+
+    async def emit(kind, data):
+        events.append((kind, data))
+
+    runtime = TurnContext(request, tmp_path, emit)
+    await AzureModelAdapter().run(runtime, [])
+    assert not (runtime.work / "forbidden").exists()
+    result = next(data for kind, data in events if kind == "tool_result")
+    assert result["call_id"] == "denied-call" and result["is_error"] is True

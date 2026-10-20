@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 from typing import Protocol, cast
 from uuid import uuid4
 
+import httpx
 from agents import Agent, RunConfig, Runner
 from agents.agent_output import AgentOutputSchemaBase
 from agents.handoffs import Handoff
@@ -20,14 +21,29 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
-from openai import AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, BadRequestError
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import JsonValue, TypeAdapter
 
+from .credentials import mcp_headers
 from .errors import HarnessError
 from .runtime import TurnContext
 
 JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+
+
+def bound_mcp_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    # Redirects must never forward operator headers to an unbound origin.
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout or httpx.Timeout(30, read=300),
+        auth=auth,
+        follow_redirects=False,
+    )
 
 
 class ModelAdapter(Protocol):
@@ -52,8 +68,14 @@ class MeteredResponsesModel(OpenAIResponsesModel):
         conversation_id: str | None = None,
         prompt: ResponsePromptParam | None = None,
     ) -> ModelResponse:
+        self.context.model_input = cast(
+            list[JsonValue],
+            JSON.validate_python(
+                [{"role": "user", "content": input}] if isinstance(input, str) else input
+            ),
+        )
         request_id = str(uuid4())
-        self.context.emit(
+        await self.context.emit(
             "model_request_started", {"request_id": request_id, "model": self.context.request.model}
         )
         try:
@@ -70,7 +92,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                 prompt=prompt,
             )
         except (Exception, asyncio.CancelledError) as exc:
-            self.context.emit(
+            await self.context.emit(
                 "error",
                 {
                     "kind": "usage_unavailable",
@@ -84,7 +106,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
             raise HarnessError("usage_unavailable", "Model request ended without usage") from exc
         usage = response.usage
         if usage.requests != 1 or not response.response_id:
-            self.context.emit(
+            await self.context.emit(
                 "error",
                 {
                     "kind": "usage_unavailable",
@@ -94,7 +116,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                 },
             )
             raise HarnessError("usage_missing", "Model response did not report usage")
-        self.context.emit(
+        await self.context.emit(
             "usage",
             {
                 "request_id": request_id,
@@ -105,11 +127,41 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                 "reasoning_tokens": usage.output_tokens_details.reasoning_tokens,
             },
         )
-        for item in response.output:
+        for item in list(response.output):
+            if item.type == "function_call":
+                name = item.name
+                for server in sorted(
+                    self.context.request.mcp_servers,
+                    key=lambda config: len(config.name),
+                    reverse=True,
+                ):
+                    prefix = server.name + "__"
+                    if name.startswith(prefix):
+                        name = server.name + "/" + name[len(prefix) :]
+                        break
+                if self.context.permission(name) == "deny":
+
+                    async def never_execute() -> JsonValue:
+                        raise AssertionError("denied tool must not execute")
+
+                    await self.context.tool(
+                        item.call_id,
+                        name,
+                        {"arguments": item.arguments},
+                        never_execute,
+                        mcp="/" in name,
+                    )
+                    response.output.remove(item)
             if item.type == "message":
                 text = "".join(part.text for part in item.content if part.type == "output_text")
-                self.context.emit("agent_message_delta", {"text": text})
-                self.context.emit("agent_message", {"parts": [{"type": "text", "text": text}]})
+                message_id = str(uuid4())
+                await self.context.emit(
+                    "agent_message_delta", {"message_id": message_id, "text": text}
+                )
+                await self.context.emit(
+                    "agent_message",
+                    {"message_id": message_id, "parts": [{"type": "text", "text": text}]},
+                )
         return response
 
 
@@ -122,6 +174,8 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
     }
     tools: list[Tool] = []
     for name, properties in schemas.items():
+        if context.permission(name) == "deny":
+            continue
 
         def make_tool(tool_name: str, fields: dict[str, dict[str, str]]) -> FunctionTool:
             async def invoke(ctx: ToolContext[TurnContext], arguments: str) -> str:
@@ -161,20 +215,27 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
 
 
 class AzureModelAdapter:
+    def __init__(self) -> None:
+        self.key = os.environ.get("AZURE_OPENAI_API_KEY")
+        self.credential = DefaultAzureCredential() if not self.key else None
+        self.endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+        self.api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
+
     async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
         async with AsyncExitStack() as stack:
-            key = os.environ.get("AZURE_OPENAI_API_KEY")
+            key = self.key
             token_provider = None
             if not key:
-                credential = await stack.enter_async_context(DefaultAzureCredential())
+                credential = self.credential
+                assert credential is not None
                 token_provider = get_bearer_token_provider(
                     credential,
                     "https://cognitiveservices.azure.com/.default",
                 )
             client = await stack.enter_async_context(
                 AsyncAzureOpenAI(
-                    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-                    api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
+                    azure_endpoint=self.endpoint,
+                    api_version=self.api_version,
                     api_key=key,
                     azure_ad_token_provider=token_provider,
                     max_retries=0,
@@ -182,15 +243,21 @@ class AzureModelAdapter:
             )
             tools = builtin_tools(context)
             for config in context.request.mcp_servers:
-                headers = {header: os.environ[env] for header, env in config.headers_env.items()}
+                headers = mcp_headers(config, context.credentials, context.credential_bindings)
                 server = await stack.enter_async_context(
                     MCPServerStreamableHttp(
                         name=config.name,
-                        params={"url": config.url, "headers": headers},
+                        params={
+                            "url": config.url,
+                            "headers": headers,
+                            "httpx_client_factory": bound_mcp_http_client,
+                        },
                         cache_tools_list=True,
                     )
                 )
                 for remote in await server.list_tools():
+                    if context.permission(f"{config.name}/{remote.name}") == "deny":
+                        continue
 
                     def make_remote(
                         connection: MCPServerStreamableHttp,
@@ -252,13 +319,55 @@ class AzureModelAdapter:
                 instructions=instructions,
                 tools=tools,
                 model=MeteredResponsesModel(context, client),
-                model_settings=ModelSettings(parallel_tool_calls=False, store=False),
+                model_settings=ModelSettings(
+                    parallel_tool_calls=False,
+                    store=False,
+                    response_include=["reasoning.encrypted_content"],
+                ),
             )
-            result = await Runner.run(
-                agent,
-                input=items,
-                context=context,
-                max_turns=context.request.limits.max_tool_calls + 1,
-                run_config=RunConfig(tracing_disabled=True),
-            )
-            return cast(list[JsonValue], JSON.validate_python(result.to_input_list()))
+            for attempt in range(2):
+                try:
+                    result = await Runner.run(
+                        agent,
+                        input=items,
+                        context=context,
+                        max_turns=context.request.limits.max_tool_calls + 2,
+                        run_config=RunConfig(tracing_disabled=True),
+                    )
+                    return cast(list[JsonValue], JSON.validate_python(result.to_input_list()))
+                except Exception as exc:
+                    root = exc
+                    while root.__cause__ is not None and not isinstance(root, HarnessError):
+                        root = root.__cause__
+                    if isinstance(root, HarnessError) and root.kind == "tool_limit":
+                        raise HarnessError("tool_limit", "Maximum tool calls exceeded") from exc
+                    cause = root.__cause__
+                    if not (
+                        attempt == 0
+                        and isinstance(cause, BadRequestError)
+                        and cause.code in {"context_length_exceeded", "context_window_exceeded"}
+                    ):
+                        raise
+                    # Preserve calls/results from this turn so recovery cannot repeat
+                    # completed side effects. Each attempt retains its usage inventory.
+                    await context.emit(
+                        "error",
+                        {
+                            "kind": "context_truncated",
+                            "message": "Context limit reached; older history was removed",
+                            "retryable": True,
+                        },
+                    )
+                    recent = context.model_input[len(history) :]
+                    compact: list[JsonValue] = []
+                    for item in recent:
+                        if isinstance(item, dict) and item.get("type") == "reasoning":
+                            continue
+                        if isinstance(item, dict) and item.get("type") == "function_call_output":
+                            item = dict(item)
+                            output = item.get("output")
+                            if isinstance(output, str) and len(output) > 8192:
+                                item["output"] = output[:8192] + "\n[output truncated for context]"
+                        compact.append(item)
+                    items = cast(list[TResponseInputItem], compact)
+            raise AssertionError("context recovery exhausted")

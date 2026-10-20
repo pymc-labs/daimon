@@ -25,12 +25,12 @@ class FakeModelAdapter:
         text = context.request.input[0]
         assert text.type == "text"
         mode = text.text
-        context.emit(
+        await context.emit(
             "model_request_started",
             {"request_id": f"req-{self.calls}", "model": context.request.model},
         )
         if mode != "unmetered":
-            context.emit(
+            await context.emit(
                 "usage",
                 {
                     "request_id": f"req-{self.calls}",
@@ -54,8 +54,16 @@ class FakeModelAdapter:
             )
         if mode == "error":
             raise RuntimeError("secret provider message must never be exposed")
-        context.emit("agent_message_delta", {"text": "done"})
-        context.emit("agent_message", {"parts": [{"type": "text", "text": "done"}]})
+        await context.emit(
+            "agent_message_delta", {"message_id": "msg-" + context.request.turn_id, "text": "done"}
+        )
+        await context.emit(
+            "agent_message",
+            {
+                "message_id": "msg-" + context.request.turn_id,
+                "parts": [{"type": "text", "text": "done"}],
+            },
+        )
         return [
             *history,
             {"role": "user", "content": mode},

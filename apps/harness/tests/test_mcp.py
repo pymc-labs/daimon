@@ -11,8 +11,10 @@ import httpx
 import pytest
 import uvicorn
 from daimon_harness import model_adapter
+from daimon_harness.credentials import turn_credentials
+from daimon_harness.journal import Journal
 from daimon_harness.model_adapter import AzureModelAdapter
-from daimon_harness.runtime import TurnContext
+from daimon_harness.runtime import TurnContext, discard_event
 from fastmcp import FastMCP
 from mux.drivers.selfhosted.wire import ActionRequest, MCPServer, TurnRequest
 from openai import AsyncAzureOpenAI
@@ -23,13 +25,20 @@ from .conftest import turn
 async def test_mcp_tool_executes_after_confirmation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    secret = "Bearer synthetic-operator-mcp-secret"
+    monkeypatch.setenv("HARNESS_MCP_CRED_SAMPLE", secret)
+    journal = Journal(tmp_path)
     mcp = FastMCP("unit-test")
     executed: list[str] = []
 
     @mcp.tool
     def echo(text: str) -> str:
         executed.append(text)
-        return text
+        return text + " " + secret
+
+    @mcp.tool
+    def forbidden() -> str:
+        raise AssertionError("denied tool must not execute")
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -46,6 +55,7 @@ async def test_mcp_tool_executes_after_confirmation(
         body = json.loads(request.content)
         if calls == 1:
             assert "sample__echo" in [tool["name"] for tool in body["tools"]]
+            assert "sample__forbidden" not in [tool["name"] for tool in body["tools"]]
             output = [
                 {
                     "type": "function_call",
@@ -58,6 +68,8 @@ async def test_mcp_tool_executes_after_confirmation(
             ]
         else:
             assert "mcp-result" in str(body["input"])
+            assert "[redacted]" in str(body["input"])
+            assert "synthetic-operator-mcp-secret" not in str(body)
             output = [
                 {
                     "type": "message",
@@ -101,11 +113,27 @@ async def test_mcp_tool_executes_after_confirmation(
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
     events: list[tuple[str, object]] = []
     request = TurnRequest.model_validate(turn())
-    request.mcp_servers = [MCPServer(name="sample", url=f"http://127.0.0.1:{port}/mcp")]
-    context = TurnContext(request, tmp_path, lambda kind, data: None)
+    request.tool_policy = {"sample/*": "deny", "sample/echo": "ask"}
+    request.mcp_servers = [
+        MCPServer(
+            name="sample",
+            url=f"http://127.0.0.1:{port}/mcp",
+            headers_env={"Authorization": "HARNESS_MCP_CRED_SAMPLE"},
+        )
+    ]
+    monkeypatch.setenv(
+        "HARNESS_MCP_CRED_BINDINGS",
+        json.dumps(
+            {"HARNESS_MCP_CRED_SAMPLE": {"origin": f"http://127.0.0.1:{port}", "tenants": ["*"]}}
+        ),
+    )
+    context = TurnContext(
+        request, tmp_path, discard_event, credentials=turn_credentials(request, None)
+    )
 
-    def emit(kind: str, data: dict[str, object]) -> None:
+    async def emit(kind: str, data: dict[str, object]) -> None:
         events.append((kind, data))
+        journal.append(request, kind, data)
         if kind == "requires_action":
             assert executed == []
             action = str(data["action_id"])
@@ -118,7 +146,8 @@ async def test_mcp_tool_executes_after_confirmation(
                 if serving.done():
                     await serving
                 await asyncio.sleep(0.01)
-        await AzureModelAdapter().run(context, [])
+        history = await AzureModelAdapter().run(context, [])
+        journal.save_history(request.session_id, history)
     finally:
         server.should_exit = True
         await asyncio.wait_for(serving, 10)
@@ -133,3 +162,30 @@ async def test_mcp_tool_executes_after_confirmation(
     }
     assert sum(kind == "requires_action" for kind, _ in events) == 1
     assert sum(kind == "usage" for kind, _ in events) == 2
+
+    journal.close()
+    for path in (tmp_path / ".daimon").rglob("*"):
+        if path.is_file():
+            assert b"synthetic-operator-mcp-secret" not in path.read_bytes()
+    assert "synthetic-operator-mcp-secret" not in str(events)
+
+
+async def test_credential_http_client_does_not_follow_redirects(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def redirect(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(307, headers={"Location": "https://attacker.example/mcp"})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        model_adapter.httpx,
+        "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(redirect), **kwargs),
+    )
+    client = model_adapter.bound_mcp_http_client(headers={"X-Credential": "synthetic-secret"})
+    async with client:
+        response = await client.get("https://allowed.example/mcp")
+    assert response.status_code == 307
+    assert len(requests) == 1
+    assert requests[0].url.host == "allowed.example"

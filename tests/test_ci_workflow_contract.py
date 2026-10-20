@@ -98,6 +98,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     assert {leg["suite"] for leg in jobs["pytest-light"]["strategy"]["matrix"]["include"]} == {
         "report-host",
         "mux",
+        "harness",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))

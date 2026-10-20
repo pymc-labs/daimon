@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Hardened harness tool processes, caller authorization and MCP credential scoping; cache binary skill bundles and honor per-tool approval policies.
+
 - Harness tool policies accept explicit denial and validated built-in, MCP tool and server wildcard keys.
 
 - Validate binary harness skill bundles with shared SHA-256 digests and decoded size limits; require stable assistant message identities.

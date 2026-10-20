@@ -8,10 +8,12 @@ import json
 import logging
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, TypeVar, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -24,14 +26,19 @@ from mux.drivers.selfhosted.wire import (
     InvocationEnvelope,
     TurnAccepted,
     TurnRequest,
+    URLSkill,
 )
 from pydantic import JsonValue, ValidationError
 
 from .auth import Authenticator
+from .credentials import load_bindings, redact, turn_credentials
 from .errors import HarnessError
+from .isolation import protect_process
 from .journal import ConflictError, Journal, identifier
 from .model_adapter import AzureModelAdapter, ModelAdapter
 from .runtime import TurnContext
+
+T = TypeVar("T")
 
 audit_logger = logging.getLogger("daimon_harness.audit")
 audit_logger.setLevel(logging.INFO)
@@ -42,12 +49,25 @@ audit_logger.propagate = False
 
 class Supervisor:
     def __init__(self, home: Path, adapter: ModelAdapter) -> None:
+        self.operator_credentials = {
+            name: value
+            for name, value in os.environ.items()
+            if name.startswith("HARNESS_MCP_CRED_") and name != "HARNESS_MCP_CRED_BINDINGS"
+        }
+        self.credential_bindings = load_bindings()
+        self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="harness-journal")
+        self.submissions = asyncio.Lock()
         self.journal = Journal(home)
         self.home = home
         self.adapter = adapter
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.contexts: dict[str, TurnContext] = {}
         self.changed = asyncio.Event()
+
+    async def io(self, operation: Callable[..., T], *args: object) -> T:
+        # One worker owns all SQLite operations, including ordered event commits.
+        future = asyncio.get_running_loop().run_in_executor(self.worker, partial(operation, *args))
+        return await asyncio.shield(future)
 
     def recover(self) -> None:
         # A claimed turn can have executed tools. Never retry it after a process crash.
@@ -75,43 +95,85 @@ class Supervisor:
                     )
                 self.journal.append(request, "turn_ended", {"outcome": "interrupted"})
 
-    async def run(self, request: TurnRequest) -> None:
+    async def run(self, request: TurnRequest, credentials: dict[str, str]) -> None:
         usage_count = 0
         failure: dict[str, JsonValue] | None = None
 
-        def emit(kind: EventType, data: dict[str, JsonValue]) -> None:
+        async def emit(kind: EventType, data: dict[str, JsonValue]) -> None:
             nonlocal usage_count, failure
             if kind == "usage":
                 usage_count += 1
             if kind == "error":
                 failure = {"kind": data["kind"], "message": data["message"]}
-            self.journal.append(request, kind, data)
+            await self.io(
+                self.journal.append,
+                request,
+                kind,
+                cast(dict[str, JsonValue], redact(data, credentials)),
+            )
             self.changed.set()
 
-        context = TurnContext(request, self.home, emit)
-        self.contexts[request.turn_id] = context
         outcome = "completed"
+        context: TurnContext | None = None
         try:
-            emit("status_running", {})
+            sandbox, uid = await self.io(self.journal.sandbox, request.session_id)
+            context = TurnContext(
+                request,
+                sandbox,
+                emit,
+                credentials=credentials,
+                credential_bindings=self.credential_bindings,
+                tool_uid=uid,
+                state_dir=self.journal.root / "sessions" / request.session_id,
+            )
+            self.contexts[request.turn_id] = context
+            await emit("status_running", {})
+            previous = await self.io(self.journal.history, request.session_id)
+            await self.io(
+                self.journal.save_history,
+                request.session_id,
+                cast(
+                    list[JsonValue],
+                    redact(
+                        previous
+                        + [
+                            {
+                                "role": "user",
+                                "content": "Interrupted turn input: "
+                                + request.model_dump_json(include={"input"}),
+                            }
+                        ],
+                        credentials,
+                    ),
+                ),
+            )
             async with asyncio.timeout(request.limits.deadline_s):
-                history = await self.adapter.run(context, self.journal.history(request.session_id))
+                history = await self.adapter.run(context, previous)
             if not usage_count:
                 raise HarnessError("usage_missing", "Turn completed without measured usage")
-            self.journal.save_history(request.session_id, history)
+            await self.io(
+                self.journal.save_history,
+                request.session_id,
+                cast(list[JsonValue], redact(history, credentials)),
+            )
         except (asyncio.CancelledError, TimeoutError):
             outcome = "interrupted"
         except Exception as exc:
             outcome = "errored"
             # SDK exception messages can include credentials and request bodies.
             kind = exc.kind if isinstance(exc, HarnessError) else type(exc).__name__
-            if failure is not None and isinstance(exc, HarnessError):
+            if isinstance(exc, HarnessError):
                 failure = {"kind": kind, "message": str(exc)}
             if failure is None:
-                emit("error", {"kind": kind, "message": "Harness turn failed", "retryable": False})
+                await emit(
+                    "error", {"kind": kind, "message": "Harness turn failed", "retryable": False}
+                )
         finally:
+            if context is not None:
+                context.stop_processes()
             original_failure = failure
-            for request_id in self.journal.pending_requests(request):
-                emit(
+            for request_id in await self.io(self.journal.pending_requests, request):
+                await emit(
                     "error",
                     {
                         "kind": "usage_unavailable",
@@ -125,21 +187,31 @@ class Supervisor:
             data: dict[str, JsonValue] = {"outcome": outcome}
             if outcome == "errored":
                 data["error"] = failure or {"kind": "harness", "message": "Harness turn failed"}
-            emit("turn_ended", data)
+            await emit("turn_ended", data)
+            credentials.clear()
             self.contexts.pop(request.turn_id, None)
             self.changed.set()
 
-    def submit(self, request: TurnRequest) -> None:
-        self.tasks = {key: task for key, task in self.tasks.items() if not task.done()}
-        if self.journal.claim(request):
-            self.tasks[request.turn_id] = asyncio.create_task(self.run(request))
+    async def submit(self, request: TurnRequest, mcp_authorization: str | None = None) -> None:
+        async with self.submissions:
+            if await self.io(self.journal.is_replay, request):
+                return
+            if any(isinstance(skill, URLSkill) for skill in request.skills):
+                raise ValueError("URL skills are not supported; send an inline bundle")
+            credentials = turn_credentials(
+                request, mcp_authorization, self.operator_credentials, self.credential_bindings
+            )
+            self.tasks = {key: task for key, task in self.tasks.items() if not task.done()}
+            await self.io(self.journal.sandbox, request.session_id)
+            if await self.io(self.journal.claim, request):
+                self.tasks[request.turn_id] = asyncio.create_task(self.run(request, credentials))
 
     async def stream(self, request: TurnRequest) -> AsyncIterator[str]:
         after = 0
         while True:
             self.changed.clear()
-            events = self.journal.events(request.session_id, after)
-            complete = self.journal.ended(request.turn_id)
+            complete = await self.io(self.journal.ended, request.turn_id)
+            events = await self.io(self.journal.events, request.session_id, after)
             if not events and not complete:
                 try:
                     await asyncio.wait_for(self.changed.wait(), timeout=15)
@@ -157,10 +229,13 @@ class Supervisor:
 
     async def close(self) -> None:
         for task in self.tasks.values():
-            if not task.done():
+            if not task.done() and not task.cancelling():
                 task.cancel()
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
-        self.journal.close()
+        if isinstance(self.adapter, AzureModelAdapter) and self.adapter.credential is not None:
+            await self.adapter.credential.close()
+        await self.io(self.journal.close)
+        self.worker.shutdown(wait=True)
 
 
 def create_app(
@@ -173,12 +248,15 @@ def create_app(
     root = home or Path.home()
     auth = Authenticator(token)
     supervisor = Supervisor(root, adapter or AzureModelAdapter())
+    if adapter is None:
+        supervisor.journal.root.chmod(0o700)
+        protect_process()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with (supervisor.journal.root / "process.lock").open("a") as lease:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            supervisor.recover()
+            await supervisor.io(supervisor.recover)
             try:
                 yield
             finally:
@@ -203,6 +281,7 @@ def create_app(
         request: TurnRequest,
         caller: str = Depends(authenticate),
         accept: Annotated[str | None, Header()] = None,
+        x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
     ) -> Response:
         audit_logger.info(
             json.dumps(
@@ -215,11 +294,9 @@ def create_app(
             )
         )
         try:
-            supervisor.submit(request)
+            await supervisor.submit(request, x_daimon_mcp_authorization)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=422, detail="Invalid session or turn identifier"
-            ) from exc
+            raise HTTPException(status_code=422, detail="Invalid turn configuration") from exc
         except ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         if accept and "application/json" in accept and "text/event-stream" not in accept:
@@ -252,7 +329,10 @@ def create_app(
             return CancelResponse(cancelled=False)
         # Ensure a newly submitted task reaches its finally block before cancellation.
         await asyncio.sleep(0)
-        task.cancel()
+        if task.done():
+            return CancelResponse(cancelled=False)
+        if not task.cancelling():
+            task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         return CancelResponse(cancelled=True)
 
@@ -261,16 +341,17 @@ def create_app(
             identifier(session_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid session identifier") from exc
-        requests = supervisor.journal.turns(session_id)
+        complete = await supervisor.io(supervisor.journal.complete, session_id)
         return EventsResponse(
-            events=supervisor.journal.events(session_id, after_seq),
-            complete=all(supervisor.journal.ended(r.turn_id) for r in requests),
+            events=await supervisor.io(supervisor.journal.events, session_id, after_seq),
+            complete=complete,
         )
 
     async def invoke(
         envelope: InvocationEnvelope,
         caller: str = Depends(authenticate),
         accept: Annotated[str | None, Header()] = None,
+        x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
     ) -> Response:
         route = envelope.c3
         method, path = route.method, route.path
@@ -284,7 +365,12 @@ def create_app(
             if method == "GET" and path == "/v0/healthz":
                 return JSONResponse((await health()).model_dump())
             if method == "POST" and path == "/v0/turns":
-                return await turns(TurnRequest.model_validate(route.body), caller, accept)
+                return await turns(
+                    TurnRequest.model_validate(route.body),
+                    caller,
+                    accept,
+                    x_daimon_mcp_authorization,
+                )
             if method == "POST" and (
                 match := re.fullmatch(r"/v0/turns/([^/]+)/(actions|cancel)", path)
             ):
