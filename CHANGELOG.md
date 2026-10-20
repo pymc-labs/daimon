@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Teams, when Microsoft refuses a `microsoft_write` because the file is locked (usually open in a desktop Office app), the model is now told nothing was changed and to ask the person to close the file and try again, instead of just "refused (423)".
+
 - In Teams, clicking Stop on a reply's status card now turns that card into "Stopping…" without a Stop button right away. It used to show a "Cancelling…" banner that stayed on the card after the reply had stopped.
 
 - A turn stopped, or cut off by its time limit, just after Daimon created its Managed Agents session no longer leaves that session running upstream with nothing pointing at it. The same goes for a database error at that moment. Daimon now archives the session before giving up; sessions it reuses or adopts from another turn are never archived.

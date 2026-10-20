@@ -128,6 +128,11 @@ def _refusal_hint(response: httpx.Response) -> str:
             "The person's account, or what their organisation allowed this app, does not "
             "permit this. Do not retry."
         )
+    if status == 423:
+        return (
+            "The file is locked, most likely open in a desktop Office app, so nothing was "
+            "changed. Ask the person to close it and try again."
+        )
     return ""
 
 
