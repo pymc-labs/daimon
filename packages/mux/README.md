@@ -1118,3 +1118,6 @@ file/directory collisions are refused. Limits are 8 MiB decoded per skill and
 Assistant message deltas and snapshots require the same session-unique
 `message_id`, allowing a driver to accumulate deltas and replace them with the
 final snapshot.
+
+A turn may supply `tool_policy: {tool_name: "auto" | "ask"}`. The default is
+empty; unlisted tools execute automatically. Explicit `ask` requires approval.

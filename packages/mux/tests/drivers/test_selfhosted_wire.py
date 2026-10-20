@@ -291,3 +291,28 @@ def test_assistant_messages_require_stable_identity(kind, payload):
         DATA_MODELS[kind].model_validate(payload)
     parsed = DATA_MODELS[kind].model_validate({**payload, "message_id": "stable", "future": 1})
     assert parsed.model_dump()["message_id"] == "stable"
+
+
+def test_per_tool_policy_defaults_to_auto_and_validates_choices():
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    fields = dict(
+        session_id="s",
+        turn_id="t",
+        idempotency_key="k",
+        model="m",
+        instructions="",
+        input=[],
+        mcp_servers=[],
+        skills=[],
+        limits={"max_tool_calls": 1, "deadline_s": 1},
+    )
+    assert TurnRequest.model_validate(fields).tool_policy == {}
+    assert (
+        TurnRequest.model_validate(
+            {**fields, "tool_policy": {"write": "ask", "bash": "auto"}}
+        ).tool_policy["write"]
+        == "ask"
+    )
+    with pytest.raises(ValidationError):
+        TurnRequest.model_validate({**fields, "tool_policy": {"write": "allow"}})

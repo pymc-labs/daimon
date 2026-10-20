@@ -11,6 +11,7 @@ import binascii
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Annotated, Literal, cast
 
 from pydantic import (
@@ -61,7 +62,7 @@ SKILL_MAX_BYTES = 8 * 1024 * 1024
 TURN_SKILLS_MAX_BYTES = 24 * 1024 * 1024
 
 
-def skill_sha256(name: str, files: dict[str, bytes]) -> str:
+def skill_sha256(name: str, files: Mapping[str, bytes]) -> str:
     """Hash UTF-8 compact sorted JSON {name, files: {path: canonical base64}}."""
     canonical = json.dumps(
         {
@@ -145,6 +146,7 @@ class TurnRequest(WireModel):
     mcp_servers: list[MCPServer]
     skills: list[Skill]
     limits: Limits
+    tool_policy: dict[str, Literal["auto", "ask"]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_skills(self) -> TurnRequest:
