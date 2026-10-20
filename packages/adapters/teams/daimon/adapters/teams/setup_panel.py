@@ -53,7 +53,7 @@ from daimon.adapters.teams.setup_conversation import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import DetailListName
-from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
+from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
@@ -100,6 +100,7 @@ from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import AdaptiveCard
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import Provider
+from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger()
 
@@ -474,6 +475,32 @@ class SetupPanel:
             channel_names=names,
         )
 
+    async def _without_hidden_places(
+        self, session: AsyncSession, actor: Actor, details: AgentDetails
+    ) -> AgentDetails:
+        """`details` without the channels an isolated channel's line hides from `actor`.
+
+        As Who answers where does: a member never learns an isolated channel's
+        name, or that an agent answers there. Admins see every place.
+        """
+        viewer = await load_rule_viewer(
+            session,
+            self._runtime.anthropic,
+            tenant_id=actor.tenant_id,
+            channel_id=actor.conversation_id,
+            is_admin=actor.is_admin,
+            platform="teams",
+            default=self._runtime.deployment_default,
+        )
+        if viewer is None:
+            return details
+        places = tuple(
+            place
+            for place in details.answers_in
+            if place.tier != "channel" or viewer.sees_place(place.channel_id)
+        )
+        return details.model_copy(update={"answers_in": places})
+
     async def _details(
         self, actor: Actor, name: str, page: int, expanded: DetailListName | None = None
     ) -> AdaptiveCard | None:
@@ -504,6 +531,7 @@ class SetupPanel:
                 is_admin=actor.is_admin,
                 channel_label=None,
             )
+            details = await self._without_hidden_places(session, actor, details)
             github_panel = await load_grants_panel(
                 session,
                 tenant_id=actor.tenant_id,

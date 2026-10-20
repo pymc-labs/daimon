@@ -240,6 +240,47 @@ async def test_routing_hides_an_isolated_channels_environment_from_outside(
 
 
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
+async def test_details_hides_an_isolated_channels_name_from_a_member(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+) -> None:
+    """Answers in follows Who answers where: a member never learns an isolated
+    channel's name, or that the agent answers there; an admin sees it."""
+    isolated, open_channel = "19:vault@thread.tacv2", "19:lobby@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(isolated,), isolated_channel_ids=(isolated,)
+            ),
+        )
+        await upsert_channel_names(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            names={isolated: "Secret Vault", open_channel: "Lobby"},
+        )
+        for channel in (CONVERSATION_ID, isolated, open_channel):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+                tenant_id=TENANT,
+                agent_name="analyst",
+                mode="agent",
+            )
+    admins = (AAD_OBJECT_ID,) if admin else ()
+    async with _running(db_session_factory, teams_api_fake, admins=admins) as (service, _):
+        details = json.dumps(
+            await post_activity(service, _click("details", agent="analyst")), ensure_ascii=False
+        )
+
+    assert "Lobby" in details, "an open channel's name is listed"
+    assert ("Secret Vault" in details) is admin, "the isolated channel's shows only to an admin"
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
 async def test_the_agents_list_hides_an_isolated_channels_own_agent_from_outside(
     db_session_factory: async_sessionmaker[AsyncSession],
     teams_api_fake: TeamsApiFake,

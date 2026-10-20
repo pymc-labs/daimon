@@ -350,9 +350,10 @@ def routing_card(
     `channel_names` names the channels listed (`routing_channel_ids`); one with no
     name shows a neutral label, never its id.
     """
-    names = channel_names or {}
+    channels = channel_names or {}
     body: list[CardElement] = [
-        _text(_channel_line(answer.channel_id, answer.agent_name, names)) for answer in page.items
+        _text(_channel_line(answer.channel_id, answer.agent_name, channels))
+        for answer in page.items
     ] or [_text("No channel has its own setting.", subtle=True)]
     tenant = answering_map.tenant_default
     default = tenant.agent_name if tenant else "Not assigned"
@@ -364,7 +365,7 @@ def routing_card(
         if answering_map.tenant_consumes_fallthrough:
             line += " (not in effect while an organisation default is set)"
         body.append(_text(line))
-    body.append(_text(_environments_text(answering_map, names)))
+    body.append(_text(_environments_text(answering_map, channels)))
     names = [setup_thread_name(ref.target_name) for ref in answering_map.setup_threads]
     if answering_map.setup_threads_truncated:
         names.append("…and more")
