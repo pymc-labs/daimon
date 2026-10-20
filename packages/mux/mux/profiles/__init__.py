@@ -19,9 +19,11 @@ from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
 from mux.profiles.gemini import INLINE_REUSE, WORKER_MODEL
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
+from mux.profiles.selfhosted import LOOP
 
 PROFILES: Mapping[str, Profile] = {
-    p.profile_id: p for p in (MANAGED_AGENTS, PERSISTENT_WORKSPACE, CONVERSATION_ONLY, INLINE_REUSE)
+    p.profile_id: p
+    for p in (MANAGED_AGENTS, PERSISTENT_WORKSPACE, CONVERSATION_ONLY, INLINE_REUSE, LOOP)
 }
 
 
@@ -164,6 +166,7 @@ __all__ = [
     "CONVERSATION_ONLY",
     "INLINE_REUSE",
     "MANAGED_AGENTS",
+    "LOOP",
     "PERSISTENT_WORKSPACE",
     "PROFILES",
     "get_profile",
@@ -189,6 +192,10 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
         BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"),
         ("per_caller",),
         profiles=(CONVERSATION_ONLY.profile_id,),
+    ),
+    "selfhosted": BackendSelection(
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        ("per_caller",),
     ),
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
@@ -224,7 +231,9 @@ def runnable_selection(selection: ResolvedBackend) -> bool:
     return (
         selection.profile in (resolved.profile, *declared.profiles)
         and (
-            selection.model == resolved.model or selection.model in (declared.allowed_models or ())
+            selection.model == resolved.model
+            or selection.model in (declared.allowed_models or ())
+            or (selection.backend == "selfhosted" and selection.model is not None)
         )
         and selection.thread_mode in declared.thread_modes
     )

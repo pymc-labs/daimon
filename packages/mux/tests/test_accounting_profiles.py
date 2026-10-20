@@ -19,6 +19,7 @@ from pydantic import ValidationError
         ("openai.persistent_workspace", AccountingMode.NATIVE_ROOT_TOTALS, True, True),
         ("openai.conversation_only", AccountingMode.NATIVE_ROOT_TOTALS, True, True),
         ("gemini.inline_reuse", AccountingMode.NATIVE_TOTALS, True, False),
+        ("selfhosted.loop", AccountingMode.NATIVE_TOTALS, True, False),
     ],
 )
 def test_declared_profile_accounting_preserves_existing_policy(id_, mode, native, root):
