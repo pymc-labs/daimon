@@ -1245,3 +1245,11 @@ bundles on other backends without duplicating provider policy.
 wire models. It does not import Daimon core or adapters. It implements the C3 HTTP
 service, Azure Responses model loop, durable request inventory and per-session
 tool isolation; its README documents deployment and authentication requirements.
+
+Core registers `selfhosted.loop` through its selfhosted deployment runtime.
+The shell authorizes an exact tenant/channel/account configuration, checks
+selfhosted tariffs before HTTP, injects scoped resource ports, and records
+model-request usage through the shared accounting outbox. Its turn codec keeps
+canonical events and fenced idempotency receipts while rendering adapter DTOs;
+no Anthropic API is used for these turns. The MCP credential stays in a turn
+transport closure and is revoked by the prepared-turn finalizer.

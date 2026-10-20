@@ -206,6 +206,9 @@ class PreparedTurn:
     session_account_id: uuid.UUID
     _record: UsageRecorder | ObservationRecorder
     continuity: ContinuityOutcome = CONTINUED
+    _finalize: Callable[[], Awaitable[None]] | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
     # Populated only by a provider-native preparation hook. Anthropic's
     # existing field values and preparation remain unchanged.
     backend: ManagedAgents | None = None

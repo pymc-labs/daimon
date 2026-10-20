@@ -2189,3 +2189,20 @@ existing progress card while it waits behind the tenant cap. The same card
 returns to ordinary progress when the slot is granted. Stop, queue limits and
 FIFO admission are unchanged, and the card displays no tenant identities or
 queue counts. Drained follow-up turns keep their existing card wording.
+
+### Self-hosted harness turns
+
+The `selfhosted.loop` turn-runtime entry point composes injected tenant-scoped
+agent/environment ports with the mux HTTP driver. A manifest authorizes the
+exact admitted channel revision and caller. Price admission happens before
+transport use; the host binds a deterministic session without model I/O and
+records sends, receipts and canonical events in the existing fenced mux state
+store. Invocation baselines keep previous roots out of each new reply.
+
+The driver polls the durable harness journal through direct HTTP or Foundry
+invocations. Reconnect reconciles the same root; cancellation holds occupancy
+until a canonical terminal arrives. Model-request observations pass through the
+selfhosted recorder, including unknown observations for unmatched request
+starts. Display conversion uses SDK DTOs for adapter compatibility without
+calling an Anthropic API. Tools and inline skills are assembled under the
+admitted scope, and the host revokes the header-only MCP token in turn cleanup.

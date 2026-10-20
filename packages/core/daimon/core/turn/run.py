@@ -859,6 +859,9 @@ async def run_prepared_turn(
     except BaseException as exc:
         observation.finish(error=exc)
         raise
+    finally:
+        if prepared._finalize is not None:  # pyright: ignore[reportPrivateUsage]
+            await prepared._finalize()  # pyright: ignore[reportPrivateUsage]
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
     return result

@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, JsonValue, model_validator
 
-from mux.contracts.resources import AgentSpec, EnvironmentSpec
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, MCPConnection
 from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
 
@@ -161,11 +161,37 @@ class HarnessConfig(BaseModel):
         return self
 
 
+def _validate_mcp_policy(server: MCPConnection) -> None:
+    """Admit only permission labels and a closed list of tool names."""
+    policy = server.tool_policy
+    allowed = policy.get("allowed_tools")
+    if "allowed_tools" in policy and (
+        not isinstance(allowed, list)
+        or any(
+            not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name)
+            for name in allowed
+        )
+    ):
+        raise ValueError("MCP allowed_tools must contain tool names")
+    for name, permission in policy.items():
+        if name == "allowed_tools":
+            continue
+        tool = name.removeprefix(server.name + "/")
+        if permission not in ("auto", "ask", "deny") or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+|\*", tool
+        ):
+            raise ValueError(
+                "MCP policy requires tools in the server namespace and permission labels"
+            )
+        if isinstance(allowed, list) and tool not in allowed and permission != "deny":
+            raise ValueError("MCP policy cannot widen allowed_tools")
+
+
 def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
     """Reject credential-bearing or unsupported resource input with a mux error.
 
-    Extensions and tool policies have no selfhosted v1 credential schema, so
-    accepting arbitrary dictionaries there would bypass reference validation.
+    Tool policies contain only closed permission labels and tool names;
+    arbitrary dictionaries cannot bypass credential-reference validation.
     """
     try:
         _reject_credentials(dict(spec.metadata or {}))
@@ -184,8 +210,7 @@ def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
                     server.credential_ref
                 ):
                     raise ValueError("MCP credential_ref must name a HARNESS_MCP_CRED_ variable")
-                if server.tool_policy:
-                    raise ValueError("MCP tool policies are not supported by selfhosted v1")
+                _validate_mcp_policy(server)
         else:
             _reject_credentials(spec.model_dump(mode="json")["packages"])
             if spec.execution != "self_hosted" or spec.native_config is None:

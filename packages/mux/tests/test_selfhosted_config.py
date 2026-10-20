@@ -361,3 +361,34 @@ def test_explicit_internal_http_admits_rfc1918_ula_and_cluster_names(host):
 @pytest.mark.parametrize("host", ["127.0.0.1", "127.1", "2130706433", "0x7f000001", "[::1]"])
 def test_loopback_http_remains_available_without_internal_override(host):
     HarnessConfig(harness_url=f"http://{host}:8080", auth_ref="TOKEN")
+
+
+@pytest.mark.parametrize(
+    "policy, valid",
+    [
+        ({"allowed_tools": ["read"], "read": "ask"}, True),
+        ({"tools/*": "deny", "tools/read": "ask"}, True),
+        ({"other/read": "ask"}, False),
+        ({"allowed_tools": ["read"], "write": "auto"}, False),
+        ({"allowed_tools": [], "*": "auto"}, False),
+        ({"allowed_tools": "read"}, False),
+        ({"allowed_tools": ["../read"]}, False),
+        ({"read": "sometimes"}, False),
+        ({"headers": {"Authorization": "opaque-value"}}, False),
+    ],
+)
+def test_persisted_mcp_policy_has_closed_permission_schema(policy, valid):
+    from mux.contracts.resources import MCPConnection
+
+    spec = AgentSpec(
+        name="agent",
+        model=ModelRef(provider=LOOP.provider, id="gpt-5"),
+        mcp_servers=(
+            MCPConnection(name="tools", url="https://tools.example/mcp", tool_policy=policy),
+        ),
+    )
+    if valid:
+        validate_resource_spec(spec)
+    else:
+        with pytest.raises(ProviderError):
+            validate_resource_spec(spec)

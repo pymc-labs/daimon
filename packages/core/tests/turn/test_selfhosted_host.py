@@ -1,0 +1,877 @@
+"""Real self-hosted host turns, with a C3 HTTP fake and fenced persistence."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
+from typing import cast
+
+import httpx
+import pytest
+from daimon.core.pricing import ProviderPrice
+from daimon.core.turn import selfhosted_host
+from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
+from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, prepare_selfhosted
+from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
+from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+from mux.contracts.ids import ModelRef, ResourceRef, Revision
+from mux.contracts.ports import Agents, Environments
+from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec, SessionSpec
+from mux.drivers.selfhosted.transport import DirectTransport
+from mux.state.memory import MemoryStateStore
+
+from .conformance_support import ACCOUNT, TENANT, admission
+from .test_provider_dispatch import SCOPE
+
+PROFILE = "selfhosted.loop"
+BASE = admission().backend_revision
+REVISION = ConfigRevision.create(
+    BASE.channel,
+    1,
+    resolve_default(BackendConfig(backend="selfhosted", profile=PROFILE, model="gpt-5")),
+)
+
+
+class Wire:
+    def __init__(self):
+        self.events = []
+        self.turns = {}
+        self.posts = 0
+        self.unmatched_start = False
+
+    def handle(self, request):
+        assert request.headers["authorization"] == "Bearer offline"
+        if request.method == "GET":
+            return httpx.Response(200, json={"events": self.events, "complete": True})
+        body = json.loads(request.content)
+        if body["idempotency_key"] not in self.turns:
+            self.turns[body["idempotency_key"]] = body
+            self.posts += 1
+            events = [
+                ("status_running", {}),
+                (
+                    "usage",
+                    {
+                        "request_id": f"request-{self.posts}",
+                        "model": "gpt-5",
+                        "input_tokens": 10,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 5,
+                        "reasoning_tokens": 0,
+                    },
+                ),
+                (
+                    "agent_message",
+                    {
+                        "message_id": f"message-{self.posts}",
+                        "parts": [{"type": "text", "text": f"answer {self.posts}"}],
+                    },
+                ),
+                ("turn_ended", {"outcome": "completed"}),
+            ]
+            if self.unmatched_start:
+                events[1] = (
+                    "model_request_started",
+                    {"request_id": f"request-{self.posts}", "model": "gpt-5"},
+                )
+                events[-1] = ("turn_ended", {"outcome": "interrupted"})
+            for kind, data in events:
+                self.events.append(
+                    dict(
+                        seq=len(self.events) + 1,
+                        session_id=body["session_id"],
+                        turn_id=body["turn_id"],
+                        at=datetime.now(UTC).isoformat(),
+                        type=kind,
+                        data=data,
+                    )
+                )
+        return httpx.Response(202, json={"accepted": True, "turn_id": body["turn_id"]})
+
+
+class Resources:
+    def __init__(self, value):
+        self.value = value
+
+    async def retrieve(self, scope, ref):
+        assert scope == SCOPE and ref == self.value.ref
+        return self.value
+
+
+@pytest.fixture(params=["memory", "postgres"])
+async def composed(request, db_session_factory, db_clean, monkeypatch):
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.testing.factories import make_tenant
+
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+
+    async with db_session_factory() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+    store = (
+        MemoryStateStore() if request.param == "memory" else PostgresStateStore(db_session_factory)
+    )
+    wire = Wire()
+    observations = []
+
+    async def record(**kwargs):
+        observations.append(kwargs)
+        return False
+
+    monkeypatch.setattr(selfhosted_host, "record_provider_usage", record)
+
+    def ref(kind):
+        return ResourceRef(
+            id="native-" + kind,
+            kind=kind,
+            provider="selfhosted",
+            account_scope_id=str(TENANT),
+            tenant_id=SCOPE.tenant_id,
+            account_id=None,
+        )
+
+    agents = cast(
+        Agents,
+        Resources(
+            Agent(
+                ref=ref("agent"),
+                revision=Revision(local=1),
+                created_at=datetime.now(UTC),
+                spec=AgentSpec(name="test", model=ModelRef(provider="selfhosted", id="gpt-5")),
+            )
+        ),
+    )
+    environments = cast(
+        Environments,
+        Resources(
+            Environment(
+                ref=ref("environment"),
+                revision=Revision(local=1),
+                created_at=datetime.now(UTC),
+                spec=EnvironmentSpec(name="test", execution="self_hosted"),
+            )
+        ),
+    )
+
+    async def plan(preparation):
+        return SessionSpec(
+            agent=ref("agent"),
+            agent_revision=Revision(local=1),
+            environment=ref("environment"),
+            config_revision=REVISION.local,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)) as client:
+        runtime = SelfHostedHostRuntime(
+            transport_factory=lambda config, scope: DirectTransport(
+                client, base_url="https://harness", token="offline"
+            ),
+            journal=None,
+            usage_store=None,
+            account_scope_id=str(TENANT),
+            session_plan=plan,
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            model="gpt-5",
+            price=ProviderPrice(
+                provider="selfhosted",
+                model="gpt-5",
+                checked_on=date(2026, 1, 1),
+                input=Decimal(2),
+                output=Decimal(10),
+                cache_read=Decimal("0.5"),
+            ),
+            infrastructure_usd=Decimal(0),
+            agents=agents,
+            environments=environments,
+        )
+        deps = replace(
+            deps_for(None, db_session_factory),
+            channel_backends=True,
+            state_store=store,
+            turn_runtimes={PROFILE: runtime},
+        )
+        request = ProviderPreparationRequest(
+            deps,
+            replace(admission(), backend_revision=REVISION),
+            SCOPE,
+            TENANT,
+            "slack",
+            "caller",
+            "thread",
+            ACCOUNT,
+            True,
+            cast(object, None),
+            None,
+            datetime.now(UTC) + timedelta(seconds=20),
+            lambda: datetime.now(UTC),
+        )
+        yield request, wire, store, observations
+
+
+async def test_prepare_reuses_same_tenant_bound_session_without_a_turn(composed):
+    request, wire, _, _ = composed
+    first = await prepare_selfhosted(request)
+    second = await prepare_selfhosted(request)
+    assert first.session_ref == second.session_ref
+    assert not first.reused and second.reused
+    assert wire.posts == 0
+
+
+async def test_two_real_host_turns_keep_roots_and_usage_separate(composed):
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    request, wire, store, observations = composed
+    finalized = []
+
+    async def finalize():
+        finalized.append(True)
+
+    runtime = replace(
+        request.deps.turn_runtimes[PROFILE],
+        finalize=finalize,
+        skipped_notice=lambda: "Daimon: skills unavailable here: docx (requires Anthropic).",
+    )
+    request = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
+    for index in (1, 2):
+        prepared = await bind_session_impl(
+            request.deps,
+            request.admission,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="caller",
+            thread_id="thread",
+            session_account_id=ACCOUNT,
+            reuse_existing=True,
+        )
+
+        async def reseed():
+            return "question"
+
+        outcome = await run_prepared_turn(
+            request.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            external_user_id="caller",
+            user_message=f"question {index}",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+            render_interval_s=0.01,
+            operation_key=f"selfhosted-{index}",
+        )
+        await drain_outcomes()
+        assert outcome.state.error is None
+        assert f"answer {index}" in str(outcome.state.content)
+        assert ("skills unavailable here" in str(outcome.state.content)) == (index == 1)
+        assert len(finalized) == index
+        if index == 2:
+            assert "answer 1" not in str(outcome.state.content)
+    assert wire.posts == 2
+    assert observations
+    assert len({row["observation"].id for row in observations}) == 2
+    assert all(row["model_id"] == "gpt-5" for row in observations)
+    events = await store.read_events(prepared.session_ref.id)
+    assert sum(e.type == "session.turn_ended" for e in events) == 2
+
+
+@pytest.mark.parametrize("composed", ["postgres"], indirect=True)
+async def test_unmatched_start_reaches_actual_recorder_as_pending_unknown(composed):
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.config import SelfhostedBillingSettings, SelfhostedModelPrice
+    from daimon.core.selfhosted_usage import admit_selfhosted_usage, record_selfhosted_usage
+    from daimon.core.stores.accounting_outbox import list_pending_usage
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    request, wire, _, _ = composed
+    billing = SelfhostedBillingSettings(
+        deployments={"gpt-5": "test-model"},
+        models={
+            "test-model": [
+                SelfhostedModelPrice(
+                    effective_from=date(2026, 1, 1), input="2", output="10", cache_read="0.5"
+                )
+            ]
+        },
+    )
+    received = []
+
+    async def record(observation, binding_id):
+        received.append(observation)
+        return await record_selfhosted_usage(
+            sessionmaker=request.deps.sessionmaker,
+            observation=observation,
+            binding_id=binding_id,
+            tenant_id=TENANT,
+            platform_user_id="caller",
+            admission_key="inventory-test",
+            infrastructure_usd=Decimal(0),
+        )
+
+    runtime = replace(request.deps.turn_runtimes[PROFILE], record_usage=record)
+    request = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
+    prepared = await prepare_selfhosted(request)
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    binding = await PostgresStateStore(request.deps.sessionmaker).get_binding(
+        Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id=request.thread_id),
+            account_id=SCOPE.account_id,
+        )
+    )
+    assert binding is not None
+    await admit_selfhosted_usage(
+        sessionmaker=request.deps.sessionmaker,
+        tenant_id=TENANT,
+        binding_id=binding.id,
+        session_ref=prepared.session_ref,
+        admission_key="inventory-test",
+        deployment="gpt-5",
+        billing=billing,
+    )
+    wire.unmatched_start = True
+    await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        [UserMessage(content=(TextPart(text="start then crash"),))],
+        key="inventory-test",
+    )
+    observations = await prepared.backend.usage.reconcile(SCOPE, prepared.session_ref)
+    assert len(observations) == 1
+    assert observations[0].completeness == "unknown"
+    assert observations[0].input_tokens is None and observations[0].output_tokens is None
+    assert not await prepared._record(observation=observations[0])
+    assert received == list(observations)
+    async with request.deps.sessionmaker() as session:
+        pending = await list_pending_usage(session, tenant_id=TENANT)
+    assert any(
+        row.observation_id == observations[0].id and row.completeness == "unknown"
+        for row in pending.rows
+    )
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, failure):
+    from daimon.core.turn import run
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    request, _, _, _ = composed
+    finalized = []
+
+    async def finalize():
+        finalized.append(True)
+
+    prepared = await prepare_selfhosted(request)
+    prepared = replace(prepared, _finalize=finalize)
+
+    async def fail(*args, **kwargs):
+        raise failure()
+
+    monkeypatch.setattr(run, "run_prepared_turn_impl", fail)
+    with pytest.raises(failure):
+        await run_prepared_turn(
+            request.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            external_user_id="caller",
+            user_message="question",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=fail,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        )
+    await drain_outcomes()
+    assert finalized == [True]
+
+
+@pytest.mark.parametrize("composed", ["postgres"], indirect=True)
+@pytest.mark.parametrize("unmatched", [False, True])
+@pytest.mark.parametrize("drop_stream", [False, True])
+async def test_production_shell_admits_before_http_records_and_revokes(
+    composed, tmp_path, monkeypatch, unmatched, drop_stream
+):
+    import uuid
+
+    import jwt
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.config import (
+        McpCredentialBinding,
+        McpSettings,
+        SelfhostedBillingSettings,
+        SelfhostedModelPrice,
+        SelfhostedSettings,
+    )
+    from daimon.core.stores import mux_state
+    from daimon.core.stores import selfhosted_usage as contexts
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.accounting_outbox import list_pending_usage
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
+    from daimon.core.stores.tenants import get_tenant, set_funding_mode
+    from daimon.core.turn.admission import admit
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.persistence import current_persistence
+    from daimon.core.turn.runtimes import build_channel_runtime, ensure_channel_runtime
+    from daimon.testing.factories import make_account, make_platform_principal, make_tenant_config
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import ThreadRef
+    from mux.contracts.resources import MCPConnection, ToolSpec
+    from mux.state.lease import Slot
+    from pydantic import SecretStr
+
+    from .test_selfhosted_admission import ForbiddenAnthropic
+
+    request, wire, _, _ = composed
+    async with request.deps.sessionmaker() as db, db.begin():
+        tenant = await get_tenant(db, TENANT)
+        assert tenant is not None
+        account = await make_account(db, tenant=tenant, id=ACCOUNT)
+        await make_platform_principal(
+            db, tenant=tenant, account=account, platform="slack", external_id="caller"
+        )
+        await make_tenant_config(db, tenant=tenant, agent_name="test", environment_name="test")
+        await set_funding_mode(db, tenant_id=TENANT, funding_mode="operator_funded")
+        await set_access_policy(
+            db,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(
+                enabled_backends=("anthropic", "selfhosted"),
+            ),
+        )
+        await mux_state.put_config_revision(db, REVISION)
+    agent = await SelfHostedAgents(request.deps.sessionmaker).create(
+        SCOPE,
+        AgentSpec(
+            name="test",
+            model=ModelRef(provider="selfhosted", id="gpt-5"),
+            tools=(
+                ToolSpec(name="write", kind="builtin", permission="ask"),
+                ToolSpec(name="reports", kind="mcp_toolset", permission="ask"),
+            ),
+            mcp_servers=(
+                MCPConnection(
+                    name="reports",
+                    url="https://reports.example/mcp",
+                    credential_ref="HARNESS_MCP_CRED_REPORTS",
+                    tool_policy={"allowed_tools": ["summarize"]},
+                ),
+            ),
+        ),
+        key="production-agent",
+    )
+    environment = await SelfHostedEnvironments(request.deps.sessionmaker).create(
+        SCOPE,
+        EnvironmentSpec(
+            name="test",
+            execution="self_hosted",
+            native_config=ExtensionConfig(
+                namespace="selfhosted.environment",
+                version=1,
+                value={
+                    "harness_url": "https://harness",
+                    "auth_mode": "bearer_env",
+                    "auth_ref": "HARNESS_PRODUCTION_TEST_TOKEN",
+                },
+            ),
+        ),
+        key="production-environment",
+    )
+    request = replace(
+        request,
+        admission=replace(
+            request.admission,
+            agent=request.admission.agent.model_copy(update={"id": agent.ref.id}),
+            environment=request.admission.environment.model_copy(update={"id": environment.ref.id}),
+        ),
+        deps=replace(
+            request.deps,
+            anthropic=ForbiddenAnthropic(),
+            mcp=McpSettings(
+                public_url="https://mcp.example/mcp",
+                jwt_secret=SecretStr("offline-test-signing-material-32-bytes"),
+            ),
+        ),
+    )
+    billing = SelfhostedBillingSettings(
+        deployments={"gpt-5": "test-model"},
+        models={
+            "test-model": [
+                SelfhostedModelPrice(
+                    effective_from=date(2026, 1, 1), input="2", output="10", cache_read="0.5"
+                )
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "daimon.core.config.load_settings",
+        lambda: SimpleNamespace(
+            billing=SimpleNamespace(selfhosted=billing),
+            selfhosted=SelfhostedSettings(
+                mcp_credential_bindings=(
+                    McpCredentialBinding(
+                        name="HARNESS_MCP_CRED_REPORTS",
+                        origin="https://reports.example",
+                        tenants=(TENANT,),
+                    ),
+                )
+            ),
+        ),
+    )
+    path = tmp_path / "runtime.json"
+    path.write_text(
+        json.dumps(
+            [
+                dict(
+                    profile=PROFILE,
+                    tenant_id=SCOPE.tenant_id,
+                    platform="slack",
+                    channel_id=REVISION.channel.channel_id,
+                    account_id=SCOPE.account_id,
+                    config_digest=REVISION.content_digest(),
+                    agent_id=agent.ref.id,
+                    environment_id=environment.ref.id,
+                    infrastructure_usd="0",
+                )
+            ]
+        )
+    )
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    monkeypatch.setenv("HARNESS_PRODUCTION_TEST_TOKEN", "offline")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("DAIMON_ANTHROPIC__API_KEY", raising=False)
+    requests, admitted_keys, token_ids = [], [], []
+
+    async def http(self, method, url, **kwargs):
+        call = httpx.Request(method, url, json=kwargs.get("json"), headers=kwargs["headers"])
+        requests.append(call)
+        if method == "POST" and call.url.path == "/v0/turns":
+            body = json.loads(call.content)
+            active = current_persistence.get()
+            assert active is not None
+            key = "selfhosted:turn:" + body["turn_id"]
+            async with request.deps.sessionmaker() as db:
+                admission = await contexts.read_context(
+                    db,
+                    tenant_id=TENANT,
+                    binding_id=active.binding.id,
+                    key=contexts.context_key("admission", active.binding.id, key),
+                )
+            assert admission is not None and admission["admission_key"] == key
+            admitted_keys.append(key)
+            token = call.headers["X-Daimon-MCP-Authorization"].removeprefix("Bearer ")
+            token_ids.append(
+                uuid.UUID(jwt.decode(token, options={"verify_signature": False})["jti"])
+            )
+            assert token.encode() not in call.content
+            assert body["model"] == "gpt-5"
+            assert body["tool_policy"] == {
+                "bash": "deny",
+                "read": "deny",
+                "edit": "deny",
+                "write": "ask",
+                "reports/*": "deny",
+                "reports/summarize": "ask",
+            }
+            assert body["mcp_servers"][1]["headers_env"] == {
+                "Authorization": "HARNESS_MCP_CRED_REPORTS"
+            }
+        response = wire.handle(call)
+        response.request = call
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", http)
+    wire.unmatched_start = unmatched
+    dropped = []
+    if drop_stream:
+        from daimon.core.turn.io import TurnConnectionLost
+        from daimon.core.turn.selfhosted_io import _SelfHostedStream
+
+        original_next = _SelfHostedStream.__anext__
+
+        async def disconnect_after_record(stream):
+            event = await original_next(stream)
+            if not dropped:
+                dropped.append(True)
+                await stream.close()
+                raise TurnConnectionLost("offline reader dropped after first durable record")
+            return event
+
+        monkeypatch.setattr(_SelfHostedStream, "__anext__", disconnect_after_record)
+    assert ensure_channel_runtime(PROFILE)
+    admitted = await admit(
+        request.deps,
+        tenant_id=TENANT,
+        platform="slack",
+        external_user_id="caller",
+        channel_id=REVISION.channel.channel_id,
+        thread_id=request.thread_id,
+        now=request.now(),
+    )
+    assert admitted.grant is not None and admitted.backend_revision == REVISION
+    assert admitted.agent.id == agent.ref.id and admitted.account_id == ACCOUNT
+    request = replace(request, admission=admitted)
+    request = replace(
+        request,
+        deps=replace(request.deps, turn_runtimes={}, turn_runtime_factory=build_channel_runtime),
+    )
+    prepared = await bind_session_impl(
+        request.deps,
+        admitted,
+        tenant_id=TENANT,
+        platform="slack",
+        external_user_id="caller",
+        thread_id=request.thread_id,
+        session_account_id=ACCOUNT,
+        reuse_existing=True,
+    )
+    assert isinstance(prepared.runtime, SelfHostedHostRuntime)
+
+    async def reseed():
+        return "question"
+
+    outcome = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        render_interval_s=0.01,
+        operation_key="production-shell",
+    )
+    await drain_outcomes()
+    assert requests and wire.posts == 1 and len(admitted_keys) == 1
+    assert bool(dropped) == drop_stream
+    if not unmatched:
+        assert outcome.state.error is None
+    else:
+        from daimon.core.turn.termination import TerminationReason
+
+        assert outcome.state.termination is TerminationReason.INTERRUPTED
+    observations = await prepared.backend.usage.reconcile(SCOPE, prepared.session_ref)
+    assert len(observations) == 1
+    await prepared._record(observation=observations[0])
+    await prepared._record(observation=observations[0])
+    async with request.deps.sessionmaker() as db:
+        pending = await list_pending_usage(db, tenant_id=TENANT)
+        token = await get_mcp_token(db, jti=token_ids[0])
+        binding = await mux_state.PostgresStateStore(request.deps.sessionmaker).get_binding(
+            Slot(
+                thread=ThreadRef(
+                    channel=REVISION.channel,
+                    thread_id=request.thread_id,
+                ),
+                account_id=SCOPE.account_id,
+            )
+        )
+        assert binding is not None
+        receipt = await contexts.read_context(
+            db,
+            tenant_id=TENANT,
+            binding_id=binding.id,
+            key=contexts.context_key("receipt", binding.id, observations[0].id),
+        )
+    assert receipt is not None and receipt["admission"]["admission_key"] == admitted_keys[0]
+    assert token is not None and token.revoked_at is not None
+    if unmatched:
+        assert any(
+            row.observation_id == observations[0].id and row.reason == "usage_unknown"
+            for row in pending.rows
+        )
+    else:
+        assert not pending.rows
+
+
+async def test_preparation_rechecks_disabled_operator_switch_before_harness_io(
+    composed, monkeypatch
+):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, wire, _, _ = composed
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "false")
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await prepare_selfhosted(request)
+    assert wire.posts == 0 and wire.events == []
+
+
+async def test_batched_host_approvals_submit_independent_idempotent_actions(composed, monkeypatch):
+    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    request, wire, _, _ = composed
+    prepared = await prepare_selfhosted(request)
+    await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        [UserMessage(content=(TextPart(text="question"),))],
+        key="approval-turn",
+    )
+    wire.events = wire.events[:2]
+    for action in ("one", "two"):
+        wire.events.append(
+            dict(
+                seq=len(wire.events) + 1,
+                session_id=prepared.session_ref.id,
+                turn_id=wire.events[0]["turn_id"],
+                at=datetime.now(UTC).isoformat(),
+                type="requires_action",
+                data=dict(
+                    action_id=action, call_id="call-" + action, name="write", input={"path": action}
+                ),
+            )
+        )
+    actions = []
+    original = wire.handle
+
+    def handle(call):
+        if call.url.path.endswith("/actions"):
+            body = json.loads(call.content)
+            actions.append(body)
+            wire.events.append(
+                dict(
+                    seq=len(wire.events) + 1,
+                    session_id=prepared.session_ref.id,
+                    turn_id=wire.events[0]["turn_id"],
+                    at=datetime.now(UTC).isoformat(),
+                    type="tool_result",
+                    data=dict(
+                        call_id="call-" + body["action_id"], output="executed", is_error=False
+                    ),
+                )
+            )
+            return httpx.Response(200, json={"accepted": True})
+        return original(call)
+
+    class Persistence:
+        def __init__(self, prefix="current"):
+            self.prefix = prefix
+
+        async def mutate(self, session, kind, payload, call, response, status):
+            return await call(self.prefix + ":approval:" + session.id + ":" + kind)
+
+    monkeypatch.setattr(wire, "handle", handle)
+
+    # The injected HTTP client's dispatcher was bound at construction.
+    async def http(self, method, url, **kwargs):
+        call = httpx.Request(method, url, json=kwargs.get("json"), headers=kwargs["headers"])
+        response = handle(call)
+        response.request = call
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", http)
+    io = SelfHostedTurnIO(
+        prepared.backend,
+        SCOPE,
+        prepared.session_ref,
+        persistence=Persistence(),
+        root_turn_id=wire.events[0]["turn_id"],
+    )
+    confirmations = [
+        dict(type="user.tool_confirmation", tool_use_id="selfhosted:tool:" + action, result="allow")
+        for action in ("one", "two")
+    ]
+    from mux.errors import ProviderError
+
+    stale = SelfHostedTurnIO(
+        prepared.backend,
+        SCOPE,
+        prepared.session_ref,
+        persistence=Persistence("stale"),
+        root_turn_id="stale-root",
+    )
+    with pytest.raises(ProviderError):
+        await stale.send(confirmations[:1])
+    assert actions == []
+    await io.send(confirmations)
+    await io.send(confirmations)
+    assert actions == [
+        dict(action_id="one", decision="allow"),
+        dict(action_id="two", decision="allow"),
+    ]
+
+
+async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(composed, monkeypatch):
+    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    request, wire, _, _ = composed
+    prepared = await prepare_selfhosted(request)
+    await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        [UserMessage(content=(TextPart(text="question"),))],
+        key="cancel-turn",
+    )
+    root = wire.events[0]["turn_id"]
+    wire.events.pop()
+    cancellations, recorded, released = [], [], []
+    original = wire.handle
+
+    def handle(call):
+        if call.url.path.endswith("/cancel"):
+            cancellations.append(call.url.path)
+            wire.events.append(
+                dict(
+                    seq=len(wire.events) + 1,
+                    session_id=prepared.session_ref.id,
+                    turn_id=root,
+                    at=datetime.now(UTC).isoformat(),
+                    type="turn_ended",
+                    data={"outcome": "interrupted"},
+                )
+            )
+            return httpx.Response(200, json={"cancelled": True})
+        return original(call)
+
+    async def http(self, method, url, **kwargs):
+        call = httpx.Request(method, url, json=kwargs.get("json"), headers=kwargs["headers"])
+        response = handle(call)
+        response.request = call
+        return response
+
+    class Persistence:
+        async def mutate(self, session, kind, payload, call, response, status):
+            assert kind == "cancel" and payload == {"turn_id": root}
+            return await call("cancel-operation")
+
+        async def record(self, session, event, *, source_key=None):
+            assert session == prepared.session_ref
+            recorded.append(event)
+
+        async def stopped(self, key, session):
+            assert recorded[-1].type == "session.turn_ended"
+            assert recorded[-1].turn_id == root
+            released.append((key, session))
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", http)
+    io = SelfHostedTurnIO(
+        prepared.backend,
+        SCOPE,
+        prepared.session_ref,
+        persistence=Persistence(),
+        root_turn_id=root,
+    )
+    stopped = await io.interrupt(timeout_s=2)
+    assert stopped.stopped and stopped.outcome == "interrupted"
+    assert len(cancellations) == 1
+    assert released == [(stopped.receipt_operation_id, prepared.session_ref)]

@@ -355,6 +355,60 @@ admission refuses with `selfhosted_admission_disabled`. Enabling it still requir
 usage observations and a configured self-hosted core runtime; it does not select
 a backend for any channel. See [configuration](configuration.md) for the setting.
 
+## Self-hosted harness runtime
+
+The opt-in `selfhosted.loop` backend runs chat turns through a separately
+operated `daimon-harness/0` service. Set `DAIMON_TURN__PATH=mux` and enable
+channel backends and `DAIMON_SELFHOSTED__ADMISSION_ENABLED=true`, then select
+the selfhosted agent/environment for the channel.
+Each caller gets a separate persistent harness session. Steer, shared sessions,
+workers, session transfer, memory stores and workspace export/import are not
+supported. Admission refuses policies the harness cannot enforce.
+
+Mount a credential-free JSON manifest and point
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE` at it. Each entry grants exactly one
+configuration to one tenant, channel and account; no wildcard grants are read:
+
+```json
+[
+  {
+    "profile": "selfhosted.loop",
+    "tenant_id": "<tenant UUID>",
+    "platform": "discord",
+    "channel_id": "<channel id>",
+    "account_id": "<account UUID>",
+    "config_digest": "<admitted ConfigRevision.content_digest()>",
+    "agent_id": "sh_agent_<id>",
+    "environment_id": "sh_env_<id>",
+    "infrastructure_usd": "0",
+    "max_tool_calls": 100,
+    "deadline_s": 300
+  }
+]
+```
+
+`infrastructure_usd` is required: enter an audited per-request infrastructure
+cost, or explicitly choose zero when the operator funds it separately. Configure
+selfhosted billing's deployment-to-model mapping and verified model rates;
+an unpriced or expired deployment is refused before any harness HTTP call.
+Unmeasured model attempts remain pending for reconciliation.
+
+Production uses `HarnessConfig.transport="direct"` with a private harness
+endpoint. Direct transport sends authenticated `/v0` requests to `harness_url`.
+The Foundry invocation adapter is retained for future platform validation;
+unsigned gateway identity headers do not authorize harness calls. `bearer_env`
+reads the named variable only in the host process; `entra` obtains a token for the configured audience with Azure
+DefaultAzureCredential. Configure ingress and the invoked identity's access
+for the chosen transport. Both transports use JSON acknowledgements and durable
+event polling, including after a dropped connection.
+
+Daimon's MCP public URL and JWT secret must be configured. Each turn receives a
+caller-bound MCP token only in `X-Daimon-MCP-Authorization`; it never enters the
+manifest or turn JSON and is revoked when the turn ends. Third-party MCP
+credentials are operator-provisioned environment references on the harness.
+Unavailable skills are reported once in the bound thread. A changed agent or
+environment revision requires a fresh session binding.
+
 ## Self-host on OpenAI
 
 Daimon can run on just your own OpenAI key — no Anthropic account needed at
