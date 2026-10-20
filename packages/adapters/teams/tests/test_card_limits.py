@@ -65,7 +65,7 @@ from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import build_setup_opener
 from daimon.core.stores.domain import ChannelBudgetRow, CredentialRequestRow, RoutineRow
 from daimon.core.stores.routines import LAST_RESULT_TAIL_MAX
-from daimon.core.tool_safety import ToolCall
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from daimon.core.turn.notices import TerminationNotice
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import format_summary
@@ -377,6 +377,27 @@ def _confirmation(state: ConfirmationCardState) -> AdaptiveCard:
     return confirmation_adaptive_card(confirmation, prompt, answered_by=EMOJI * 256)
 
 
+def _microsoft_confirmation(tool_name: str) -> AdaptiveCard:
+    """A microsoft_write approval card with every model-supplied field at its worst."""
+    inputs: dict[str, dict[str, object]] = {
+        "microsoft_write": {
+            "method": "PATCH",
+            "path": f"/me/drive/items/x/workbook/{EMOJI * 2_000}",
+            "body": {"values": [[EMOJI * 100] * 100]},
+            "file_handle": EMOJI * 500,
+        },
+    }
+    call = ToolCall(
+        tool_use_id="toolu_1",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name=tool_name,
+        input=inputs[tool_name],
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id=str(uuid.UUID(int=0)), now=NOW)
+    confirmation = build_confirmation_card(prompt, state="pending", token="t" * 64)
+    return confirmation_adaptive_card(confirmation, prompt)
+
+
 MESSAGES: dict[str, Callable[[], MessageSource]] = {
     "status": lambda: card.status_card(_turn_state(), now=99 * 3600.0, cancel_key="k" * 64),
     "answer": _answer,
@@ -440,6 +461,10 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
     **{
         f"confirmation_{state}": lambda state=state: _confirmation(state)
         for state in get_args(ConfirmationCardState)
+    },
+    **{
+        f"confirmation_{tool}": lambda tool=tool: _microsoft_confirmation(tool)
+        for tool in ("microsoft_write",)
     },
 }
 # Dialogs are invoke responses, never posted, so the message cap does not apply.

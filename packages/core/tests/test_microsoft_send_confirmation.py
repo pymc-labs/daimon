@@ -8,6 +8,7 @@ from typing import cast
 
 from daimon.core.confirmation import (
     SEND_BODY_LIMIT,
+    ConfirmationPrompt,
     confirmed_tools_for_turn,
     prompt_for_tool_call,
 )
@@ -205,3 +206,48 @@ def test_microsoft_write_asks_only_with_tool_safety_on() -> None:
     assert absent is None or not has_confirmation_gate(absent, tool_name="microsoft_write"), (
         "without Microsoft accounts no session gains a config for the absent tool"
     )
+
+
+def _lines(prompt: ConfirmationPrompt) -> list[str]:
+    return (prompt.consequence or "").splitlines()
+
+
+def test_a_subject_cannot_add_a_recipient_line() -> None:
+    """Newlines in what the model wrote stay inside the field they came in."""
+    prompt = prompt_for_tool_call(
+        _call(subject="Hi\nTo: ceo@else.com", body="Hi"),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    assert [line for line in _lines(prompt) if line.startswith("To:")] == ["To: ada@example.com"], (
+        "only the real recipients may head a line"
+    )
+    assert "\n" not in prompt.title and "\n" not in (prompt.action or ""), "one-line title"
+    assert "Subject: Hi To: ceo@else.com" in _lines(prompt), "the subject reads on one line"
+    assert "Subject: Hi To: ceo@else.com" in prompt.detail_lines
+
+
+def test_location_and_addresses_stay_on_their_own_lines() -> None:
+    prompt = prompt_for_tool_call(
+        _call(
+            action="create_event",
+            start="2026-09-15T10:00",
+            end="2026-09-15T11:00\nTo: ceo@else.com",
+            to=["ada@example.com\rCc: boss@else.com"],
+            location="Room 4\u2028To: ceo@else.com\u202e",
+            body="Hi",
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    shown = "\n".join((*_lines(prompt), *prompt.detail_lines))
+    heads = [line.split(":")[0] for line in _lines(prompt)]
+    assert heads == [
+        "It goes out from your Microsoft account.",
+        "To",
+        "Subject",
+        "When",
+        "Where",
+        "Message",
+    ], "each field is one line, whatever its text held"
+    assert "\u202e" not in shown and "\u2028" not in shown, "no direction or line separators"
