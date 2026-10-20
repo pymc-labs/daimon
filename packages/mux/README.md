@@ -8,7 +8,22 @@ Its transport fields are `harness_url`, `auth_mode`, `auth_ref`, optional
 `packages_note`, and `transport` (default `direct`). `foundry_invocations`
 requires `agent_name` and `project_endpoint`. Resource `account_scope_id` is
 the tenant UUID. Full mux specs are persisted as JSONB alongside names,
-revisions and lifecycle timestamps.
+revisions and lifecycle timestamps. Active names are unique within a tenant;
+archived names can be reused, and name/ID resolution excludes archived rows.
+Mutations use account- and resource-kind-scoped keys, with principal ownership.
+Receipts contain only resource references/revisions and expire after seven days.
+Resource retries reread the row and refuse deleted or changed revisions. Writes
+prune expired receipts for their tenant; operators can prune idle tenants with
+`cleanup_expired_receipts` in the store module. Archive preserves historical
+resources; hard deletion invalidates any session still referring to that ID.
+
+The shared resource validator rejects credential-shaped values, credential
+URLs, arbitrary extensions and MCP tool-policy dictionaries. Bearer references
+must name environment variables; Entra references must be audience URIs.
+Routing uses HTTPS, with loopback HTTP accepted for local use. Direct HTTP on
+internal service names/private addresses requires `allow_insecure_http=true`;
+this permits the in-cluster ACA fallback explicitly. Foundry fields are accepted
+only for the Foundry transport.
 
 Source loss consent can name the unsupported native URL-fetch capability as
 `builtin_tool:web_fetch`. This does not waive other builtin tools or authorize

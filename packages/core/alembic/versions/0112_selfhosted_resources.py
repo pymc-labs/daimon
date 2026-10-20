@@ -41,7 +41,13 @@ def upgrade() -> None:
                 server_default=sa.func.now(),
             ),
             sa.Column("archived_at", sa.DateTime(timezone=True)),
-            sa.UniqueConstraint("tenant_id", "name"),
+        )
+        op.create_index(
+            f"uq_{name}_active_name",
+            name,
+            ["tenant_id", "name"],
+            unique=True,
+            postgresql_where=sa.text("archived_at IS NULL"),
         )
     op.create_table(
         "selfhosted_resource_operations",
@@ -51,9 +57,29 @@ def upgrade() -> None:
             sa.ForeignKey("tenants.id", ondelete="CASCADE"),
             primary_key=True,
         ),
+        sa.Column("account_id", sa.Text(), primary_key=True),
+        sa.Column("kind", sa.Text(), primary_key=True),
         sa.Column("key", sa.Text(), primary_key=True),
+        sa.Column("principal_id", sa.Text(), nullable=False),
+        sa.Column("operation_id", sa.Text(), nullable=False),
+        sa.Column("action", sa.Text(), nullable=False),
         sa.Column("digest", sa.Text(), nullable=False),
         sa.Column("result", postgresql.JSONB(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column(
+            "expires_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now() + interval '7 days'"),
+        ),
+    )
+
+    op.create_index(
+        "ix_selfhosted_resource_operations_expires_at",
+        "selfhosted_resource_operations",
+        ["expires_at"],
     )
 
 

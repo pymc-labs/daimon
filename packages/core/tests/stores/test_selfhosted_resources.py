@@ -263,3 +263,181 @@ def test_foundry_transport_retains_project_and_agent():
         HarnessConfig(harness_url="http://localhost:8080", auth_ref="HARNESS_TOKEN").transport
         == "direct"
     )
+
+
+async def test_receipts_are_reference_only_owned_and_separate_by_account_and_kind(
+    db_session, db_session_factory
+):
+    from daimon.core._models import SelfHostedResourceOperation
+    from sqlalchemy import select
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    authorized = scope(str(tenant.id))
+    agents = SelfHostedAgents(db_session_factory)
+    agent = await agents.create(authorized, agent_spec(), key="same-key")
+    env = await SelfHostedEnvironments(db_session_factory).create(
+        authorized, environment_spec(), key="same-key"
+    )
+    with pytest.raises(ScopeViolation):
+        await agents.create(
+            authorized.model_copy(update={"principal_id": "other-principal"}),
+            agent_spec(),
+            key="same-key",
+        )
+    other_account = authorized.model_copy(
+        update={"account_id": str(uuid4()), "principal_id": "other-principal"}
+    )
+    other = await agents.create(other_account, agent_spec("other"), key="same-key")
+    assert len({agent.ref.id, env.ref.id, other.ref.id}) == 3
+    async with db_session_factory() as db:
+        receipts = list(await db.scalars(select(SelfHostedResourceOperation)))
+        assert len(receipts) == 3
+        assert all(set(receipt.result) == {"ref", "revision"} for receipt in receipts)
+        assert all(receipt.expires_at > receipt.created_at for receipt in receipts)
+        assert {receipt.principal_id for receipt in receipts} == {"operator", "other-principal"}
+
+
+async def test_deleted_create_replay_fails_and_archived_names_can_be_reused(
+    db_session, db_session_factory
+):
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    authorized = scope(str(tenant.id))
+    agents = SelfHostedAgents(db_session_factory)
+    old = await agents.create(authorized, agent_spec(), key="create")
+    await agents.archive(authorized, old.ref, key="archive")
+    for name in (old.ref.id, old.spec.name):
+        with pytest.raises(ProviderError) as error:
+            await agents.resolve(authorized, name)
+        assert error.value.category == "not_found"
+    new = await agents.create(authorized, agent_spec(), key="replacement")
+    assert new.ref.id != old.ref.id
+    assert (await agents.resolve(authorized, old.spec.name)).ref == new.ref
+    assert (await agents.retrieve(authorized, old.ref)).archived_at is not None
+    await agents.delete(authorized, new.ref, key="delete")
+    with pytest.raises(ProviderError) as error:
+        await agents.create(authorized, agent_spec(), key="replacement")
+    assert error.value.category == "not_found"
+
+
+async def test_explicit_null_patches_clear_optional_fields(db_session, db_session_factory):
+    from daimon.core._models import SelfHostedAgentRecord
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    authorized = scope(str(tenant.id))
+    agents = SelfHostedAgents(db_session_factory)
+    agent = await agents.create(authorized, agent_spec(), key="agent")
+    # Simulate a record from before the v1 extension allowlist. Clearing it
+    # must remove the stored data rather than preserve an unvalidated payload.
+    row = await db_session.get(SelfHostedAgentRecord, agent.ref.id)
+    assert row is not None
+    row.spec = {
+        **row.spec,
+        "extensions": [
+            {"namespace": "selfhosted.legacy", "version": 1, "value": {"mode": "legacy"}}
+        ],
+    }
+    await db_session.commit()
+    cleared = await agents.update(
+        authorized,
+        agent.ref,
+        AgentPatch(metadata=None, extensions=None, system=None, skills=None),
+        expected=agent.revision,
+        key="clear",
+    )
+    assert cleared.spec.metadata is None and cleared.spec.extensions is None
+    assert cleared.spec.system is None and cleared.spec.skills is None
+    assert cleared.spec.mcp_servers == agent.spec.mcp_servers
+    envs = SelfHostedEnvironments(db_session_factory)
+    env_spec = EnvironmentSpec.model_validate(
+        {**environment_spec().model_dump(), "metadata": {"note": "keep"}, "description": "clear"}
+    )
+    env = await envs.create(authorized, env_spec, key="env")
+    env = await envs.update(
+        authorized,
+        env.ref,
+        EnvironmentPatch(metadata=None, description=None),
+        expected=env.revision,
+        key="clear",
+    )
+    assert env.spec.metadata is None and env.spec.description is None
+    assert env.spec.native_config == env_spec.native_config
+
+
+async def test_receipt_ttl_prunes_idle_and_active_tenants(db_session, db_session_factory):
+    from datetime import timedelta
+
+    from daimon.core._models import SelfHostedResourceOperation
+    from daimon.core.stores.selfhosted_resources import cleanup_expired_receipts
+    from sqlalchemy import select, update
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    authorized = scope(str(tenant.id))
+    agents = SelfHostedAgents(db_session_factory)
+    await agents.create(authorized, agent_spec(), key="expired")
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            update(SelfHostedResourceOperation).values(
+                expires_at=datetime.now(UTC) - timedelta(days=1)
+            )
+        )
+    assert await cleanup_expired_receipts(db_session_factory) == 1
+    await agents.create(authorized, agent_spec("after-expiry"), key="expired")
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            update(SelfHostedResourceOperation).values(
+                expires_at=datetime.now(UTC) - timedelta(days=1)
+            )
+        )
+    await agents.create(authorized, agent_spec("prunes-on-write"), key="new")
+    async with db_session_factory() as db:
+        receipts = list(await db.scalars(select(SelfHostedResourceOperation)))
+        assert len(receipts) == 1 and receipts[0].key == "new"
+
+
+async def test_bad_input_uses_mux_errors_and_does_not_write_receipts(
+    db_session, db_session_factory
+):
+    from daimon.core._models import SelfHostedResourceOperation
+    from sqlalchemy import func, select
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    authorized = scope(str(tenant.id))
+    agents = SelfHostedAgents(db_session_factory)
+    for name in ("", "sh_reserved"):
+        with pytest.raises(ProviderError) as error:
+            await agents.create(authorized, agent_spec(name), key="invalid")
+        assert error.value.category == "invalid_request"
+    with pytest.raises(ScopeViolation):
+        await agents.create(
+            authorized.model_copy(update={"tenant_id": "invalid"}), agent_spec(), key="invalid"
+        )
+    with pytest.raises(ProviderError) as error:
+        await agents.create(
+            authorized.model_copy(update={"tenant_id": str(uuid4())}), agent_spec(), key="unknown"
+        )
+    assert error.value.category == "not_found"
+    secret_spec = AgentSpec.model_validate(
+        {**agent_spec().model_dump(), "metadata": {"api_key": "opaque-value"}}
+    )
+    with pytest.raises(ProviderError) as error:
+        await agents.create(authorized, secret_spec, key="secret")
+    assert error.value.category == "invalid_request"
+    async with db_session_factory() as db:
+        assert await db.scalar(select(func.count()).select_from(SelfHostedResourceOperation)) == 0
+    agent = await agents.create(authorized, agent_spec(), key="valid")
+    for patch in (
+        AgentPatch(name="sh_reserved"),
+        AgentPatch(name=None),
+        AgentPatch(metadata={"api_key": "opaque-value"}),
+    ):
+        with pytest.raises(ProviderError) as error:
+            await agents.update(
+                authorized, agent.ref, patch, expected=agent.revision, key="invalid-patch"
+            )
+        assert error.value.category == "invalid_request"
+    assert await agents.retrieve(authorized, agent.ref) == agent

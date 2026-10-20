@@ -1,21 +1,22 @@
-"""Postgres resource ports for the self-hosted driver, injected by the host.
+"""Tenant-scoped Postgres resource ports for injection into the self-hosted driver.
 
-Each mutation commits its resource and receipt together. A tenant-level
-transaction lock serializes keys and names across processes, including init.
-No provider client or credential value is needed to manage these records.
+Mutations and reference-only receipts commit together. Tenant transaction
+locks serialize key/name races; receipt ownership matches mux operation scope.
+Receipts expire after seven days and retries never return deleted resources.
 """
 
 from __future__ import annotations
 
-import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from daimon.core._models import (
     SelfHostedAgentRecord,
     SelfHostedEnvironmentRecord,
     SelfHostedResourceOperation,
+    Tenant,
 )
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
@@ -29,19 +30,33 @@ from mux.contracts.resources import (
     EnvironmentPatch,
     EnvironmentSpec,
 )
-from mux.drivers.selfhosted.config import HarnessConfig
+from mux.drivers.selfhosted.config import validate_resource_spec
 from mux.errors import OperationConflict, ProviderError, ScopeViolation
 from mux.profiles.selfhosted import LOOP
 from mux.state.operations import request_digest
-from pydantic import JsonValue, TypeAdapter
-from sqlalchemy import func, select
+from pydantic import JsonValue, TypeAdapter, ValidationError
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ulid import ULID
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
-
-
 Row = SelfHostedAgentRecord | SelfHostedEnvironmentRecord
+
+
+async def cleanup_expired_receipts(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Operator cleanup for idle tenants; writes also prune their tenant's expired receipts."""
+    async with sessionmaker() as session, session.begin():
+        removed = await session.scalars(
+            delete(SelfHostedResourceOperation)
+            .where(SelfHostedResourceOperation.expires_at <= (now or datetime.now(UTC)))
+            .returning(SelfHostedResourceOperation.key)
+        )
+        return len(list(removed))
 
 
 class _Resources[
@@ -60,7 +75,10 @@ class _Resources[
     def _tenant(self, scope: Scope) -> UUID:
         if scope.is_platform or scope.is_legacy_host_authorized:
             raise ScopeViolation("selfhosted", "an explicit tenant scope is required")
-        return UUID(scope.tenant_id)
+        try:
+            return UUID(scope.tenant_id)
+        except ValueError:
+            raise ScopeViolation("selfhosted", "tenant scope must contain a UUID") from None
 
     def _check(self, scope: Scope, ref: ResourceRef) -> None:
         self._tenant(scope)
@@ -82,29 +100,49 @@ class _Resources[
         )
 
     def _result(self, scope: Scope, row: Row) -> Result:
-        return self.result_type.model_validate(
-            {
-                "ref": self._ref(scope, row),
-                "revision": Revision(local=row.revision),
-                "spec": row.spec,
-                "lifecycle": "archived" if row.archived_at else "active",
-                "created_at": row.created_at,
-                "updated_at": row.updated_at,
-                "archived_at": row.archived_at,
-            }
-        )
-
-    async def _lock(self, session: AsyncSession, scope: Scope) -> UUID:
-        tenant = self._tenant(scope)
-        # Stable hash inside Postgres; collisions only serialize unrelated tenants.
-        await session.execute(
-            select(
-                func.pg_advisory_xact_lock(
-                    func.hashtextextended("selfhosted-resources:" + str(tenant), 0)
-                )
+        try:
+            return self.result_type.model_validate(
+                {
+                    "ref": self._ref(scope, row),
+                    "revision": Revision(local=row.revision),
+                    "spec": row.spec,
+                    "lifecycle": "archived" if row.archived_at else "active",
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                    "archived_at": row.archived_at,
+                }
             )
-        )
-        return tenant
+        except ValidationError:
+            raise ProviderError("invalid_request", retryable=False) from None
+
+    @asynccontextmanager
+    async def _write(self, scope: Scope) -> AsyncIterator[tuple[AsyncSession, UUID]]:
+        try:
+            async with self.sessionmaker() as session, session.begin():
+                tenant = self._tenant(scope)
+                await session.execute(
+                    select(
+                        func.pg_advisory_xact_lock(
+                            func.hashtextextended("selfhosted-resources:" + str(tenant), 0)
+                        )
+                    )
+                )
+                exists = await session.scalar(
+                    select(Tenant.id)
+                    .where(Tenant.id == tenant, Tenant.archived_at.is_(None))
+                    .with_for_update(read=True, key_share=True)
+                )
+                if exists is None:
+                    raise ProviderError("not_found", retryable=False)
+                await session.execute(
+                    delete(SelfHostedResourceOperation).where(
+                        SelfHostedResourceOperation.tenant_id == tenant,
+                        SelfHostedResourceOperation.expires_at <= func.now(),
+                    )
+                )
+                yield session, tenant
+        except IntegrityError:
+            raise ProviderError("conflict", retryable=False) from None
 
     async def _row(self, session: AsyncSession, scope: Scope, ref: ResourceRef) -> Row:
         self._check(scope, ref)
@@ -117,66 +155,78 @@ class _Resources[
             raise ProviderError("not_found", retryable=False)
         return row
 
-    def _validate(self, spec: Spec) -> None:
-        if not spec.name.strip():
-            raise ValueError("resource name cannot be blank")
-        if isinstance(spec, AgentSpec):
-            if spec.model.provider != LOOP.provider:
-                raise ValueError("agent model must use provider selfhosted")
-            for server in spec.mcp_servers or ():
-                if server.credential_ref and not re.fullmatch(
-                    r"[A-Za-z_][A-Za-z0-9_]*", server.credential_ref
-                ):
-                    raise ValueError("MCP credential_ref must be an environment variable name")
-                url = urlsplit(server.url)
-                if (
-                    url.scheme not in ("http", "https")
-                    or not url.hostname
-                    or url.username
-                    or url.password
-                    or url.query
-                    or url.fragment
-                ):
-                    raise ValueError("MCP URL must be HTTP without credentials, query or fragment")
-        else:
-            if spec.execution != "self_hosted" or spec.native_config is None:
-                raise ValueError("self-hosted environment requires its harness configuration")
-            if (
-                spec.native_config.namespace != "selfhosted.environment"
-                or spec.native_config.version != 1
-            ):
-                raise ValueError("unsupported self-hosted environment configuration")
-            HarnessConfig.model_validate(dict(spec.native_config.value))
-
     async def _previous(
-        self, session: AsyncSession, tenant: UUID, key: str, digest: str
-    ) -> dict[str, JsonValue] | None:
-        row = await session.get(SelfHostedResourceOperation, (tenant, key))
+        self, session: AsyncSession, scope: Scope, key: str, digest: str
+    ) -> SelfHostedResourceOperation | None:
+        row = await session.get(
+            SelfHostedResourceOperation, (self._tenant(scope), scope.account_id, self.kind, key)
+        )
         if row is None:
             return None
+        if row.principal_id != scope.principal_id:
+            raise ScopeViolation(row.operation_id, "operation belongs to another principal")
         if row.digest != digest:
             raise OperationConflict(key)
-        return row.result
+        return row
+
+    async def _record(
+        self,
+        session: AsyncSession,
+        scope: Scope,
+        key: str,
+        digest: str,
+        action: str,
+        ref: ResourceRef,
+        revision: Revision,
+    ) -> SelfHostedResourceOperation:
+        receipt = SelfHostedResourceOperation(
+            tenant_id=self._tenant(scope),
+            account_id=scope.account_id,
+            principal_id=scope.principal_id,
+            kind=self.kind,
+            key=key,
+            digest=digest,
+            operation_id=str(ULID()),
+            action=action,
+            result={
+                "ref": ref.model_dump(mode="json"),
+                "revision": revision.model_dump(mode="json"),
+            },
+        )
+        session.add(receipt)
+        await session.flush()
+        return receipt
+
+    async def _replay(
+        self, session: AsyncSession, scope: Scope, receipt: SelfHostedResourceOperation
+    ) -> Result:
+        ref = ResourceRef.model_validate(receipt.result["ref"])
+        row = await self._row(session, scope, ref)
+        if Revision.model_validate(receipt.result["revision"]) != Revision(local=row.revision):
+            raise ProviderError("conflict", retryable=False)
+        return self._result(scope, row)
 
     async def create(self, scope: Scope, spec: Spec, *, key: str) -> Result:
-        self._validate(spec)
+        validate_resource_spec(spec)
         digest = request_digest(
             _JSON.validate_python([self.kind, "create", spec.model_dump(mode="json")])
         )
-        async with self.sessionmaker() as session, session.begin():
-            tenant = await self._lock(session, scope)
-            previous = await self._previous(session, tenant, key, digest)
+        async with self._write(scope) as (session, tenant):
+            previous = await self._previous(session, scope, key, digest)
             if previous is not None:
-                return self.result_type.model_validate(previous)
-            existing = await session.scalar(
+                return await self._replay(session, scope, previous)
+            exists = await session.scalar(
                 select(self.table.id).where(
-                    self.table.tenant_id == tenant, self.table.name == spec.name
+                    self.table.tenant_id == tenant,
+                    self.table.name == spec.name,
+                    self.table.archived_at.is_(None),
                 )
             )
-            if existing is not None:
+            if exists is not None:
                 raise ProviderError("conflict", retryable=False)
+            prefix = "sh_agent_" if self.kind == "agent" else "sh_env_"
             row = self.table(
-                id=f"sh_{self.kind[:3] if self.kind == 'environment' else self.kind}_{ULID()}",
+                id=prefix + str(ULID()),
                 tenant_id=tenant,
                 name=spec.name,
                 spec=spec.model_dump(mode="json"),
@@ -185,11 +235,7 @@ class _Resources[
             session.add(row)
             await session.flush()
             result = self._result(scope, row)
-            session.add(
-                SelfHostedResourceOperation(
-                    tenant_id=tenant, key=key, digest=digest, result=result.model_dump(mode="json")
-                )
-            )
+            await self._record(session, scope, key, digest, "create", result.ref, result.revision)
             return result
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Result:
@@ -197,12 +243,14 @@ class _Resources[
             return self._result(scope, await self._row(session, scope, ref))
 
     async def resolve(self, scope: Scope, name_or_id: str) -> Result:
-        """Resolve an exact ID or tenant-local name; IDs never fall back to names."""
+        """Resolve active resources only; reserved IDs never fall back to names."""
         async with self.sessionmaker() as session:
             field = self.table.id if name_or_id.startswith("sh_") else self.table.name
             row = await session.scalar(
                 select(self.table).where(
-                    self.table.tenant_id == self._tenant(scope), field == name_or_id
+                    self.table.tenant_id == self._tenant(scope),
+                    field == name_or_id,
+                    self.table.archived_at.is_(None),
                 )
             )
             if row is None:
@@ -212,8 +260,7 @@ class _Resources[
     async def _list(
         self, scope: Scope, *, filters: AgentFilter | EnvironmentFilter, page: PageRequest
     ) -> Page[Result]:
-        tenant = self._tenant(scope)
-        query = select(self.table).where(self.table.tenant_id == tenant)
+        query = select(self.table).where(self.table.tenant_id == self._tenant(scope))
         if filters.name is not None:
             query = query.where(self.table.name == filters.name)
         if not filters.include_archived:
@@ -230,8 +277,48 @@ class _Resources[
         async with self.sessionmaker() as session:
             rows = list(await session.scalars(query.limit(limit + 1)))
             more = len(rows) > limit
-            data = tuple(self._result(scope, row) for row in rows[:limit])
-            return Page(data=data, has_more=more, next_cursor=rows[limit - 1].id if more else None)
+            return Page(
+                data=tuple(self._result(scope, row) for row in rows[:limit]),
+                has_more=more,
+                next_cursor=rows[limit - 1].id if more else None,
+            )
+
+    def _patched(self, row: Row, patch: Patch) -> Spec:
+        changes = patch.model_dump(mode="json", exclude_unset=True)
+        current = self.spec_type.model_validate(row.spec)
+        data = dict(row.spec)
+        if "metadata" in changes:
+            changes.pop("metadata")
+            if patch.metadata is None:
+                data["metadata"] = None
+            else:
+                metadata = dict(current.metadata or {})
+                for name, value in patch.metadata.items():
+                    if value is None:
+                        metadata.pop(name, None)
+                    else:
+                        metadata[name] = value
+                data["metadata"] = metadata
+        if "extensions" in changes:
+            changes.pop("extensions")
+            if isinstance(current, AgentSpec):
+                if patch.extensions is None:
+                    data["extensions"] = None
+                else:
+                    extensions = {item.namespace: item for item in current.extensions or ()}
+                    extensions.update(patch.extensions)
+                    data["extensions"] = [
+                        item.model_dump(mode="json") for item in extensions.values()
+                    ]
+            elif patch.extensions:
+                raise ProviderError("invalid_request", retryable=False)
+        data.update(changes)
+        try:
+            spec = self.spec_type.model_validate(data)
+        except ValidationError:
+            raise ProviderError("invalid_request", retryable=False) from None
+        validate_resource_spec(spec)
+        return spec
 
     async def update(
         self, scope: Scope, ref: ResourceRef, patch: Patch, *, expected: Revision, key: str
@@ -248,102 +335,79 @@ class _Resources[
                 ]
             )
         )
-        async with self.sessionmaker() as session, session.begin():
-            tenant = await self._lock(session, scope)
-            previous = await self._previous(session, tenant, key, digest)
+        async with self._write(scope) as (session, tenant):
+            previous = await self._previous(session, scope, key, digest)
             if previous is not None:
-                return self.result_type.model_validate(previous)
+                return await self._replay(session, scope, previous)
             row = await self._row(session, scope, ref)
             if expected != Revision(local=row.revision) or row.archived_at is not None:
                 raise ProviderError("conflict", retryable=False)
-            changes = patch.model_dump(mode="json", exclude_unset=True)
-            spec_data = dict(row.spec)
-            if "metadata" in changes:
-                changes.pop("metadata")
-                metadata = dict(self.spec_type.model_validate(row.spec).metadata or {})
-                for name, value in (patch.metadata or {}).items():
-                    if value is None:
-                        metadata.pop(name, None)
-                    else:
-                        metadata[name] = value
-                spec_data["metadata"] = metadata
-            if "extensions" in changes:
-                changes.pop("extensions")
-                current = self.spec_type.model_validate(row.spec)
-                if isinstance(current, AgentSpec):
-                    extensions = {item.namespace: item for item in current.extensions or ()}
-                    extensions.update(patch.extensions or {})
-                    spec_data["extensions"] = [
-                        item.model_dump(mode="json") for item in extensions.values()
-                    ]
-                elif patch.extensions:
-                    raise ValueError("environment extensions must use native_config")
-            spec_data.update(changes)
-            spec = self.spec_type.model_validate(spec_data)
-            self._validate(spec)
+            spec = self._patched(row, patch)
             if spec.name != row.name:
                 exists = await session.scalar(
                     select(self.table.id).where(
-                        self.table.tenant_id == tenant, self.table.name == spec.name
+                        self.table.tenant_id == tenant,
+                        self.table.name == spec.name,
+                        self.table.archived_at.is_(None),
                     )
                 )
                 if exists is not None:
                     raise ProviderError("conflict", retryable=False)
             row.spec, row.name = spec.model_dump(mode="json"), spec.name
             row.revision += 1
-            row.updated_at = datetime.now(UTC)
+            row.updated_at = await self._now(session)
             result = self._result(scope, row)
-            session.add(
-                SelfHostedResourceOperation(
-                    tenant_id=tenant, key=key, digest=digest, result=result.model_dump(mode="json")
-                )
-            )
+            await self._record(session, scope, key, digest, "update", result.ref, result.revision)
             return result
 
+    async def _now(self, session: AsyncSession) -> datetime:
+        now = await session.scalar(select(func.now()))
+        assert isinstance(now, datetime)
+        return now
+
+    def _archive_receipt(self, receipt: SelfHostedResourceOperation) -> Operation:
+        return Operation(
+            id=receipt.operation_id,
+            key=receipt.key,
+            request_digest=receipt.digest,
+            status="processed",
+            resource=ResourceRef.model_validate(receipt.result["ref"]),
+            created_at=receipt.created_at,
+            updated_at=receipt.created_at,
+        )
+
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
-        result = await self._remove(scope, ref, key=key, delete=False)
-        return Operation.model_validate(result)
-
-    async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
-        return DeletionReceipt.model_validate(await self._remove(scope, ref, key=key, delete=True))
-
-    async def _remove(
-        self, scope: Scope, ref: ResourceRef, *, key: str, delete: bool
-    ) -> dict[str, JsonValue]:
         self._check(scope, ref)
         digest = request_digest(
-            _JSON.validate_python(
-                [self.kind, "delete" if delete else "archive", ref.model_dump(mode="json")]
-            )
+            _JSON.validate_python([self.kind, "archive", ref.model_dump(mode="json")])
         )
-        async with self.sessionmaker() as session, session.begin():
-            tenant = await self._lock(session, scope)
-            previous = await self._previous(session, tenant, key, digest)
+        async with self._write(scope) as (session, _):
+            previous = await self._previous(session, scope, key, digest)
             if previous is not None:
-                return previous
+                return self._archive_receipt(previous)
             row = await self._row(session, scope, ref)
-            now = datetime.now(UTC)
-            if delete:
-                await session.delete(row)
-                result = DeletionReceipt(operation_id=str(ULID()), deleted=(ref,))
-            else:
-                if row.archived_at is None:
-                    row.archived_at = row.updated_at = now
-                    row.revision += 1
-                result = Operation(
-                    id=str(ULID()),
-                    key=key,
-                    request_digest=digest,
-                    status="processed",
-                    resource=ref,
-                    created_at=now,
-                    updated_at=now,
-                )
-            data = result.model_dump(mode="json")
-            session.add(
-                SelfHostedResourceOperation(tenant_id=tenant, key=key, digest=digest, result=data)
+            if row.archived_at is None:
+                row.archived_at = row.updated_at = await self._now(session)
+                row.revision += 1
+            receipt = await self._record(
+                session, scope, key, digest, "archive", ref, Revision(local=row.revision)
             )
-            return data
+            return self._archive_receipt(receipt)
+
+    async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
+        self._check(scope, ref)
+        digest = request_digest(
+            _JSON.validate_python([self.kind, "delete", ref.model_dump(mode="json")])
+        )
+        async with self._write(scope) as (session, _):
+            previous = await self._previous(session, scope, key, digest)
+            if previous is not None:
+                return DeletionReceipt(operation_id=previous.operation_id, deleted=(ref,))
+            row = await self._row(session, scope, ref)
+            revision = Revision(local=row.revision)
+            await session.delete(row)
+            receipt = await self._record(session, scope, key, digest, "delete", ref, revision)
+            return DeletionReceipt(operation_id=receipt.operation_id, deleted=(ref,))
 
 
 class SelfHostedAgents(_Resources[AgentSpec, AgentPatch, Agent]):
