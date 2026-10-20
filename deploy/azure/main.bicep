@@ -6,7 +6,7 @@ param location string = resourceGroup().location
 
 @minLength(3)
 @maxLength(8)
-@description('Lowercase letters and digits; used in globally unique resource names.')
+@description('Lowercase letters and digits, starting with a letter; used in globally unique resource names.')
 param namePrefix string = 'daimon'
 
 param gpt5DeploymentName string = 'gpt-5'

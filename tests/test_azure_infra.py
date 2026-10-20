@@ -215,6 +215,12 @@ def test_ai_is_optional_and_vault_protection_is_opt_in(templates: dict[str, dict
     [
         ("abc", True),
         ("abc12345", True),
+        ("a01", True),
+        ("0abc", False),
+        ("1ab", False),
+        ("123", False),
+        ("9abcdefg", False),
+        ("", False),
         ("ABC", False),
         ("a-b", False),
         ("a_b", False),
@@ -258,6 +264,6 @@ def test_name_prefix_validation_runs_offline(
             if name == "validateNamePrefix"
         )
         assert (
-            "fail('namePrefix must be 3-8 lowercase alphanumeric characters')"
+            "fail('namePrefix must be 3-8 lowercase alphanumeric characters starting with a lowercase letter')"
             in validator["output"]["value"]
         )

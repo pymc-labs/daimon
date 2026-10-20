@@ -114,9 +114,9 @@ when that agent is deployed, not by these templates.
 
 ## Provision the foundation
 
-Choose lowercase letters/digits for `namePrefix` (3–8 characters); resource
-names include a deterministic group-specific suffix. Keep the same group,
-prefix and location for later stages.
+Choose lowercase letters/digits for `namePrefix` (3–8 characters), starting
+with a lowercase letter. Resource names include a deterministic group-specific
+suffix. Keep the same group, prefix and location for later stages.
 
 Set `vaultPurgeProtection=true` for M3/Coke and other production installs.
 The default false supports development teardown; once enabled on an existing
