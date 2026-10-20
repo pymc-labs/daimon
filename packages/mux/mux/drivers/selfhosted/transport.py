@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import math
 import random
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
@@ -49,6 +50,7 @@ class Transport(Protocol):
         session_id: str,
         body: Mapping[str, JsonValue] | None = None,
         mcp_authorization: str | None = None,
+        deadline: datetime | None = None,
     ) -> JsonValue: ...
 
 
@@ -75,13 +77,18 @@ def retry_delay(response: httpx.Response, attempt: int) -> float:
     retry_after = response.headers.get("Retry-After")
     if retry_after:
         try:
-            return max(0, float(retry_after))
+            value = float(retry_after)
+            if math.isfinite(value):
+                return min(30, max(0, value))
         except ValueError:
             try:
-                return max(
-                    0,
-                    cast(datetime, parsedate_to_datetime(retry_after)).timestamp()
-                    - datetime.now(UTC).timestamp(),
+                return min(
+                    30,
+                    max(
+                        0,
+                        cast(datetime, parsedate_to_datetime(retry_after)).timestamp()
+                        - datetime.now(UTC).timestamp(),
+                    ),
                 )
             except (ValueError, TypeError):
                 pass
@@ -115,6 +122,7 @@ class DirectTransport:
         *,
         mcp_authorization: str | None = None,
         replay: bool = False,
+        deadline: datetime | None = None,
     ) -> JsonValue:
         if mcp_authorization is not None and (
             not mcp_authorization.startswith("Bearer ")
@@ -130,20 +138,43 @@ class DirectTransport:
             headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
             if mcp_authorization is not None:
                 headers["X-Daimon-MCP-Authorization"] = mcp_authorization
-            try:
-                response = await self._client.request(
-                    method,
-                    url,
-                    json=body,
-                    headers=headers,
-                    follow_redirects=False,
+            remaining = (
+                (deadline - datetime.now(UTC)).total_seconds() if deadline is not None else None
+            )
+            if remaining is not None and remaining <= 0:
+                raise ProviderError(
+                    "transient_network", retryable=True, native_code="polling_deadline"
                 )
+            try:
+                async with asyncio.timeout(remaining):
+                    response = await self._client.request(
+                        method,
+                        url,
+                        json=body,
+                        headers=headers,
+                        follow_redirects=False,
+                    )
                 if replay and response.status_code in (429, 502, 503, 504) and attempt < 5:
-                    await asyncio.sleep(retry_delay(response, attempt))
+                    delay = retry_delay(response, attempt)
+                    remaining = (
+                        (deadline - datetime.now(UTC)).total_seconds()
+                        if deadline is not None
+                        else delay
+                    )
+                    await asyncio.sleep(max(0, min(delay, remaining)))
                     continue
                 checked(response)
                 return _JSON.validate_json(response.content)
-            except httpx.HTTPError:
+            except (httpx.HTTPError, TimeoutError):
+                if replay and attempt < 5:
+                    delay = random.uniform(0.1, min(2.0, 0.1 * 2**attempt))
+                    remaining = (
+                        (deadline - datetime.now(UTC)).total_seconds()
+                        if deadline is not None
+                        else delay
+                    )
+                    await asyncio.sleep(max(0, min(delay, remaining)))
+                    continue
                 raise ProviderError("transient_network", retryable=True) from None
             except ValueError:
                 raise ProviderError(
@@ -159,6 +190,7 @@ class DirectTransport:
         session_id: str,
         body: Mapping[str, JsonValue] | None = None,
         mcp_authorization: str | None = None,
+        deadline: datetime | None = None,
     ) -> JsonValue:
         turn = method == "POST" and urlsplit(path).path == "/v0/turns"
         if mcp_authorization is not None and not turn:
@@ -169,6 +201,7 @@ class DirectTransport:
             body,
             mcp_authorization=mcp_authorization,
             replay=method == "GET",
+            deadline=deadline,
         )
 
 
@@ -198,6 +231,7 @@ class FoundryInvocationsTransport(DirectTransport):
         session_id: str,
         body: Mapping[str, JsonValue] | None = None,
         mcp_authorization: str | None = None,
+        deadline: datetime | None = None,
     ) -> JsonValue:
         parsed = urlsplit(path)
         turn = method == "POST" and parsed.path == "/v0/turns"
@@ -224,4 +258,5 @@ class FoundryInvocationsTransport(DirectTransport):
             envelope,
             mcp_authorization=mcp_authorization,
             replay=method == "GET",
+            deadline=deadline,
         )

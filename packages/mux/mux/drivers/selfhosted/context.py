@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import Agents, Environments
 from mux.contracts.resources import Environment, ProviderBinding, SessionSpec
 from mux.drivers.selfhosted.transport import Transport
@@ -66,6 +66,15 @@ class Context:
         ):
             raise ScopeViolation(ref.id, "self-hosted session requires its authorized host binding")
         return binding
+
+    @staticmethod
+    def revision(binding: ProviderBinding, kind: str) -> Revision:
+        encoded = binding.native_refs.get(kind + "_revision_pin")
+        return (
+            Revision.model_validate_json(encoded)
+            if encoded is not None
+            else Revision(local=int(binding.native_refs.get(kind + "_revision", "0")))
+        )
 
     def check_environment(self, environment: Environment) -> None:
         spec = environment.spec

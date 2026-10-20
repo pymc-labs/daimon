@@ -27,7 +27,7 @@ from mux.state.operations import request_digest
 class SelfHostedSessions:
     def __init__(self, context: Context) -> None:
         self._c = context
-        self._creates: dict[tuple[Scope, str], tuple[str, Session]] = {}
+        self._creates: dict[tuple[str, str, str, str], tuple[str, Session]] = {}
         # Set by the driver after both ports have been constructed.
         from mux.contracts.ports import Events
 
@@ -42,7 +42,7 @@ class SelfHostedSessions:
             raise ContinuityLost(binding.id, ("self-hosted session has no agent/environment pins",))
         return SessionSpec(
             agent=self._c.ref(scope, "agent", refs["agent"]),
-            agent_revision=Revision(local=int(refs.get("agent_revision", "0"))),
+            agent_revision=self._c.revision(binding, "agent"),
             environment=self._c.ref(scope, "environment", refs["environment"]),
             config_revision=binding.config_revision,
         )
@@ -64,11 +64,27 @@ class SelfHostedSessions:
         ):
             raise self._c.unsupported("session_create_options")
         digest = request_digest(spec.model_dump(mode="json"))
-        previous = self._creates.get((scope, key))
+        identity = (scope.tenant_id, scope.account_id, scope.principal_id, key)
+        previous = self._creates.get(identity)
         if previous:
             if previous[0] != digest:
                 raise OperationConflict(key)
             return previous[1]
+        # The identity excludes both renewable grants and the mutable request
+        # payload, so a reconstructed client can detect a changed intent.
+        id_ = "sh_session_" + str(uuid5(NAMESPACE_URL, request_digest(list(identity))))
+        ref = self._c.ref(scope, "session", id_)
+        prior_binding = self._c.bindings.get(ref)
+        if prior_binding is None and self._c.binding_lookup is not None:
+            prior_binding = self._c.binding_lookup(scope, id_)
+        if prior_binding is not None:
+            if prior_binding.native_refs.get("spec_digest") != digest:
+                raise OperationConflict(key)
+            self._c.bindings[ref] = prior_binding
+            prior_binding = self._c.binding(scope, ref)
+            result = self._session(ref, prior_binding, "idle")
+            self._creates[identity] = digest, result
+            return result
         agent = await self._c.agents.retrieve(scope, spec.agent)
         environment = await self._c.environments.retrieve(scope, spec.environment)
         if agent.ref != spec.agent or environment.ref != spec.environment:
@@ -80,8 +96,6 @@ class SelfHostedSessions:
             spec.agent_revision.local != 0 or spec.agent_revision.native is not None
         ) and agent.revision != spec.agent_revision:
             raise ContinuityLost(spec.agent.id, ("agent revision differs from session pin",))
-        id_ = "sh_session_" + str(uuid5(NAMESPACE_URL, scope.model_dump_json() + key + digest))
-        ref = self._c.ref(scope, "session", id_)
         binding = ProviderBinding(
             id=id_,
             provider="selfhosted",
@@ -102,12 +116,17 @@ class SelfHostedSessions:
                 "environment": spec.environment.id,
                 "agent_revision": str(agent.revision.local),
                 "environment_revision": str(environment.revision.local),
+                "agent_revision_pin": agent.revision.model_dump_json(),
+                "environment_revision_pin": environment.revision.model_dump_json(),
                 "spec_digest": digest,
             },
         )
-        self._c.bindings[ref], self._c.specs[ref] = binding, spec
+        self._c.bindings[ref], self._c.specs[ref] = (
+            binding,
+            spec.model_copy(update={"agent_revision": agent.revision}),
+        )
         result = self._session(ref, binding, "idle")
-        self._creates[scope, key] = digest, result
+        self._creates[identity] = digest, result
         return result
 
     @staticmethod

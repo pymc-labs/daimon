@@ -1131,20 +1131,23 @@ lookup. `DirectTransport` calls the harness `/v0` endpoints;
 `FoundryInvocationsTransport` wraps those same calls in `/invocations` and sends
 one deterministic sandbox id on every call. Both submit turns with JSON
 acknowledgements and poll the durable event log. `open_stream` opens the first
-HTTP replay request before returning its iterator. A lost reader can reconnect
+HTTP replay request before returning its iterator. With no cursor it starts at
+the active turn or the current high-water mark; use an explicit cursor for
+historical replay. A lost reader can reconnect
 at a sequence cursor without running the turn again.
 
 Usage identities include the session, turn and model request, so replay preserves
 one observation per request. Missing measurements are unknown observations when
 the harness explicitly reports `usage_unavailable`/`usage_missing`; a terminal
-turn with no measured, unavailable or started request is retained as errored
-and unresolved for operator reconciliation without blocking later turns. Unmatched
+turn with no measured, unavailable or started request is retained as unresolved (errored unless interrupted)
+for operator reconciliation without blocking later turns. Unmatched
 request starts remain unknown observations; measured revision 2 supersedes an
 unknown revision 1 under the same observation id. Tokens are never
 inferred as zero. Agent/environment revision changes require a new binding.
 Artifacts, session listing/deletion and native skill administration refuse
-explicitly. Built-in and MCP tool policies support `auto` and `ask`, including
-multiple pending approvals.
+explicitly. Built-in `auto`/`ask` and multiple pending approvals are supported.
+Until deny wire support lands, narrowed built-in sets and MCP policies refuse
+explicitly so omitted tools cannot silently become automatic.
 
 `mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
 turn requests, approval decisions, durable event replay and typed event data.
@@ -1201,3 +1204,12 @@ The real harness/driver interop suite must cover:
 8. Foundry invocation envelope with string `query.after_seq`.
 9. Concurrent second send receiving 409.
 10. Two sequential turns on one session.
+
+Session creation uses tenant/account/principal plus the caller's idempotency key,
+independently of renewable authorization grants. The binding retains a separate
+specification digest; a changed specification under that key conflicts, including
+on reconstruction. Durable agent/environment pins retain both local and native
+revisions. Creation replay reuses those pins instead of current resource versions.
+Approval retries reconcile a known call's tool result; an uncertain HTTP reply
+cannot cause another tool execution. Retry-After is capped at 30 seconds and the
+poll deadline; network polling and cancellation observation use bounded backoff.

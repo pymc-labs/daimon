@@ -6,7 +6,7 @@ import asyncio
 import random
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -78,6 +78,7 @@ class SelfHostedEvents:
         self._sends: dict[tuple[ResourceRef, str], tuple[str, SendReceipt]] = {}
         self._locks: dict[ResourceRef, asyncio.Lock] = {}
         self._intents: dict[tuple[ResourceRef, str], str] = {}
+        self._approvals: dict[tuple[ResourceRef, str, str], tuple[str, SendReceipt]] = {}
         self._cancels: dict[tuple[ResourceRef, str], CancelReceipt] = {}
 
     def _remember(self, ref: ResourceRef, raw: wire.Event) -> Event:
@@ -103,7 +104,9 @@ class SelfHostedEvents:
         ):
             self.unresolved_turns.setdefault(ref, set()).add(raw.turn_id)
             payload = TurnEndedPayload(
-                root_turn_id=raw.turn_id, outcome="errored", native_reason="turn_usage_required"
+                root_turn_id=raw.turn_id,
+                outcome="interrupted" if raw.data.get("outcome") == "interrupted" else "errored",
+                native_reason="turn_usage_required",
             )
             normalized = normalized.model_copy(update={"payload": payload.model_dump(mode="json")})
         if raw.type == "requires_action":
@@ -115,13 +118,16 @@ class SelfHostedEvents:
         self._normalized.setdefault(ref, {})[raw.seq] = normalized
         return normalized
 
-    async def replay(self, scope: Scope, ref: ResourceRef) -> tuple[tuple[Event, ...], bool]:
+    async def replay(
+        self, scope: Scope, ref: ResourceRef, *, deadline: datetime | None = None
+    ) -> tuple[tuple[Event, ...], bool]:
         self._c.binding(scope, ref)
         after = max(self._history.get(ref, {}), default=0)
         raw = await self._c.transport.request(
             "GET",
             f"/v0/sessions/{segment(ref.id)}/events?after_seq={after}",
             session_id=ref.id,
+            deadline=deadline,
         )
         try:
             response = wire.EventsResponse.model_validate(raw)
@@ -211,9 +217,7 @@ class SelfHostedEvents:
         agent = await self._c.agents.retrieve(scope, spec.agent)
         self._c.check(scope, agent.ref, "agent")
         binding = self._c.binding(scope, session)
-        if agent.ref != spec.agent or str(agent.revision.local) != binding.native_refs.get(
-            "agent_revision"
-        ):
+        if agent.ref != spec.agent or agent.revision != self._c.revision(binding, "agent"):
             raise ContinuityLost(binding.id, ("agent changed since session creation",))
         if spec.environment is None:
             raise self._c.unsupported("selfhosted_environment_required")
@@ -222,7 +226,7 @@ class SelfHostedEvents:
         if (
             environment.ref != spec.environment
             or environment.lifecycle != "active"
-            or str(environment.revision.local) != binding.native_refs.get("environment_revision")
+            or environment.revision != self._c.revision(binding, "environment")
         ):
             raise ContinuityLost(binding.id, ("environment changed since session creation",))
         self._c.check_environment(environment)
@@ -232,7 +236,7 @@ class SelfHostedEvents:
             raise self._c.unsupported("agent_options_or_extensions")
         if agent.spec.tools is not None:
             builtins = {tool.name for tool in agent.spec.tools if tool.kind == "builtin"}
-            if not builtins.issubset({"bash", "read", "write", "edit"}) or any(
+            if builtins != {"bash", "read", "write", "edit"} or any(
                 tool.kind == "custom" for tool in agent.spec.tools
             ):
                 raise self._c.unsupported("custom_tools_or_tool_permissions")
@@ -240,10 +244,8 @@ class SelfHostedEvents:
             tool.name: tool.permission for tool in agent.spec.tools or ()
         }
         for connection in agent.spec.mcp_servers or ():
-            for name, permission in connection.tool_policy.items():
-                if permission not in ("auto", "ask"):
-                    raise self._c.unsupported("mcp_tool_policy")
-                policy[name] = permission
+            if connection.tool_policy:
+                raise self._c.unsupported("mcp_tool_policy_requires_deny_wire")
         model = self._model or agent.spec.model.id
         if self._deployment is not None and model != self._deployment:
             raise self._c.unsupported("model_deployment_mismatch")
@@ -366,7 +368,8 @@ class SelfHostedEvents:
         if prior:
             if prior[0] != digest:
                 raise OperationConflict(key)
-            return prior[1]
+            if prior[1].status != "outcome_unknown":
+                return prior[1]
         event = events[0]
         if isinstance(event, UserMessage):
             if event.mode != "new_turn":
@@ -399,23 +402,30 @@ class SelfHostedEvents:
                 or raw.get("accepted") is not True
                 or raw.get("turn_id") != request.turn_id
             ):
-                return SendReceipt(
+                receipt = SendReceipt(
                     operation_id=key,
                     status="outcome_unknown",
                     input_ids=(key,),
                     turn_id=request.turn_id,
                 )
+                self._sends[session, key] = digest, receipt
+                return receipt
             turn_id = request.turn_id
         elif isinstance(event, UserToolConfirmation | UserToolResult):
-            snapshot = await self.reconcile(scope, session)
-            action = next((a for a in snapshot.required_actions if a.id == event.action_id), None)
-            if (
-                action is None
-                or snapshot.active_root_turn is None
-                or (expected_turn is not None and expected_turn != snapshot.active_root_turn)
-            ):
+            values, _ = await self.replay(scope, session)
+            requested = next(
+                (
+                    raw
+                    for raw in reversed(tuple(self._history.get(session, {}).values()))
+                    if raw.type == "requires_action"
+                    and raw.data.get("action_id") == event.action_id
+                    and (expected_turn is None or raw.turn_id == expected_turn)
+                ),
+                None,
+            )
+            if requested is None:
                 raise ProviderError("conflict", retryable=False, native_code="action_not_pending")
-            turn_id = snapshot.active_root_turn
+            turn_id = requested.turn_id
             if isinstance(event, UserToolConfirmation):
                 body = wire.ActionRequest(action_id=event.action_id, decision=event.decision)
             else:
@@ -427,12 +437,63 @@ class SelfHostedEvents:
                         "is_error": event.is_error,
                     },
                 )
-            await self._c.transport.request(
-                "POST",
-                f"/v0/turns/{segment(turn_id)}/actions",
-                body=body.model_dump(mode="json", exclude_unset=True),
-                session_id=session.id,
+            action_digest = request_digest(body.model_dump(mode="json", exclude_unset=True))
+            action_key = (session, turn_id, event.action_id)
+            attempted = self._approvals.get(action_key)
+            if attempted is not None and attempted[0] != action_digest:
+                raise OperationConflict(key)
+            settled = any(
+                value.turn_id == turn_id
+                and value.type == "agent.tool_result"
+                and value.payload.get("call_id") == requested.data.get("call_id")
+                for value in values
             )
+            snapshot = self.projection(session, values, False)
+            pending = any(action.id == event.action_id for action in snapshot.required_actions)
+            if settled:
+                receipt = SendReceipt(
+                    operation_id=key, status="processed", input_ids=(key,), turn_id=turn_id
+                )
+            elif attempted is not None or not pending:
+                receipt = SendReceipt(
+                    operation_id=key, status="outcome_unknown", input_ids=(key,), turn_id=turn_id
+                )
+            else:
+                receipt = SendReceipt(
+                    operation_id=key, status="outcome_unknown", input_ids=(key,), turn_id=turn_id
+                )
+                # Keep the intent before HTTP: a lost acknowledgement must never
+                # turn an already executed decision into another tool execution.
+                self._approvals[action_key] = action_digest, receipt
+                self._sends[session, key] = digest, receipt
+                try:
+                    await self._c.transport.request(
+                        "POST",
+                        f"/v0/turns/{segment(turn_id)}/actions",
+                        body=body.model_dump(mode="json", exclude_unset=True),
+                        session_id=session.id,
+                    )
+                except ProviderError as error:
+                    if not error.retryable:
+                        raise
+                    try:
+                        values, _ = await self.replay(scope, session)
+                    except ProviderError as replay_error:
+                        if not replay_error.retryable:
+                            raise
+                    settled = any(
+                        value.turn_id == turn_id
+                        and value.type == "agent.tool_result"
+                        and value.payload.get("call_id") == requested.data.get("call_id")
+                        for value in values
+                    )
+                    if settled:
+                        receipt = receipt.model_copy(update={"status": "processed"})
+                else:
+                    receipt = receipt.model_copy(update={"status": "queued"})
+            self._approvals[action_key] = action_digest, receipt
+            self._sends[session, key] = digest, receipt
+            return receipt
         else:
             raise self._c.unsupported("native_input")
         receipt = SendReceipt(operation_id=key, status="queued", input_ids=(key,), turn_id=turn_id)
@@ -451,7 +512,20 @@ class SelfHostedEvents:
         cursor = int(after or "0")
         # Establish the first durable HTTP replay request before returning;
         # opening on an idle session must still wait for the next turn.
-        initial, complete = await self.replay(scope, session)
+        deadline = datetime.now(UTC) + timedelta(seconds=self._deadline_s)
+        initial, complete = await self.replay(scope, session, deadline=deadline)
+        if after is None:
+            active = self.projection(session, initial, complete).active_root_turn
+            active_events = [
+                event.sequence
+                for event in initial
+                if active is not None and event.turn_id == active
+            ]
+            cursor = (
+                min(active_events) - 1
+                if active_events
+                else max((event.sequence for event in initial), default=0)
+            )
 
         async def iterate() -> AsyncIterator[Event]:
             nonlocal cursor
@@ -473,8 +547,9 @@ class SelfHostedEvents:
                 }
                 if done and observed_end and pending.issubset(ended):
                     return
-                await asyncio.sleep(random.uniform(0.1, delay))
-                replayed, done = await self.replay(scope, session)
+                remaining = (deadline - datetime.now(UTC)).total_seconds()
+                await asyncio.sleep(max(0, min(random.uniform(0.1, delay), remaining)))
+                replayed, done = await self.replay(scope, session, deadline=deadline)
                 delay = (
                     0.1
                     if any(event.sequence > cursor for event in replayed)
@@ -561,8 +636,14 @@ class SelfHostedEvents:
     async def wait_stopped(
         self, scope: Scope, receipt: CancelReceipt, *, deadline: datetime
     ) -> StopObservation:
-        while True:
-            values, _ = await self.replay(scope, receipt.session)
+        delay = 0.1
+        while (deadline - datetime.now(UTC)).total_seconds() > 0:
+            try:
+                values, _ = await self.replay(scope, receipt.session, deadline=deadline)
+            except ProviderError as error:
+                if error.native_code == "polling_deadline":
+                    break
+                raise
             for event in values:
                 if event.turn_id == receipt.turn_id and event.type == "session.turn_ended":
                     payload = TurnEndedPayload.model_validate(event.payload)
@@ -573,13 +654,11 @@ class SelfHostedEvents:
                         observed_at=datetime.now(UTC),
                     )
             remaining = (deadline - datetime.now(UTC)).total_seconds()
-            if remaining <= 0:
-                return StopObservation(
-                    receipt_operation_id=receipt.operation_id,
-                    stopped=False,
-                    observed_at=datetime.now(UTC),
-                )
-            await asyncio.sleep(min(0.1, remaining))
+            await asyncio.sleep(max(0, min(random.uniform(0.1, delay), remaining)))
+            delay = min(2.0, delay * 2)
+        return StopObservation(
+            receipt_operation_id=receipt.operation_id, stopped=False, observed_at=datetime.now(UTC)
+        )
 
     def observations(self, session: ResourceRef) -> tuple[UsageObservation, ...]:
         observations: dict[str, UsageObservation] = {}

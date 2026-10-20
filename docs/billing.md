@@ -1310,7 +1310,7 @@ revision 2 under the same observation id; replay never creates another charge.
 An explicit `usage_unavailable` also keeps that request pending. Missing token
 counts remain unknown, including after cancellation or a harness restart.
 
-A terminal turn with no request inventory or usage is reported as errored and
-retained for operator reconciliation. Its terminal event remains replayable,
+A terminal turn with no request inventory or usage is retained for operator
+reconciliation. A cancellation stays interrupted; other outcomes report an error. Its terminal event remains replayable,
 and later turns can use the session. Operators must investigate these unresolved
 turns rather than treating them as zero-cost work.
