@@ -6,6 +6,11 @@ An event validates its data against its type before entering a durable journal.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import json
+import re
 from typing import Annotated, Literal, cast
 
 from pydantic import (
@@ -52,9 +57,69 @@ class MCPServer(WireModel):
     headers_env: dict[str, str] = Field(default_factory=dict)
 
 
+SKILL_MAX_BYTES = 8 * 1024 * 1024
+TURN_SKILLS_MAX_BYTES = 24 * 1024 * 1024
+
+
+def skill_sha256(name: str, files: dict[str, bytes]) -> str:
+    """Hash UTF-8 compact sorted JSON {name, files: {path: canonical base64}}."""
+    canonical = json.dumps(
+        {
+            "name": name,
+            "files": {path: base64.b64encode(data).decode("ascii") for path, data in files.items()},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validate_skill_path(path: str) -> None:
+    if (
+        not path
+        or "\\" in path
+        or "\x00" in path
+        or any(part in ("", ".", "..") for part in path.split("/"))
+    ):
+        raise ValueError("skill files require canonical relative POSIX paths")
+
+
 class InlineSkill(WireModel):
     name: str
     files: dict[str, str]
+    binary_files: dict[str, str] = Field(default_factory=dict)
+    sha256: str = ""
+
+    def decoded_files(self) -> dict[str, bytes]:
+        if self.files.keys() & self.binary_files.keys():
+            raise ValueError("skill path occurs in both text and binary files")
+        decoded = {path: text.encode("utf-8") for path, text in self.files.items()}
+        for path, data in self.binary_files.items():
+            if len(data) > ((SKILL_MAX_BYTES + 2) // 3) * 4:
+                raise ValueError("skill exceeds 8 MiB decoded bytes")
+            try:
+                decoded[path] = base64.b64decode(data, validate=True)
+            except (ValueError, binascii.Error):
+                raise ValueError("skill binary file requires valid base64") from None
+        if sum(map(len, decoded.values())) > SKILL_MAX_BYTES:
+            raise ValueError("skill exceeds 8 MiB decoded bytes")
+        for path in decoded:
+            validate_skill_path(path)
+            parts = path.split("/")
+            if any("/".join(parts[:i]) in decoded for i in range(1, len(parts))):
+                raise ValueError("skill path is both a file and a directory")
+        return decoded
+
+    @model_validator(mode="after")
+    def validate_bundle(self) -> InlineSkill:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", self.name):
+            raise ValueError("invalid skill name")
+        digest = skill_sha256(self.name, self.decoded_files())
+        if "sha256" in self.model_fields_set and self.sha256 != digest:
+            raise ValueError("skill sha256 does not match content")
+        self.sha256 = digest
+        return self
 
 
 class URLSkill(WireModel):
@@ -80,6 +145,19 @@ class TurnRequest(WireModel):
     mcp_servers: list[MCPServer]
     skills: list[Skill]
     limits: Limits
+
+    @model_validator(mode="after")
+    def validate_skills(self) -> TurnRequest:
+        if len({skill.name for skill in self.skills}) != len(self.skills):
+            raise ValueError("duplicate skill names")
+        size = sum(
+            sum(map(len, skill.decoded_files().values()))
+            for skill in self.skills
+            if isinstance(skill, InlineSkill)
+        )
+        if size > TURN_SKILLS_MAX_BYTES:
+            raise ValueError("turn skills exceed 24 MiB decoded bytes")
+        return self
 
 
 class ActionRequest(WireModel):
@@ -117,10 +195,12 @@ class StatusRunningData(ResponseModel):
 
 
 class AgentMessageDeltaData(ResponseModel):
+    message_id: str
     text: str
 
 
 class AgentMessageData(ResponseModel):
+    message_id: str
     parts: list[Part]
 
 

@@ -1102,3 +1102,19 @@ Model attempts use `model_request_started` before model I/O; measured usage or
 an explicit `usage_unavailable` error closes the same request id. Approval actions
 use `allow` to execute, `deny` to refuse, and `result` to substitute a host result.
 Only `result` carries a result field; JSON null remains a valid host result.
+
+
+Inline harness skills carry text `files`, base64 `binary_files`, and a verified
+`sha256`. `InlineSkill` computes a missing digest for local builders and rejects
+an explicitly supplied digest that differs from the content. Use the shared
+`skill_sha256(name, decoded_files)` helper: it hashes UTF-8 JSON with sorted keys,
+compact separators and `ensure_ascii=False`, shaped as
+`{"name": name, "files": {path: standard_base64(decoded_bytes)}}`.
+The digest includes all paths and bytes regardless of their text/binary map.
+Paths must be canonical relative POSIX paths; duplicates, traversal and
+file/directory collisions are refused. Limits are 8 MiB decoded per skill and
+24 MiB per turn; seeded names such as `marimo_notebooks` remain valid.
+
+Assistant message deltas and snapshots require the same session-unique
+`message_id`, allowing a driver to accumulate deltas and replace them with the
+final snapshot.

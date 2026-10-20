@@ -7,8 +7,8 @@ from pydantic import ValidationError
 DATA = {
     "model_request_started": {"request_id": "r", "model": "gpt-5"},
     "status_running": {},
-    "agent_message_delta": {"text": "hello"},
-    "agent_message": {"parts": [{"type": "text", "text": "hello"}]},
+    "agent_message_delta": {"message_id": "msg-1", "text": "hello"},
+    "agent_message": {"message_id": "msg-1", "parts": [{"type": "text", "text": "hello"}]},
     "tool_use": {"call_id": "c", "name": "read", "input": {"path": "a"}, "executor": "agent"},
     "tool_result": {"call_id": "c", "output": "contents", "is_error": False},
     "requires_action": {
@@ -189,3 +189,105 @@ def test_action_decision_rejects_ambiguous_pairing(body: dict[str, object]) -> N
 
     with pytest.raises(ValidationError, match="result must be present exactly"):
         ActionRequest.model_validate(body)
+
+
+def test_binary_skill_digest_covers_name_paths_and_decoded_content() -> None:
+    import base64
+    import hashlib
+
+    from mux.drivers.selfhosted.wire import InlineSkill, skill_sha256
+
+    skill = InlineSkill(
+        name="marimo_notebooks",
+        files={"SKILL.md": "hello"},
+        binary_files={"assets/font.bin": base64.b64encode(b"\x00\xff").decode()},
+    )
+    canonical = (
+        b'{"files":{"SKILL.md":"aGVsbG8=","assets/font.bin":"AP8="},"name":"marimo_notebooks"}'
+    )
+    assert skill.sha256 == hashlib.sha256(canonical).hexdigest()
+    assert skill.sha256 == skill_sha256(skill.name, skill.decoded_files())
+    assert InlineSkill.model_validate_json(skill.model_dump_json()) == skill
+    # Text/binary representation and insertion order do not alter the digest.
+    assert (
+        InlineSkill(
+            name=skill.name,
+            files={},
+            binary_files={"assets/font.bin": "AP8=", "SKILL.md": "aGVsbG8="},
+        ).sha256
+        == skill.sha256
+    )
+    assert (
+        InlineSkill(name="other", files=skill.files, binary_files=skill.binary_files).sha256
+        != skill.sha256
+    )
+    with pytest.raises(ValidationError, match="sha256"):
+        InlineSkill(name="a", files={}, sha256="0" * 64)
+    with pytest.raises(ValidationError, match="sha256"):
+        InlineSkill(name="a", files={}, sha256="")
+
+
+@pytest.mark.parametrize("path", ["../x", "/x", "a/../x", "a//x", "./x", "a/", "a\\x", "", "x\x00"])
+def test_skill_paths_cannot_escape_or_alias(path: str) -> None:
+    from mux.drivers.selfhosted.wire import InlineSkill
+
+    with pytest.raises(ValidationError, match="POSIX"):
+        InlineSkill(name="safe", files={path: "x"})
+
+
+def test_skill_rejects_ambiguous_paths_invalid_base64_and_unsafe_names() -> None:
+    from mux.drivers.selfhosted.wire import InlineSkill
+
+    for fields in [
+        {"files": {"a": "x"}, "binary_files": {"a": "eA=="}},
+        {"files": {"a": "x", "a/b": "y"}},
+        {"files": {}, "binary_files": {"a": "invalid!"}},
+    ]:
+        with pytest.raises(ValidationError):
+            InlineSkill(name="safe", **fields)
+    with pytest.raises(ValidationError, match="name"):
+        InlineSkill(name="../escape", files={})
+
+
+def test_skill_and_turn_decoded_byte_caps() -> None:
+    from mux.drivers.selfhosted.wire import SKILL_MAX_BYTES, InlineSkill
+
+    content = "a" * SKILL_MAX_BYTES
+    admitted = InlineSkill(name="a", files={"SKILL.md": content})
+    with pytest.raises(ValidationError, match="8 MiB"):
+        InlineSkill(name="a", files={"SKILL.md": content + "a"})
+    body = {
+        "session_id": "s",
+        "turn_id": "t",
+        "idempotency_key": "k",
+        "model": "m",
+        "instructions": "",
+        "input": [],
+        "mcp_servers": [],
+        "limits": {"max_tool_calls": 1, "deadline_s": 1},
+        "skills": [
+            admitted.model_dump()
+            | {"name": str(i), "sha256": InlineSkill(name=str(i), files=admitted.files).sha256}
+            for i in range(3)
+        ],
+    }
+    assert len(TurnRequest.model_validate(body).skills) == 3
+    body["skills"].append(InlineSkill(name="extra", files={"SKILL.md": "x"}).model_dump())
+    with pytest.raises(ValidationError, match="24 MiB"):
+        TurnRequest.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    "kind,payload",
+    [
+        ("agent_message_delta", {"text": "hello"}),
+        ("agent_message", {"parts": []}),
+    ],
+)
+def test_assistant_messages_require_stable_identity(kind, payload):
+    from mux.drivers.selfhosted.wire import DATA_MODELS
+
+    with pytest.raises(ValidationError, match="message_id"):
+        DATA_MODELS[kind].model_validate(payload)
+    parsed = DATA_MODELS[kind].model_validate({**payload, "message_id": "stable", "future": 1})
+    assert parsed.model_dump()["message_id"] == "stable"
