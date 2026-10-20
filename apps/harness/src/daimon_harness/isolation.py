@@ -4,8 +4,47 @@ from __future__ import annotations
 
 import ctypes
 import os
+import stat
 import sys
 from pathlib import Path
+from typing import Literal
+
+TOOL_UID_MIN = 10001
+TOOL_UID_MAX = 60000
+
+
+def proc_hides_other_users(mountinfo: Path = Path("/proc/self/mountinfo")) -> bool:
+    """Inspect the actual proc mount, including its superblock options."""
+    for line in mountinfo.read_text().splitlines():
+        mount, separator, filesystem = line.partition(" - ")
+        fields, backing = mount.split(), filesystem.split()
+        if separator and fields[4] == "/proc" and backing[0] == "proc":
+            options = set(fields[5].split(",")) | set(backing[2].split(","))
+            return bool(options & {"hidepid=2", "hidepid=invisible"}) and not any(
+                option.startswith("gid=") for option in options
+            )
+    return False
+
+
+def validate_session_mode(
+    *, mountinfo: Path = Path("/proc/self/mountinfo"), shared_tmp: Path = Path("/tmp")
+) -> Literal["single", "multi"]:
+    mode = os.environ.get("HARNESS_SESSION_MODE", "single")
+    if mode not in {"single", "multi"}:
+        raise RuntimeError("HARNESS_SESSION_MODE must be single or multi")
+    if mode == "multi" and os.environ.get("HARNESS_TEST_MODE") != "1":
+        if not can_switch_uid() or not proc_hides_other_users(mountinfo):
+            raise RuntimeError("multi session mode requires UID switching and hidepid=2 /proc")
+        info = shared_tmp.stat()
+        # Refuse writable global scratch, including ACL grants that mode bits hide.
+        if (
+            info.st_mode & stat.S_IWOTH
+            or TOOL_UID_MIN <= info.st_uid <= TOOL_UID_MAX
+            or (info.st_mode & stat.S_IWGRP and TOOL_UID_MIN <= info.st_gid <= TOOL_UID_MAX)
+            or "system.posix_acl_access" in os.listxattr(shared_tmp)
+        ):
+            raise RuntimeError("multi session mode requires /tmp not writable by tool UIDs")
+    return "single" if mode == "single" else "multi"
 
 
 def protect_process() -> None:
@@ -25,8 +64,11 @@ def protect_process() -> None:
 
 def tool_identity(home: Path, uid: int = 10001) -> tuple[int | None, int | None, list[int] | None]:
     home.mkdir(parents=True, exist_ok=True)
-    work = home / "work"
-    work.mkdir(exist_ok=True)
+    directories = [home / name for name in ("work", "tmp")]
+    for directory in directories:
+        if directory.is_symlink():
+            raise RuntimeError("tool directories must not be symlinks")
+        directory.mkdir(exist_ok=True, mode=0o700)
     if not can_switch_uid():
         if os.environ.get("HARNESS_TEST_MODE") != "1":
             raise RuntimeError("tool execution requires a separate UID")
@@ -35,9 +77,10 @@ def tool_identity(home: Path, uid: int = 10001) -> tuple[int | None, int | None,
     # Only that identity can traverse the service-owned session directory.
     os.chown(home, os.geteuid(), uid)
     os.chmod(home, 0o710)
-    if work.stat().st_uid != uid:
-        os.chmod(work, 0o700)
-        os.chown(work, uid, uid)
+    for directory in directories:
+        if directory.stat().st_uid != uid:
+            os.chmod(directory, 0o700)
+            os.chown(directory, uid, uid)
     return uid, uid, []
 
 

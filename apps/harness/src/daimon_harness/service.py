@@ -33,7 +33,7 @@ from pydantic import JsonValue, ValidationError
 from .auth import Authenticator
 from .credentials import load_bindings, redact, turn_credentials
 from .errors import HarnessError
-from .isolation import can_switch_uid, prepare_service, protect_process
+from .isolation import can_switch_uid, prepare_service, protect_process, validate_session_mode
 from .journal import ConflictError, Journal, identifier
 from .model_adapter import AzureModelAdapter, ModelAdapter
 from .runtime import TurnContext
@@ -48,7 +48,7 @@ audit_logger.propagate = False
 
 
 class Supervisor:
-    def __init__(self, home: Path, adapter: ModelAdapter) -> None:
+    def __init__(self, home: Path, adapter: ModelAdapter, session_mode: str = "single") -> None:
         self.operator_credentials = {
             name: value
             for name, value in os.environ.items()
@@ -58,6 +58,14 @@ class Supervisor:
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="harness-journal")
         self.submissions = asyncio.Lock()
         self.journal = Journal(home)
+        self.session_mode = session_mode
+        if session_mode == "single":
+            try:
+                self.journal.configure_single_session()
+            except BaseException:
+                self.journal.close()
+                self.worker.shutdown(wait=True)
+                raise
         self.home = home
         self.adapter = adapter
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -194,6 +202,8 @@ class Supervisor:
 
     async def submit(self, request: TurnRequest, mcp_authorization: str | None = None) -> None:
         async with self.submissions:
+            if self.session_mode == "single":
+                await self.io(self.journal.bind_session, request.session_id)
             if await self.io(self.journal.is_replay, request):
                 return
             if any(isinstance(skill, URLSkill) for skill in request.skills):
@@ -270,10 +280,12 @@ def create_app(
     elif not can_switch_uid():
         raise RuntimeError("production requires separate service and tool UIDs")
     auth = Authenticator(token)
-    supervisor = Supervisor(root, adapter or AzureModelAdapter())
+    session_mode = validate_session_mode()
+    supervisor = Supervisor(root, adapter or AzureModelAdapter(), session_mode)
     if not test_mode:
         prepare_service(root)
         protect_process()
+    audit_logger.info(json.dumps({"event": "harness.session_mode", "mode": session_mode}))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -364,6 +376,11 @@ def create_app(
             identifier(session_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid session identifier") from exc
+        if supervisor.session_mode == "single":
+            try:
+                await supervisor.io(supervisor.journal.bind_session, session_id)
+            except ConflictError as exc:
+                raise HTTPException(status_code=409, detail="session_bound") from exc
         complete = await supervisor.io(supervisor.journal.complete, session_id)
         return EventsResponse(
             events=await supervisor.io(supervisor.journal.events, session_id, after_seq),

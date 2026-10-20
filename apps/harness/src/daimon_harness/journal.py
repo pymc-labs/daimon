@@ -12,7 +12,7 @@ from pathlib import Path
 from mux.drivers.selfhosted.wire import Event, EventType, TurnRequest
 from pydantic import JsonValue
 
-from .isolation import can_switch_uid
+from .isolation import TOOL_UID_MAX
 
 
 def identifier(value: str) -> str:
@@ -52,6 +52,11 @@ class Journal:
             "session_id TEXT UNIQUE NOT NULL)"
         )
         self.db.commit()
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS session_binding "
+            "(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL)"
+        )
+        self.db.commit()
         # Repair only the terminal-event/global-index crash window, once at startup.
         for turn_id, session_id in self.db.execute(
             "SELECT turn_id, session_id FROM turns WHERE ended=0"
@@ -75,23 +80,47 @@ class Journal:
 
     def sandbox(self, session_id: str) -> tuple[Path, int]:
         identifier(session_id)
-        if (
-            not can_switch_uid()
-            and self.db.execute(
-                "SELECT 1 FROM sandboxes WHERE session_id<>? LIMIT 1", (session_id,)
-            ).fetchone()
-        ):
-            raise ValueError("fixed-UID mode requires one isolated HOME per session")
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO sandboxes(session_id) VALUES (?)", (session_id,))
-        ordinal = self.db.execute(
-            "SELECT ordinal FROM sandboxes WHERE session_id=?", (session_id,)
-        ).fetchone()[0]
+            row = self.db.execute(
+                "SELECT ordinal FROM sandboxes WHERE session_id=?", (session_id,)
+            ).fetchone()
+            ordinal = (
+                row[0]
+                if row
+                else self.db.execute("SELECT COALESCE(MAX(ordinal),0)+1 FROM sandboxes").fetchone()[
+                    0
+                ]
+            )
+            if 10_000 + ordinal > TOOL_UID_MAX:
+                raise ConflictError("session_uid_exhausted")
+            if row is None:
+                self.db.execute("INSERT INTO sandboxes VALUES (?, ?)", (ordinal, session_id))
         name = hashlib.sha256(session_id.encode()).hexdigest()[:32]
         parent = self.root.parent / "sessions"
         parent.mkdir(exist_ok=True, mode=0o711)
         self.root.parent.chmod(0o711)
         return parent / name, 10_000 + ordinal
+
+    def configure_single_session(self) -> None:
+        known = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT session_id FROM sandboxes UNION SELECT session_id FROM turns "
+                "UNION SELECT session_id FROM session_binding"
+            )
+        }
+        if len(known) > 1:
+            raise RuntimeError("single session mode cannot open multi-session state")
+        if known:
+            self.bind_session(known.pop())
+
+    def bind_session(self, session_id: str) -> None:
+        identifier(session_id)
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO session_binding VALUES (1, ?)", (session_id,))
+            bound = self.db.execute("SELECT session_id FROM session_binding WHERE id=1").fetchone()
+            if bound[0] != session_id:
+                raise ConflictError("session_bound")
 
     def connection(self, session_id: str) -> sqlite3.Connection:
         if session_id not in self.connections:

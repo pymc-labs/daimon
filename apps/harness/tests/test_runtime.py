@@ -289,3 +289,19 @@ async def test_file_parent_swap_never_escapes_workspace(tmp_path):
         worker.join(timeout=2)
     assert not worker.is_alive()
     assert (outside / "file").read_text() == "outside-value"
+
+
+async def test_shell_uses_private_home_cwd_and_temporary_directory(tmp_path):
+    import json
+
+    runtime = context(tmp_path)
+    result = await runtime.bash(
+        "python3 -c 'import json,os,tempfile; "
+        "f=tempfile.NamedTemporaryFile(); "
+        'print(json.dumps([os.environ["HOME"],os.getcwd(),f.name]))\''
+    )
+    assert result.startswith("exit_code=0\n")
+    home, cwd, temporary = json.loads(result.split("\n", 1)[1])
+    assert home == cwd == str(runtime.work)
+    assert Path(temporary).parent == runtime.home / "tmp"
+    assert (runtime.home / "tmp").stat().st_mode & 0o777 == 0o700

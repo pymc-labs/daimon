@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
 from daimon_harness.journal import Journal
 from daimon_harness.runtime import TurnContext
 from daimon_harness.service import create_app
@@ -93,3 +94,31 @@ async def test_cancelled_tool_side_effects_reach_next_turn_history(tmp_path: Pat
         await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
         await app.state.supervisor.tasks["next"]
         assert model.histories[-1] == history
+
+
+def test_session_uids_are_stable_distinct_and_bounded(tmp_path):
+    from daimon_harness.journal import ConflictError
+
+    journal = Journal(tmp_path)
+    first = journal.sandbox("first")
+    for _ in range(5):
+        assert journal.sandbox("first") == first
+    second = journal.sandbox("second")
+    assert first[1] == 10001
+    assert second[1] == 10002
+    journal.close()
+    journal = Journal(tmp_path)
+    try:
+        assert journal.sandbox("first") == first
+        assert journal.sandbox("second") == second
+        with journal.db:
+            journal.db.execute("INSERT INTO sandboxes VALUES (50000, 'last')")
+        assert journal.sandbox("last")[1] == 60000
+        with pytest.raises(ConflictError, match="session_uid_exhausted"):
+            journal.sandbox("exhausted")
+        assert (
+            journal.db.execute("SELECT 1 FROM sandboxes WHERE session_id='exhausted'").fetchone()
+            is None
+        )
+    finally:
+        journal.close()

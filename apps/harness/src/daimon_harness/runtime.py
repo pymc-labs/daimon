@@ -166,6 +166,7 @@ class TurnContext:
             # Model and harness credentials must not be visible in child processes.
             env={
                 "HOME": str(self.work),
+                "TMPDIR": str(self.home / "tmp"),
                 "PYTHONUSERBASE": str(self.work / ".local"),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "LANG": "C.UTF-8",
@@ -221,7 +222,12 @@ class TurnContext:
             group=gid,
             extra_groups=groups,
             cwd=self.home,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(self.work), "LANG": "C.UTF-8"},
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.work),
+                "TMPDIR": str(self.home / "tmp"),
+                "LANG": "C.UTF-8",
+            },
         )
         if result.returncode != 0:
             raise ValueError("File operation refused or failed")

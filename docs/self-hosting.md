@@ -295,7 +295,13 @@ PyMC-Marketing. Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
 persistent home directory at `/home/harness`; run one worker per HOME. The image
 starts as root, drops the service to UID 10000 and retains the capabilities needed
 to assign separate tool UIDs and work/skills directories to sessions. Production
-refuses a same-UID fallback. Use direct ACA transport with private ingress and
+refuses a same-UID fallback. `HARNESS_SESSION_MODE=single` is the default: the
+first session ID binds persistently and all other IDs receive 409 `session_bound`.
+Use one custom container per session in Azure Container Apps dynamic sessions.
+Every tool receives a session-local HOME, cwd and TMPDIR. Multi-session mode
+requires verified `hidepid=2` process visibility, per-session UIDs and a shared
+`/tmp` that tools cannot write; otherwise startup refuses it.
+Use direct ACA transport with private ingress and
 bearer or Entra authentication; unsigned Foundry gateway mode refuses startup.
 Port 8088 serves authenticated `/v0/*` endpoints and `/invocations`. Model calls,
 tool execution and session files remain in the configured runtime and Azure

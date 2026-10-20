@@ -277,3 +277,61 @@ def test_test_mode_requires_fake_adapter_and_refuses_credentials(tmp_path, monke
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "synthetic-forbidden-value")
     with pytest.raises(RuntimeError, match="no configured credentials"):
         create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+
+
+async def test_single_session_binds_on_first_poll_and_rejects_other_turns(harness):
+    client, model, _ = harness
+    assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
+    assert (await client.get("/v0/sessions/other/events")).json() == {"detail": "session_bound"}
+    request = turn()
+    request["session_id"] = "other"
+    rejected = await client.post("/v0/turns", json=request)
+    assert rejected.status_code == 409
+    assert rejected.json() == {"detail": "session_bound"}
+    wrapped = await client.post(
+        "/invocations",
+        json={"c3": {"method": "GET", "path": "/v0/sessions/other/events"}},
+    )
+    assert wrapped.status_code == 409
+    assert model.calls == 0
+    assert (await client.post("/v0/turns", json=turn())).status_code == 200
+    assert model.calls == 1
+
+
+async def test_single_session_binding_survives_restart(tmp_path):
+    for session_id, expected in (("first", 200), ("second", 409), ("first", 200)):
+        app = create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test",
+                headers={"Authorization": "Bearer test"},
+            ) as client,
+        ):
+            response = await client.get(f"/v0/sessions/{session_id}/events")
+            assert response.status_code == expected
+            if expected == 409:
+                assert response.json() == {"detail": "session_bound"}
+
+
+async def test_multi_session_fake_mode_accepts_two_sessions(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARNESS_SESSION_MODE", "multi")
+    app = create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test"},
+        ) as client,
+    ):
+        for name in ("first", "second"):
+            request = turn(turn_id=name, key=name)
+            request["session_id"] = name
+            response = await client.post("/v0/turns", json=request)
+            assert stream_events(response)[-1].data["outcome"] == "completed"
+    # Unsafe multi-session state cannot later masquerade as a single sandbox.
+    monkeypatch.setenv("HARNESS_SESSION_MODE", "single")
+    with pytest.raises(RuntimeError, match="multi-session state"):
+        create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())

@@ -57,3 +57,53 @@ app.state.supervisor.journal.close()
         [sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=60
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("hidepid", ["0", "1", "2", "invisible"])
+@pytest.mark.parametrize("exempt_group", [False, True])
+def test_proc_mount_requires_hidden_pids_without_exempt_group(tmp_path, hidepid, exempt_group):
+    from daimon_harness.isolation import proc_hides_other_users
+
+    mountinfo = tmp_path / "mountinfo"
+    options = f"rw,hidepid={hidepid}" + (",gid=10001" if exempt_group else "")
+    mountinfo.write_text(f"25 24 0:22 / /proc rw,nosuid - proc proc {options}\n")
+    assert proc_hides_other_users(mountinfo) == (hidepid in {"2", "invisible"} and not exempt_group)
+
+
+def test_multi_mode_refuses_unsafe_proc_tmp_and_missing_uid_switch(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+
+    monkeypatch.delenv("HARNESS_TEST_MODE")
+    monkeypatch.setenv("HARNESS_SESSION_MODE", "multi")
+    monkeypatch.setattr(isolation, "can_switch_uid", lambda: True)
+    mountinfo = tmp_path / "mountinfo"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o755)
+    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw\n")
+    with pytest.raises(RuntimeError, match="hidepid"):
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch)
+    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw,hidepid=2\n")
+    scratch.chmod(0o1777)
+    with pytest.raises(RuntimeError, match="/tmp not writable"):
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch)
+    scratch.chmod(0o755)
+    assert isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch) == "multi"
+    monkeypatch.setattr(isolation, "can_switch_uid", lambda: False)
+    with pytest.raises(RuntimeError, match="UID switching"):
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_tmp=scratch)
+
+
+def test_multi_app_refuses_startup_without_verified_isolation(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+    from daimon_harness.service import create_app
+
+    from .conftest import FakeModelAdapter
+
+    monkeypatch.delenv("HARNESS_TEST_MODE")
+    monkeypatch.setenv("HARNESS_SESSION_MODE", "multi")
+    monkeypatch.setattr(isolation, "can_switch_uid", lambda: True)
+    monkeypatch.setattr(isolation, "proc_hides_other_users", lambda path: False)
+    monkeypatch.setattr("daimon_harness.service.can_switch_uid", lambda: True)
+    with pytest.raises(RuntimeError, match="hidepid"):
+        create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+    assert not (tmp_path / ".daimon").exists()

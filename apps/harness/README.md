@@ -18,13 +18,27 @@ docker run --rm -p 8088:8088 --env-file /path/to/private/harness.env \
   --mount source=daimon-home,target=/home/harness daimon-harness
 ```
 
-Run one worker per persistent HOME. Root mode supports multiple isolated sessions. The service takes a
-process lease to prevent two workers from operating on the same journal. A
-shared worker/HOME is not a security boundary between tenants. The deployment
-must isolate sandboxes and scope access to the correct sandbox.
+Run one worker per persistent HOME. `HARNESS_SESSION_MODE=single` is the
+production default: the first session ID seen on a turn or event poll is bound
+persistently under `.daimon`; other IDs return HTTP 409 `session_bound`, including
+after restart. Existing multi-session state refuses single-mode startup. Deploy
+one container per session using Azure Container Apps dynamic sessions with a
+custom container, and route every call for that session to its sandbox identifier.
+The service takes a process lease to prevent two workers operating on one journal.
+
+`HARNESS_SESSION_MODE=multi` requires a `/proc` mount with `hidepid=2` or
+`hidepid=invisible`, no exempt proc group, UID switching, and a shared `/tmp` that
+is not writable by any tool UID (including ACL grants). Unsafe configurations
+refuse startup. Session UIDs are allocated persistently from 10001 through 60000;
+exhaustion refuses further sessions. Each session has private `work` and `tmp`
+directories: tool HOME and cwd use `work`, and TMPDIR uses `tmp`. A writable global
+`/tmp` and visible process arguments cannot be used as shared-session boundaries.
+The selected mode is logged at startup. Offline test mode may bypass the multi
+mode platform checks only with its mandatory fake adapter and no credentials.
 
 | Variable | Purpose |
 | --- | --- |
+| `HARNESS_SESSION_MODE` | `single` (default, persistent session binding) or `multi` (verified proc/tmp/UID isolation required) |
 | `HARNESS_AUTH_MODE` | `bearer` (default) or `entra`; `foundry_gateway` refuses startup |
 | `HARNESS_TOKEN` | Local/direct HTTP bearer secret; no default |
 | `HARNESS_MCP_CRED_BINDINGS` | Required for operator MCP credentials: JSON list of `{name, origin, tenants}` objects |
@@ -60,9 +74,10 @@ and memory through `/proc`. Startup refuses if this protection cannot be set.
 The image starts as root, prepares private state, then runs the service as UID
 10000 with only ownership, signal and UID/GID switching capabilities. Tool
 subprocesses use a separate persistent UID per session (starting at 10001). Only that
-session's `work` directory is writable under
+session's `work` and `tmp` directories are writable under
 the harness HOME; the journal is private and skills are read-only to tools.
-Children receive only PATH, HOME (workspace), LANG and PYTHONUSERBASE under work.
+Children receive only PATH, HOME (workspace), TMPDIR (private session scratch),
+LANG and PYTHONUSERBASE under work.
 They have CPU (up to the turn deadline, capped at 300 seconds), 4 GiB address
 space, 1024 processes, 256 open files and 256 MiB output-file limits; core dumps
 are disabled. Each command has a wall timeout (the turn deadline, capped at 300 seconds). Output
