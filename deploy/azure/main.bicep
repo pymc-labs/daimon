@@ -181,8 +181,8 @@ module apps './modules/app.bicep' = [
       command: service.command
       port: service.port
       environment: union(
-        commonEnvironment,
         service.name == 'mcp' ? artifactsEnvironment : {},
+        commonEnvironment,
         service.name == 'mcp' && contains(services, 'teams') ? (serviceEnvironment.?teams ?? {}) : {},
         serviceEnvironment[?service.name] ?? {}
       )

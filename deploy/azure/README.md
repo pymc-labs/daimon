@@ -354,8 +354,10 @@ The MCP app is configured automatically for private Azure Blob chart links:
 
 These values come from the foundation module's outputs. The artifact settings
 are applied only to MCP; other services and init do not receive them by default.
-`serviceEnvironment.mcp` can override them using the existing per-service
-configuration mechanism. Keep S3 keys and Azurite connection strings unset.
+`appEnvironment` and `serviceEnvironment.mcp` override these defaults, with
+per-service settings taking precedence. Existing S3 installations can retain
+their explicit backend, endpoint and bucket settings. For Azure Blob, keep S3
+keys and Azurite connection strings unset.
 
 The runtime identity receives **Storage Blob Delegator** at storage-account
 scope to mint user-delegation keys, plus **Storage Blob Data Contributor**

@@ -332,3 +332,22 @@ def test_only_mcp_receives_blob_settings_from_foundation_outputs(
         templates["azd/main.bicep"]["outputs"]["DAIMON_MCP_ARTIFACTS_ENVIRONMENT"]["value"]
         == "[reference('stack').outputs.mcpArtifactsEnvironment.value]"
     )
+
+
+def test_explicit_artifact_backend_overrides_blob_defaults(templates: dict[str, dict]) -> None:
+    main = templates["main.bicep"]
+    app = next(r for r in main["resources"] if r.get("copy", {}).get("name") == "apps")
+    environment = app["properties"]["parameters"]["environment"]["value"]
+    # ARM union gives the last object precedence. An explicit backend=s3 in
+    # appEnvironment must survive even when serviceEnvironment.mcp is empty;
+    # per-service overrides must win over both shared settings and defaults.
+    assert environment.startswith(
+        "[union(if(equals(variables('serviceDefinitions')[copyIndex()].name, 'mcp'), "
+        "createObject('DAIMON_ARTIFACTS__BACKEND', 'azure_blob'"
+    )
+    assert environment.index("parameters('appEnvironment')") > environment.index("'azure_blob'")
+    assert "parameters('appEnvironment')), if(" in environment
+    assert environment.endswith(
+        "coalesce(tryGet(parameters('serviceEnvironment'), "
+        "variables('serviceDefinitions')[copyIndex()].name), createObject()))]"
+    )
