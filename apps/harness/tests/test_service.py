@@ -253,48 +253,27 @@ async def test_deadline_interrupts_background_turn(
     assert replay["events"][-1]["data"]["outcome"] == "interrupted"
 
 
-async def test_foundry_invocation_logs_authorized_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import json
-
-    from daimon_harness import service
-
+def test_gateway_mode_refuses_startup_even_with_platform_headers(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_AUTH_MODE", "foundry_gateway")
     monkeypatch.setenv("HARNESS_ALLOWED_CALLERS", "host-identity")
     for name in ("FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_AGENT_NAME", "FOUNDRY_AGENT_SESSION_ID"):
         monkeypatch.setenv(name, "platform-value")
-    logged: list[str] = []
-    monkeypatch.setattr(service.audit_logger, "info", logged.append)
-    app = create_app(home=tmp_path, adapter=FakeModelAdapter())
-    async with (
-        app.router.lifespan_context(app),
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
-    ):
-        body = {"c3": {"method": "POST", "path": "/v0/turns", "body": turn()}}
-        assert (await client.post("/invocations", json=body)).status_code == 401
-        response = await client.post(
-            "/invocations",
-            headers={
-                "x-agent-user-id": "host-identity",
-                "x-agent-foundry-call-id": "call-1",
-                "Accept": "application/json",
-            },
-            json=body,
-        )
-        assert response.status_code == 202
-        assert json.loads(logged[0]) == {
-            "event": "harness.turn_authorized",
-            "caller": "host-identity",
-            "session_id": "session-1",
-            "turn_id": "turn-1",
-        }
-        assert (
-            await client.get(
-                "/v0/healthz",
-                headers={
-                    "x-agent-user-id": "another-identity",
-                    "x-agent-foundry-call-id": "call-2",
-                },
-            )
-        ).status_code == 403
+    with pytest.raises(ValueError, match="disabled"):
+        create_app(home=tmp_path, adapter=FakeModelAdapter())
+
+
+def test_production_refuses_same_uid_tools(tmp_path, monkeypatch):
+    from daimon_harness import service
+
+    monkeypatch.delenv("HARNESS_TEST_MODE")
+    monkeypatch.setattr(service, "can_switch_uid", lambda: False)
+    with pytest.raises(RuntimeError, match="separate service and tool UIDs"):
+        create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+
+
+def test_test_mode_requires_fake_adapter_and_refuses_credentials(tmp_path, monkeypatch):
+    with pytest.raises(RuntimeError, match="fake adapter"):
+        create_app(home=tmp_path, token="test")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "synthetic-forbidden-value")
+    with pytest.raises(RuntimeError, match="no configured credentials"):
+        create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())

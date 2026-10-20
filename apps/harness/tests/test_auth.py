@@ -81,30 +81,16 @@ def test_auth_fails_closed_without_config(monkeypatch: pytest.MonkeyPatch) -> No
         Authenticator()
 
 
-async def test_foundry_gateway_requires_platform_context_and_allowed_caller(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_foundry_gateway_refuses_unsigned_platform_headers(monkeypatch):
     monkeypatch.setenv("HARNESS_AUTH_MODE", "foundry_gateway")
     monkeypatch.setenv("HARNESS_ALLOWED_CALLERS", "host-identity")
     for name in ("FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_AGENT_NAME", "FOUNDRY_AGENT_SESSION_ID"):
-        monkeypatch.delenv(name, raising=False)
-    with pytest.raises(HTTPException):
-        await Authenticator().verify(None, "host-identity", "call-1")
-    for name in ("FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_AGENT_NAME", "FOUNDRY_AGENT_SESSION_ID"):
         monkeypatch.setenv(name, "platform-value")
-    auth = Authenticator()
-    assert await auth.verify(None, "host-identity", "call-1") == "host-identity"
-    for caller, call_id, status in [
-        (None, "call-1", 401),
-        ("host-identity", None, 401),
-        ("other-caller", "call-1", 403),
-    ]:
-        with pytest.raises(HTTPException) as caught:
-            await auth.verify(None, caller, call_id)
-        assert caught.value.status_code == status
+    with pytest.raises(ValueError, match="disabled"):
+        Authenticator()
 
 
-@pytest.mark.parametrize("mode", ["entra", "foundry_gateway"])
+@pytest.mark.parametrize("mode", ["entra"])
 def test_identity_auth_requires_a_caller_allowlist(monkeypatch, mode):
     monkeypatch.setenv("HARNESS_AUTH_MODE", mode)
     monkeypatch.delenv("HARNESS_ALLOWED_CALLERS", raising=False)

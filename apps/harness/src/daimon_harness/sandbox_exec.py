@@ -1,5 +1,6 @@
 """Tiny exec wrapper: apply tool-only resource limits before starting bash."""
 
+import ctypes
 import os
 import resource
 import sys
@@ -13,6 +14,10 @@ def main() -> None:
     resource.setrlimit(resource.RLIMIT_NPROC, (processes, processes))
     resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
     resource.setrlimit(resource.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024))
+    library = ctypes.CDLL(None, use_errno=True)
+    if library.prctl(38, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot disable tool privilege escalation")
+    os.chdir(os.environ["HOME"])
     os.execv("/bin/bash", ["/bin/bash", "-c", sys.argv[4]])
 
 

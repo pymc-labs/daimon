@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verify self-hosted skill pins using their declared content or ZIP representation, preserve held-version mount names, and load pinned channel bundles for other channel members. Explicit custom skills may use built-in names. Wildcard MCP credentials require single-tenant opt-in; private HTTP MCP destinations require operator exceptions.
 
 - Bind self-hosted MCP credentials to operator-declared HTTPS origins and tenants, cap per-turn tokens at one hour, and recognize built-in skills without source metadata.
+- Require separate service/tool identities in the self-hosted harness, refuse unsigned gateway authentication, isolate file operations and redact SDK failure logs.
+
 ### Added
 
 - A standalone Azure OpenAI harness runs local agent tools, MCP connections and skills, with durable event replay, approval decisions and cancellation. It supports direct HTTP and Foundry invocation envelopes; deployment details are in `apps/harness/README.md`.

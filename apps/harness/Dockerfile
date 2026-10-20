@@ -17,6 +17,7 @@ FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0
 COPY --from=ghcr.io/astral-sh/uv:0.9.11@sha256:5aa820129de0a600924f166aec9cb51613b15b68f1dcd2a02f31a500d2ede568 /uv /usr/local/bin/uv
 RUN apt-get update && apt-get install -y --no-install-recommends bash g++ \
     && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10000 harness \
     && useradd --create-home --uid 10001 agent \
     && mkdir -p /home/harness && chmod 711 /home/harness
 COPY --from=builder /opt/venv /opt/venv

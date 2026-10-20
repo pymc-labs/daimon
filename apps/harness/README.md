@@ -25,11 +25,11 @@ must isolate sandboxes and scope access to the correct sandbox.
 
 | Variable | Purpose |
 | --- | --- |
-| `HARNESS_AUTH_MODE` | `bearer` (default), `entra`, or private `foundry_gateway` |
+| `HARNESS_AUTH_MODE` | `bearer` (default) or `entra`; `foundry_gateway` refuses startup |
 | `HARNESS_TOKEN` | Local/direct HTTP bearer secret; no default |
 | `HARNESS_MCP_CRED_BINDINGS` | Required for operator MCP credentials: JSON list of `{name, origin, tenants}` objects |
 | `HARNESS_DAIMON_MCP_URL` | Approved URL (normalized before comparison) for the reserved `daimon-mcp` server |
-| `HARNESS_ALLOWED_CALLERS` | Required in Entra/gateway modes: permitted object IDs or Entra app IDs |
+| `HARNESS_ALLOWED_CALLERS` | Required in Entra mode: permitted object IDs or Entra app IDs |
 | `HARNESS_ENTRA_TENANT_ID`, `HARNESS_ENTRA_AUDIENCE` | Tenant-bound validation in `HARNESS_AUTH_MODE=entra` |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource URL |
 | `AZURE_OPENAI_API_VERSION` | Defaults to `2025-04-01-preview` |
@@ -57,24 +57,28 @@ turns until a credential-exchange route is provided.
 Startup credentials are captured in memory, removed from `os.environ`, and
 Linux `prctl(PR_SET_DUMPABLE, 0)` blocks same-UID reads of harness environment
 and memory through `/proc`. Startup refuses if this protection cannot be set.
-The image runs the harness supervisor as root and switches shell subprocesses
-to a persistent unprivileged UID for each session (starting at 10001). Only that
+The image starts as root, prepares private state, then runs the service as UID
+10000 with only ownership, signal and UID/GID switching capabilities. Tool
+subprocesses use a separate persistent UID per session (starting at 10001). Only that
 session's `work` directory is writable under
 the harness HOME; the journal is private and skills are read-only to tools.
 Children receive only PATH, HOME (workspace), LANG and PYTHONUSERBASE under work.
 They have CPU (up to the turn deadline, capped at 300 seconds), 4 GiB address
-space, 1024 processes (16384 in fixed-UID mode, where the limit counts all processes of that UID), 256 open files and 256 MiB output-file limits; core dumps
+space, 1024 processes, 256 open files and 256 MiB output-file limits; core dumps
 are disabled. Each command has a wall timeout (the turn deadline, capped at 300 seconds). Output
 is bounded to 256 KiB with a truncation marker. Every command exit kills its process
 group, and turn cleanup kills any remaining processes of that session UID.
 
-Foundry may impose a fixed non-root UID. In that case the harness cannot switch
-UIDs and uses scrubbed environment, non-dumpable process and the same resource
-limits, with reduced filesystem/signal isolation. Fixed-UID mode rejects a second
-session ID in the same HOME; use one platform sandbox per session. Verify the platform's UID and
-sandbox boundary live before accepting untrusted tenants. The container needs
-one isolated session HOME per tenant/session, plus restrictive network policy;
-process protections do not replace that platform boundary.
+Production refuses startup without UID switching. There is no same-UID
+production fallback. `HARNESS_TEST_MODE=1` permits unprivileged offline tests
+only with an injected fake adapter and no configured model/service credentials.
+The model's file tools use isolated Python helper processes under the session
+UID. Descriptor-relative traversal refuses symlinks at every component; open
+file descriptors are checked for regular files and used for ownership changes.
+FIFOs/devices are refused without waiting. Helpers have wall/CPU/memory limits,
+and the SDK offloads file operations from the service event loop. SDK/MCP logs,
+including connection failures and tracebacks, are redacted against all active
+turn credentials before handlers receive them.
 
 ## Wire and persistence
 
@@ -168,13 +172,12 @@ selected CPU/memory tier. These have not been tested on Azure. Use JSON acceptan
 plus polling as the baseline; no turn depends on a long-lived gateway stream.
 Do not infer an HTTP timeout from the session idle timeout.
 
-The gateway strips `Authorization`. Set `HARNESS_AUTH_MODE=foundry_gateway`:
-this requires the injected project endpoint, agent name and sandbox ID plus
-`x-agent-user-id` and `x-agent-foundry-call-id` on each call. Configure Entra RBAC
-to grant invocation only to the Daimon host identity; set
-`HARNESS_ALLOWED_CALLERS` to its platform user ID (required at startup). The caller ID is logged with
-each submitted turn. This mode trusts private Foundry ingress and must never
-be exposed directly to the public network. Missing platform context is refused.
+The gateway strips `Authorization`; unsigned `x-agent-*` headers can also be
+forged by tool processes over loopback. `HARNESS_AUTH_MODE=foundry_gateway`
+therefore refuses startup until a verified platform proof or network boundary
+is available. The initial deployment uses direct ACA transport with private
+ingress and bearer or Entra authentication. Foundry hosted deployment remains
+pending verification of a secure gateway proof and UID switching.
 [Gateway headers and runtime contract](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agent-contract).
 
 Choose ACA dynamic sessions with Azure Files mounted at HOME if the target

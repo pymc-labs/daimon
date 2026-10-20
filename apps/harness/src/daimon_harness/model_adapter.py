@@ -25,7 +25,7 @@ from openai import AsyncAzureOpenAI, BadRequestError
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import JsonValue, TypeAdapter
 
-from .credentials import mcp_headers
+from .credentials import credential_log_redaction, mcp_headers
 from .errors import HarnessError
 from .runtime import TurnContext
 
@@ -83,7 +83,12 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                 system_instructions,
                 input,
                 model_settings,
-                tools,
+                [
+                    tool
+                    for tool in tools
+                    if not isinstance(tool, FunctionTool)
+                    or self.context.permission(self.policy_name(tool.name)) != "deny"
+                ],
                 output_schema,
                 handoffs,
                 tracing,
@@ -129,29 +134,35 @@ class MeteredResponsesModel(OpenAIResponsesModel):
         )
         for item in list(response.output):
             if item.type == "function_call":
-                name = item.name
-                for server in sorted(
-                    self.context.request.mcp_servers,
-                    key=lambda config: len(config.name),
-                    reverse=True,
+                name = self.policy_name(item.name)
+                if self.context.permission(name) == "deny" and not any(
+                    isinstance(tool, FunctionTool) and tool.name == item.name for tool in tools
                 ):
-                    prefix = server.name + "__"
-                    if name.startswith(prefix):
-                        name = server.name + "/" + name[len(prefix) :]
-                        break
-                if self.context.permission(name) == "deny":
+                    # Keep the model's call and reasoning intact. Register only a
+                    # local rejection handler, omitted from every model request.
+                    def rejection(tool_name: str, policy_name: str) -> FunctionTool:
+                        async def invoke(ctx: ToolContext[TurnContext], arguments: str) -> str:
+                            async def never_execute() -> JsonValue:
+                                raise AssertionError("denied tool must not execute")
 
-                    async def never_execute() -> JsonValue:
-                        raise AssertionError("denied tool must not execute")
+                            output = await self.context.tool(
+                                ctx.tool_call_id,
+                                policy_name,
+                                {"arguments": arguments},
+                                never_execute,
+                                mcp="/" in policy_name,
+                            )
+                            return json.dumps(output)
 
-                    await self.context.tool(
-                        item.call_id,
-                        name,
-                        {"arguments": item.arguments},
-                        never_execute,
-                        mcp="/" in name,
-                    )
-                    response.output.remove(item)
+                        return FunctionTool(
+                            name=tool_name,
+                            description="Local policy rejection",
+                            params_json_schema={"type": "object", "properties": {}},
+                            strict_json_schema=False,
+                            on_invoke_tool=invoke,
+                        )
+
+                    tools.append(rejection(item.name, name))
             if item.type == "message":
                 text = "".join(part.text for part in item.content if part.type == "output_text")
                 message_id = str(uuid4())
@@ -163,6 +174,15 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                     {"message_id": message_id, "parts": [{"type": "text", "text": text}]},
                 )
         return response
+
+    def policy_name(self, name: str) -> str:
+        for server in sorted(
+            self.context.request.mcp_servers, key=lambda config: len(config.name), reverse=True
+        ):
+            prefix = server.name + "__"
+            if name.startswith(prefix):
+                return server.name + "/" + name[len(prefix) :]
+        return name
 
 
 def builtin_tools(context: TurnContext) -> list[Tool]:
@@ -186,12 +206,14 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
                         case "bash":
                             return await context.bash(str(args["command"]))
                         case "read":
-                            return context.read(str(args["path"]))
+                            return await asyncio.to_thread(context.read, str(args["path"]))
                         case "write":
-                            return context.write(str(args["path"]), str(args["content"]))
+                            return await asyncio.to_thread(
+                                context.write, str(args["path"]), str(args["content"])
+                            )
                         case "edit":
-                            return context.edit(
-                                str(args["path"]), str(args["old"]), str(args["new"])
+                            return await asyncio.to_thread(
+                                context.edit, str(args["path"]), str(args["old"]), str(args["new"])
                             )
                         case _:
                             raise ValueError("unknown builtin tool")
@@ -222,6 +244,10 @@ class AzureModelAdapter:
         self.api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 
     async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
+        with credential_log_redaction(context.credentials):
+            return await self._run(context, history)
+
+    async def _run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
         async with AsyncExitStack() as stack:
             key = self.key
             token_provider = None

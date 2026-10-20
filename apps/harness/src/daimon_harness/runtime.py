@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -27,7 +29,7 @@ from pydantic import JsonValue
 
 from .credentials import redact
 from .errors import HarnessError
-from .isolation import tool_identity
+from .isolation import can_switch_uid, tool_identity
 from .journal import identifier
 
 
@@ -148,6 +150,7 @@ class TurnContext:
         uid, gid, groups = tool_identity(self.home, self.tool_uid)
         process = await asyncio.create_subprocess_exec(
             sys.executable,
+            "-I",
             str(Path(__file__).with_name("sandbox_exec.py")),
             str(max(1, min(300, math.ceil(self.request.limits.deadline_s)))),
             str(4 * 1024 * 1024 * 1024),
@@ -156,7 +159,7 @@ class TurnContext:
             user=uid,
             group=gid,
             extra_groups=groups,
-            cwd=self.work,
+            cwd=self.home,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
@@ -193,7 +196,7 @@ class TurnContext:
         for pid in self.process_groups:
             with suppress(ProcessLookupError):
                 os.killpg(pid, signal.SIGKILL)
-        if os.geteuid() == 0:
+        if can_switch_uid():
             # A child can start a new session and leave its original process group.
             # The session-specific UID also seals those descendants at turn end.
             for entry in Path("/proc").iterdir():
@@ -202,36 +205,39 @@ class TurnContext:
                         if entry.stat().st_uid == self.tool_uid:
                             os.kill(int(entry.name), signal.SIGKILL)
 
+    def file_operation(
+        self, operation: str, path: str, *, content: str = "", old: str = "", new: str = ""
+    ) -> str:
+        uid, gid, groups = tool_identity(self.home, self.tool_uid)
+        result = subprocess.run(
+            [sys.executable, "-I", str(Path(__file__).with_name("file_exec.py")), str(self.home)],
+            input=json.dumps(
+                {"operation": operation, "path": path, "content": content, "old": old, "new": new}
+            ),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            user=uid,
+            group=gid,
+            extra_groups=groups,
+            cwd=self.home,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(self.work), "LANG": "C.UTF-8"},
+        )
+        if result.returncode != 0:
+            raise ValueError("File operation refused or failed")
+        output: object = json.loads(result.stdout).get("output")
+        if not isinstance(output, str):
+            raise ValueError("Invalid file operation response")
+        return output
+
     def read(self, path: str) -> str:
-        target = (self.work / path).resolve()
-        if not any(
-            target.is_relative_to(root.resolve()) for root in (self.work, self.home / "skills")
-        ):
-            raise ValueError("path is outside workspace and skills")
-        with target.open() as source:
-            return source.read(100_000)
+        return self.file_operation("read", path)
 
     def write(self, path: str, content: str) -> str:
-        target = self.path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-        if os.geteuid() == 0:
-            uid, gid, _ = tool_identity(self.home, self.tool_uid)
-            assert uid is not None and gid is not None
-            os.chown(target, uid, gid)
-            for directory in target.parents:
-                if directory == self.work:
-                    break
-                os.chown(directory, uid, gid)
-        return "written"
+        return self.file_operation("write", path, content=content)
 
     def edit(self, path: str, old: str, new: str) -> str:
-        target = self.path(path)
-        content = target.read_text()
-        if not old or content.count(old) != 1:
-            raise ValueError("old text must occur exactly once")
-        target.write_text(content.replace(old, new, 1))
-        return "edited"
+        return self.file_operation("edit", path, old=old, new=new)
 
     async def skills(self) -> str:
         descriptions: list[str] = []

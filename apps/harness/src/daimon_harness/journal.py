@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -12,6 +11,8 @@ from pathlib import Path
 
 from mux.drivers.selfhosted.wire import Event, EventType, TurnRequest
 from pydantic import JsonValue
+
+from .isolation import can_switch_uid
 
 
 def identifier(value: str) -> str:
@@ -75,7 +76,7 @@ class Journal:
     def sandbox(self, session_id: str) -> tuple[Path, int]:
         identifier(session_id)
         if (
-            os.geteuid() != 0
+            not can_switch_uid()
             and self.db.execute(
                 "SELECT 1 FROM sandboxes WHERE session_id<>? LIMIT 1", (session_id,)
             ).fetchone()

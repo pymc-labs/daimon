@@ -352,27 +352,55 @@ async def test_sdk_context_overflow_truncates_history_and_inventories_retry(
     assert any(kind == "error" and data["kind"] == "context_truncated" for kind, data in events)
 
 
-async def test_sdk_hallucinated_denied_tool_is_refused_with_a_paired_result(tmp_path, monkeypatch):
-    def respond(request: httpx.Request) -> httpx.Response:
-        assert "bash" not in [tool["name"] for tool in json.loads(request.content)["tools"]]
+async def test_denied_call_retains_reasoning_and_paired_output_in_next_turn(tmp_path, monkeypatch):
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert "bash" not in [tool["name"] for tool in body["tools"]]
+        if len(requests) == 1:
+            output = [
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "summary": [],
+                    "encrypted_content": "opaque-reasoning",
+                },
+                {
+                    "type": "function_call",
+                    "id": "f",
+                    "call_id": "denied-call",
+                    "name": "bash",
+                    "status": "completed",
+                    "arguments": '{"command":"touch forbidden"}',
+                },
+            ]
+        else:
+            calls = [item for item in body["input"] if item.get("type") == "function_call"]
+            results = [item for item in body["input"] if item.get("type") == "function_call_output"]
+            assert len(calls) == len(results) == 1
+            assert calls[0]["call_id"] == results[0]["call_id"] == "denied-call"
+            assert "denied by policy" in results[0]["output"]
+            assert any(item.get("type") == "reasoning" for item in body["input"])
+            output = [
+                {
+                    "type": "message",
+                    "id": f"msg-{len(requests)}",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ]
         return httpx.Response(
             200,
             json={
-                "id": "denied",
+                "id": f"response-{len(requests)}",
                 "object": "response",
                 "created_at": 1,
                 "model": "gpt-5",
                 "status": "completed",
-                "output": [
-                    {
-                        "type": "function_call",
-                        "id": "f",
-                        "call_id": "denied-call",
-                        "name": "bash",
-                        "status": "completed",
-                        "arguments": '{"command":"touch forbidden"}',
-                    }
-                ],
+                "output": output,
                 "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
                 "parallel_tool_calls": False,
                 "tool_choice": "auto",
@@ -380,15 +408,14 @@ async def test_sdk_hallucinated_denied_tool_is_refused_with_a_paired_result(tmp_
             },
         )
 
-    client = AsyncAzureOpenAI(
-        azure_endpoint="https://unit-test.openai.azure.com",
-        api_key="test",
-        api_version="2025-04-01-preview",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
-    )
-    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    def client_factory(**kwargs):
+        return AsyncAzureOpenAI(
+            **kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        )
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", client_factory)
     monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
     request = TurnRequest.model_validate(turn())
     request.tool_policy = {"bash": "deny"}
     events = []
@@ -397,7 +424,42 @@ async def test_sdk_hallucinated_denied_tool_is_refused_with_a_paired_result(tmp_
         events.append((kind, data))
 
     runtime = TurnContext(request, tmp_path, emit)
-    await AzureModelAdapter().run(runtime, [])
+    history = await AzureModelAdapter().run(runtime, [])
+    second = TurnContext(request.model_copy(update={"turn_id": "second"}), tmp_path, emit)
+    await AzureModelAdapter().run(second, history)
+    assert len(requests) == 3
     assert not (runtime.work / "forbidden").exists()
     result = next(data for kind, data in events if kind == "tool_result")
     assert result["call_id"] == "denied-call" and result["is_error"] is True
+
+
+async def test_file_tools_execute_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    from agents.tool import FunctionTool
+    from agents.tool_context import ToolContext
+    from daimon_harness.runtime import discard_event
+
+    runtime = TurnContext(TurnRequest.model_validate(turn()), tmp_path, discard_event)
+    main_thread = threading.get_ident()
+    called = []
+
+    def file_operation(*args):
+        assert threading.get_ident() != main_thread
+        called.append(args)
+        return "file-result"
+
+    for name in ("read", "write", "edit"):
+        monkeypatch.setattr(runtime, name, file_operation)
+    arguments = {"path": "file", "content": "content", "old": "old", "new": "new"}
+    for tool in model_adapter.builtin_tools(runtime):
+        if tool.name in {"read", "write", "edit"}:
+            assert isinstance(tool, FunctionTool)
+            context = ToolContext(
+                context=runtime,
+                tool_call_id=tool.name,
+                tool_name=tool.name,
+                tool_arguments=json.dumps(arguments),
+            )
+            assert "file-result" in await tool.on_invoke_tool(context, json.dumps(arguments))
+    assert len(called) == 3

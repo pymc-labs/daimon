@@ -299,6 +299,7 @@ async def test_mismatched_binding_refuses_turn_before_model_io(tmp_path, monkeyp
         ),
     )
     adapter = FakeModelAdapter()
+    monkeypatch.delenv("HARNESS_MCP_CRED_TEST")
     app = create_app(home=tmp_path, token="test", adapter=adapter)
     body = turn()
     body["mcp_servers"] = [
@@ -352,3 +353,64 @@ def test_invalid_operator_binding_configuration_refused(monkeypatch, raw):
     monkeypatch.setenv("HARNESS_MCP_CRED_BINDINGS", json.dumps(raw))
     with pytest.raises(ValueError):
         load_bindings()
+
+
+async def test_real_mcp_initialization_failure_logs_are_redacted(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from daimon_harness import model_adapter
+    from daimon_harness.model_adapter import AzureModelAdapter
+    from daimon_harness.runtime import discard_event
+    from mux.drivers.selfhosted.wire import MCPServer
+    from pydantic import ValidationError
+
+    secret = "Bearer synthetic-mcp-initialization-secret"
+    monkeypatch.setenv("HARNESS_DAIMON_MCP_URL", "https://mcp.example/mcp")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    request = TurnRequest.model_validate(turn())
+    request.mcp_servers = [
+        MCPServer(
+            name="daimon-mcp",
+            url="https://mcp.example/mcp",
+            headers_env={"Authorization": VIRTUAL_ENV},
+        )
+    ]
+    runtime = TurnContext(request, tmp_path, discard_event, credentials={VIRTUAL_ENV: secret})
+
+    def invalid_response(request):
+        assert request.headers["Authorization"] == secret
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {"echo": secret},
+            },
+        )
+
+    def client_factory(**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(invalid_response), **kwargs)
+
+    monkeypatch.setattr(model_adapter, "bound_mcp_http_client", client_factory)
+    with caplog.at_level(logging.WARNING), pytest.raises(ValidationError):
+        await AzureModelAdapter().run(runtime, [])
+    assert caplog.records
+    assert "synthetic-mcp-initialization-secret" not in caplog.text
+    assert "[redacted]" in caplog.text
+
+
+def test_log_redaction_covers_other_turns_and_exception_tracebacks(caplog):
+    import logging
+
+    from daimon_harness.credentials import credential_log_redaction
+
+    with (
+        credential_log_redaction({"a": "first-secret"}),
+        credential_log_redaction({"b": "Bearer second-secret"}),
+    ):
+        try:
+            raise ValueError("first-secret second-secret")
+        except ValueError:
+            logging.getLogger("sdk.failure").exception("response: %s", "Bearer second-secret")
+    assert "first-secret" not in caplog.text and "second-secret" not in caplog.text
+    assert "ValueError" in caplog.text and "[redacted]" in caplog.text

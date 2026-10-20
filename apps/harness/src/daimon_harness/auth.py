@@ -15,6 +15,8 @@ from jwt import PyJWKClient
 class Authenticator:
     def __init__(self, token: str | None = None) -> None:
         self.mode = os.environ.get("HARNESS_AUTH_MODE", "bearer")
+        if self.mode == "foundry_gateway":
+            raise ValueError("foundry_gateway is disabled: unsigned gateway headers are forgeable")
         self.allowed = {
             value.strip()
             for value in os.environ.get("HARNESS_ALLOWED_CALLERS", "").split(",")

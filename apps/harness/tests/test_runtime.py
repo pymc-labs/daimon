@@ -226,3 +226,66 @@ async def test_denied_tools_are_hidden_and_refused_with_exact_precedence(tmp_pat
     for name in ("bash", "sample/delete"):
         assert await runtime.tool(name, name, {}, execute) == "Tool execution denied by policy"
     assert not executed
+
+
+async def test_file_tools_refuse_symlinks_and_special_files(tmp_path):
+    import os
+
+    runtime = context(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must-not-read-or-overwrite")
+    (runtime.work / "link").symlink_to(outside)
+    for execute in (
+        lambda: runtime.read("link"),
+        lambda: runtime.write("link", "bad"),
+        lambda: runtime.edit("link", "must", "bad"),
+    ):
+        with pytest.raises(ValueError):
+            await asyncio.to_thread(execute)
+    fifo = runtime.work / "pipe"
+    os.mkfifo(fifo)
+    async with asyncio.timeout(2):
+        for execute in (
+            lambda: runtime.read("pipe"),
+            lambda: runtime.write("pipe", "bad"),
+            lambda: runtime.edit("pipe", "old", "new"),
+        ):
+            with pytest.raises(ValueError):
+                await asyncio.to_thread(execute)
+    assert outside.read_text() == "must-not-read-or-overwrite"
+
+
+async def test_file_parent_swap_never_escapes_workspace(tmp_path):
+    import threading
+
+    runtime = context(tmp_path / "sandbox")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file").write_text("outside-value")
+    directory = runtime.work / "directory"
+    directory.mkdir()
+    (directory / "file").write_text("inside-value")
+    moved = runtime.work / "moved"
+    stop = threading.Event()
+
+    def swap():
+        while not stop.is_set():
+            directory.rename(moved)
+            directory.symlink_to(outside, target_is_directory=True)
+            directory.unlink()
+            moved.rename(directory)
+
+    worker = threading.Thread(target=swap)
+    worker.start()
+    try:
+        for _ in range(15):
+            try:
+                output = await asyncio.to_thread(runtime.read, "directory/file")
+                assert output == "inside-value"
+            except ValueError:
+                pass
+    finally:
+        stop.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert (outside / "file").read_text() == "outside-value"

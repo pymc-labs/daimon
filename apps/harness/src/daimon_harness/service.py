@@ -33,7 +33,7 @@ from pydantic import JsonValue, ValidationError
 from .auth import Authenticator
 from .credentials import load_bindings, redact, turn_credentials
 from .errors import HarnessError
-from .isolation import protect_process
+from .isolation import can_switch_uid, prepare_service, protect_process
 from .journal import ConflictError, Journal, identifier
 from .model_adapter import AzureModelAdapter, ModelAdapter
 from .runtime import TurnContext
@@ -246,10 +246,33 @@ def create_app(
 ) -> FastAPI:
     """One worker per session sandbox; the HOME lease rejects accidental replicas."""
     root = home or Path.home()
+    test_mode = os.environ.get("HARNESS_TEST_MODE") == "1"
+    if test_mode:
+        forbidden = {
+            name
+            for name in os.environ
+            if (
+                name
+                in {
+                    "HARNESS_TOKEN",
+                    "AZURE_OPENAI_API_KEY",
+                    "AZURE_CLIENT_SECRET",
+                    "AZURE_CLIENT_CERTIFICATE_PATH",
+                    "IDENTITY_HEADER",
+                    "MSI_SECRET",
+                }
+                or (name.startswith("HARNESS_MCP_CRED_") and name != "HARNESS_MCP_CRED_BINDINGS")
+            )
+            and os.environ.get(name)
+        }
+        if adapter is None or isinstance(adapter, AzureModelAdapter) or forbidden:
+            raise RuntimeError("test mode requires a fake adapter and no configured credentials")
+    elif not can_switch_uid():
+        raise RuntimeError("production requires separate service and tool UIDs")
     auth = Authenticator(token)
     supervisor = Supervisor(root, adapter or AzureModelAdapter())
-    if adapter is None:
-        supervisor.journal.root.chmod(0o700)
+    if not test_mode:
+        prepare_service(root)
         protect_process()
 
     @asynccontextmanager

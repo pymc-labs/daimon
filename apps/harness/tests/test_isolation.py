@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux process sandbox")
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.geteuid() != 0,
+    reason="root Linux process sandbox; image CI always exercises it",
+)
 def test_tools_cannot_read_startup_credentials_or_harness_proc(tmp_path: Path) -> None:
     script = tmp_path / "probe.py"
     script.write_text("""

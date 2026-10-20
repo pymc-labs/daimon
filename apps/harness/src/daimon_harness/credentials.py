@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
+import threading
+import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -166,3 +171,51 @@ def redact(value: JsonValue, credentials: dict[str, str]) -> JsonValue:
             str(redact(key, credentials)): redact(item, credentials) for key, item in value.items()
         }
     return value
+
+
+# Concurrent turns share Python loggers. Scrub records against every active turn,
+# before handlers (including SDK-created handlers) or capture tools see the record.
+_LOG_LOCK = threading.RLock()
+_LOG_CREDENTIALS: dict[object, dict[str, str]] = {}
+_log_factory_installed = False
+
+
+def _scrub_log_text(value: str) -> str:
+    with _LOG_LOCK:
+        secrets = {secret for values in _LOG_CREDENTIALS.values() for secret in values.values()}
+    secrets |= {secret[7:] for secret in secrets if secret.startswith("Bearer ")}
+    for secret in sorted(secrets, key=len, reverse=True):
+        if secret:
+            value = value.replace(secret, "[redacted]")
+    return value
+
+
+@contextmanager
+def credential_log_redaction(credentials: dict[str, str]) -> Iterator[None]:
+    global _log_factory_installed
+    key = object()
+    with _LOG_LOCK:
+        if not _log_factory_installed:
+            original = logging.getLogRecordFactory()
+
+            def factory(*args: object, **kwargs: object) -> logging.LogRecord:
+                record = original(*args, **kwargs)
+                record.msg = _scrub_log_text(record.getMessage())
+                record.args = ()
+                if record.exc_info:
+                    record.exc_text = _scrub_log_text(
+                        "".join(traceback.format_exception(*record.exc_info))
+                    )
+                    record.exc_info = None
+                if record.stack_info:
+                    record.stack_info = _scrub_log_text(record.stack_info)
+                return record
+
+            logging.setLogRecordFactory(factory)
+            _log_factory_installed = True
+        _LOG_CREDENTIALS[key] = credentials.copy()
+    try:
+        yield
+    finally:
+        with _LOG_LOCK:
+            _LOG_CREDENTIALS.pop(key, None)

@@ -113,3 +113,8 @@ def turn(mode: str = "hello", *, turn_id: str = "turn-1", key: str = "key-1") ->
         "skills": [],
         "limits": {"max_tool_calls": 3, "deadline_s": 30},
     }
+
+
+@pytest.fixture(autouse=True)
+def fake_harness_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HARNESS_TEST_MODE", "1")

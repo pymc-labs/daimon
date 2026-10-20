@@ -1240,3 +1240,8 @@ travels only in the per-turn `X-Daimon-MCP-Authorization` transport header.
 by source or reserved id when imported refs omit source. Explicit custom refs
 with reserved names remain custom skills. Hosts can skip native
 bundles on other backends without duplicating provider policy.
+
+`apps/harness` is a standalone consumer of `daimon-mux` for the shared self-hosted
+wire models. It does not import Daimon core or adapters. It implements the C3 HTTP
+service, Azure Responses model loop, durable request inventory and per-session
+tool isolation; its README documents deployment and authentication requirements.
