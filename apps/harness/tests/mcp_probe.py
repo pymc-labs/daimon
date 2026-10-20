@@ -95,10 +95,28 @@ async def mcp_turn_probe(
     monkeypatch.setattr(model_adapter, "bound_mcp_http_client", local_tls_client)
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     calls = 0
+    http_harness_client: httpx.AsyncClient | None = None
+    http_session_id: str | None = None
+    request_ids_at_io: list[str] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    async def respond(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        if interop:
+            assert http_harness_client is not None and http_session_id is not None
+            # Observe committed events through the real HTTP service at model I/O,
+            # before the synthetic response can supply any usage for this request.
+            durable = await http_harness_client.get(f"/v0/sessions/{http_session_id}/events")
+            durable.raise_for_status()
+            inventory = durable.json()["events"]
+            starts = [event for event in inventory if event["type"] == "model_request_started"]
+            measured = [event for event in inventory if event["type"] == "usage"]
+            assert len(starts) == calls, "each model request must be journaled before model I/O"
+            assert len(measured) == calls - 1
+            assert [event["data"]["request_id"] for event in measured] == request_ids_at_io
+            request_id = starts[-1]["data"]["request_id"]
+            assert request_id not in request_ids_at_io
+            request_ids_at_io.append(request_id)
         body = json.loads(request.content)
         if calls == 1:
             assert "sample__echo" in [tool["name"] for tool in body["tools"]]
@@ -243,6 +261,7 @@ async def mcp_turn_probe(
                         }
                     ],
                 )
+                http_harness_client, http_session_id = client, session.ref.id
                 try:
                     sent = await driver.events.send(
                         SCOPE, session.ref, [message("mcp")], key="send"
@@ -252,6 +271,7 @@ async def mcp_turn_probe(
                             snapshot = await driver.events.reconcile(SCOPE, session.ref)
                             if snapshot.state == "requires_action":
                                 break
+                            assert snapshot.state != "idle", "model failed before MCP approval"
                             await asyncio.sleep(0.01)
                     assert executed == []
                     action = snapshot.required_actions[0]
@@ -283,6 +303,28 @@ async def mcp_turn_probe(
                     assert calls == 2
                     assert len(usage) == calls
                     assert all(item.completeness == "measured" for item in usage)
+                    durable = await client.get(f"/v0/sessions/{session.ref.id}/events")
+                    durable.raise_for_status()
+                    inventory = durable.json()["events"]
+                    starts = [
+                        event for event in inventory if event["type"] == "model_request_started"
+                    ]
+                    measured = [event for event in inventory if event["type"] == "usage"]
+                    assert len(starts) == len(measured) == calls
+                    assert [event["data"]["request_id"] for event in starts] == request_ids_at_io
+                    assert [event["data"]["request_id"] for event in measured] == request_ids_at_io
+                    assert [item.native_meter["request_id"] for item in usage] == request_ids_at_io
+                    assert all(
+                        start["seq"] < end["seq"]
+                        for start, end in zip(starts, measured, strict=True)
+                    )
+                    assert (
+                        sum(
+                            event.type == "native.selfhosted.model_request_started"
+                            for event in recorded
+                        )
+                        == calls
+                    )
                 finally:
                     await driver.aclose()
         else:

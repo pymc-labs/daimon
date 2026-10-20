@@ -6,6 +6,8 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 from mux.contracts.actions import UserToolConfirmation
+from mux.drivers.selfhosted.normalize import normalize
+from mux.drivers.selfhosted.wire import Event
 
 from .interop_support import SCOPE, collect, driver_session, message, workspace
 
@@ -85,8 +87,25 @@ async def test_stream_tool_usage_and_resend(harness):
         await driver.aclose()
 
 
-async def test_dropped_reader_reconciles_approval_and_approved_write_executes(harness):
+async def test_dropped_reader_reconciles_approval_and_approved_write_executes(harness, monkeypatch):
     client, model, home = harness
+    reader_closed = asyncio.Event()
+    approval_ready = asyncio.Event()
+    original_run = model.run
+
+    async def gated_run(context, history):
+        original_emit = context.emit
+
+        async def emit(kind, data):
+            if kind == "requires_action":
+                approval_ready.set()
+                await reader_closed.wait()
+            await original_emit(kind, data)
+
+        context.emit = emit
+        return await original_run(context, history)
+
+    monkeypatch.setattr(model, "run", gated_run)
     tools = [
         {"kind": "builtin", "name": name, "permission": "ask" if name == "write" else "auto"}
         for name in ("bash", "read", "write", "edit")
@@ -97,7 +116,13 @@ async def test_dropped_reader_reconciles_approval_and_approved_write_executes(ha
         source = await driver.events.open_stream(SCOPE, session.ref, after="0")
         async with asyncio.timeout(10):
             first = await anext(source)
+            await approval_ready.wait()
+        before_close = await client.get(f"/v0/sessions/{session.ref.id}/events")
+        assert not any(
+            event["type"] == "requires_action" for event in before_close.json()["events"]
+        )
         await source.aclose()
+        reader_closed.set()
         async with asyncio.timeout(10):
             while True:
                 snapshot = await driver.events.reconcile(SCOPE, session.ref)
@@ -124,6 +149,15 @@ async def test_dropped_reader_reconciles_approval_and_approved_write_executes(ha
             == approved
         )
         remaining = await collect(driver, session, after=str(first.sequence))
+        durable = await client.get(
+            f"/v0/sessions/{session.ref.id}/events", params={"after_seq": first.sequence}
+        )
+        durable.raise_for_status()
+        assert durable.json()["complete"]
+        assert remaining == [
+            normalize(Event.model_validate(event), session.ref)
+            for event in durable.json()["events"]
+        ]
         assert all(event.sequence > first.sequence for event in remaining)
         assert len({event.id for event in remaining}) == len(remaining)
         assert remaining[-1].payload["outcome"] == "completed"
