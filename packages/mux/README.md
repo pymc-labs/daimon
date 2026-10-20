@@ -1,5 +1,15 @@
 # mux
 
+The host supplies Postgres-backed `SelfHostedAgents` and
+`SelfHostedEnvironments` from `daimon.core.stores.selfhosted_resources` to the
+self-hosted driver. Records and mutation receipts are tenant-scoped; resource
+`account_scope_id` is the tenant UUID. Environment `native_config` uses
+`selfhosted.environment` version 1 with `harness_url`, `auth_mode`, `auth_ref`
+and optional `packages_note`. `transport` defaults to `direct`;
+`foundry_invocations` requires `agent_name` and `project_endpoint`. `auth_ref`
+and MCP `credential_ref` name credential sources; they never contain credential values. The full mux spec is persisted
+as JSONB alongside names, revisions and lifecycle timestamps.
+
 Source loss consent can name the unsupported native URL-fetch capability as
 `builtin_tool:web_fetch`. This does not waive other builtin tools or authorize
 shell-based emulation of the missing native tool.

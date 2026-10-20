@@ -171,6 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tenant-owned self-hosted agent and environment records now have Postgres-backed resource ports, scoped lookups, revision checks and durable retry receipts. Harness authentication and MCP credentials are stored by reference only.
+
 - **Teams people can connect their own Microsoft 365.** With
   `DAIMON_MICROSOFT_ACCOUNTS__*` set, `connect_microsoft` sends a private
   sign-in card, and `microsoft_search`, `microsoft_get`, `microsoft_write`
