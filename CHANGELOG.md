@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On Teams, when Microsoft refuses a `microsoft_write` because the file is locked (usually open in a desktop Office app), the model is now told nothing was changed and to ask whoever has the file open to close it and try again, instead of just "refused (423)".
 
+||||||| parent of a50b28579 (fix(mcp): use the sole running turn to decide a microsoft file link is for the 1:1 chat)
+- On Teams, a file's download link from `microsoft_get` now comes back in the person's 1:1 chat with Daimon even when the model leaves out `origin_context_id`, as mail and calendar reads already did. It used to say the link is given only in the 1:1 chat, in the 1:1 chat itself. Without the id, the person's one running turn with that agent decides; with no running turn, or several, nobody gets a link on a guess.
+
 - In Teams, clicking Stop on a reply's status card now turns that card into "Stopping…" without a Stop button right away. It used to show a "Cancelling…" banner that stayed on the card after the reply had stopped.
 
 - A turn stopped, or cut off by its time limit, just after Daimon created its Managed Agents session no longer leaves that session running upstream with nothing pointing at it. The same goes for a database error at that moment. Daimon now archives the session before giving up; sessions it reuses or adopts from another turn are never archived.

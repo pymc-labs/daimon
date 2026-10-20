@@ -8,7 +8,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import caller_foreign_status, get_verified_origin
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import require_turn_origin, sole_running_origin_id
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
 
@@ -60,13 +60,27 @@ async def require_one_to_one(
     return origin
 
 
+async def _live_origin(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str
+) -> TurnOriginRow | None:
+    """The verified turn origin, or None. As `require_turn_origin` does, a model that
+    dropped the id gets the person's one running turn with this agent; with none or
+    several, or an id that does not verify, there is no origin."""
+    if not origin_context_id:
+        sole = await sole_running_origin_id(runtime, auth)
+        if sole is None:
+            return None
+        origin_context_id = sole
+    return await get_verified_origin(runtime, auth, origin_context_id)
+
+
 async def origin_facts(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str
 ) -> tuple[bool, bool | None]:
     """(is it the person's 1:1 chat, is the sender from another organisation) for the
     verified turn origin. Without one, the person's running turns say whether they are
     from another organisation, and None means that is not known."""
-    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    origin = await _live_origin(runtime, auth, origin_context_id)
     if origin is None:
         return False, await caller_foreign_status(runtime, auth)
     return origin.parent_channel_id.startswith("a:"), origin.sender_foreign
@@ -74,5 +88,5 @@ async def origin_facts(
 
 async def is_one_to_one(runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str) -> bool:
     """Whether the verified turn origin is the person's 1:1 chat; False when unverified."""
-    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    origin = await _live_origin(runtime, auth, origin_context_id)
     return origin is not None and origin.parent_channel_id.startswith("a:")

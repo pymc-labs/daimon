@@ -35,7 +35,7 @@ async def require_turn_origin(
     if not origin_context_id:
         # Smaller models sometimes drop the argument. The caller's own single
         # running turn for this responder is unambiguous; anything else refuses.
-        origin_context_id = await _sole_running_origin_id(runtime, auth)
+        origin_context_id = await sole_running_origin_id(runtime, auth)
         if origin_context_id is None:
             raise ToolError("Use the origin_context_id from the current chat.")
     try:
@@ -67,7 +67,7 @@ async def require_turn_origin(
     return origin
 
 
-async def _sole_running_origin_id(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
+async def sole_running_origin_id(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
     """The id of the caller's one running turn with this responder, or None."""
     executing_agent = auth.agent_id or auth.chat_agent_id
     if executing_agent is None or auth.platform is None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -392,6 +393,65 @@ async def test_no_pre_authenticated_link_outside_the_one_to_one_chat(
     assert listing.data == {"value": [{"name": "q3.xlsx", "children": [{}]}]}, (
         "only the link keys are stripped"
     )
+
+
+@pytest.mark.parametrize(
+    ("running", "link"),
+    [
+        ([ONE_TO_ONE], True),
+        ([CHANNEL], False),
+        ([ONE_TO_ONE, CHANNEL], False),
+        ([ONE_TO_ONE, ONE_TO_ONE], False),
+        ([], False),
+    ],
+    ids=["sole 1:1 turn", "sole channel turn", "1:1 and channel", "two 1:1 turns", "none"],
+)
+async def test_download_link_without_origin_follows_the_sole_running_turn(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    running: list[str],
+    link: bool,
+) -> None:
+    """A model that drops `origin_context_id` in a real 1:1 still gets the link, as mail
+    paths do (`require_turn_origin`); with no turn or several, nobody gets one on a guess."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    for parent in running:
+        await _origin(committing_sessionmaker, auth, parent)
+    fake.graph[("GET", "/me/drive/items/i1/content")] = httpx.Response(
+        302, headers={"location": "https://files.example/download?sig=1"}
+    )
+
+    result = await microsoft_get_impl(
+        _runtime(committing_sessionmaker, fake),
+        auth,
+        path="/me/drive/items/i1/content",
+        origin_context_id="",
+    )
+
+    assert (result.download_url == "https://files.example/download?sig=1") is link
+    assert link or "files.example" not in result.model_dump_json(), "no link outside a 1:1"
+
+
+async def test_a_named_origin_that_is_not_the_one_to_one_is_not_replaced_by_the_sole_turn(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
+) -> None:
+    """The fallback is for a dropped argument only: a stale or foreign id gets no link."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
+    fake.graph[("GET", "/me/drive/items/i1/content")] = httpx.Response(
+        302, headers={"location": "https://files.example/download?sig=1"}
+    )
+
+    result = await microsoft_get_impl(
+        _runtime(committing_sessionmaker, fake),
+        auth,
+        path="/me/drive/items/i1/content",
+        origin_context_id=str(uuid.uuid4()),
+    )
+
+    assert result.download_url is None and "files.example" not in result.model_dump_json()
 
 
 @pytest.mark.parametrize("running", ["guest", "local", "none"])
