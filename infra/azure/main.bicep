@@ -1,0 +1,176 @@
+targetScope = 'resourceGroup'
+
+param location string = resourceGroup().location
+
+@minLength(3)
+@maxLength(8)
+@description('Lowercase letters and digits; used in globally unique resource names.')
+param namePrefix string = 'daimon'
+
+param gpt5DeploymentName string = 'gpt-5'
+@minValue(1)
+param gpt5Capacity int = 1
+@allowed(['GlobalStandard', 'DataZoneStandard', 'Standard'])
+param gpt5Sku string = 'GlobalStandard'
+param gpt5ModelVersion string = '2025-08-07'
+
+@allowed([false])
+@description('Private networking is not implemented in this public-endpoint baseline. True is refused.')
+param enablePrivateNetworking bool = false
+
+@secure()
+@minLength(16)
+@description('No default. Supply through a secure prompt or ARM Key Vault parameter reference. Retain for subsequent deployments.')
+param postgresAdministratorPassword string
+
+@description('Immutable image reference from the root Dockerfile. Empty provisions the foundation only.')
+param containerImage string = ''
+@description('Enable only after the manual init job succeeds. Workers require one always-on replica.')
+param deployServices bool = false
+
+@description('Optional nonsecret environment variables, common to all services. Put credentials in secretNames instead.')
+param appEnvironment object = {}
+@description('Additional environment variable -> Key Vault secret-name mappings, common to all services. Values are names, never secret values.')
+param secretNames object = {}
+@description('Per-service nonsecret environment variables, keyed by discord/teams/mcp/scheduler/init.')
+param serviceEnvironment object = {}
+@description('Per-service environment variable -> Key Vault secret-name mappings.')
+param serviceSecretNames object = {
+  discord: { DAIMON_DISCORD__BOT_TOKEN: 'discord-bot-token' }
+  teams: { DAIMON_TEAMS__CLIENT_SECRET: 'teams-client-secret' }
+}
+@description('Optional additional Postgres firewall ranges: [{name, startIpAddress, endIpAddress}]. Azure-service access is enabled for ACA.')
+param postgresFirewallRules array = []
+
+var suffix = uniqueString(resourceGroup().id)
+var stem = '${namePrefix}-${suffix}'
+var tags = { application: 'daimon' }
+
+module foundation './modules/foundation.bicep' = {
+  name: 'foundation'
+  params: { location: location, stem: stem, compactName: '${namePrefix}${suffix}', tags: tags }
+}
+
+module database './modules/database.bicep' = {
+  name: 'database'
+  params: {
+    location: location
+    name: '${stem}-pg'
+    tags: tags
+    administratorPassword: postgresAdministratorPassword
+    vaultName: foundation.outputs.vaultName
+    firewallRules: postgresFirewallRules
+  }
+}
+
+module ai './modules/ai.bicep' = {
+  name: 'ai'
+  params: {
+    location: location
+    name: '${stem}-ai'
+    tags: tags
+    runtimePrincipalId: foundation.outputs.identityPrincipalId
+    deploymentName: gpt5DeploymentName
+    capacity: gpt5Capacity
+    deploymentSku: gpt5Sku
+    modelVersion: gpt5ModelVersion
+  }
+}
+
+var commonEnvironment = union(
+  {
+    DAIMON_MCP__PUBLIC_URL: 'https://${stem}-mcp.${foundation.outputs.defaultDomain}/mcp'
+    // Four processes on a burstable database: bound their combined connection budget.
+    DAIMON_DATABASE__POOL_SIZE: '3'
+    DAIMON_DATABASE__MAX_OVERFLOW: '2'
+    AZURE_CLIENT_ID: foundation.outputs.identityClientId
+  },
+  appEnvironment
+)
+var commonSecrets = union(
+  {
+    DAIMON_DATABASE__URL: 'database-url'
+    DAIMON_MCP__JWT_SECRET: 'mcp-jwt-secret'
+    DAIMON_CRYPTO__KEYS: 'crypto-keys'
+  },
+  secretNames
+)
+
+module init './modules/init.bicep' = if (!empty(containerImage)) {
+  name: 'init'
+  params: {
+    location: location
+    name: '${stem}-init'
+    tags: tags
+    environmentId: foundation.outputs.environmentId
+    identityId: foundation.outputs.identityId
+    registryServer: foundation.outputs.registryServer
+    vaultUri: foundation.outputs.vaultUri
+    image: containerImage
+    environment: union(commonEnvironment, serviceEnvironment.?init ?? {})
+    secretNames: union(commonSecrets, serviceSecretNames.?init ?? {})
+  }
+  dependsOn: [database]
+}
+
+var services = [
+  { name: 'discord', command: ['python', '-m', 'daimon.adapters.discord'], port: 0 }
+  { name: 'teams', command: ['python', '-m', 'daimon.adapters.teams'], port: 3978 }
+  {
+    name: 'mcp'
+    command: [
+      'uvicorn'
+      'daimon.adapters.mcp.server:create_mcp_app'
+      '--factory'
+      '--host'
+      '0.0.0.0'
+      '--port'
+      '8765'
+    ]
+    port: 8765
+  }
+  { name: 'scheduler', command: ['daimon-scheduler'], port: 0 }
+]
+module apps './modules/app.bicep' = [
+  for service in services: if (deployServices && !empty(containerImage)) {
+    name: service.name
+    params: {
+      location: location
+      name: '${stem}-${service.name}'
+      serviceName: service.name
+      tags: tags
+      environmentId: foundation.outputs.environmentId
+      identityId: foundation.outputs.identityId
+      registryServer: foundation.outputs.registryServer
+      vaultUri: foundation.outputs.vaultUri
+      image: containerImage
+      command: service.command
+      port: service.port
+      environment: union(commonEnvironment, serviceEnvironment[?service.name] ?? {})
+      secretNames: union(commonSecrets, serviceSecretNames[?service.name] ?? {})
+    }
+    dependsOn: [database]
+  }
+]
+
+output resourceGroupName string = resourceGroup().name
+output registryName string = foundation.outputs.registryName
+output registryServer string = foundation.outputs.registryServer
+output keyVaultName string = foundation.outputs.vaultName
+output managedIdentityId string = foundation.outputs.identityId
+output initJobName string = '${stem}-init'
+output containerAppNames array = [for service in services: '${stem}-${service.name}']
+output postgresHost string = database.outputs.host
+output chartsBlobEndpoint string = foundation.outputs.blobEndpoint
+output chartsContainerName string = 'charts'
+output foundryProjectId string = ai.outputs.projectId
+output daimonEnvironment object = commonEnvironment
+output daimonSecretNames object = commonSecrets
+output harnessEnvironment object = {
+  AZURE_CLIENT_ID: foundation.outputs.identityClientId
+  AZURE_OPENAI_ENDPOINT: ai.outputs.openaiEndpoint
+  AZURE_OPENAI_DEPLOYMENT: gpt5DeploymentName
+  AZURE_OPENAI_API_VERSION: '2025-04-01-preview'
+  AZURE_AI_PROJECT_ENDPOINT: ai.outputs.projectEndpoint
+}
+output privateNetworkingEnabled bool = enablePrivateNetworking

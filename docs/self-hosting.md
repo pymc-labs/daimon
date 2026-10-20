@@ -4,6 +4,22 @@ This guide expands the README quickstart. It covers the full Docker Compose
 setup, running the processes by hand, Slack, Microsoft Teams, the Claude Code
 login mounts, chart storage and connecting MCP servers.
 
+## Azure infrastructure
+
+The repository includes Bicep templates in `infra/azure/` and a root `azure.yaml`
+for Azure Developer CLI. They provision a Container Apps environment, Discord,
+Teams, MCP and scheduler apps, a manual migration/seeding job, Burstable
+PostgreSQL, RBAC Key Vault, a private Blob container, ACR, Log Analytics and an
+Azure OpenAI GPT-5 deployment with a Foundry project. Service secrets use Key
+Vault references through managed identity.
+
+Deployment is staged: foundation, image publication and successful init, then
+serving apps. The baseline uses public endpoints and does not implement private
+networking. Blob is provisioned but is not connected to the current S3 artifact
+client. These templates have been validated offline only; subscription deployment
+and runtime behavior have not been verified. See `infra/azure/README.md` in the
+repository for parameters, deployment commands, required roles and limitations.
+
 ## Upgrading an existing installation
 
 The new MCP server is strict immediately by default: credentials need a live
