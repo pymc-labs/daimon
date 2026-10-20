@@ -5,6 +5,7 @@ from mux.drivers.selfhosted.wire import DATA_MODELS, Event, TurnRequest
 from pydantic import ValidationError
 
 DATA = {
+    "model_request_started": {"request_id": "r", "model": "gpt-5"},
     "status_running": {},
     "agent_message_delta": {"text": "hello"},
     "agent_message": {"parts": [{"type": "text", "text": "hello"}]},
@@ -156,3 +157,35 @@ def test_errored_turn_requires_error_details() -> None:
         ).error
         is not None
     )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action_id": "a", "decision": "allow"},
+        {"action_id": "a", "decision": "deny"},
+        {"action_id": "a", "decision": "result", "result": None},
+        {"action_id": "a", "decision": "result", "result": {"ok": True}},
+    ],
+)
+def test_action_decision_round_trip(body: dict[str, object]) -> None:
+    from mux.drivers.selfhosted.wire import ActionRequest
+
+    action = ActionRequest.model_validate(body)
+    assert action.model_dump(mode="json") == body
+    assert ActionRequest.model_validate_json(action.model_dump_json()) == action
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action_id": "a", "decision": "allow", "result": None},
+        {"action_id": "a", "decision": "deny", "result": "denied"},
+        {"action_id": "a", "decision": "result"},
+    ],
+)
+def test_action_decision_rejects_ambiguous_pairing(body: dict[str, object]) -> None:
+    from mux.drivers.selfhosted.wire import ActionRequest
+
+    with pytest.raises(ValidationError, match="result must be present exactly"):
+        ActionRequest.model_validate(body)

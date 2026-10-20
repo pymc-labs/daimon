@@ -1097,3 +1097,8 @@ versions are explicitly unsupported.
 turn requests, approval decisions, durable event replay and typed event data.
 These models require no provider SDK. Inline image parts use `data_b64`;
 credentials in MCP configuration are environment variable names.
+
+Model attempts use `model_request_started` before model I/O; measured usage or
+an explicit `usage_unavailable` error closes the same request id. Approval actions
+use `allow` to execute, `deny` to refuse, and `result` to substitute a host result.
+Only `result` carries a result field; JSON null remains a valid host result.

@@ -6,9 +6,18 @@ An event validates its data against its type before entering a durable journal.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 PROTOCOL = "daimon-harness/0"
 
@@ -75,8 +84,22 @@ class TurnRequest(WireModel):
 
 class ActionRequest(WireModel):
     action_id: str
-    decision: Literal["allow", "deny"]
+    decision: Literal["allow", "deny", "result"]
     result: JsonValue = None
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> ActionRequest:
+        has_result = "result" in self.model_fields_set
+        if (self.decision == "result") != has_result:
+            raise ValueError("result must be present exactly when decision is result")
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_decision(self, handler: SerializerFunctionWrapHandler) -> dict[str, JsonValue]:
+        data = cast(dict[str, JsonValue], handler(self))
+        if self.decision != "result":
+            data.pop("result", None)
+        return data
 
 
 class CancelResponse(ResponseModel):
@@ -122,6 +145,11 @@ class RequiresActionData(ResponseModel):
     input: JsonValue
 
 
+class ModelRequestStartedData(ResponseModel):
+    request_id: str
+    model: str
+
+
 class UsageData(ResponseModel):
     request_id: str
     model: str
@@ -154,6 +182,7 @@ class ErrorData(TurnError):
 
 EventType = Literal[
     "status_running",
+    "model_request_started",
     "agent_message_delta",
     "agent_message",
     "tool_use",
@@ -170,6 +199,7 @@ EventData = (
     | ToolUseData
     | ToolResultData
     | RequiresActionData
+    | ModelRequestStartedData
     | UsageData
     | TurnEndedData
     | ErrorData
@@ -181,6 +211,7 @@ DATA_MODELS: dict[EventType, type[WireModel]] = {
     "tool_use": ToolUseData,
     "tool_result": ToolResultData,
     "requires_action": RequiresActionData,
+    "model_request_started": ModelRequestStartedData,
     "usage": UsageData,
     "turn_ended": TurnEndedData,
     "error": ErrorData,
