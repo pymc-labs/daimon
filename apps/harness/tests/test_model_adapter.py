@@ -480,3 +480,101 @@ async def test_file_tools_execute_off_the_event_loop(tmp_path, monkeypatch):
             )
             assert "file-result" in await tool.on_invoke_tool(context, json.dumps(arguments))
     assert len(called) == 3
+
+
+@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter", None])
+@pytest.mark.parametrize("tool_call", [False, True])
+async def test_incomplete_response_preserves_usage_and_ends_errored(
+    tmp_path, monkeypatch, reason, tool_call
+):
+    import asyncio
+
+    from daimon_harness.service import Supervisor
+
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        output = (
+            [
+                {
+                    "id": "fc",
+                    "type": "function_call",
+                    "call_id": "unsafe",
+                    "name": "write",
+                    "arguments": '{"path":"must-not-execute","content":"bad"}',
+                    "status": "incomplete",
+                }
+            ]
+            if tool_call
+            else [
+                {
+                    "id": "msg",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [{"type": "output_text", "text": "partial", "annotations": []}],
+                }
+            ]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "truncated-response",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-5",
+                "status": "incomplete",
+                "incomplete_details": {"reason": reason} if reason else None,
+                "output": output,
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 8,
+                    "total_tokens": 20,
+                    "input_tokens_details": {"cached_tokens": 3},
+                    "output_tokens_details": {"reasoning_tokens": 2},
+                },
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://unit-test.openai.azure.com",
+        api_key="test",
+        api_version="2025-04-01-preview",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
+    supervisor = Supervisor(tmp_path, AzureModelAdapter())
+    request = TurnRequest.model_validate(turn())
+    try:
+        await supervisor.submit(request)
+        await asyncio.wait_for(supervisor.tasks[request.turn_id], 5)
+        events = supervisor.journal.events(request.session_id)
+        ended = events[-1]
+        assert ended.type == "turn_ended"
+        assert ended.data["outcome"] == "errored"
+        assert ended.data["error"]["kind"] == "model_incomplete"
+        assert ended.data["error"]["message"] == "Model response incomplete: " + (
+            reason or "unknown"
+        )
+        starts = [event for event in events if event.type == "model_request_started"]
+        usages = [event for event in events if event.type == "usage"]
+        assert len(calls) == len(starts) == len(usages) == 1
+        assert starts[0].data["request_id"] == usages[0].data["request_id"]
+        assert usages[0].data["input_tokens"] == 12 and usages[0].data["output_tokens"] == 8
+        assert (
+            usages[0].data["cached_input_tokens"] == 3 and usages[0].data["reasoning_tokens"] == 2
+        )
+        assert not supervisor.journal.pending_requests(request)
+        assert not list(tmp_path.rglob("must-not-execute"))
+        assert not any(event.type == "tool_use" for event in events)
+        if not tool_call:
+            assert any(event.type == "agent_message" for event in events)
+    finally:
+        await supervisor.close()

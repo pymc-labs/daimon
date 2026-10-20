@@ -104,6 +104,7 @@ def test_multi_app_refuses_startup_without_verified_isolation(tmp_path, monkeypa
     monkeypatch.setattr(isolation, "can_switch_uid", lambda: True)
     monkeypatch.setattr(isolation, "proc_hides_other_users", lambda path: False)
     monkeypatch.setattr("daimon_harness.service.can_switch_uid", lambda: True)
+    monkeypatch.setattr("daimon_harness.service.validate_credential_files", lambda: None)
     with pytest.raises(RuntimeError, match="hidepid"):
         create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
     assert not (tmp_path / ".daimon").exists()
@@ -122,3 +123,55 @@ def test_multi_refuses_every_shared_scratch_directory(tmp_path, location):
         validate_shared_directories((tmp_path,))
     scratch.chmod(0o755)
     validate_shared_directories((tmp_path,))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "AZURE_FEDERATED_TOKEN_FILE",
+        "AZURE_CLIENT_CERTIFICATE_PATH",
+        "KUBECONFIG",
+        "HARNESS_SECRET_FILE",
+        "OPERATOR_CREDENTIAL_PATH",
+    ],
+)
+def test_startup_refuses_file_backed_credentials_even_with_an_api_key(
+    tmp_path, monkeypatch, source
+):
+    from daimon_harness.service import create_app
+
+    from .conftest import FakeModelAdapter
+
+    token = tmp_path / "projected-token"
+    token.write_text("synthetic-projected-token")
+    token.chmod(0o644)
+    monkeypatch.setenv(source, str(token))
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "synthetic-key")
+    with pytest.raises(RuntimeError, match="file-based credentials"):
+        create_app(home=tmp_path / "home", token="test", adapter=FakeModelAdapter())
+    assert not (tmp_path / "home").exists()
+
+
+def test_readable_secret_mount_refused_without_an_environment_reference(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+
+    # Use the current identity to exercise traversal through pytest's private root.
+    monkeypatch.setattr(isolation, "TOOL_UID_MIN", os.geteuid())
+    monkeypatch.setattr(isolation, "TOOL_UID_MAX", os.geteuid())
+    token = tmp_path / "unreferenced-token"
+    token.write_text("synthetic-unreferenced-token")
+    token.chmod(0o644)
+    with pytest.raises(RuntimeError, match="not be readable"):
+        isolation.validate_credential_files((tmp_path,))
+    token.chmod(0o000)
+    isolation.validate_credential_files((tmp_path,))
+
+
+def test_mi_refuses_an_endpoint_without_a_secret_header(monkeypatch):
+    from daimon_harness.model_adapter import AzureModelAdapter
+
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("IDENTITY_HEADER", raising=False)
+    monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1/token")
+    with pytest.raises(RuntimeError, match="header-protected"):
+        AzureModelAdapter()

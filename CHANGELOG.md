@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Restrict harness credentials to API keys or header-protected managed identity, refuse file-backed credentials, and preserve usage while marking incomplete model responses as errored.
+
 - Include async managed-identity transport in the harness image and finish subprocess cleanup when cancellation arrives during launch.
 
 - Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.

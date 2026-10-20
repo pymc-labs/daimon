@@ -440,6 +440,8 @@ async def test_sdk_debug_logs_keep_header_filters_and_hide_all_secrets(
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", key)
     else:
         monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1:1234/token")
+        monkeypatch.setenv("IDENTITY_HEADER", "synthetic-identity-header")
 
     async def token_provider():
         return bearer

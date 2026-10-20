@@ -13,6 +13,104 @@ TOOL_UID_MIN = 10001
 TOOL_UID_MAX = 60000
 
 
+def validate_credential_sources() -> None:
+    """File-backed identity is unsupported even when a model API key is set."""
+    for projected in (
+        "/var/run/secrets/azure/tokens/azure-identity-token",
+        "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    ):
+        if Path(projected).exists():
+            raise RuntimeError("mounted workload identity tokens are unsupported")
+    for name, value in os.environ.items():
+        upper = name.upper()
+        if value and (
+            name
+            in {
+                "AZURE_FEDERATED_TOKEN_FILE",
+                "AZURE_CLIENT_CERTIFICATE_PATH",
+                "KUBECONFIG",
+                "AZURE_CONFIG_DIR",
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "AWS_CONFIG_FILE",
+            }
+            or (
+                any(
+                    marker in upper
+                    for marker in ("TOKEN", "SECRET", "CREDENTIAL", "CERTIFICATE", "PRIVATE_KEY")
+                )
+                and upper.endswith(("_FILE", "_PATH", "_DIR"))
+            )
+        ):
+            raise RuntimeError(f"file-based credentials are unsupported: {name}")
+
+
+def validate_credential_files(roots: tuple[Path, ...] | None = None) -> None:
+    """Refuse readable secret mounts, projected tokens and local credential caches."""
+    if roots is None:
+        candidates = {
+            Path("/run/secrets"),
+            Path("/var/run/secrets"),
+            Path("/etc/secrets"),
+            Path("/mnt/secrets"),
+            Path("/var/secrets"),
+        }
+        for home in {Path.home(), Path("/root"), Path("/home/harness")}:
+            candidates.update(
+                home / name
+                for name in (".azure", ".aws", ".kube", ".ssh", ".docker", ".config/gcloud")
+            )
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = line.split()
+            if any(
+                word in (fields[3] + fields[4]).lower()
+                for word in ("secret", "credential", "projected")
+            ):
+                candidates.add(Path(fields[4].replace(r"\040", " ").replace(r"\134", "\\")))
+        roots = tuple(candidates)
+
+    def scan_error(error: OSError) -> None:
+        raise RuntimeError("cannot verify credential file isolation") from error
+
+    for root in roots:
+        try:
+            info = root.stat()
+        except FileNotFoundError:
+            continue
+        paths = [root]
+        if stat.S_ISDIR(info.st_mode):
+            seen: set[tuple[int, int]] = set()
+            for directory, children, files in os.walk(root, followlinks=True, onerror=scan_error):
+                info = Path(directory).stat()
+                identity = (info.st_dev, info.st_ino)
+                if identity in seen:
+                    children.clear()
+                    continue
+                seen.add(identity)
+                paths.extend(Path(directory) / name for name in files)
+        for path in paths:
+            if not path.is_file():
+                continue
+            # Refuse ambiguous ACL grants rather than relying only on mode bits.
+            chain = (path, *path.parents, path.resolve(), *path.resolve().parents)
+            if any("system.posix_acl_access" in os.listxattr(part) for part in chain):
+                raise RuntimeError("credential file access cannot be verified")
+            identities = {TOOL_UID_MIN}
+            for part in chain:
+                info = part.stat()
+                identities.update(
+                    uid for uid in (info.st_uid, info.st_gid) if TOOL_UID_MIN <= uid <= TOOL_UID_MAX
+                )
+            for uid in identities:
+
+                def permitted(part: Path, uid: int = uid) -> bool:
+                    info = part.stat()
+                    shift = 6 if info.st_uid == uid else 3 if info.st_gid == uid else 0
+                    return bool(info.st_mode & ((4 if part.is_file() else 1) << shift))
+
+                if all(permitted(part) for part in chain):
+                    raise RuntimeError("credential/secret files must not be readable by tool UIDs")
+
+
 def proc_hides_other_users(mountinfo: Path = Path("/proc/self/mountinfo")) -> bool:
     """Inspect the actual proc mount, including its superblock options."""
     for line in mountinfo.read_text().splitlines():
@@ -49,7 +147,7 @@ def protect_process() -> None:
         raise OSError(ctypes.get_errno(), "cannot protect harness process")
     for name in tuple(os.environ):
         if (
-            name in {"IDENTITY_HEADER", "MSI_ENDPOINT", "IDENTITY_ENDPOINT"}
+            name in {"IDENTITY_HEADER", "MSI_ENDPOINT", "IDENTITY_ENDPOINT", "AZURE_CLIENT_ID"}
             or name.startswith("HARNESS_MCP_CRED_")
             or any(marker in name.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))
         ):

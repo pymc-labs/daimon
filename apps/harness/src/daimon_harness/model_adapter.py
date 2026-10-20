@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast, overload
 from uuid import uuid4
 
 import httpx
@@ -21,8 +21,9 @@ from agents.models.interface import ModelTracing
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
-from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
+from azure.identity.aio import ManagedIdentityCredential, get_bearer_token_provider
 from openai import AsyncAzureOpenAI, BadRequestError
+from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import JsonValue, TypeAdapter
 
@@ -33,6 +34,7 @@ from .credentials import (
     remember_log_secret,
 )
 from .errors import HarnessError
+from .isolation import validate_credential_sources
 from .runtime import TurnContext
 
 JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -60,6 +62,68 @@ class MeteredResponsesModel(OpenAIResponsesModel):
     def __init__(self, context: TurnContext, client: AsyncAzureOpenAI) -> None:
         super().__init__(model=context.request.model, openai_client=client)
         self.context = context
+        self.incomplete_reason: str | None = None
+
+    @overload
+    async def _fetch_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        stream: Literal[True],
+        prompt: ResponsePromptParam | None = None,
+    ) -> AsyncIterator[ResponseStreamEvent]: ...
+
+    @overload
+    async def _fetch_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        stream: Literal[False],
+        prompt: ResponsePromptParam | None = None,
+    ) -> Response: ...
+
+    async def _fetch_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        stream: Literal[True, False] = False,
+        prompt: ResponsePromptParam | None = None,
+    ) -> Response | AsyncIterator[ResponseStreamEvent]:
+        response = await super()._fetch_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            previous_response_id,
+            conversation_id,
+            stream,
+            prompt,
+        )
+        # The SDK's ModelResponse conversion drops status and incomplete_details.
+        if isinstance(response, Response) and response.status == "incomplete":
+            details = response.incomplete_details
+            self.incomplete_reason = details.reason if details and details.reason else "unknown"
+        return response
 
     async def get_response(
         self,
@@ -80,6 +144,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                 [{"role": "user", "content": input}] if isinstance(input, str) else input
             ),
         )
+        self.incomplete_reason = None
         request_id = str(uuid4())
         await self.context.emit(
             "model_request_started", {"request_id": request_id, "model": self.context.request.model}
@@ -179,6 +244,10 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                     "agent_message",
                     {"message_id": message_id, "parts": [{"type": "text", "text": text}]},
                 )
+        if self.incomplete_reason is not None:
+            raise HarnessError(
+                "model_incomplete", "Model response incomplete: " + self.incomplete_reason
+            )
         return response
 
     def policy_name(self, name: str) -> str:
@@ -244,9 +313,18 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
 
 class AzureModelAdapter:
     def __init__(self) -> None:
+        validate_credential_sources()
         self.log_credentials = process_credentials()
         self.key = os.environ.get("AZURE_OPENAI_API_KEY")
-        self.credential = DefaultAzureCredential() if not self.key else None
+        if not self.key and not (
+            os.environ.get("IDENTITY_ENDPOINT") and os.environ.get("IDENTITY_HEADER")
+        ):
+            raise RuntimeError("managed identity requires a header-protected IDENTITY_ENDPOINT")
+        self.credential = (
+            ManagedIdentityCredential(client_id=os.environ.get("AZURE_CLIENT_ID"))
+            if not self.key
+            else None
+        )
         self.endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
         self.api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 
@@ -386,6 +464,8 @@ class AzureModelAdapter:
                         root = root.__cause__
                     if isinstance(root, HarnessError) and root.kind == "tool_limit":
                         raise HarnessError("tool_limit", "Maximum tool calls exceeded") from exc
+                    if isinstance(root, HarnessError) and root.kind == "model_incomplete":
+                        raise HarnessError(root.kind, str(root)) from exc
                     cause = root.__cause__
                     if not (
                         attempt == 0

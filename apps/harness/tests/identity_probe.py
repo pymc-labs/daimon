@@ -19,6 +19,7 @@ from daimon_harness.service import create_app
 SCOPE = "https://cognitiveservices.azure.com/.default"
 TOKEN = "synthetic-managed-identity-token"
 HARNESS_TOKEN = "synthetic-identity-probe-harness-token"
+CLIENT_ID = "11111111-1111-1111-1111-111111111111"
 
 
 @asynccontextmanager
@@ -34,6 +35,7 @@ async def managed_identity_endpoint():
             assert "x-identity-header: synthetic-identity-header" in headers.lower()
             query = parse_qs(urlsplit(path).query)
             assert query["resource"] == [SCOPE.removesuffix("/.default")]
+            assert query["client_id"] == [CLIENT_ID]
             calls.append(query)
             payload = json.dumps(
                 {
@@ -61,6 +63,7 @@ async def managed_identity_endpoint():
             {
                 "IDENTITY_ENDPOINT": f"http://127.0.0.1:{port}/metadata/identity/oauth2/token",
                 "IDENTITY_HEADER": "synthetic-identity-header",
+                "AZURE_CLIENT_ID": CLIENT_ID,
                 "AZURE_OPENAI_ENDPOINT": "https://unit-test.openai.azure.com",
                 "HARNESS_TOKEN": HARNESS_TOKEN,
             },
@@ -88,6 +91,9 @@ async def main():
         async with app.router.lifespan_context(app):
             provider = get_bearer_token_provider(adapter.credential, SCOPE)
             assert await provider() == TOKEN
+            assert "IDENTITY_ENDPOINT" not in os.environ
+            assert "IDENTITY_HEADER" not in os.environ
+            assert "AZURE_CLIENT_ID" not in os.environ
             assert len(calls) == 1
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://harness"

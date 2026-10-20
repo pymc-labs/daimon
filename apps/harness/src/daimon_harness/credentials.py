@@ -184,7 +184,7 @@ def process_credentials() -> dict[str, str]:
         if value
         and name != "HARNESS_MCP_CRED_BINDINGS"
         and (
-            name in {"IDENTITY_HEADER", "MSI_ENDPOINT", "IDENTITY_ENDPOINT"}
+            name in {"IDENTITY_HEADER", "MSI_ENDPOINT", "IDENTITY_ENDPOINT", "AZURE_CLIENT_ID"}
             or name.startswith("HARNESS_MCP_CRED_")
             or any(marker in name.upper() for marker in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))
         )

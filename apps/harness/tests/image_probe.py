@@ -21,6 +21,32 @@ async def main() -> None:
     secret = "synthetic-runtime-secret"
     os.environ["HARNESS_TOKEN"] = secret
     os.environ["AZURE_OPENAI_API_KEY"] = secret
+    projected = Path("/var/run/secrets/azure/tokens/azure-identity-token")
+    projected.parent.mkdir(parents=True, exist_ok=True)
+    projected.write_text("synthetic-projected-identity-token")
+    projected.chmod(0o644)
+    try:
+        try:
+            create_app(home=home)
+            raise AssertionError("accepted a mounted workload identity token")
+        except RuntimeError as exc:
+            assert "workload identity" in str(exc), str(exc)
+        assert os.geteuid() == 0, "credential refusal must precede UID drop and tool startup"
+    finally:
+        projected.unlink()
+    operator_file = Path("/run/secrets/operator-credential")
+    operator_file.parent.mkdir(parents=True, exist_ok=True)
+    operator_file.write_text("synthetic-unreferenced-secret")
+    operator_file.chmod(0o644)
+    try:
+        try:
+            create_app(home=home)
+            raise AssertionError("accepted a tool-readable unreferenced secret file")
+        except RuntimeError as exc:
+            assert "not be readable" in str(exc), str(exc)
+        assert os.geteuid() == 0
+    finally:
+        operator_file.unlink()
     if os.environ.get("HARNESS_SESSION_MODE") == "multi":
         for scratch in (Path("/var/tmp"), Path("/dev/shm")):
             scratch.chmod(0o1777)

@@ -297,7 +297,13 @@ Build it from the repository root with
 `docker build -f apps/harness/Dockerfile -t daimon-harness .`. Its dependencies
 are exported from `uv.lock`; the image includes NumPy, pandas, PyMC and
 PyMC-Marketing. Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
-`AZURE_OPENAI_API_KEY` or managed identity credentials at runtime. Mount a
+`AZURE_OPENAI_API_KEY` or ACA managed identity at runtime. The model credential
+uses only `ManagedIdentityCredential`, with `IDENTITY_ENDPOINT` and
+`IDENTITY_HEADER` required together and an optional `AZURE_CLIENT_ID`; these
+values are captured then scrubbed. File-backed credentials, certificate paths,
+projected workload tokens and tool-readable secret mounts refuse startup.
+Incomplete Azure responses preserve usage but end as `errored` with the reason.
+Mount a
 persistent home directory at `/home/harness`; run one worker per HOME. The image
 starts as root, drops the service to UID 10000 and retains the capabilities needed
 to assign separate tool UIDs and work/skills directories to sessions. Production

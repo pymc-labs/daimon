@@ -47,8 +47,9 @@ mode platform checks only with its mandatory fake adapter and no credentials.
 | `HARNESS_ENTRA_TENANT_ID`, `HARNESS_ENTRA_AUDIENCE` | Tenant-bound validation in `HARNESS_AUTH_MODE=entra` |
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource URL |
 | `AZURE_OPENAI_API_VERSION` | Defaults to `2025-04-01-preview` |
-| `AZURE_OPENAI_API_KEY` | Optional; absent means `DefaultAzureCredential` |
-| `AZURE_CLIENT_ID` | Optional user-assigned managed identity selection |
+| `AZURE_OPENAI_API_KEY` | Optional; absent means `ManagedIdentityCredential` |
+| `AZURE_CLIENT_ID` | Optional user-assigned managed identity selection; captured then scrubbed |
+| `IDENTITY_ENDPOINT`, `IDENTITY_HEADER` | Required together for managed identity; captured by the credential then scrubbed |
 | `HARNESS_REQUIRED_ROLE` | Optional Entra application role required in addition to caller identity |
 | `HARNESS_VERSION` | Image git SHA for the authenticated health response |
 
@@ -266,3 +267,16 @@ managed-identity endpoint stub through the real Azure async credential transport
 Command cleanup also covers cancellation while subprocess creation is pending:
 creation is shielded, and cancellation waits for the child to be registered,
 terminated and reaped before returning.
+
+Model authentication accepts an API key or `ManagedIdentityCredential` only.
+Managed identity requires ACA's header-protected endpoint; IMDS-only and developer
+credential chains are refused. File-backed identity sources, certificate paths,
+and mounted Kubernetes/workload token paths refuse startup even with an API key.
+Startup also checks secret mounts and credential caches for tool-readable files
+(including traversal permissions and ambiguous ACLs). Do not mount credentials
+into the tool filesystem. The image probe verifies refusal with a projected 0644
+token before the service drops its startup UID.
+
+Incomplete Azure responses preserve their measured usage and partial text but end
+with outcome `errored`, kind `model_incomplete`, and the provider's reason (or
+`unknown` when absent). Incomplete tool calls never execute.

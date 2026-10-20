@@ -7,7 +7,7 @@ RUN --mount=type=bind,source=.,target=/workspace,readonly \
       --no-emit-workspace --no-header --no-annotate --output-file /tmp/requirements.txt >/dev/null
 RUN uv venv /opt/venv && uv pip sync --python /opt/venv/bin/python \
     --require-hashes /tmp/requirements.txt && \
-    /opt/venv/bin/python -c 'from azure.identity.aio import DefaultAzureCredential; DefaultAzureCredential()'
+    /opt/venv/bin/python -c 'from azure.identity.aio import ManagedIdentityCredential; ManagedIdentityCredential()'
 RUN --mount=type=bind,source=packages/mux,target=/src/mux,readonly \
     --mount=type=bind,source=apps/harness,target=/src/harness,readonly \
     uv build --wheel /src/mux --out-dir /tmp/wheels && \
