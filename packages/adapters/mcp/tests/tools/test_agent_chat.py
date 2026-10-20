@@ -742,6 +742,64 @@ async def test_start_turn_then_poll_get_session_and_read_transcript(
     )
 
 
+async def test_list_events_never_returns_a_turn_origin_id() -> None:
+    """get_events on a session reads its history; the origin id in its prompt and tool
+    calls proves a call comes from that turn and must not be handed to another."""
+    origin_id = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="test-agent",
+                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET", r"/v1/sessions/([^/]+)", lambda _r, _m: httpx.Response(200, json=_session_json())
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "sevt_u",
+                        "type": "user.message",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": '<turn_controls>\n{"origin_context_id": '
+                                f'"{origin_id}"}}\n</turn_controls>\nhello',
+                            }
+                        ],
+                    },
+                    {
+                        "id": "sevt_t",
+                        "type": "agent.mcp_tool_use",
+                        "name": "microsoft_get",
+                        "input": {"origin_context_id": origin_id},
+                    },
+                ],
+                "next_page": None,
+            },
+        ),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    page = await _list_events_impl(runtime, _auth(), "ses_test001", None, None, "asc")
+
+    shown = page.model_dump_json()
+    assert origin_id not in shown and "hello" in shown
+
+
 def _started(
     handle: str, *, at: dt.datetime = dt.datetime(2026, 6, 23, 0, 0, tzinfo=dt.UTC)
 ) -> dict[str, str]:

@@ -1003,9 +1003,7 @@ async def _list_events_impl(
         runtime.client, handle, query=list_kwargs, scope=mcp_scope(auth)
     )
     return Page[SessionEventOut](
-        items=[
-            SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data
-        ],
+        items=[SessionEventOut.from_event(event) for event in cursor.data],
         next_page=cursor.next_page,
     )
 

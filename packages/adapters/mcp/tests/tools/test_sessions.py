@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import uuid
 from typing import Any
 from unittest.mock import MagicMock
@@ -30,6 +31,8 @@ from daimon.adapters.mcp.tools.sessions import (
     register_sessions_tools,
 )
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.turn_origin import render_turn_origin
 from daimon.testing import ma_agent, ma_session
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.ma import (
@@ -454,6 +457,90 @@ async def test_list_session_events_returns_page_envelope() -> None:
     assert result.next_page == "p2", "should forward SDK next_page cursor unchanged"
     item: SessionEventOut = result.items[0]
     assert item.id == "sevt_1", "event id should round-trip through SDK parse"
+
+
+ORIGIN_ID = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def _origin_row() -> TurnOriginRow:
+    return TurnOriginRow.model_validate(
+        {
+            "id": uuid.UUID(ORIGIN_ID),
+            "tenant_id": uuid.uuid4(),
+            "account_id": uuid.uuid4(),
+            "platform": "teams",
+            "parent_channel_id": "a:1personal-chat",
+            "thread_id": "a:1personal-chat",
+            "responder_ma_agent_id": "ag_a",
+            "responder_name": "demo",
+            "configuration_target_ma_agent_id": None,
+            "configuration_target_name": None,
+            "role": Role.USER,
+            "is_setup": False,
+            "created_at": datetime.datetime(2026, 10, 20, tzinfo=datetime.UTC),
+            "expires_at": datetime.datetime(2026, 10, 20, 1, tzinfo=datetime.UTC),
+        }
+    )
+
+
+async def test_list_session_events_never_returns_a_turn_origin_id() -> None:
+    """A routine or channel turn may read the owner's 1:1 session. The origin id in that
+    session's prompt and tool calls proves a call comes from that turn, so it is redacted."""
+    tenant_id = uuid.uuid4()
+    account_id = uuid.uuid4()
+    controls = render_turn_origin(_origin_row())
+    assert ORIGIN_ID in controls, "the turn's own prompt keeps the id"
+    user_event = {
+        "id": "sevt_1",
+        "type": "user.message",
+        "content": [{"type": "text", "text": f"{controls}\n\nread my mail"}],
+    }
+    tool_event = {
+        "id": "sevt_2",
+        "type": "agent.mcp_tool_use",
+        "name": "microsoft_get",
+        "input": {"path": "/me/messages", "origin_context_id": ORIGIN_ID},
+    }
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_a",
+                    name="demo",
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=ma_session(
+                id="ses_1", agent_id="ag_a", metadata={"daimon_account": str(account_id)}
+            ).model_dump(mode="json"),
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: httpx.Response(200, json={"data": [user_event, tool_event]}),
+    )
+    client = build_fake_anthropic(router.dispatch)
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+
+    result = await _list_session_events_impl(
+        _runtime(client), auth, "ses_1", page=None, limit=None, order=None
+    )
+
+    shown = result.model_dump_json()
+    assert ORIGIN_ID not in shown, "no event may carry a turn-origin id"
+    assert "read my mail" in shown and "/me/messages" in shown, "the rest must be intact"
 
 
 # ---------------------------------------------------------------------------

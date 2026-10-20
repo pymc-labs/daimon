@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A turn's `origin_context_id` no longer shows up in what Daimon lets the model read of another conversation. The id proves that a call comes from one live turn (on Teams it is what lets `microsoft_get` and `microsoft_send` reach mail, calendar and file links in the person's 1:1 chat). `list_session_events`, the agent-chat event reader and the earlier conversation quoted to a replacement agent after a handoff now replace it with `[redacted]`, in the controls at the top of each message and in tool calls. Before, a scheduled routine or a channel turn could list the owner's sessions, read the newest message of their 1:1 conversation and reuse the id. The turn's own prompt is unchanged, and normal use looks the same.
+
 - An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
 
 ### Fixed

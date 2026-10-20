@@ -83,6 +83,24 @@ def test_is_worth_checkpointing_is_true_once_the_agent_has_replied() -> None:
     assert is_worth_checkpointing(events), "one agent reply is enough to justify the checkpoint"
 
 
+def test_select_recent_turns_redacts_the_earlier_turns_origin_id() -> None:
+    controls = '<turn_controls>\n{"origin_context_id": "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"}'
+    events: list[BetaManagedAgentsSessionEvent] = [
+        BetaManagedAgentsUserMessageEvent(
+            id="evt_u",
+            type="user.message",
+            content=[BetaManagedAgentsTextBlock(type="text", text=f"{controls}\nhello")],
+            processed_at=PROCESSED_AT,
+        )
+    ]
+
+    (turn,) = select_recent_turns(events)
+
+    assert "0b1c2d3e" not in turn.text and "hello" in turn.text, (
+        "the successor's turn has its own origin; the earlier id must not be quoted into it"
+    )
+
+
 def test_select_recent_turns_keeps_the_newest_turns_in_reading_order() -> None:
     events: list[BetaManagedAgentsSessionEvent] = []
     for index in range(10):

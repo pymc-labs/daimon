@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from daimon.core.stores.github_grant_proposals import resolve as resolve_github_
 from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
 from daimon.core.teams_threads import conversation_of, is_group_chat
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: A continuation is the person's own words and is untrusted text. It is JSON
@@ -377,3 +378,46 @@ def render_turn_origin(
             "this turn; anything else applies from the person's next message."
         )
     return rendered + "\n</turn_controls>"
+
+
+REDACTED_ORIGIN_ID = "[redacted]"
+_ORIGIN_ID_KEY = "origin_context_id"
+# The key and the id after it, in the rendered controls (`"origin_context_id": "<uuid>"`),
+# in a tool call's JSON (also escaped) and in a model's prose ("origin_context_id is <uuid>").
+_ORIGIN_ID_TEXT = re.compile(
+    rf"({_ORIGIN_ID_KEY}(?:\W|\b(?:is|was|are|of|equals)\b){{0,12}})"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def redact_turn_origin_text(text: str) -> str:
+    """`text` with the id after every `origin_context_id` replaced by `[redacted]`."""
+    return _ORIGIN_ID_TEXT.sub(rf"\1{REDACTED_ORIGIN_ID}", text)
+
+
+def redact_turn_origin_ids(value: JsonValue) -> JsonValue:
+    """`value` with every turn-origin id replaced by `[redacted]`.
+
+    An origin id is a bearer proof that a call comes from one live turn (the
+    person's 1:1 chat gates mail, calendar and file links on it), so it must stay
+    inside that turn. Whatever lets the model read another session's history
+    (transcripts, session events, a quoted earlier conversation) passes it through
+    here, never the current turn's own prompt. Walks nested lists and objects and
+    redacts both the rendered controls' text and any `origin_context_id` field, such
+    as the one in a tool call's input. The id format lives with `render_turn_origin`
+    above; keep the two in step (`tests/test_turn_origin_redaction.py` round-trips them).
+    """
+    if isinstance(value, str):
+        return redact_turn_origin_text(value)
+    if isinstance(value, list):
+        return [redact_turn_origin_ids(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                REDACTED_ORIGIN_ID
+                if key == _ORIGIN_ID_KEY and isinstance(item, str)
+                else redact_turn_origin_ids(item)
+            )
+            for key, item in value.items()
+        }
+    return value

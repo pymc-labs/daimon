@@ -35,6 +35,7 @@ from daimon.adapters.mcp.tools._session_access import (
 )
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.turn_origin import redact_turn_origin_ids
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.errors import ScopeViolation
@@ -93,6 +94,16 @@ class SessionEventOut(BaseModel):
     # agent.message; None on status events). Kept as raw JSON blocks rather than
     # the SDK's typed content union — the caller folds agent.message text itself.
     content: list[dict[str, Any]] | None = None
+
+    @classmethod
+    def from_event(cls, event: BaseModel) -> SessionEventOut:
+        """An event as the model may read it: turn-origin ids redacted.
+
+        An origin id proves a call comes from one live turn, and it sits in that turn's
+        prompt and its tool calls. Another session's transcript must not hand it over.
+        """
+        raw = redact_turn_origin_ids(event.model_dump(mode="json"))
+        return cls.model_validate(raw)
 
 
 def _session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
@@ -229,9 +240,7 @@ async def _list_session_events_impl(
         runtime.client, session_id, query=list_kwargs, scope=mcp_scope(auth)
     )
     return Page[SessionEventOut](
-        items=[
-            SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data
-        ],
+        items=[SessionEventOut.from_event(event) for event in cursor.data],
         next_page=cursor.next_page,
     )
 
