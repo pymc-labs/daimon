@@ -1230,3 +1230,12 @@ revisions. Creation replay reuses those pins instead of current resource version
 Approval retries reconcile a known call's tool result; an uncertain HTTP reply
 cannot cause another tool execution. Retry-After is capped at 30 seconds and the
 poll deadline; network polling and cancellation observation use bounded backoff.
+
+Host-side MCP and skill preparation lives in
+[`daimon.core.turn.selfhosted_tools`](../core/README.md#self-hosted-tool-preparation).
+It returns credential-free wire fields; the registered Daimon MCP credential
+travels only in the per-turn `X-Daimon-MCP-Authorization` transport header.
+
+`mux.profiles.anthropic.is_builtin_skill` recognizes native built-in skill refs
+by source or reserved id when imported refs omit source. Hosts can skip native
+bundles on other backends without duplicating provider policy.

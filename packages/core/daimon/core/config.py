@@ -1194,6 +1194,46 @@ class CredentialsSettings(BaseModel):
     )
 
 
+class McpCredentialBinding(BaseModel):
+    """Operator authority for one harness credential, never its secret value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=r"^HARNESS_MCP_CRED_[A-Za-z0-9_]+$")
+    origin: str
+    tenants: tuple[UUID, ...] | tuple[Literal["*"],]
+
+    @field_validator("origin")
+    @classmethod
+    def exact_https_origin(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() or ord(char) < 32 for char in value)
+        ):
+            raise ValueError("MCP credential binding requires an exact HTTPS origin")
+        port = parsed.port
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        return f"https://{host}" + (f":{port}" if port not in (None, 443) else "")
+
+    @field_validator("tenants")
+    @classmethod
+    def nonempty_tenants(
+        cls, value: tuple[UUID, ...] | tuple[Literal["*"],]
+    ) -> tuple[UUID, ...] | tuple[Literal["*"],]:
+        if not value:
+            raise ValueError("MCP credential binding requires at least one tenant")
+        return value
+
+
 class SelfHostedSettings(BaseModel):
     """Operator opt-in for the self-hosted turn runtime."""
 
@@ -1205,6 +1245,26 @@ class SelfHostedSettings(BaseModel):
             "capability and a configured self-hosted core runtime."
         ),
     )
+
+    mcp_credential_bindings: tuple[McpCredentialBinding, ...] = Field(
+        default=(),
+        description=(
+            "JSON list of operator MCP credential bindings: each has name "
+            "(HARNESS_MCP_CRED_*), origin (exact HTTPS origin), and tenants (UUID list). "
+            "Unbound references, other origins and other tenants are refused. "
+            'Use tenants=["*"] only for a single-tenant installation. Configure the '
+            "harness HARNESS_MCP_CRED_BINDINGS from the same operator source."
+        ),
+    )
+
+    @field_validator("mcp_credential_bindings")
+    @classmethod
+    def unique_names(
+        cls, value: tuple[McpCredentialBinding, ...]
+    ) -> tuple[McpCredentialBinding, ...]:
+        if len({binding.name for binding in value}) != len(value):
+            raise ValueError("MCP credential binding names must be unique")
+        return value
 
 
 class GeminiSettings(BaseModel):

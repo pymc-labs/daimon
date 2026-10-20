@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mux.contracts.extensions import ANTHROPIC_EXTENSIONS, ExtensionRef
+from mux.contracts.ids import SkillRef
 from mux.contracts.profile import AccountingMode, Profile
 
 MANAGED_AGENTS = Profile(
@@ -40,3 +41,8 @@ MANAGED_AGENTS = Profile(
     },
     extensions=(*ANTHROPIC_EXTENSIONS, ExtensionRef(namespace="anthropic.model_config", version=1)),
 )
+
+
+def is_builtin_skill(ref: SkillRef) -> bool:
+    """Recognize native built-ins even when an imported ref omits its source."""
+    return ref.source == "anthropic" or ref.id in {"docx", "pptx", "xlsx", "pdf"}

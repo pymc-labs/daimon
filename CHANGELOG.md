@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Bind self-hosted MCP credentials to operator-declared HTTPS origins and tenants, cap per-turn tokens at one hour, and recognize built-in skills without source metadata.
+
 ### Changed
 
 - Harness tool policies accept explicit denial and validated built-in, MCP tool and server wildcard keys.
@@ -15,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Hosted MCP chart links can use private Azure Blob Storage with managed identity and read-only user-delegation SAS. Select `DAIMON_ARTIFACTS__BACKEND=azure_blob` and set `DAIMON_ARTIFACTS__AZURE_CLIENT_ID` for an explicit managed identity, with no developer or service-principal fallback; S3 remains the default. A loopback-only Azurite connection string is supported for local development.
 - Added selfhosted tariff admission and request settlement APIs with dated Azure model tariff history and frozen admission snapshots. Runtimes must call the admission gate before paid work; these APIs alone do not wire turn refusal. Unknown usage stays pending with reasons in the paginated `daimon usage pending` report. Deployment/model aliases share the admitted underlying-model identity across corrections. Corrupt tariff context keeps corrections durable and pending; accepted clock lag across midnight uses the frozen admission date. Native settlement requires measured completeness.
+- Added host-side preparation for self-hosted MCP servers and complete text/binary skill bundles, with scoped credential references, explicit unsupported-skill skips, and revocable caller-bound MCP credentials kept outside turn bodies. Runtime integration remains opt-in.
 
 - Reserved the opt-in `selfhosted.loop` profile for the self-hosted harness. Runtime admission remains closed while the driver is being implemented.
 - Added offline-validated Azure Bicep infrastructure and an azd entrypoint for staged Container Apps deployment, PostgreSQL, Key Vault, Blob, ACR and Azure OpenAI/Foundry.

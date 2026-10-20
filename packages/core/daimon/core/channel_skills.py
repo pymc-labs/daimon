@@ -25,7 +25,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Final, Literal, NoReturn
+from typing import Final, Literal, NoReturn, Protocol
 
 import anthropic
 import structlog
@@ -412,7 +412,14 @@ def _log_once(event: str, key: tuple[str, ...], **fields: object) -> None:
     _log.warning(event, **fields)
 
 
-def skill_room(agent: BetaManagedAgentsAgent, platform_skills: Sequence[MaSkill] = ()) -> int:
+class SkillHolder(Protocol):
+    """The skill-selection helpers need only a resolved list, never a provider client."""
+
+    @property
+    def skills(self) -> Sequence[MaSkill]: ...
+
+
+def skill_room(agent: SkillHolder, platform_skills: Sequence[MaSkill] = ()) -> int:
     """How many channel skills a session of `agent` may add under `AGENT_SKILL_CAP`. Pure.
 
     Every skill the session holds before them counts: the agent's own and the
@@ -588,7 +595,7 @@ async def turn_platform_skills(
 def applicable_skills(
     rows: Sequence[ChannelSkillRow],
     *,
-    agent: BetaManagedAgentsAgent,
+    agent: SkillHolder,
     agent_names: tuple[str | None, ...],
     bodies: dict[str, str] | None,
     platform_skills: Sequence[MaSkill] = (),

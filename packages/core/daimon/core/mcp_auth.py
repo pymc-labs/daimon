@@ -185,6 +185,7 @@ async def mint_chat_mcp_token(
     secret: bytes,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    ttl: dt.timedelta = CHAT_TOKEN_TTL,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
     """Register one expiring ordinary-chat credential with the existing token owner.
 
@@ -200,7 +201,9 @@ async def mint_chat_mcp_token(
     if identity is None:
         raise ValueError("chat credential requires a live account")
     jti = uuid.uuid4()
-    expires_at = now + CHAT_TOKEN_TTL
+    if ttl <= dt.timedelta(0):
+        raise ValueError("chat token TTL must be positive")
+    expires_at = now + ttl
     await create_mcp_token_row(
         session,
         jti=jti,

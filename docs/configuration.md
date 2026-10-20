@@ -1000,6 +1000,15 @@ Allow explicitly configured selfhosted channels to pass backend admission. Defau
 false. Enabling this still requires the profile's usage observations capability and a
 configured self-hosted core runtime.
 
+### `DAIMON_SELFHOSTED__MCP_CREDENTIAL_BINDINGS`
+
+`tuple[McpCredentialBinding, ...]` · optional · default unset
+
+JSON list of operator MCP credential bindings: each has name (HARNESS_MCP_CRED_*),
+origin (exact HTTPS origin), and tenants (UUID list). Unbound references, other origins
+and other tenants are refused. Use tenants=["*"] only for a single-tenant installation.
+Configure the harness HARNESS_MCP_CRED_BINDINGS from the same operator source.
+
 ## Gemini
 
 Read from `daimon.core.config.GeminiSettings`. Prefix `DAIMON_GEMINI__`.
