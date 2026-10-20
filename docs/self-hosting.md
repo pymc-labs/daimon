@@ -45,10 +45,12 @@ UTF-8 file. `--model` is the Azure deployment name. The command records
 `HARNESS_TOKEN` as a variable name; it does not read or store its value.
 `--packages-note` records an operator note without installing packages.
 
-For Foundry, add `--transport foundry_invocations --agent-name <hosted-agent>`
-and `--project-endpoint <project-endpoint>`, with `--auth-mode entra` and
+The record schema also accepts Foundry routing with
+`--transport foundry_invocations --agent-name <hosted-agent>` and
+`--project-endpoint <project-endpoint>`, with `--auth-mode entra` and
 `--auth-ref <audience>`. Both routing fields are required for that transport.
-Direct `/v0/*` requests are the default transport. HTTPS is required outside
+Current deployments use direct transport; the harness refuses unsigned Foundry
+gateway authentication. Direct `/v0/*` requests are the default transport. HTTPS is required outside
 loopback. `--allow-insecure-http` explicitly permits HTTP on internal service
 names/private addresses for an in-cluster deployment.
 
