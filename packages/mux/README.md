@@ -1084,3 +1084,8 @@ only destination and allowlist; bearer values are resolved afresh for interactio
 requests. `RetainedSkillDeployments` implements the existing publisher contract
 for independently provisioned immutable GCS directories, verifying the complete
 scope, version and every retained file digest without making storage writes.
+
+`mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
+turn requests, approval decisions, durable event replay and typed event data.
+These models require no provider SDK. Inline image parts use `data_b64`;
+credentials in MCP configuration are environment variable names.
