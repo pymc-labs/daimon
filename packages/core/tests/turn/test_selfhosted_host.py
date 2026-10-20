@@ -7,7 +7,6 @@ import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import cast
 
 import httpx
@@ -403,6 +402,7 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
 async def test_production_shell_admits_before_http_records_and_revokes(
     composed, tmp_path, monkeypatch, unmatched, drop_stream
 ):
+    import os
     import uuid
 
     import jwt
@@ -412,7 +412,6 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         McpSettings,
         SelfhostedBillingSettings,
         SelfhostedModelPrice,
-        SelfhostedSettings,
     )
     from daimon.core.stores import mux_state
     from daimon.core.stores import selfhosted_usage as contexts
@@ -515,19 +514,18 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             ]
         },
     )
-    monkeypatch.setattr(
-        "daimon.core.config.load_settings",
-        lambda: SimpleNamespace(
-            billing=SimpleNamespace(selfhosted=billing),
-            selfhosted=SelfhostedSettings(
-                mcp_credential_bindings=(
-                    McpCredentialBinding(
-                        name="HARNESS_MCP_CRED_REPORTS",
-                        origin="https://reports.example",
-                        tenants=(TENANT,),
-                    ),
-                )
-            ),
+    monkeypatch.setenv("DAIMON_DATABASE__URL", os.environ["DAIMON_DATABASE__TEST_URL"])
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED", billing.model_dump_json())
+    monkeypatch.setenv(
+        "DAIMON_SELFHOSTED__MCP_CREDENTIAL_BINDINGS",
+        json.dumps(
+            [
+                McpCredentialBinding(
+                    name="HARNESS_MCP_CRED_REPORTS",
+                    origin="https://reports.example",
+                    tenants=(TENANT,),
+                ).model_dump(mode="json")
+            ]
         ),
     )
     path = tmp_path / "runtime.json"
@@ -550,8 +548,14 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     )
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
     monkeypatch.setenv("HARNESS_PRODUCTION_TEST_TOKEN", "offline")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("DAIMON_ANTHROPIC__API_KEY", raising=False)
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "DAIMON_ANTHROPIC__API_KEY",
+        "OPENAI_API_KEY",
+        "DAIMON_OPENAI__API_KEY",
+        "AZURE_OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
     requests, admitted_keys, token_ids = [], [], []
 
     async def http(self, method, url, **kwargs):

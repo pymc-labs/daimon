@@ -2244,3 +2244,21 @@ class _SelfHostedSettingsSource(BaseSettings):
 def load_selfhosted_settings(*, _env_file: str | None = ".env") -> SelfHostedSettings:
     """Read the operator admission switch without constructing provider clients."""
     return _SelfHostedSettingsSource(_env_file=_env_file).selfhosted  # pyright: ignore[reportCallIssue]
+
+
+class _BillingSettingsSource(BaseSettings):
+    """Tariff discovery without unrelated provider or database configuration."""
+
+    billing: BillingSettings = Field(default_factory=BillingSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+def load_billing_settings(*, _env_file: str | None = ".env") -> BillingSettings:
+    """Read billing policy without constructing a host or provider clients."""
+    return _BillingSettingsSource(_env_file=_env_file).billing  # pyright: ignore[reportCallIssue]

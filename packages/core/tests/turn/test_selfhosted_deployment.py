@@ -105,3 +105,40 @@ def test_disabled_operator_switch_refuses_before_resource_or_transport_dependenc
     monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "false")
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         build_selfhosted_runtime(facts())
+
+
+def test_installed_tariffs_load_without_database_or_provider_credentials(tmp_path, monkeypatch):
+    from daimon.core.turn.runtimes import channel_runtime_prices
+    from daimon.core.turn.selfhosted_deployment import register_runtime
+
+    monkeypatch.chdir(tmp_path)
+    for name in (
+        "DAIMON_DATABASE__URL",
+        "DAIMON_ANTHROPIC__API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "DAIMON_BILLING__SELFHOSTED",
+        json.dumps(
+            {
+                "deployments": {"offline-deployment": "offline-model"},
+                "models": {
+                    "offline-model": [
+                        {
+                            "effective_from": "2026-01-01",
+                            "input": "2",
+                            "output": "10",
+                            "cache_read": "0.5",
+                        }
+                    ]
+                },
+            }
+        ),
+    )
+    register_runtime()
+    prices = channel_runtime_prices()
+    assert prices[("selfhosted", "offline-deployment")].input == 2
+    assert ("selfhosted", "unknown-model") not in prices

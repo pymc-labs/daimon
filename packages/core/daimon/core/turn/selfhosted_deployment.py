@@ -416,7 +416,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
 
 
 def register_runtime() -> None:
-    from daimon.core.config import load_settings
+    from daimon.core.config import load_billing_settings
     from daimon.core.selfhosted_usage import selfhosted_prices
     from daimon.core.turn.runtimes import register_channel_runtime
 
@@ -425,6 +425,6 @@ def register_runtime() -> None:
         PROFILE,
         build_selfhosted_runtime,
         authorizations=authorized_deployments,
-        tariffs=lambda: selfhosted_prices(load_settings().billing.selfhosted),
+        tariffs=lambda: selfhosted_prices(load_billing_settings().selfhosted),
         fallback=True,
     )
