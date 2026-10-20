@@ -321,6 +321,10 @@ async def microsoft_write_impl(
 ) -> GraphResult:
     graph, user_id = require_person(runtime, auth)
     target, kind = check_write(method, path)
+    if target.personal:
+        await require_one_to_one(runtime, auth, origin_context_id, what="OneNote")
+    if (kind == "upload") != (file_handle is not None):
+        raise ToolError("A file upload (PUT .../content) takes file_handle; nothing else does.")
     # The approval card shows the whole path and body, so nothing longer is written.
     if len(target.decoded) > WRITE_PATH_LIMIT:
         raise ToolError(
@@ -338,7 +342,7 @@ async def microsoft_write_impl(
     headers: dict[str, str] = {}
     payload: JsonValue = None
     if kind == "upload":
-        assert file_handle is not None
+        assert file_handle is not None  # checked above
         if body is not None:
             raise ToolError("A file upload takes file_handle and no body.")
         ((upload, data),) = await staged_uploads(
