@@ -206,8 +206,9 @@ def test_settle_backlog_is_a_dry_run_unless_applied(
     engine.dispose.assert_awaited_once()
 
 
-def test_pending_billing_command_exposes_unknown_usage_without_anthropic(monkeypatch):
-    from daimon.core.stores.accounting_outbox import PendingUsageRow
+@pytest.mark.parametrize("as_json", [False, True])
+def test_pending_billing_command_exposes_unknown_usage_without_anthropic(monkeypatch, as_json):
+    from daimon.core.stores.accounting_outbox import PendingUsagePage, PendingUsageRow
 
     tenant = uuid4()
     row = PendingUsageRow(
@@ -217,9 +218,11 @@ def test_pending_billing_command_exposes_unknown_usage_without_anthropic(monkeyp
         revision=1,
         model=None,
         completeness="unknown",
+        reason="usage_unknown",
         observed_at=datetime(2026, 10, 20, tzinfo=UTC),
     )
-    query = AsyncMock(return_value=[row])
+    page = PendingUsagePage(rows=[row], next_cursor="next-page", truncated=True)
+    query = AsyncMock(return_value=page)
     session = object()
 
     @asynccontextmanager
@@ -237,8 +240,15 @@ def test_pending_billing_command_exposes_unknown_usage_without_anthropic(monkeyp
     monkeypatch.setattr(usage, "build_engine", lambda url, **kwargs: engine)
     monkeypatch.setattr(usage, "build_session_factory", lambda engine: sessionmaker)
     monkeypatch.setattr(usage, "list_pending_usage", query)
-    result = CliRunner().invoke(app, ["usage", "pending", str(tenant), "--limit", "10", "--json"])
+    args = ["usage", "pending", str(tenant), "--limit", "10", "--cursor", "previous-page"]
+    if as_json:
+        args.append("--json")
+    result = CliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == [row.model_dump(mode="json")]
-    query.assert_awaited_once_with(session, tenant_id=tenant, limit=10)
+    if as_json:
+        assert json.loads(result.output) == page.model_dump(mode="json")
+    else:
+        assert "truncated: true" in result.output
+        assert "next_cursor: next-page" in result.output
+    query.assert_awaited_once_with(session, tenant_id=tenant, limit=10, cursor="previous-page")
     engine.dispose.assert_awaited_once()

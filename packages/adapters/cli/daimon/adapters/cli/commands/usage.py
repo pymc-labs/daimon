@@ -184,6 +184,9 @@ def usage_settle_backlog_command(
 def usage_pending_command(
     tenant_id: UUID,
     limit: Annotated[int, typer.Option(min=1, max=1000)] = 100,
+    cursor: Annotated[
+        str | None, typer.Option(help="Continue from the previous next_cursor.")
+    ] = None,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
     """List billing observations awaiting usage, price or infrastructure reconciliation."""
@@ -199,10 +202,18 @@ def usage_pending_command(
         )
         try:
             async with build_session_factory(engine)() as session:
-                rows = await list_pending_usage(session, tenant_id=tenant_id, limit=limit)
+                try:
+                    page = await list_pending_usage(
+                        session, tenant_id=tenant_id, limit=limit, cursor=cursor
+                    )
+                except ValueError as error:
+                    raise typer.BadParameter(str(error)) from error
+            if as_json:
+                console.print(page.model_dump_json(), soft_wrap=True, highlight=False, markup=False)
+                return
             emit_rows(
                 console,
-                rows,
+                page.rows,
                 columns=(
                     "binding_id",
                     "session_id",
@@ -210,10 +221,17 @@ def usage_pending_command(
                     "revision",
                     "model",
                     "completeness",
+                    "reason",
                     "observed_at",
                 ),
-                as_json=as_json,
+                as_json=False,
             )
+            console.print(
+                f"truncated: {str(page.truncated).lower()}  invalid_rows: {page.invalid_rows}",
+                markup=False,
+            )
+            if page.next_cursor is not None:
+                console.print(f"next_cursor: {page.next_cursor}", markup=False)
         finally:
             await engine.dispose()
 

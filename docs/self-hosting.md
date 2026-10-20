@@ -1334,4 +1334,5 @@ container before stopping the old one and give it the same database.
 Selfhosted Azure metering requires explicit deployment-to-model mappings and
 operator-verified model tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
 `DAIMON_BILLING__SELFHOSTED__MODELS`. See [selfhosted Azure usage](billing.md#selfhosted-azure-usage)
-for tariff fields, compute-cost attribution and pending-usage reconciliation.
+for tariff histories, the runtime admission gate and durable snapshot, explicit
+compute-cost attribution, and paginated pending-usage reconciliation.

@@ -1138,19 +1138,21 @@ through.
 
 `dict[str, str]` · optional · default `{}`
 
-JSON object mapping selfhosted Azure deployment names to underlying model ids. Every
-deployment must resolve to an explicitly configured model tariff; unmapped or unpriced
-deployments refuse turns.
+JSON object mapping selfhosted Azure deployment names to underlying model ids. Targets
+must have configured tariffs and aliases cannot shadow another model. The runtime must
+call the tariff admission gate before paid model work; these settings alone do not
+enable refusal or execution.
 
 ### `DAIMON_BILLING__SELFHOSTED__MODELS`
 
-`dict[str, SelfhostedModelPrice]` · optional · default `{}`
+`dict[str, list[SelfhostedModelPrice]]` · optional · default `{}`
 
-JSON object keyed by underlying Azure OpenAI model id. Each tariff requires checked_on
-(ISO date), input, output and cache_read (USD per million tokens); optional valid_before
-expires the tariff. Supply verified regional/contract Azure rates, never deployment-name
-guesses or public OpenAI rate fallbacks. Input/output rates must be positive; cached
-tokens may explicitly cost zero.
+JSON object keyed by underlying Azure OpenAI model id, each containing a list of
+historical tariffs. Each requires effective_from (ISO date), input, output and
+cache_read (USD per million tokens); optional valid_before expires a row. A newer
+effective_from ends the previous open window. Retain historical rows. Supply verified
+regional/contract rates; input/output must be positive. Runtime admission must persist
+the selected tariff before paid work.
 
 ### `DAIMON_BILLING__SIGNUP_CREDIT`
 

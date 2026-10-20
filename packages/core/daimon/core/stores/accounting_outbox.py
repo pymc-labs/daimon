@@ -6,19 +6,22 @@ This store owns only the host's reads; it never commits or opens a session.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
 from daimon.core._models import AccountingOutbox, TenantLedger, UsageObservation
+from daimon.core.stores import selfhosted_usage as billing_contexts
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from mux.contracts.usage import UsageObservation as UsageDTO
 from mux.errors import ScopeViolation
 from mux.profiles import accounting_mode_for
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -320,28 +323,56 @@ async def check_provider_grain(
 
 
 class PendingUsageRow(BaseModel):
-    """Content-free billing gaps; only the latest revision needs repair."""
+    """Content-free billing gaps; bad bodies expose only their relational identity."""
 
     binding_id: str
-    session_id: str
+    session_id: str | None
     observation_id: str
     revision: int
     model: str | None
     completeness: str
     observed_at: datetime
+    reason: str
+
+
+class PendingUsageCursor(BaseModel):
+    tenant_id: uuid.UUID
+    created_at: datetime
+    binding_id: str
+    observation_id: str
+
+    def encode(self) -> str:
+        return base64.urlsafe_b64encode(self.model_dump_json().encode()).decode()
+
+    @classmethod
+    def decode(cls, value: str) -> PendingUsageCursor:
+        try:
+            return cls.model_validate_json(base64.b64decode(value, altchars=b"-_", validate=True))
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("invalid pending-usage cursor") from error
+
+
+class PendingUsagePage(BaseModel):
+    rows: list[PendingUsageRow]
+    next_cursor: str | None
+    truncated: bool
+    invalid_rows: int = 0
 
 
 async def list_pending_usage(
-    session: AsyncSession, *, tenant_id: uuid.UUID, limit: int = 100
-) -> list[PendingUsageRow]:
-    """Surface unresolved billing observations without treating absence as zero.
+    session: AsyncSession, *, tenant_id: uuid.UUID, limit: int = 100, cursor: str | None = None
+) -> PendingUsagePage:
+    """Oldest pending rows first, with tenant-bound keyset pagination.
 
-    A repaired higher revision supersedes an older pending snapshot. The older
-    outbox row remains available for audit but no longer needs operator action.
-    No native meter payload, credentials or user content are returned.
+    Superseded snapshots stay auditable but do not need operator action.
+    Corrupt bodies become flagged rows instead of hiding the rest of the page.
+    Native payloads and user content are never returned.
     """
     if not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
+    after = PendingUsageCursor.decode(cursor) if cursor is not None else None
+    if after is not None and after.tenant_id != tenant_id:
+        raise ValueError("pending-usage cursor belongs to another tenant")
     latest = (
         select(
             AccountingOutbox.binding_id,
@@ -352,8 +383,14 @@ async def list_pending_usage(
         .group_by(AccountingOutbox.binding_id, AccountingOutbox.observation_id)
         .subquery()
     )
-    bodies = await session.scalars(
-        select(AccountingOutbox.row)
+    query = (
+        select(
+            AccountingOutbox.binding_id,
+            AccountingOutbox.observation_id,
+            AccountingOutbox.revision,
+            AccountingOutbox.created_at,
+            AccountingOutbox.row,
+        )
         .join(
             latest,
             (AccountingOutbox.binding_id == latest.c.binding_id)
@@ -361,24 +398,97 @@ async def list_pending_usage(
             & (AccountingOutbox.revision == latest.c.revision),
         )
         .where(AccountingOutbox.tenant_id == tenant_id, AccountingOutbox.applied_at.is_(None))
-        .order_by(AccountingOutbox.binding_id, AccountingOutbox.observation_id)
-        .limit(limit)
-    )
-    rows: list[PendingUsageRow] = []
-    for body in bodies:
-        row = OutboxRow.model_validate(body)
-        value = row.observation
-        if value.session.tenant_id != str(tenant_id):
-            raise ScopeViolation(value.id, "pending usage belongs to another tenant")
-        rows.append(
-            PendingUsageRow(
-                binding_id=row.binding_id,
-                session_id=value.session.id,
-                observation_id=value.id,
-                revision=value.revision,
-                model=value.model.id if value.model else None,
-                completeness=value.completeness,
-                observed_at=value.observed_at,
-            )
+        .order_by(
+            AccountingOutbox.created_at,
+            AccountingOutbox.binding_id,
+            AccountingOutbox.observation_id,
         )
-    return rows
+        .limit(limit + 1)
+    )
+    if after is not None:
+        query = query.where(
+            tuple_(
+                AccountingOutbox.created_at,
+                AccountingOutbox.binding_id,
+                AccountingOutbox.observation_id,
+            )
+            > (after.created_at, after.binding_id, after.observation_id)
+        )
+    with session.no_autoflush:
+        bodies = list((await session.execute(query)).all())
+        rows: list[PendingUsageRow] = []
+        invalid = 0
+        for binding_id, identity, revision, created_at, body in bodies[:limit]:
+            try:
+                row = OutboxRow.model_validate(body)
+                value = row.observation
+                if (
+                    row.key != (binding_id, identity, revision)
+                    or (value.id, value.revision) != (identity, revision)
+                    or value.session.tenant_id
+                    not in (
+                        None,
+                        str(tenant_id),
+                    )
+                ):
+                    raise ValueError("pending body identity differs from its relational owner")
+                reason = (
+                    f"usage_{value.completeness}"
+                    if value.completeness != "measured"
+                    else "reconciliation_required"
+                )
+                try:
+                    context = await billing_contexts.read_context(
+                        session,
+                        tenant_id=tenant_id,
+                        binding_id=binding_id,
+                        key=billing_contexts.context_key("receipt", binding_id, identity),
+                    )
+                    reasons = context.get("pending_reasons") if context else None
+                    saved = reasons.get(str(revision)) if isinstance(reasons, dict) else None
+                    if isinstance(saved, str):
+                        reason = saved
+                except ValueError:
+                    reason = "tariff_context_invalid"
+                rows.append(
+                    PendingUsageRow(
+                        binding_id=binding_id,
+                        session_id=value.session.id,
+                        observation_id=identity,
+                        revision=revision,
+                        model=value.model.id if value.model else None,
+                        completeness=value.completeness,
+                        observed_at=value.observed_at,
+                        reason=reason,
+                    )
+                )
+            except ValueError:
+                invalid += 1
+                rows.append(
+                    PendingUsageRow(
+                        binding_id=binding_id,
+                        session_id=None,
+                        observation_id=identity,
+                        revision=revision,
+                        model=None,
+                        completeness="unknown",
+                        observed_at=created_at,
+                        reason="invalid_observation",
+                    )
+                )
+        truncated = len(bodies) > limit
+        next_cursor = None
+        if truncated:
+            binding_id, identity, _, created_at, _ = bodies[limit - 1]
+            next_cursor = PendingUsageCursor(
+                tenant_id=tenant_id,
+                created_at=created_at,
+                binding_id=binding_id,
+                observation_id=identity,
+            ).encode()
+        return PendingUsagePage(
+            rows=rows,
+            next_cursor=next_cursor,
+            truncated=truncated,
+            invalid_rows=invalid,
+        )
