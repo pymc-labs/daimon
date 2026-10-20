@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reserved the opt-in `selfhosted.loop` profile for the self-hosted harness. Runtime admission remains closed while the driver is being implemented.
+
 - The GitHub repo page for an agent, its Add repos dialogs and the saved page are back on Daimon's own colours and header instead of a grey, black-button look. The working repo, added repos and checked rows are teal, repos to add are green, repos to remove are red, and anything GitHub could not load or show is amber with a warning icon and, where it helps, a Try again button. The dim layer behind a dialog covers the whole screen, and the Add 0 repos button reads as disabled without fading.
 
 - **New setting `DAIMON_TURN__STATUS_LOG` (off by default): the "Working on it…" card shows an agent's last three messages.** With it off nothing changes: the card shows only the latest line the agent wrote, and consecutive messages are joined as before. With it on (Slack, Teams and Discord), the card keeps the last three messages the agent wrote, oldest first, one line each (cut at 120 characters), instead of replacing one line each time. An answer made of several messages keeps every one, set apart by a blank line, so a short line written just before the answer is no longer glued onto its first word. The headline, tool lines and Stop button are unchanged.

@@ -32,6 +32,7 @@ def test_declared_profiles_and_their_core_status() -> None:
         "openai.persistent_workspace": True,
         "openai.conversation_only": False,
         "gemini.inline_reuse": False,
+        "selfhosted.loop": False,
     }
 
 
