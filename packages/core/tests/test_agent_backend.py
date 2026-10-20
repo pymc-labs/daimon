@@ -869,3 +869,55 @@ async def test_non_admin_and_agent_key_refused_without_revision_or_audit(owned, 
         await service.set_backend(agent, "anthropic", 0, replace(actor, subject=subject))
     assert await service.current(agent) is None
     assert await service.audit(agent.tenant_id) == ()
+
+
+async def test_selfhosted_agent_selection_refuses_before_source_capture(owned):
+    service, agent, actor, sessions = owned
+
+    async def forbidden_capture(source):
+        raise AssertionError("source capture must not run for a selfhosted agent preference")
+
+    service = AgentBackendService(sessions, enabled=True, capture_source=forbidden_capture)
+    with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
+        await service.preview(agent, "selfhosted")
+    with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
+        compatibility_preview(agent, "selfhosted", await service.tenant_policy(agent.tenant_id))
+
+
+async def test_legacy_selfhosted_agent_revision_cannot_materialize(owned):
+    from daimon.core.stores import agent_backends
+
+    service, agent, actor, sessions = owned
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="channel")
+    async with sessions.begin() as db:
+        await agent_backends.put_revision(
+            db,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            local=1,
+            backend="selfhosted",
+            digest="legacy",
+            previous_local=None,
+            agent_name=agent.name,
+            preview_digest="legacy",
+        )
+        assert await agent_backends.has_backend_preference_by_name(
+            db, tenant_id=agent.tenant_id, agent_name=agent.name, backend="selfhosted"
+        )
+        with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
+            await resolve_turn_backend(db, channel, agent, enabled=True)
+        assert await mux_state.latest_config_revision(db, channel) is None
+        await agent_backends.put_revision(
+            db,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            local=2,
+            backend=None,
+            digest="clear",
+            previous_local=1,
+            agent_name=agent.name,
+            preview_digest="clear",
+        )
+        assert not await agent_backends.has_backend_preference_by_name(
+            db, tenant_id=agent.tenant_id, agent_name=agent.name, backend="selfhosted"
+        )

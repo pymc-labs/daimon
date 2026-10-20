@@ -408,6 +408,8 @@ def compatibility_preview(
     """Pure preview from host-resolved agent facts and declared profile metadata."""
     if agent.tenant_id != tenant.tenant_id:
         raise AgentBackendRefused("tenant_mismatch")
+    if target_backend == "selfhosted":
+        raise AgentBackendRefused("selfhosted_requires_channel_configuration")
     selection = backend_selection(target_backend)
     profile = get_profile(selection.profile)
 
@@ -536,6 +538,8 @@ class AgentBackendService:
     ) -> CompatibilityPreview:
         capture = self._capture_source if target is not None else None
         target = target or DEFAULT_BACKEND
+        if target == "selfhosted":
+            raise AgentBackendRefused("selfhosted_requires_channel_configuration")
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
         original = agent
         if capture is not None:
@@ -598,6 +602,8 @@ class AgentBackendService:
     ) -> BackendSelectionState | None:
         """Read an optional panel selection, preserving strict mutation refusals."""
         if not self.enabled:
+            return None
+        if target_backend == "selfhosted":
             return None
         try:
             agent = await load_backend_agent(
@@ -1042,6 +1048,8 @@ async def resolve_turn_backend(
         if retained is None or origin not in ("channel", "channel_clear", "agent"):
             raise AgentBackendRefused("stale_revision")
         source: Literal["channel", "agent"] = "agent" if origin == "agent" else "channel"
+        if source == "agent" and retained.backend == "selfhosted":
+            raise AgentBackendRefused("selfhosted_requires_channel_configuration")
         return retained, retained.thread_mode == "shared", source
     if not isinstance(agent, BackendAgent):
         raise AgentBackendRefused("agent_identity_required")
@@ -1090,6 +1098,8 @@ async def resolve_turn_backend(
         ):
             raise AgentBackendRefused("stale_revision")
         selection = worker.backend
+    if selection.backend == "selfhosted":
+        raise AgentBackendRefused("selfhosted_requires_channel_configuration")
     consent_revision = setting if setting is not None and setting.drop_consent is not None else None
     if consent_revision is not None:
         if validate_origin is None:

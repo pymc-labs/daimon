@@ -13,6 +13,7 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
+from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import ResourceRef, Scope
 from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
@@ -45,7 +46,7 @@ async def resolve_records(
         )
     except ProviderError as error:
         if error.category != "not_found":
-            raise
+            raise AdmissionDenied(reason="backend_unsupported") from None
         raise MAResolverMissError(
             kind="agent", tenant_id=UUID(scope.tenant_id), daimon_tag=agent_name
         ) from error
@@ -53,7 +54,7 @@ async def resolve_records(
         environment = await SelfHostedEnvironments(sessionmaker).resolve(scope, environment_name)
     except ProviderError as error:
         if error.category != "not_found":
-            raise
+            raise AdmissionDenied(reason="backend_unsupported") from None
         raise MAResolverMissError(
             kind="environment", tenant_id=UUID(scope.tenant_id), daimon_tag=environment_name
         ) from error

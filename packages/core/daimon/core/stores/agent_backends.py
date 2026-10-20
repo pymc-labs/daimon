@@ -61,6 +61,28 @@ async def current(
     return AgentBackendRevision.model_validate(row) if row is not None else None
 
 
+async def has_backend_preference_by_name(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str, backend: Provider
+) -> bool:
+    """Conservative refusal guard; friendly names must never authorize selection."""
+    latest = (
+        select(AgentBackendRevisionRecord)
+        .where(AgentBackendRevisionRecord.tenant_id == tenant_id)
+        .distinct(AgentBackendRevisionRecord.agent_id)
+        .order_by(AgentBackendRevisionRecord.agent_id, AgentBackendRevisionRecord.local.desc())
+        .subquery()
+    )
+    return bool(
+        await session.scalar(
+            select(
+                select(latest.c.agent_id)
+                .where(latest.c.agent_name == agent_name, latest.c.backend == backend)
+                .exists()
+            )
+        )
+    )
+
+
 async def put_revision(
     session: AsyncSession,
     *,

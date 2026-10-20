@@ -281,3 +281,43 @@ def test_cli_unexpected_engine_construction_errors_do_not_echo_input(
     assert "database configuration invalid (scheme/host/port check)" in output.err
     assert "DbPasswordMarker927" not in output.err
     assert "Traceback" not in output.err
+
+
+@pytest.mark.parametrize("failure", ["drift", "provider", "database", "file"])
+def test_main_expected_initialization_failures_are_friendly(monkeypatch, capsys, failure):
+    from daimon.adapters.cli.main import main
+    from mux.errors import ProviderError
+    from sqlalchemy.exc import SQLAlchemyError
+
+    async def fail_initialize(*args, **kwargs):
+        if failure == "drift":
+            raise ValueError("DbPasswordMarker927")
+        if failure == "provider":
+            raise ProviderError("invalid_request", retryable=False)
+        if failure == "database":
+            raise SQLAlchemyError("DbPasswordMarker927")
+        raise OSError("DbPasswordMarker927")
+
+    monkeypatch.setattr(selfhosted, "initialize", fail_initialize)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "daimon",
+            "selfhosted",
+            "init",
+            "--tenant-id",
+            "11111111-2222-3333-4444-555555555555",
+            "--harness-url",
+            "https://harness.example",
+            "--database-url",
+            "postgresql+asyncpg://user:DbPasswordMarker927@host/database",
+        ],
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Initialization refused" in output.err or "Initialization failed" in output.err
+    assert "Traceback" not in output.err
+    assert "DbPasswordMarker927" not in output.err

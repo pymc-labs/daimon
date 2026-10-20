@@ -80,7 +80,7 @@ from daimon.core.permissions import (
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
-from daimon.core.stores import mux_state
+from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
@@ -563,6 +563,35 @@ async def admit_impl(
             agent_name_tier=config.agent_name_tier,
             environment_name_tier=config.environment_name_tier,
         )
+
+    # A legacy agent preference must be refused before resolving its source
+    # through Anthropic. The name lookup can only deny; it never selects a
+    # backend or grants authority to another resource with the same name.
+    if (
+        selection_enabled
+        and channel is not None
+        and not configured_channel
+        and retained_revision is None
+    ):
+        async with deps.sessionmaker() as session:
+            if config.responder_ma_agent_id is not None:
+                preference = await agent_backends.current(
+                    session,
+                    tenant_id,
+                    derive_agent_uuid(
+                        tenant_id=tenant_id, ma_agent_id=config.responder_ma_agent_id
+                    ),
+                )
+                refused = preference is not None and preference.backend == LOOP.provider
+            else:
+                refused = await agent_backends.has_backend_preference_by_name(
+                    session,
+                    tenant_id=tenant_id,
+                    agent_name=config.agent_name,
+                    backend=LOOP.provider,
+                )
+        if refused:
+            raise AdmissionDenied(reason="backend_unsupported")
 
     # --- Channel backend: its profile must meet the channel's configuration
     # and be runnable here. Before any MA call; a channel never configured has

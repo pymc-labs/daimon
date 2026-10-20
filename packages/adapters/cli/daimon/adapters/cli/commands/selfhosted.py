@@ -189,6 +189,17 @@ def selfhosted_init_command(
         finally:
             await engine.dispose()
 
-    agent_id, environment_id = asyncio.run(run())
+    try:
+        agent_id, environment_id = asyncio.run(run())
+    except typer.BadParameter:
+        raise
+    except (ProviderError, ValueError):
+        raise typer.BadParameter(
+            "Initialization refused; check resource names and existing configuration."
+        ) from None
+    except Exception:
+        raise typer.BadParameter(
+            "Initialization failed; check database access, migrations and the system file."
+        ) from None
     typer.echo(agent_id)
     typer.echo(environment_id)

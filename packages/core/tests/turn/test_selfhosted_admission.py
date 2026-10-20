@@ -18,7 +18,6 @@ from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.factories import make_account, make_tenant, make_tenant_config
 from daimon.testing.turn_fakes import deps_for
-from mux import profiles
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.profiles.selfhosted import LOOP
 
@@ -70,19 +69,7 @@ async def test_admits_without_anthropic_key_or_calls(
         authorized, environment_spec(), key="env"
     )
 
-    # A test driver supplies usage capability evidence. Keep the real mux
-    # admission and runnability checks, and every host gate, in this path.
-    profile = profiles.get_profile(revision.profile)
-    monkeypatch.setattr(
-        profiles,
-        "PROFILES",
-        {
-            **profiles.PROFILES,
-            revision.profile: profile.model_copy(
-                update={"support": {**profile.support, "usage_observations": "native"}}
-            ),
-        },
-    )
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
     deps = replace(
         deps_for(ForbiddenAnthropic(), db_session_factory),
         channel_backends=True,
@@ -190,4 +177,74 @@ async def test_bound_responder_is_an_exact_id_never_a_name(db_session, db_sessio
             agent_name="ag_foreign",
             environment_name="default",
             responder_id="ag_foreign",
+        )
+
+
+@pytest.mark.parametrize("agent_backends", [False, True])
+async def test_agent_selected_selfhosted_is_refused_before_anthropic(
+    db_session, db_session_factory, monkeypatch, agent_backends
+):
+    from uuid import uuid4
+
+    from daimon.core.stores import agent_backends as preferences
+
+    monkeypatch.delenv("DAIMON_ANTHROPIC__API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await preferences.put_revision(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=uuid4(),
+        local=1,
+        backend=LOOP.provider,
+        digest="legacy",
+        previous_local=None,
+        agent_name="daimon",
+        preview_digest="legacy",
+    )
+    await db_session.commit()
+    deps = replace(
+        deps_for(ForbiddenAnthropic(), db_session_factory),
+        channel_backends=True,
+        agent_backends=agent_backends,
+    )
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="caller",
+            channel_id="channel",
+            now=datetime.now(UTC),
+        )
+    await drain_outcomes()
+
+
+@pytest.mark.parametrize("kind", ["agent", "environment"])
+async def test_invalid_local_records_become_admission_denials(db_session, db_session_factory, kind):
+    from daimon.core.turn.selfhosted_records import resolve_records
+    from sqlalchemy import text
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    authorized = scope(str(tenant.id), str(account.id))
+    await SelfHostedAgents(db_session_factory).create(authorized, agent_spec(), key="agent")
+    await SelfHostedEnvironments(db_session_factory).create(
+        authorized, environment_spec(), key="env"
+    )
+    table = "selfhosted_agents" if kind == "agent" else "selfhosted_environments"
+    async with db_session_factory.begin() as db:
+        await db.execute(text(f"UPDATE {table} SET spec = spec - 'name'"))
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await resolve_records(
+            db_session_factory,
+            authorized,
+            agent_name="daimon",
+            environment_name="default",
+            responder_id=None,
         )

@@ -58,6 +58,12 @@ referenced by environment variable name, and harness URLs cannot embed
 credentials. These records do not provision an Azure resource or start a
 harness.
 
+Selfhosted admission is disabled by default. Enable
+`DAIMON_SELFHOSTED__ADMISSION_ENABLED` only with a configured self-hosted runtime
+and a profile that supplies usage observations. Select selfhosted on the channel;
+agent backend preferences cannot choose it. Existing setup/handoff threads that
+reference Managed Agents responders cannot continue on a selfhosted channel.
+
 ## Upgrading an existing installation
 
 The new MCP server is strict immediately by default: credentials need a live
