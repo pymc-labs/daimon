@@ -79,6 +79,27 @@ async def read_context(
     return dict(OperationRecord.model_validate(body).result)
 
 
+async def recorded_model(
+    session: AsyncSession, *, tenant_id: uuid.UUID, binding_id: str, observation_id: str
+) -> ModelRef | None:
+    """Lock the observation and recover identity without consulting tariff context."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"mux.usage\x1f{binding_id}\x1f{observation_id}"},
+    )
+    body = await session.scalar(
+        select(UsageObservation.applied)
+        .where(
+            UsageObservation.tenant_id == tenant_id,
+            UsageObservation.binding_id == binding_id,
+            UsageObservation.observation_id == observation_id,
+        )
+        .order_by(UsageObservation.revision.desc())
+        .limit(1)
+    )
+    return AppliedUsage.model_validate(body).observation.model if body is not None else None
+
+
 async def create_context(
     session: AsyncSession,
     *,

@@ -20,16 +20,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-class SelfhostedTariffAdmission(BaseModel):
+class _SelfhostedBillingIdentity(BaseModel):
+    """Accounting identity can be recovered independently of damaged rates."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    binding_id: str
+    session: ResourceRef
+    deployment: str
+    underlying_model: str
+
+
+class SelfhostedTariffAdmission(_SelfhostedBillingIdentity):
     """Host-owned snapshot committed before paid work, separate from native meters."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     admission_key: str
-    binding_id: str
-    session: ResourceRef
-    deployment: str
-    underlying_model: str
     tariff_effective_from: date
     tariff: SelfhostedModelPrice
     admitted_at: datetime
@@ -62,6 +69,7 @@ class SelfhostedTariffAdmission(BaseModel):
             provider="selfhosted",
             model=self.underlying_model,
             checked_on=self.tariff_effective_from,
+            admitted_on=self.admitted_at.date(),
             input=self.tariff.input,
             output=self.tariff.output,
             cache_read=self.tariff.cache_read,
@@ -210,6 +218,13 @@ async def record_selfhosted_usage(
         await contexts.check_session(
             db, tenant_id=tenant_id, binding_id=binding_id, native=observation.session
         )
+        stored_model = await contexts.recorded_model(
+            db, tenant_id=tenant_id, binding_id=binding_id, observation_id=observation.id
+        )
+        if stored_model is not None:
+            # A damaged tariff must not send a deployment alias back into an
+            # accounting stream already normalised to the underlying model.
+            billing_observation = observation.model_copy(update={"model": stored_model})
         try:
             original = await contexts.read_context(
                 db, tenant_id=tenant_id, binding_id=binding_id, key=receipt_key, lock=True
@@ -260,14 +275,36 @@ async def record_selfhosted_usage(
                             earliest_observed_at=admitted.admitted_at
                             - timedelta(seconds=admitted.admission_clock_skew_s),
                         )
+                        stored_model = ModelRef(provider="selfhosted", id=admitted.underlying_model)
             if original.get("invalid_context") is not None:
                 raise ValueError("receipt pricing context is corrupt")
             snapshot = original.get("admission")
             if snapshot is None:
                 reason = reason or "admission_missing"
             else:
+                identity = _SelfhostedBillingIdentity.model_validate(snapshot)
+                if (
+                    stored_model is None
+                    and identity.binding_id == binding_id
+                    and identity.session == observation.session
+                    and (
+                        observation.model is None
+                        or observation.model.provider == "selfhosted"
+                        and observation.model.id in (identity.deployment, identity.underlying_model)
+                    )
+                ):
+                    billing_observation = observation.model_copy(
+                        update={
+                            "model": ModelRef(provider="selfhosted", id=identity.underlying_model)
+                        }
+                    )
                 frozen = SelfhostedTariffAdmission.model_validate(snapshot)
-                if frozen.binding_id != binding_id or frozen.session != observation.session:
+                if (
+                    frozen.binding_id != binding_id
+                    or frozen.session != observation.session
+                    or stored_model is not None
+                    and stored_model != ModelRef(provider="selfhosted", id=frozen.underlying_model)
+                ):
                     reason = "tariff_context_invalid"
                 elif frozen.admitted_at > observation.observed_at + timedelta(
                     seconds=frozen.admission_clock_skew_s

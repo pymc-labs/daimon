@@ -1358,6 +1358,13 @@ The saved admission explicitly includes `deployment`, `underlying_model` and
 late or corrupt admission, or an unexpected model, stays pending with a reason;
 current settings cannot retroactively establish what was admitted.
 
+Corrections retain the stored accounting identity even when tariff context is
+corrupt. Their token counts and native meters remain durable and pending with
+a reason; repairing the context can settle the same revision without another
+debit. Tariff validity uses the saved host admission date and effective tariff,
+so accepted harness clock lag across midnight cannot strand measured usage.
+The original harness timestamp remains unchanged in the accounting record.
+
 A receipt first recorded without a valid admission key may adopt an existing,
 valid admission once during replay. Its original request timestamps must fit
 that admission; a later correction cannot hide a request made before admission.

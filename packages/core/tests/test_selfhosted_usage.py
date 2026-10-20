@@ -597,6 +597,104 @@ async def test_bad_pricing_context_does_not_drop_the_native_receipt(sessions):
     assert captured[0].observation == observation()
 
 
+@pytest.mark.parametrize("settled_first", [False, True])
+@pytest.mark.parametrize("corruption", ["rates", "identity", "changed_identity", "record"])
+async def test_corrupt_receipt_tariff_keeps_alias_correction_durable(
+    sessions, settled_first, corruption
+):
+    from daimon.core._models import MuxOperation
+    from mux.state.operations import OperationRecord
+    from sqlalchemy import select, update
+
+    first = observation(model=ModelRef(provider="selfhosted", id="coke-production"))
+    assert (
+        await record(sessions, first, infrastructure_usd=Decimal(0) if settled_first else None)
+        is settled_first
+    )
+    key = contexts.context_key("receipt", "selfhosted-binding", first.id)
+    async with sessions() as db, db.begin():
+        body = await db.scalar(select(MuxOperation.record).where(MuxOperation.key == key))
+        saved = OperationRecord.model_validate(body)
+        if corruption == "record":
+            damaged = {"invalid": "operation record"}
+        else:
+            result = dict(saved.result)
+            admission = dict(result["admission"])
+            if corruption == "rates":
+                admission["tariff"] = {"invalid": True}
+            elif corruption == "changed_identity":
+                admission["underlying_model"] = "different-model"
+            else:
+                del admission["underlying_model"]
+            result["admission"] = admission
+            damaged = saved.model_copy(update={"result": result}).model_dump(mode="json")
+        await db.execute(update(MuxOperation).where(MuxOperation.key == key).values(record=damaged))
+    correction = observation(
+        revision=2,
+        output_tokens=200,
+        model=ModelRef(provider="selfhosted", id="coke-production"),
+        native_meter={"request_id": "request-1", "corrected": True},
+    )
+    assert not await record(sessions, correction)
+    assert not await record(sessions, correction)
+    assert await balance(sessions) == (Decimal("-0.004050") if settled_first else 0)
+    gaps = await pending(sessions)
+    assert len(gaps) == 1
+    assert gaps[0].revision == 2 and gaps[0].reason == "tariff_context_invalid"
+    captured = await mux_state.PostgresStateStore(sessions).pending_outbox(limit=10)
+    captured_correction = next(row.observation for row in captured if row.revision == 2)
+    assert captured_correction.model == ModelRef(provider="selfhosted", id="underlying-model")
+    assert captured_correction.output_tokens == 200
+    assert captured_correction.native_meter == correction.native_meter
+    # Repairing the saved context can settle the unchanged durable correction.
+    async with sessions() as db, db.begin():
+        await db.execute(update(MuxOperation).where(MuxOperation.key == key).values(record=body))
+    assert await record(sessions, correction)
+    assert not await record(sessions, correction)
+    assert await balance(sessions) == Decimal("-0.005550")
+
+
+async def test_midnight_clock_lag_prices_from_frozen_admission_date(sessions, monkeypatch):
+    import daimon.core.selfhosted_usage as metering
+    from daimon.core._models import AccountingOutbox
+    from mux.state.usage_ledger import OutboxRow
+    from sqlalchemy import select
+
+    host_at = datetime(2026, 10, 20, 0, 0, 0, 200000, tzinfo=UTC)
+    harness_at = datetime(2026, 10, 19, 23, 59, 59, 900000, tzinfo=UTC)
+
+    class MidnightClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return host_at
+
+    monkeypatch.setattr(metering, "datetime", MidnightClock)
+    settings = billing()
+    settings.models["underlying-model"][0] = settings.models["underlying-model"][0].model_copy(
+        update={"effective_from": host_at.date()}
+    )
+    admitted = await admit(sessions, settings=settings, key="midnight")
+    assert admitted.tariff_effective_from == host_at.date()
+    assert admitted.price().checked_on == admitted.price().admitted_on == host_at.date()
+    usage = observation(
+        observed_at=harness_at, model=ModelRef(provider="selfhosted", id="coke-production")
+    )
+    assert await record(sessions, usage, admission_key="midnight")
+    assert not await record(sessions, usage, admission_key="midnight")
+    assert await balance(sessions) == Decimal("-0.004050")
+    assert await pending(sessions) == []
+    corrected = usage.model_copy(update={"revision": 2, "output_tokens": 200})
+    assert await record(sessions, corrected, admission_key="midnight")
+    assert await balance(sessions) == Decimal("-0.005550")
+    async with sessions() as db:
+        bodies = await db.scalars(
+            select(AccountingOutbox.row).where(AccountingOutbox.tenant_id == TENANT)
+        )
+        captured = [OutboxRow.model_validate(body).observation for body in bodies]
+    assert len(captured) == 2
+    assert all(value.observed_at == harness_at for value in captured)
+
+
 async def test_pagination_reaches_beyond_one_thousand_pending_requests(sessions):
     async with sessions() as db, db.begin():
         for index in range(1005):

@@ -273,7 +273,8 @@ class ProviderPrice:
     A None cache-write rate declares that billing stage inapplicable, rather
     than asserting that the provider reported a zero count. Reasoning is
     already included in output. Actual infrastructure cost is supplied
-    separately for the observation's grain and revision.
+    separately for the observation's grain and revision. A host-admitted tariff
+    pins its validity check to admitted_on; ordinary prices use the receipt date.
     """
 
     provider: str
@@ -286,9 +287,11 @@ class ProviderPrice:
     verified: bool = True
     max_priced_input_tokens: int | None = None
     valid_before: date | None = None
+    admitted_on: date | None = None
 
     def current_on(self, on: date) -> bool:
-        """A verified source row applies only within its known date window."""
+        """Check the frozen admission date when the host admitted this tariff."""
+        on = self.admitted_on or on
         return (
             self.verified
             and self.checked_on <= on
