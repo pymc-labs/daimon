@@ -180,6 +180,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Tenant-owned self-hosted agent and environment records have Postgres-backed resource ports, scoped lookups and revision checks. Credential fields reject embedded secrets while instructions and descriptions remain free text. Principal-owned retry receipts retain only resource references and revisions for seven days; account erasure serializes with writes and removes personal receipts.
+- Tenant-owned self-hosted agent and environment records have Postgres-backed resource ports, scoped lookups and revision checks. Credential-shaped configuration is rejected, and principal-owned retry receipts retain only resource references and revisions for seven days.
+- `daimon selfhosted init` creates or reuses tenant-owned agent/environment records without provider credentials. Selfhosted channel admission resolves these records locally and preserves policy and billing gates without calling Anthropic.
+
+- Tenant-owned self-hosted agent and environment records now have Postgres-backed resource ports, scoped lookups, revision checks and durable retry receipts. Harness authentication and MCP credentials are stored by reference only.
 
 - **Teams people can connect their own Microsoft 365.** With
   `DAIMON_MICROSOFT_ACCOUNTS__*` set, `connect_microsoft` sends a private

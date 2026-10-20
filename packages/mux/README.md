@@ -1,8 +1,9 @@
 # mux
 
 Postgres-backed resource ports are available in
-`daimon.core.stores.selfhosted_resources` for host injection. Admission and CLI
-wiring land in the follow-up PR. Both the host and driver use `HarnessConfig`
+`daimon.core.stores.selfhosted_resources` for host injection. Admission resolves these records after the selected profile passes its
+capability checks. `daimon selfhosted init` initializes matching named records
+and prints their IDs without provider credentials. Both the host and driver use `HarnessConfig`
 from `mux.drivers.selfhosted.config` for `selfhosted.environment` version 1.
 Its transport fields are `harness_url`, `auth_mode`, `auth_ref`, optional
 `packages_note`, and `transport` (default `direct`). `foundry_invocations`

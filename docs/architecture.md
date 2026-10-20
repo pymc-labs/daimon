@@ -5,6 +5,18 @@ receipts. The tenant’s shared agent and environment records remain available.
 Personal resource writes take the account-erasure lock and reject erased accounts,
 so an in-flight mutation cannot leave a new personal receipt after erasure.
 
+For a selected `selfhosted.loop` profile that passes capability admission, the
+host resolves the agent and environment from tenant-scoped Postgres resource
+ports. Identity and channel-access checks precede resolution; agent policy and
+billing gates follow it. It makes no Anthropic calls, including defaults
+reconciliation and platform/channel skill resolution. The driver reads MCP
+configuration and skill references from the complete stored mux agent spec.
+Admission projects only the policy facts into its existing SDK-shaped fields;
+that projection does not create a provider client. Existing Anthropic turns
+retain their resolver and self-healing behavior. The operator entry point
+`daimon selfhosted init` creates or reuses these records without provider
+credentials.
+
 Opted-in Discord worker fleets use the existing posted-card renderer and Stop
 guard. The card shows each worker's role, backend, model and current state.
 Complete rows stay in ordinal order within Discord's total text limit; large

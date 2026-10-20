@@ -103,9 +103,10 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
-from mux.contracts.ids import ThreadRef
+from mux.contracts.ids import Scope, ThreadRef
 from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
+from mux.profiles.selfhosted import LOOP
 from mux.state.lease import Slot
 
 __all__ = [
@@ -579,74 +580,97 @@ async def admit_impl(
         _log_backend_unsupported("channel_policy", err)
         raise AdmissionDenied(reason="backend_unsupported") from err
 
-    async def _apply() -> object:
-        return await reconcile_tenant_defaults(
-            deps.anthropic,
-            deps.sessionmaker,
-            deps.defaults_root,
-            tenant_id=tenant_id,
-            public_url=deps.public_url,
-        )
+    selfhosted = backend_revision is not None and backend_revision.backend == LOOP.provider
+    if selfhosted:
+        from daimon.core.turn.selfhosted_records import resolve_records
 
-    # --- Resolve agent/environment via ma_resolver (self-heals on
-    # archive/recreate); MAResolverMissError propagates unwrapped. This path
-    # always passes cached_id=None, so the resolver's own liveness step never
-    # runs here, and its short TTL cache can hand back an id for an agent
-    # archived since it was cached -- the retrieve below is what settles it. ---
-    agent_id = config.responder_ma_agent_id
-    if agent_id is None:
-        agent_id = await resolve_agent(
+        agent, environment = await resolve_records(
+            deps.sessionmaker,
+            Scope(
+                tenant_id=str(tenant_id),
+                account_id=str(principal.account_id),
+                principal_id=external_user_id,
+                authorization_id="turn-admission",
+            ),
+            agent_name=config.agent_name,
+            environment_name=config.environment_name,
+            responder_id=config.responder_ma_agent_id,
+        )
+        agent_id, env_id = agent.id, environment.id
+        if (observation := current_outcome.get()) is not None:
+            observation.agent_id = agent.id
+    else:
+
+        async def _apply() -> object:
+            return await reconcile_tenant_defaults(
+                deps.anthropic,
+                deps.sessionmaker,
+                deps.defaults_root,
+                tenant_id=tenant_id,
+                public_url=deps.public_url,
+            )
+
+        # --- Resolve agent/environment via ma_resolver (self-heals on
+        # archive/recreate); MAResolverMissError propagates unwrapped. This path
+        # always passes cached_id=None, so the resolver's own liveness step never
+        # runs here, and its short TTL cache can hand back an id for an agent
+        # archived since it was cached -- the retrieve below is what settles it. ---
+        agent_id = config.responder_ma_agent_id
+        if agent_id is None:
+            agent_id = await resolve_agent(
+                deps.anthropic,
+                tenant_id=tenant_id,
+                daimon_tag=config.agent_name,
+                cached_id=None,
+                apply_callable=_apply,
+                cache=deps.resolver_cache,
+            )
+        env_id = await resolve_environment(
             deps.anthropic,
             tenant_id=tenant_id,
-            daimon_tag=config.agent_name,
+            daimon_tag=config.environment_name,
             cached_id=None,
             apply_callable=_apply,
             cache=deps.resolver_cache,
         )
-    env_id = await resolve_environment(
-        deps.anthropic,
-        tenant_id=tenant_id,
-        daimon_tag=config.environment_name,
-        cached_id=None,
-        apply_callable=_apply,
-        cache=deps.resolver_cache,
-    )
 
-    # A bound thread resolves its responder by concrete id, never by name: a
-    # recreated namesake must not inherit the conversation. Which concrete
-    # lookup depends on why the thread is bound -- a setup conversation must
-    # answer as the built-in Daimon (`get_setup_responder` asserts that), while
-    # a thread whose task was handed to another agent answers as that agent,
-    # which is an ordinary tenant-and-archive-checked retrieve.
-    if config.thread_binding_kind == "handoff":
-        agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
-    elif config.thread_binding_id is not None:
-        agent = await get_setup_responder(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
-    else:
+        # A bound thread resolves its responder by concrete id, never by name: a
+        # recreated namesake must not inherit the conversation. Which concrete
+        # lookup depends on why the thread is bound -- a setup conversation must
+        # answer as the built-in Daimon (`get_setup_responder` asserts that), while
+        # a thread whose task was handed to another agent answers as that agent,
+        # which is an ordinary tenant-and-archive-checked retrieve.
+        if config.thread_binding_kind == "handoff":
+            agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
+        elif config.thread_binding_id is not None:
+            agent = await get_setup_responder(
+                deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id
+            )
+        else:
+            try:
+                agent = await retrieve_agent_cached(
+                    deps.anthropic, deps.resolver_cache, tenant_id, agent_id
+                )
+            except APIStatusError as err:
+                if err.status_code not in (400, 404):
+                    raise
+                deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
+                raise MAResolverMissError(
+                    kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name
+                ) from err
+        if (observation := current_outcome.get()) is not None:
+            observation.agent_id = agent.id
         try:
-            agent = await retrieve_agent_cached(
-                deps.anthropic, deps.resolver_cache, tenant_id, agent_id
+            environment = await retrieve_environment_cached(
+                deps.anthropic, deps.resolver_cache, tenant_id, env_id
             )
         except APIStatusError as err:
             if err.status_code not in (400, 404):
                 raise
-            deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
+            deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
             raise MAResolverMissError(
-                kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name
+                kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
             ) from err
-    if (observation := current_outcome.get()) is not None:
-        observation.agent_id = agent.id
-    try:
-        environment = await retrieve_environment_cached(
-            deps.anthropic, deps.resolver_cache, tenant_id, env_id
-        )
-    except APIStatusError as err:
-        if err.status_code not in (400, 404):
-            raise
-        deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
-        raise MAResolverMissError(
-            kind="environment", tenant_id=tenant_id, daimon_tag=config.environment_name
-        ) from err
     mark("agent_environment")
 
     # --- Liveness check on the already-retrieved agent: it was archived out of
@@ -656,10 +680,13 @@ async def admit_impl(
     # raise the existing resolver-miss error so the friendly copy at the four
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
-        deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
-        deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
-        async with deps.sessionmaker() as session, session.begin():
-            await clear_agent_references(session, tenant_id=tenant_id, agent_name=config.agent_name)
+        if not selfhosted:
+            deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
+            deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
+            async with deps.sessionmaker() as session, session.begin():
+                await clear_agent_references(
+                    session, tenant_id=tenant_id, agent_name=config.agent_name
+                )
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
     if environment.archived_at is not None:
         deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
@@ -784,6 +811,8 @@ async def admit_impl(
     async def resolve_preference() -> None:
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
         nonlocal backend_footer_profile, source_agent
+        if selfhosted:
+            return
         if selection_enabled and channel is not None:
             if retained_revision is None and not configured_channel:
                 # Reuse the authorized source read; a friendly name cannot carry
@@ -901,32 +930,38 @@ async def admit_impl(
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
-    platform_skills = await turn_platform_skills(
-        deps.anthropic,
-        tenant_id=tenant_id,
-        platform=platform,
-        agent=agent,
-        platform_skills=deps.platform_skills,
-        now=now,
-        memory=deps.platform_skill_memory,
-        cache=deps.resolver_cache,
-    )
-    channel_skills = (
-        ()
-        if is_dm
-        else await turn_channel_skills(
-            deps.sessionmaker,
+    if selfhosted:
+        # Self-hosted skills are record references, resolved by the harness's
+        # mount pipeline. Anthropic's platform/channel catalog is never queried.
+        platform_skills: tuple[MaSkill, ...] = ()
+        channel_skills: tuple[MaSkill, ...] = ()
+    else:
+        platform_skills = await turn_platform_skills(
             deps.anthropic,
             tenant_id=tenant_id,
             platform=platform,
-            channel_id=channel_id,
             agent=agent,
-            agent_names=grant.agent.names,
-            rows=channel_skill_rows,
+            platform_skills=deps.platform_skills,
+            now=now,
+            memory=deps.platform_skill_memory,
             cache=deps.resolver_cache,
-            platform_skills=platform_skills,
         )
-    )
+        channel_skills = (
+            ()
+            if is_dm
+            else await turn_channel_skills(
+                deps.sessionmaker,
+                deps.anthropic,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                agent=agent,
+                agent_names=grant.agent.names,
+                rows=channel_skill_rows,
+                cache=deps.resolver_cache,
+                platform_skills=platform_skills,
+            )
+        )
 
     mark("channel_skills")
 

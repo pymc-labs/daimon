@@ -21,6 +21,43 @@ client. These templates have been validated offline only; subscription deploymen
 and runtime behavior have not been verified. See `deploy/azure/README.md` in the
 repository for parameters, deployment commands, required roles and limitations.
 
+## Self-hosted resource records
+
+`daimon selfhosted init` stores an agent and an environment in Postgres for an
+existing tenant. Apply migrations first. It needs the database connection and
+no Anthropic or model credential. It prints the agent ID and environment ID,
+one per line; repeating it with matching names and configuration reuses them.
+A changed configuration is refused. Archived names can be initialized again
+with a new active record.
+
+```bash
+# DAIMON_DATABASE__URL contains the Postgres connection URL.
+daimon selfhosted init \
+  --tenant-id <tenant-uuid> \
+  --harness-url http://harness:8080 --allow-insecure-http \
+  --model gpt-5 \
+  --auth-ref HARNESS_TOKEN
+```
+
+The default names are `daimon` and `default`; override them with `--name` and
+`--environment-name`. `--system-file` reads the agent's system prompt from a
+UTF-8 file. `--model` is the Azure deployment name. The command records
+`HARNESS_TOKEN` as a variable name; it does not read or store its value.
+`--packages-note` records an operator note without installing packages.
+
+For Foundry, add `--transport foundry_invocations --agent-name <hosted-agent>`
+and `--project-endpoint <project-endpoint>`, with `--auth-mode entra` and
+`--auth-ref <audience>`. Both routing fields are required for that transport.
+Direct `/v0/*` requests are the default transport. HTTPS is required outside
+loopback. `--allow-insecure-http` explicitly permits HTTP on internal service
+names/private addresses for an in-cluster deployment.
+
+Self-hosted resources belong to one tenant. Their full mux specs, revisions,
+archive state and mutation receipts live in Postgres. MCP credentials are
+referenced by environment variable name, and harness URLs cannot embed
+credentials. These records do not provision an Azure resource or start a
+harness.
+
 ## Upgrading an existing installation
 
 The new MCP server is strict immediately by default: credentials need a live
