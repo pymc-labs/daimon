@@ -1227,3 +1227,61 @@ def test_malformed_microsoft_tenant_id_names_the_variable(
     _microsoft_env(monkeypatch, TENANT_ID="contoso.onmicrosoft.com")
     with pytest.raises(ValidationError, match="DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID"):
         load_settings(_env_file=None)
+
+
+def test_azure_artifacts_parse_without_s3_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__BACKEND", "azure_blob")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__ENDPOINT_URL", "https://example.blob.core.windows.net")
+    monkeypatch.setenv("DAIMON_ARTIFACTS__BUCKET", "charts")
+    settings = load_settings(_env_file=None).artifacts
+    assert settings is not None
+    assert settings.backend == "azure_blob"
+    assert settings.azure_connection_string is None
+    assert settings.url_ttl_seconds == 600
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["https://example.blob.core.windows.net", "http://127.0.0.1:10001/devstoreaccount1"]
+)
+def test_azure_connection_string_cannot_target_remote_or_mismatched_endpoint(endpoint: str) -> None:
+    with pytest.raises(ValidationError, match="loopback endpoint_url"):
+        ArtifactsSettings(
+            backend="azure_blob",
+            endpoint_url=endpoint,
+            bucket="charts",
+            azure_connection_string="AccountName=devstoreaccount1;AccountKey=local;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1",
+        )
+
+
+def test_s3_still_requires_credentials() -> None:
+    with pytest.raises(ValidationError, match="require access_key_id"):
+        ArtifactsSettings(endpoint_url="https://s3.example.test", bucket="charts")
+
+
+def test_azure_managed_identity_requires_https() -> None:
+    with pytest.raises(ValidationError, match="HTTPS"):
+        ArtifactsSettings(
+            backend="azure_blob",
+            endpoint_url="http://example.blob.core.windows.net",
+            bucket="charts",
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ";blobendpoint=https://remote.blob.core.windows.net",
+        ";BlobSecondaryEndpoint=https://remote.blob.core.windows.net",
+        ";UseDevelopmentStorage=true",
+    ],
+)
+def test_azurite_rejects_endpoint_overrides(extra: str) -> None:
+    with pytest.raises(ValidationError, match="loopback endpoint_url"):
+        ArtifactsSettings(
+            backend="azure_blob",
+            endpoint_url="http://127.0.0.1:10000/local",
+            bucket="charts",
+            azure_connection_string="AccountName=local;AccountKey=local;BlobEndpoint=http://127.0.0.1:10000/local"
+            + extra,
+        )

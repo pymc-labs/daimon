@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Hosted MCP chart links can use private Azure Blob Storage with managed identity and read-only user-delegation SAS. Select `DAIMON_ARTIFACTS__BACKEND=azure_blob`; S3 remains the default. A loopback-only Azurite connection string is supported for local development.
+
 - Reserved the opt-in `selfhosted.loop` profile for the self-hosted harness. Runtime admission remains closed while the driver is being implemented.
 
 - The GitHub repo page for an agent, its Add repos dialogs and the saved page are back on Daimon's own colours and header instead of a grey, black-button look. The working repo, added repos and checked rows are teal, repos to add are green, repos to remove are red, and anything GitHub could not load or show is amber with a warning icon and, where it helps, a Try again button. The dim layer behind a dialog covers the whole screen, and the Add 0 repos button reads as disabled without fading.

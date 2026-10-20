@@ -937,13 +937,50 @@ To add short-lived presigned chart links, configure
 When URL delivery is configured, `deliver_turn_charts` writes the chart to
 the private artifact store.
 
-- The storage boundary uses the vendor-neutral S3 API with SigV4 and
+- The default `s3` backend uses the S3 API with SigV4 and
   virtual-hosted-style addressing. Confirm that contract with your provider.
   Path-style-only endpoints, including default MinIO setups, are not
   supported.
 - Objects remain private. Daimon never applies a public-read ACL.
 - Presigned URL expiry does not delete stored objects. Configure a bucket
   lifecycle rule for the retention period your deployment requires.
+
+For Azure Blob Storage, set the following on the MCP service:
+
+```bash
+DAIMON_ARTIFACTS__BACKEND=azure_blob
+DAIMON_ARTIFACTS__ENDPOINT_URL=https://<account>.blob.core.windows.net
+DAIMON_ARTIFACTS__BUCKET=charts
+AZURE_CLIENT_ID=<user-assigned-managed-identity-client-id>
+```
+
+`BUCKET` names the private Blob container for this backend. Provision the
+container in advance and disable anonymous blob access on the storage account.
+Assign the managed identity **Storage Blob Data Contributor** at storage-account
+scope: it needs both blob write/read permissions and permission to generate a
+user-delegation key. Container-scoped data permissions alone cannot mint that
+key. No account key or S3 credential is needed. `DefaultAzureCredential` uses
+`AZURE_CLIENT_ID` to select a user-assigned managed identity; locally it can
+also use an Azure CLI login. See Microsoft's
+[user-delegation SAS guide](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-user-delegation-sas-create-python).
+
+Blob links are HTTPS-only, read-only SAS capabilities for one blob, with the
+same `DAIMON_ARTIFACTS__URL_TTL_SECONDS` lifetime (default 600 seconds, maximum
+86400) as S3 links. SAS expiry does not delete the blob; configure an Azure
+Storage lifecycle policy for retention. Download headers force attachments,
+and SVGs are served as `application/octet-stream`.
+
+For local Azurite only, set `DAIMON_ARTIFACTS__AZURE_CONNECTION_STRING` with an
+explicit `BlobEndpoint` matching `DAIMON_ARTIFACTS__ENDPOINT_URL`, for example
+`http://127.0.0.1:10000/devstoreaccount1`. Connection strings are rejected for
+non-loopback endpoints. Azurite uses a shared-key service SAS because it does
+not support Entra user-delegation keys. Never set this option in Azure.
+The optional Docker-backed test runs a disposable emulator:
+`uv run pytest packages/adapters/mcp/tests/artifacts/test_azurite.py`.
+
+Notebook and report hosts keep their own filesystem-backed data directories;
+these settings only select the hosted MCP chart/artifact store. There is no
+object-store listing or deletion API in this storage boundary.
 
 See `.env.example` for the optional region, URL lifetime and image-embedding
 controls.

@@ -1461,32 +1461,47 @@ Optional private object storage for hosted-client artifacts.
 This whole block is optional: it stays unset until at least one of its variables is set,
 and the features that read it are inactive while it is.
 
-Optional private S3-compatible store for presigned chart links. Bounded image embeds
-still run when this is unset.
+Optional private S3-compatible or Azure Blob store for signed chart links. Bounded image
+embeds still run when this is unset.
+
+### `DAIMON_ARTIFACTS__BACKEND`
+
+`'s3' | 'azure_blob'` · optional · default `s3`
+
+Artifact storage backend: s3 (default) or azure_blob.
 
 ### `DAIMON_ARTIFACTS__ENDPOINT_URL`
 
 `HttpUrl` · **required**
 
-S3-compatible bucket endpoint; used for uploads and presigned GET URLs.
+S3-compatible endpoint or Azure Blob account URL
+(https://&lt;account&gt;.blob.core.windows.net); used for uploads and signed GET URLs.
 
 ### `DAIMON_ARTIFACTS__BUCKET`
 
 `str` · **required**
 
-Private bucket name. Daimon never applies a public-read ACL.
+Private S3 bucket or Azure Blob container name; provision it before startup.
 
 ### `DAIMON_ARTIFACTS__ACCESS_KEY_ID`
 
-`SecretStr` · **required** · secret
+`SecretStr` · optional · default unset · secret
 
-S3-compatible access key id.
+S3 access key id; required only for the s3 backend.
 
 ### `DAIMON_ARTIFACTS__SECRET_ACCESS_KEY`
 
-`SecretStr` · **required** · secret
+`SecretStr` · optional · default unset · secret
 
-S3-compatible secret access key.
+S3 secret access key; required only for the s3 backend.
+
+### `DAIMON_ARTIFACTS__AZURE_CONNECTION_STRING`
+
+`SecretStr | None` · optional · default unset · secret
+
+Local Azurite connection string only; BlobEndpoint must match the loopback endpoint_url.
+Leave unset on Azure: DefaultAzureCredential uses AZURE_CLIENT_ID for a user-assigned
+managed identity and signs user-delegation SAS without account keys.
 
 ### `DAIMON_ARTIFACTS__REGION`
 
