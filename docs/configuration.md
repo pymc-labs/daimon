@@ -37,6 +37,7 @@ typo is silent — check the spelling here.
 - [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
+- [Selfhosted](#selfhosted)
 - [Gemini](#gemini)
 - [Notebook Host](#notebook-host)
 - [Report Host](#report-host)
@@ -984,6 +985,20 @@ unset.
 
 Full JSON contents of a Google service-account key, used by the token broker to mint
 delegated Google Workspace credentials.
+
+## Selfhosted
+
+Read from `daimon.core.config.SelfHostedSettings`. Prefix `DAIMON_SELFHOSTED__`.
+
+Operator opt-in for the self-hosted turn runtime.
+
+### `DAIMON_SELFHOSTED__ADMISSION_ENABLED`
+
+`bool` · optional · default `False`
+
+Allow explicitly configured selfhosted channels to pass backend admission. Default
+false. Enabling this still requires the profile's usage observations capability and a
+configured self-hosted core runtime.
 
 ## Gemini
 

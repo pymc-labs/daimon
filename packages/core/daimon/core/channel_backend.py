@@ -33,7 +33,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import OPEN_ACCESS_POLICY
 from daimon.core.authz import Action, Subject, authorize
-from daimon.core.config import TurnSettings
+from daimon.core.config import TurnSettings, load_selfhosted_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import DaimonError
@@ -151,8 +151,11 @@ def check_backend(
     revision: ConfigRevision, *, enabled_backends: tuple[Provider, ...] | None = None
 ) -> BackendAdmission:
     """Admit `revision`, or raise `BackendUnsupported`."""
-    if revision.backend == "selfhosted":
-        raise BackendUnsupported("selfhosted.loop is not runnable in this release")
+    if revision.backend == "selfhosted" and not load_selfhosted_settings().admission_enabled:
+        log_backend_unsupported(
+            "backend_runnable", reason="selfhosted_admission_disabled", revision=revision
+        )
+        raise BackendUnsupported("selfhosted_admission_disabled")
     if enabled_backends is not None and not backend_is_enabled(revision.backend, enabled_backends):
         log_backend_unsupported("workspace_policy", reason="backend_not_enabled", revision=revision)
         raise BackendUnsupported("That model provider isn't turned on here. Pick another.")
@@ -308,7 +311,8 @@ def log_backend_unsupported(
     stage: BackendRefusalStage,
     error: BaseException | None = None,
     *,
-    reason: Literal["backend_not_enabled", "profile_not_runnable"] | None = None,
+    reason: Literal["backend_not_enabled", "profile_not_runnable", "selfhosted_admission_disabled"]
+    | None = None,
     revision: ConfigRevision | None = None,
 ) -> None:
     """Log closed diagnostic labels, never provider messages or source payloads."""
@@ -316,7 +320,10 @@ def log_backend_unsupported(
     fields: dict[str, object] = {}
     if reason is not None:
         fields["reason"] = (
-            reason if reason in {"backend_not_enabled", "profile_not_runnable"} else "redacted"
+            reason
+            if reason
+            in {"backend_not_enabled", "profile_not_runnable", "selfhosted_admission_disabled"}
+            else "redacted"
         )
     if revision is not None:
         fields.update(

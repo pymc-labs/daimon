@@ -80,6 +80,7 @@ class SelfHostedEvents:
         self._intents: dict[tuple[ResourceRef, str], str] = {}
         self._approvals: dict[tuple[ResourceRef, str, str], tuple[str, SendReceipt]] = {}
         self._cancels: dict[tuple[ResourceRef, str], CancelReceipt] = {}
+        self._stream_cursors: dict[ResourceRef, int] = {}
 
     def _remember(self, ref: ResourceRef, raw: wire.Event) -> Event:
         if raw.session_id != ref.id:
@@ -234,18 +235,45 @@ class SelfHostedEvents:
             raise self._c.unsupported("agent_lifecycle_or_provider")
         if agent.spec.model.options or agent.spec.extensions:
             raise self._c.unsupported("agent_options_or_extensions")
+        builtin_names = {"bash", "read", "write", "edit"}
+        policy: dict[str, Literal["auto", "ask", "deny"]] = {}
         if agent.spec.tools is not None:
-            builtins = {tool.name for tool in agent.spec.tools if tool.kind == "builtin"}
-            if builtins != {"bash", "read", "write", "edit"} or any(
-                tool.kind == "custom" for tool in agent.spec.tools
+            if any(
+                tool.kind == "custom" or (tool.kind == "builtin" and tool.name not in builtin_names)
+                for tool in agent.spec.tools
             ):
                 raise self._c.unsupported("custom_tools_or_tool_permissions")
-        policy: dict[str, Literal["auto", "ask"]] = {
-            tool.name: tool.permission for tool in agent.spec.tools or ()
-        }
+            policy.update(dict.fromkeys(builtin_names, "deny"))
+            for tool in agent.spec.tools:
+                name = tool.name + "/*" if tool.kind == "mcp_toolset" else tool.name
+                policy[name] = tool.permission
         for connection in agent.spec.mcp_servers or ():
-            if connection.tool_policy:
-                raise self._c.unsupported("mcp_tool_policy_requires_deny_wire")
+            configured = connection.tool_policy
+            allowed = configured.get("allowed_tools")
+            default = policy.get(connection.name + "/*", "auto")
+            if "allowed_tools" in configured:
+                if not isinstance(allowed, list) or any(
+                    not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name)
+                    for name in allowed
+                ):
+                    raise self._c.unsupported("mcp_allowed_tools")
+                policy[connection.name + "/*"] = "deny"
+                for name in allowed:
+                    policy[connection.name + "/" + str(name)] = default
+            for name, permission in configured.items():
+                if name == "allowed_tools":
+                    continue
+                if permission not in ("auto", "ask", "deny"):
+                    raise self._c.unsupported("mcp_tool_policy")
+                qualified = (
+                    name if name.startswith(connection.name + "/") else connection.name + "/" + name
+                )
+                if "/" in name and not name.startswith(connection.name + "/"):
+                    raise self._c.unsupported("mcp_tool_policy_scope")
+                tool_name = qualified.removeprefix(connection.name + "/")
+                if isinstance(allowed, list) and tool_name not in allowed and permission != "deny":
+                    raise self._c.unsupported("mcp_tool_policy_widens_allowlist")
+                policy[qualified] = permission
         model = self._model or agent.spec.model.id
         if self._deployment is not None and model != self._deployment:
             raise self._c.unsupported("model_deployment_mismatch")
@@ -267,9 +295,7 @@ class SelfHostedEvents:
                     raise self._c.unsupported("mcp_policy_or_transport")
                 headers: dict[str, str] = {}
                 if connection.credential_ref is not None:
-                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", connection.credential_ref):
-                        raise self._c.unsupported("mcp_credential_environment_name")
-                    headers["Authorization"] = connection.credential_ref
+                    raise self._c.unsupported("credentialed_mcp_requires_scoped_tools_resolver")
                 servers.append(
                     wire.MCPServer(name=connection.name, url=connection.url, headers_env=headers)
                 )
@@ -282,6 +308,8 @@ class SelfHostedEvents:
                 skills.append(await self._skill_resolver(scope, skill))
         names: set[str] = set()
         for server in servers:
+            if server.headers_env and self._tools_resolver is None:
+                raise self._c.unsupported("credentialed_mcp_requires_scoped_tools_resolver")
             if server.name in names or any(
                 not (
                     re.fullmatch(r"HARNESS_MCP_CRED_[A-Za-z0-9_]+", name)
@@ -454,7 +482,7 @@ class SelfHostedEvents:
                 receipt = SendReceipt(
                     operation_id=key, status="processed", input_ids=(key,), turn_id=turn_id
                 )
-            elif attempted is not None or not pending:
+            elif not pending:
                 receipt = SendReceipt(
                     operation_id=key, status="outcome_unknown", input_ids=(key,), turn_id=turn_id
                 )
@@ -462,8 +490,8 @@ class SelfHostedEvents:
                 receipt = SendReceipt(
                     operation_id=key, status="outcome_unknown", input_ids=(key,), turn_id=turn_id
                 )
-                # Keep the intent before HTTP: a lost acknowledgement must never
-                # turn an already executed decision into another tool execution.
+                # Keep the decision before HTTP. Retrying the identical body is
+                # safe because the harness deduplicates actions by their id.
                 self._approvals[action_key] = action_digest, receipt
                 self._sends[session, key] = digest, receipt
                 try:
@@ -510,22 +538,18 @@ class SelfHostedEvents:
     ) -> AsyncIterator[Event]:
         self._c.binding(scope, session)
         cursor = int(after or "0")
-        # Establish the first durable HTTP replay request before returning;
-        # opening on an idle session must still wait for the next turn.
-        deadline = datetime.now(UTC) + timedelta(seconds=self._deadline_s)
-        initial, complete = await self.replay(scope, session, deadline=deadline)
+        # Each HTTP request is bounded by the transport. An idle reader may
+        # wait for a later turn, whose execution and cleanup have their own limits.
+        initial, complete = await self.replay(
+            scope, session, deadline=datetime.now(UTC) + timedelta(seconds=30)
+        )
         if after is None:
+            cursor = self._stream_cursors.get(session, 0)
             active = self.projection(session, initial, complete).active_root_turn
-            active_events = [
-                event.sequence
-                for event in initial
-                if active is not None and event.turn_id == active
-            ]
-            cursor = (
-                min(active_events) - 1
-                if active_events
-                else max((event.sequence for event in initial), default=0)
-            )
+            if active is not None:
+                active_events = [event.sequence for event in initial if event.turn_id == active]
+                if active_events:
+                    cursor = max(cursor, min(active_events) - 1)
 
         async def iterate() -> AsyncIterator[Event]:
             nonlocal cursor
@@ -536,6 +560,9 @@ class SelfHostedEvents:
                 for event in replayed:
                     if event.sequence > cursor:
                         cursor = event.sequence
+                        self._stream_cursors[session] = max(
+                            self._stream_cursors.get(session, 0), cursor
+                        )
                         observed_end = observed_end or event.type == "session.turn_ended"
                         if previews or event.authority != "preview":
                             yield event
@@ -547,9 +574,10 @@ class SelfHostedEvents:
                 }
                 if done and observed_end and pending.issubset(ended):
                     return
-                remaining = (deadline - datetime.now(UTC)).total_seconds()
-                await asyncio.sleep(max(0, min(random.uniform(0.1, delay), remaining)))
-                replayed, done = await self.replay(scope, session, deadline=deadline)
+                await asyncio.sleep(random.uniform(0.1, delay))
+                replayed, done = await self.replay(
+                    scope, session, deadline=datetime.now(UTC) + timedelta(seconds=30)
+                )
                 delay = (
                     0.1
                     if any(event.sequence > cursor for event in replayed)

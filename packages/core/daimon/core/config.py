@@ -1194,6 +1194,19 @@ class CredentialsSettings(BaseModel):
     )
 
 
+class SelfHostedSettings(BaseModel):
+    """Operator opt-in for the self-hosted turn runtime."""
+
+    admission_enabled: bool = Field(
+        default=False,
+        description=(
+            "Allow explicitly configured selfhosted channels to pass backend admission. "
+            "Default false. Enabling this still requires the profile's usage observations "
+            "capability and a configured self-hosted core runtime."
+        ),
+    )
+
+
 class GeminiSettings(BaseModel):
     """Optional Gemini API credentials for media MCP tools.
 
@@ -1898,6 +1911,7 @@ class Settings(BaseSettings):
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
+    selfhosted: SelfHostedSettings = Field(default_factory=SelfHostedSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     notebook: NotebookSettings = Field(default_factory=NotebookSettings)
     report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
@@ -2049,3 +2063,21 @@ def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
 
         validate_configured_runtime_manifest()
     return turn
+
+
+class _SelfHostedSettingsSource(BaseSettings):
+    """Admission settings without unrelated API or database configuration."""
+
+    selfhosted: SelfHostedSettings = Field(default_factory=SelfHostedSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+def load_selfhosted_settings(*, _env_file: str | None = ".env") -> SelfHostedSettings:
+    """Read the operator admission switch without constructing provider clients."""
+    return _SelfHostedSettingsSource(_env_file=_env_file).selfhosted  # pyright: ignore[reportCallIssue]

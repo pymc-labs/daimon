@@ -39,6 +39,7 @@ from mux.contracts.config import (
 from mux.contracts.ids import ChannelRef
 from mux.errors import InvalidConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 _NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
@@ -257,8 +258,47 @@ async def test_with_the_flag_on_an_unrunnable_configuration_is_refused_before_an
     assert (await _admit(replace(on), tenant, "chan-2")).backend_revision is None
 
 
-def test_selfhosted_admission_stays_closed_until_native_core_integration():
-    with pytest.raises(BackendUnsupported, match="not runnable"):
+@pytest.mark.parametrize("enabled", [None, "false"])
+def test_selfhosted_admission_is_disabled_by_default_or_explicit_switch(
+    monkeypatch, tmp_path, enabled
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DAIMON_SELFHOSTED", raising=False)
+    monkeypatch.delenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", raising=False)
+    if enabled is not None:
+        monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", enabled)
+    with (
+        capture_logs() as records,
+        pytest.raises(BackendUnsupported, match="selfhosted_admission_disabled"),
+    ):
+        check_backend(
+            _revision(BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"))
+        )
+
+    assert records[-1]["event"] == "turn.backend_unsupported"
+    assert records[-1]["reason"] == "selfhosted_admission_disabled"
+
+
+def test_selfhosted_admission_enabled_preserves_required_usage_capability(monkeypatch):
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    admitted = check_backend(
+        _revision(BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"))
+    )
+    assert admitted.provider == "selfhosted"
+    assert "usage_observations" in admitted.satisfied
+
+
+def test_selfhosted_admission_enabled_refuses_missing_usage_capability(monkeypatch):
+    from daimon.core import channel_backend
+    from mux.profiles import get_profile
+
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    profile = get_profile("selfhosted.loop")
+    unmetered = profile.model_copy(
+        update={"support": {**profile.support, "usage_observations": "unsupported"}}
+    )
+    monkeypatch.setattr(channel_backend, "get_profile", lambda name: unmetered)
+    with pytest.raises(BackendUnsupported, match="usage_observations"):
         check_backend(
             _revision(BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"))
         )

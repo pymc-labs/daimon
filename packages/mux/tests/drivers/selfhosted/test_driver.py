@@ -223,10 +223,7 @@ async def test_stream_tools_usage_and_idempotent_resend(foundry):
         receipt = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
         assert await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send") == receipt
         events = [
-            e
-            async for e in await driver.events.open_stream(
-                SCOPE, session.ref, after="0", previews=True
-            )
+            e async for e in await driver.events.open_stream(SCOPE, session.ref, previews=True)
         ]
         assert [e.type for e in events] == [
             "session.status_running",
@@ -1128,7 +1125,10 @@ async def test_default_stream_open_before_second_turn_never_replays_first_termin
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
         driver, session = await setup(client, fake)
         first = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="first")
-        await driver.events.reconcile(SCOPE, session.ref)
+        first_events = [
+            event async for event in await driver.events.open_stream(SCOPE, session.ref)
+        ]
+        assert {event.turn_id for event in first_events} == {first.turn_id}
         source = await driver.events.open_stream(SCOPE, session.ref)
         second = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="second")
         values = [event async for event in source]
@@ -1255,9 +1255,8 @@ async def test_lost_approval_ack_recovers_without_reexecuting(settled_immediatel
 
 
 @pytest.mark.parametrize("tools", [(), ("bash",), ("read", "write", "edit")])
-async def test_narrowed_builtins_refuse_until_deny_wire_is_available(tools):
+async def test_narrowed_builtins_deny_omitted_tools(tools):
     from mux.contracts.resources import ToolSpec
-    from mux.errors import UnsupportedCapability
 
     fake = Harness()
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
@@ -1269,15 +1268,23 @@ async def test_narrowed_builtins_refuse_until_deny_wire_is_available(tools):
                 )
             }
         )
-        with pytest.raises(UnsupportedCapability):
-            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
-        assert fake.executions == 0
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert fake.request["tool_policy"] == {
+            name: "auto" if name in tools else "deny" for name in ("bash", "read", "write", "edit")
+        }
 
 
-@pytest.mark.parametrize("policy", [{"write": "ask"}, {"allowed_tools": ["read"]}])
-async def test_mcp_policy_refuses_clearly_until_deny_wire_is_available(policy):
+@pytest.mark.parametrize(
+    "policy, expected",
+    [
+        ({"write": "ask"}, {"server/write": "ask"}),
+        ({"allowed_tools": ["read"]}, {"server/*": "deny", "server/read": "auto"}),
+        ({"allowed_tools": ["read"], "read": "ask"}, {"server/*": "deny", "server/read": "ask"}),
+        ({"server/write": "deny", "*": "ask"}, {"server/write": "deny", "server/*": "ask"}),
+    ],
+)
+async def test_mcp_policy_uses_server_namespace_and_deny_allowlist(policy, expected):
     from mux.contracts.resources import MCPConnection
-    from mux.errors import UnsupportedCapability
 
     fake = Harness()
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
@@ -1293,9 +1300,8 @@ async def test_mcp_policy_refuses_clearly_until_deny_wire_is_available(policy):
                 )
             }
         )
-        with pytest.raises(UnsupportedCapability, match="mcp_tool_policy_requires_deny_wire"):
-            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
-        assert fake.executions == 0
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert fake.request["tool_policy"] == expected
 
 
 async def test_unknown_turn_ack_still_has_active_identity_and_can_cancel():
@@ -1412,3 +1418,184 @@ async def test_wait_stopped_uses_exponential_backoff_bounded_by_deadline(monkeyp
         assert not result.stopped
         assert delays[:5] == [0.1, 0.2, 0.4, 0.8, 1.6]
         assert max(delays) <= 2 and sum(delays) == pytest.approx(5)
+
+
+@pytest.mark.parametrize("permission", ["auto", "ask"])
+async def test_mcp_toolset_named_write_cannot_overwrite_builtin_approval(permission):
+    from mux.contracts.resources import MCPConnection, ToolSpec
+
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        driver.agents.value = driver.agents.value.model_copy(
+            update={
+                "spec": driver.agents.value.spec.model_copy(
+                    update={
+                        "tools": (
+                            ToolSpec(name="write", kind="builtin", permission="ask"),
+                            ToolSpec(name="write", kind="mcp_toolset", permission=permission),
+                        ),
+                        "mcp_servers": (MCPConnection(name="write", url="https://mcp"),),
+                    }
+                )
+            }
+        )
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert fake.request["tool_policy"] == {
+            "bash": "deny",
+            "read": "deny",
+            "edit": "deny",
+            "write": "ask",
+            "write/*": permission,
+        }
+
+
+async def test_agent_mcp_credential_requires_scoped_resolver_before_any_harness_io():
+    from mux.contracts.resources import MCPConnection
+    from mux.errors import UnsupportedCapability
+
+    calls = []
+    fake = Harness()
+
+    def handle(request):
+        calls.append(request)
+        return fake.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        driver, session = await setup(client, fake)
+        driver.agents.value = driver.agents.value.model_copy(
+            update={
+                "spec": driver.agents.value.spec.model_copy(
+                    update={
+                        "mcp_servers": (
+                            MCPConnection(
+                                name="server",
+                                url="https://attacker.example",
+                                credential_ref="HARNESS_MCP_CRED_PRIVATE",
+                            ),
+                        ),
+                    }
+                )
+            }
+        )
+        with pytest.raises(
+            UnsupportedCapability, match="credentialed_mcp_requires_scoped_tools_resolver"
+        ):
+            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert calls == []
+
+
+@pytest.mark.parametrize("retry_key", ["approve", "another-operation"])
+async def test_approval_reposts_identical_decision_after_one_connect_error(retry_key):
+    fake, actions = Harness("approval"), []
+
+    def handle(request):
+        if request.url.path.endswith("/actions"):
+            actions.append(json.loads(request.content))
+            if len(actions) == 1:
+                raise httpx.ConnectError("temporarily unavailable", request=request)
+            fake.emit("tool_result", dict(call_id="call", output="executed", is_error=False))
+            fake.finish()
+            return httpx.Response(200, json={"accepted": True})
+        return fake.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        driver, session = await setup(client, fake)
+        turn = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        action = UserToolConfirmation(action_id="approval", decision="allow")
+        first = await driver.events.send(
+            SCOPE, session.ref, [action], key="approve", expected_turn=turn.turn_id
+        )
+        assert first.status == "outcome_unknown"
+        assert (await driver.events.reconcile(SCOPE, session.ref)).state == "requires_action"
+        with pytest.raises(OperationConflict):
+            await driver.events.send(
+                SCOPE,
+                session.ref,
+                [UserToolConfirmation(action_id="approval", decision="deny")],
+                key="conflicting-decision",
+                expected_turn=turn.turn_id,
+            )
+        retried = await driver.events.send(
+            SCOPE, session.ref, [action], key=retry_key, expected_turn=turn.turn_id
+        )
+        assert retried.status == "queued"
+        assert actions == [
+            {"action_id": "approval", "decision": "allow"},
+            {"action_id": "approval", "decision": "allow"},
+        ]
+        assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
+        assert (
+            await driver.events.send(
+                SCOPE, session.ref, [action], key="settled-retry", expected_turn=turn.turn_id
+            )
+        ).status == "processed"
+        assert len(actions) == 2
+
+
+async def test_idle_stream_can_outlive_turn_limit_and_receive_later_completion(monkeypatch):
+    from mux.drivers.selfhosted import events as module
+
+    fake = Harness("running")
+    current = started = datetime.now(UTC)
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return current
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake, deadline_s=0.3)
+        source = await driver.events.open_stream(SCOPE, session.ref)
+
+        async def sleep(delay):
+            nonlocal current
+            current += timedelta(seconds=1)
+            if fake.request is None:
+                await driver.events.send(SCOPE, session.ref, [MESSAGE], key="later-turn")
+            elif fake.events[-1]["type"] != "turn_ended":
+                fake.finish()
+
+        monkeypatch.setattr(module, "datetime", Clock)
+        monkeypatch.setattr(module.asyncio, "sleep", sleep)
+        values = [event async for event in source]
+        assert current - started == timedelta(seconds=2)
+        assert values[-1].type == "session.turn_ended"
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"allowed_tools": ["read"], "write": "auto"},
+        {"allowed_tools": [], "*": "auto"},
+        {"other/write": "ask"},
+        {"allowed_tools": "read"},
+        {"allowed_tools": ["../read"]},
+        {"write": "sometimes"},
+    ],
+)
+async def test_mcp_invalid_or_widening_policy_refuses_before_harness_io(policy):
+    from mux.contracts.resources import MCPConnection
+    from mux.errors import UnsupportedCapability
+
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        driver.agents.value = driver.agents.value.model_copy(
+            update={
+                "spec": driver.agents.value.spec.model_copy(
+                    update={
+                        "mcp_servers": (
+                            MCPConnection(
+                                name="server",
+                                url="https://mcp",
+                                tool_policy=policy,
+                            ),
+                        ),
+                    }
+                )
+            }
+        )
+        with pytest.raises(UnsupportedCapability):
+            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+        assert fake.executions == 0

@@ -1339,3 +1339,16 @@ def test_azure_artifacts_require_explicit_identity_despite_ambient_principals(
             endpoint_url="https://example.blob.core.windows.net",
             bucket="charts",
         )
+
+
+def test_selfhosted_admission_setting_defaults_false_and_reads_nested_env(monkeypatch):
+    from daimon.core.config import SelfHostedSettings, load_selfhosted_settings
+
+    assert SelfHostedSettings().admission_enabled is False
+    monkeypatch.delenv("DAIMON_SELFHOSTED", raising=False)
+    monkeypatch.delenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", raising=False)
+    assert load_selfhosted_settings(_env_file=None).admission_enabled is False
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    assert load_selfhosted_settings(_env_file=None).admission_enabled is True
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    assert load_settings(_env_file=None).selfhosted.admission_enabled is True

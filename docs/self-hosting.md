@@ -254,6 +254,12 @@ balancer, and a redeploy does not strand connected clients. The hourly limits
 on notebook publishes and bundle uploads are kept in memory, so each replica
 counts its own.
 
+The `selfhosted.loop` harness backend has a separate operator admission switch,
+`DAIMON_SELFHOSTED__ADMISSION_ENABLED`, which defaults to `false`. Disabled
+admission refuses with `selfhosted_admission_disabled`. Enabling it still requires
+usage observations and a configured self-hosted core runtime; it does not select
+a backend for any channel. See [configuration](configuration.md) for the setting.
+
 ## Self-host on OpenAI
 
 Daimon can run on just your own OpenAI key — no Anthropic account needed at

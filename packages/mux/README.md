@@ -1132,8 +1132,10 @@ lookup. `DirectTransport` calls the harness `/v0` endpoints;
 one deterministic sandbox id on every call. Both submit turns with JSON
 acknowledgements and poll the durable event log. `open_stream` opens the first
 HTTP replay request before returning its iterator. With no cursor it starts at
-the active turn or the current high-water mark; use an explicit cursor for
-historical replay. A lost reader can reconnect
+the active turn or resumes after the last event delivered by this driver instance. A turn
+that finished before the reader opened is still delivered. Explicit cursors
+control historical replay and recovery after driver recreation. Idle readers
+may wait for the next turn; individual HTTP requests remain bounded. A lost reader can reconnect
 at a sequence cursor without running the turn again.
 
 Usage identities include the session, turn and model request, so replay preserves
@@ -1146,8 +1148,11 @@ unknown revision 1 under the same observation id. Tokens are never
 inferred as zero. Agent/environment revision changes require a new binding.
 Artifacts, session listing/deletion and native skill administration refuse
 explicitly. Built-in `auto`/`ask` and multiple pending approvals are supported.
-Until deny wire support lands, narrowed built-in sets and MCP policies refuse
-explicitly so omitted tools cannot silently become automatic.
+Narrowed built-in sets deny omitted tools. MCP permissions use `server/tool`
+and `server/*` keys; `allowed_tools` denies unlisted tools. Credentialed MCP
+servers require an injected tools resolver that enforces tenant/origin bindings.
+Pending approval retries submit the same recorded decision; the harness
+deduplicates identical actions.
 
 `mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
 turn requests, approval decisions, durable event replay and typed event data.
