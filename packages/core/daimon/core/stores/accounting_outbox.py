@@ -17,6 +17,7 @@ from mux.contracts.usage import UsageObservation as UsageDTO
 from mux.errors import ScopeViolation
 from mux.profiles import accounting_mode_for
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
+from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -316,3 +317,68 @@ async def check_provider_grain(
             and prior.grain != row.observation.grain
         ):
             raise ValueError("overlapping provider settlements require one billing grain")
+
+
+class PendingUsageRow(BaseModel):
+    """Content-free billing gaps; only the latest revision needs repair."""
+
+    binding_id: str
+    session_id: str
+    observation_id: str
+    revision: int
+    model: str | None
+    completeness: str
+    observed_at: datetime
+
+
+async def list_pending_usage(
+    session: AsyncSession, *, tenant_id: uuid.UUID, limit: int = 100
+) -> list[PendingUsageRow]:
+    """Surface unresolved billing observations without treating absence as zero.
+
+    A repaired higher revision supersedes an older pending snapshot. The older
+    outbox row remains available for audit but no longer needs operator action.
+    No native meter payload, credentials or user content are returned.
+    """
+    if not 1 <= limit <= 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    latest = (
+        select(
+            AccountingOutbox.binding_id,
+            AccountingOutbox.observation_id,
+            func.max(AccountingOutbox.revision).label("revision"),
+        )
+        .where(AccountingOutbox.tenant_id == tenant_id)
+        .group_by(AccountingOutbox.binding_id, AccountingOutbox.observation_id)
+        .subquery()
+    )
+    bodies = await session.scalars(
+        select(AccountingOutbox.row)
+        .join(
+            latest,
+            (AccountingOutbox.binding_id == latest.c.binding_id)
+            & (AccountingOutbox.observation_id == latest.c.observation_id)
+            & (AccountingOutbox.revision == latest.c.revision),
+        )
+        .where(AccountingOutbox.tenant_id == tenant_id, AccountingOutbox.applied_at.is_(None))
+        .order_by(AccountingOutbox.binding_id, AccountingOutbox.observation_id)
+        .limit(limit)
+    )
+    rows: list[PendingUsageRow] = []
+    for body in bodies:
+        row = OutboxRow.model_validate(body)
+        value = row.observation
+        if value.session.tenant_id != str(tenant_id):
+            raise ScopeViolation(value.id, "pending usage belongs to another tenant")
+        rows.append(
+            PendingUsageRow(
+                binding_id=row.binding_id,
+                session_id=value.session.id,
+                observation_id=value.id,
+                revision=value.revision,
+                model=value.model.id if value.model else None,
+                completeness=value.completeness,
+                observed_at=value.observed_at,
+            )
+        )
+    return rows

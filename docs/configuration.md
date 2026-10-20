@@ -1134,6 +1134,24 @@ secrets. Keep both separate.
 Multiplier applied to raw Anthropic usage cost before billing the tenant. 1.0 = pass-
 through.
 
+### `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS`
+
+`dict[str, str]` · optional · default `{}`
+
+JSON object mapping selfhosted Azure deployment names to underlying model ids. Every
+deployment must resolve to an explicitly configured model tariff; unmapped or unpriced
+deployments refuse turns.
+
+### `DAIMON_BILLING__SELFHOSTED__MODELS`
+
+`dict[str, SelfhostedModelPrice]` · optional · default `{}`
+
+JSON object keyed by underlying Azure OpenAI model id. Each tariff requires checked_on
+(ISO date), input, output and cache_read (USD per million tokens); optional valid_before
+expires the tariff. Supply verified regional/contract Azure rates, never deployment-name
+guesses or public OpenAI rate fallbacks. Input/output rates must be positive; cached
+tokens may explicitly cost zero.
+
 ### `DAIMON_BILLING__SIGNUP_CREDIT`
 
 `Decimal` · optional · default `10.00`

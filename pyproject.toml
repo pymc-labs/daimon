@@ -265,6 +265,7 @@ source_modules = [
     "daimon.core.runtime_health",
     "daimon.core.scheduler",
     "daimon.core.scope",
+    "daimon.core.selfhosted_usage",
     "daimon.core.session_compat",
     "daimon.core.session_fence_retry",
     "daimon.core.session_mutation",

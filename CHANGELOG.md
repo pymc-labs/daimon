@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validate binary harness skill bundles with shared SHA-256 digests and decoded size limits; require stable assistant message identities.
 
 - Hosted MCP chart links can use private Azure Blob Storage with managed identity and read-only user-delegation SAS. Select `DAIMON_ARTIFACTS__BACKEND=azure_blob` and set `DAIMON_ARTIFACTS__AZURE_CLIENT_ID` for an explicit managed identity, with no developer or service-principal fallback; S3 remains the default. A loopback-only Azurite connection string is supported for local development.
+- Added explicit Azure deployment-to-model tariffs and request-level settlement for selfhosted usage. Unpriced deployments refuse preparation; unknown usage stays pending, visible through `daimon usage pending`, until reconciled. Native usage now requires measured completeness before settlement.
 
 - Reserved the opt-in `selfhosted.loop` profile for the self-hosted harness. Runtime admission remains closed while the driver is being implemented.
 - Added offline-validated Azure Bicep infrastructure and an azd entrypoint for staged Container Apps deployment, PostgreSQL, Key Vault, Blob, ACR and Azure OpenAI/Foundry.

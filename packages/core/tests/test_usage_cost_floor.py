@@ -96,8 +96,10 @@ def test_full_split_floor_matches_token_cost_without_inventing_runtime():
         input_cache_write_tokens=10,
         output_tokens=5,
     )
+    assert provider_cost_of(value, price(), infrastructure_usd=Decimal(0)) is None
+    measured = value.model_copy(update={"completeness": "measured"})
     assert minimum_cost_of(value, price()) == provider_cost_of(
-        value, price(), infrastructure_usd=Decimal(0)
+        measured, price(), infrastructure_usd=Decimal(0)
     )
 
 

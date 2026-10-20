@@ -1314,3 +1314,60 @@ A terminal turn with no request inventory or usage is retained for operator
 reconciliation. A cancellation stays interrupted; other outcomes report an error. Its terminal event remains replayable,
 and later turns can use the session. Operators must investigate these unresolved
 turns rather than treating them as zero-cost work.
+
+## Selfhosted Azure usage
+
+The selfhosted accounting API settles incremental `model_request` observations
+through the same transactional usage outbox and credit ledger. A stable
+observation ID represents the harness `request_id`: stream replay, polling and
+restarts must retain it. Corrections use a higher revision of that same ID and
+apply only the signed difference. Inclusive input is split into cached and
+uncached tokens; reasoning is already included in output and is never charged
+twice. The tenant markup applies once to the resulting cost.
+
+Azure deployment names are arbitrary. Configure
+`DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` as a JSON object mapping each admitted
+deployment to its underlying model, and
+`DAIMON_BILLING__SELFHOSTED__MODELS` as a JSON object keyed by those underlying
+model IDs. Each model tariff requires `checked_on` (ISO date), `input`, `output`
+and `cache_read` (USD per million tokens), with optional `valid_before`
+(exclusive). Supply the verified rates for the Azure region and purchase
+agreement. Input and output rates must be positive; cache-read may explicitly
+be zero. There is no built-in Azure tariff and no public OpenAI price fallback.
+Missing, future-dated or expired tariffs refuse preparation through
+`require_selfhosted_price`; provider preparation must call this before starting
+model work. The recorder accepts receipts naming either the admitted deployment
+or its configured underlying model, retaining the original model identity.
+
+`record_selfhosted_usage` binds the admitted deployment, tenant and binding to
+`record_provider_usage` at request grain. Compute cost is supplied separately
+per request: `None` keeps settlement pending; explicit audited zero means the
+operator funds compute separately. C3 token counters cannot establish compute
+cost. Runtime integration must supply both the tariff admission check and this
+recorder; the reserved profile alone does not enable turns.
+
+Native observations with `completeness: unknown` or `partial` stay pending even
+if token fields happen to be populated. Missing usage is never replaced by zero.
+If a tariff disappears after admission, a model receipt is unexpected, or usage
+or infrastructure is unavailable, the receipt and outbox remain durable and no
+unverified debit is posted. Turn telemetry reports unknown cost and an unpriced
+call. Operators can inspect outstanding billing gaps with:
+
+```bash
+daimon usage pending TENANT_UUID --json
+```
+
+This tenant-scoped, read-only command shows the latest pending revision's
+binding, session, observation ID, model, completeness and timestamp, without
+native meter payloads or content. It includes all pending dates and uses
+`--limit` (default 100, maximum 1000). A settled newer revision removes the gap
+from this report while preserving the earlier snapshot for audit.
+
+Recovery replays the durable harness usage journal through the same recorder.
+An unchanged pending snapshot may settle after verified pricing or compute
+becomes available; repaired usage needs a higher measured revision of the same
+request. Replayed settled requests cannot debit again. The Anthropic usage sweep
+is not a selfhosted recovery path. The harness journals request intention before model I/O. On reconcile, an
+unmatched intention becomes an unknown observation with the same stable
+request ID. Retain it pending until authoritative model usage is recovered;
+never infer token counts from a terminal turn or a missing receipt.

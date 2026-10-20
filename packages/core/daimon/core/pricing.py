@@ -351,13 +351,18 @@ def provider_cost_of(
 ) -> Decimal | None:
     """Verified total cost, including actual session/container charges.
 
-    Missing counts or infrastructure remain unverified, never a free turn.
+    Non-measured completeness, missing counts or infrastructure remain
+    unverified, never a free turn.
     A caller may explicitly supply zero for inapplicable infrastructure.
     Equal cached/uncached rates permit exact inclusive-input pricing even
     when the split is unreported. No missing native count is filled in.
     """
     tokens = provider_usage_tokens(usage, price)
-    if not price.current_on(usage.observed_at.date()) or infrastructure_usd is None:
+    if (
+        usage.completeness != "measured"
+        or not price.current_on(usage.observed_at.date())
+        or infrastructure_usd is None
+    ):
         return None
     if price.max_priced_input_tokens is not None and (
         usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens

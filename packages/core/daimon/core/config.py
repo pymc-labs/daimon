@@ -11,7 +11,7 @@ import binascii
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
@@ -1320,6 +1320,49 @@ class SentrySettings(BaseModel):
     )
 
 
+class SelfhostedModelPrice(BaseModel):
+    """Operator-verified Azure rates for an underlying model, in USD/M tokens."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    checked_on: date
+    input: Decimal = Field(gt=0, allow_inf_nan=False)
+    output: Decimal = Field(gt=0, allow_inf_nan=False)
+    cache_read: Decimal = Field(ge=0, allow_inf_nan=False)
+    valid_before: date | None = None
+
+    @model_validator(mode="after")
+    def validate_window(self) -> SelfhostedModelPrice:
+        if self.valid_before is not None and self.valid_before <= self.checked_on:
+            raise ValueError("pricing validity must extend beyond its checked date")
+        return self
+
+
+class SelfhostedBillingSettings(BaseModel):
+    """Explicit Azure deployment identities and operator-verified model tariffs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deployments: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "JSON object mapping selfhosted Azure deployment names to underlying model ids. "
+            "Every deployment must resolve to an explicitly configured model tariff; "
+            "unmapped or unpriced deployments refuse turns."
+        ),
+    )
+    models: dict[str, SelfhostedModelPrice] = Field(
+        default_factory=dict,
+        description=(
+            "JSON object keyed by underlying Azure OpenAI model id. Each tariff requires "
+            "checked_on (ISO date), input, output and cache_read (USD per million tokens); "
+            "optional valid_before expires the tariff. Supply verified regional/contract "
+            "Azure rates, never deployment-name guesses or public OpenAI rate fallbacks. "
+            "Input/output rates must be positive; cached tokens may explicitly cost zero."
+        ),
+    )
+
+
 class BillingSettings(BaseModel):
     """Money policy: markup multiplier and trial credit seed.
 
@@ -1335,6 +1378,7 @@ class BillingSettings(BaseModel):
             "the tenant. 1.0 = pass-through."
         ),
     )
+    selfhosted: SelfhostedBillingSettings = Field(default_factory=SelfhostedBillingSettings)
     signup_credit: Decimal = Field(
         default=Decimal("10.00"),
         description=(
