@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 import httpx
 import pytest
@@ -42,7 +42,15 @@ from daimon.core.answering_map import (
 )
 from daimon.core.billing_panel import BillingPanelState, MemberRow, lookup_line
 from daimon.core.channel_budget import ChannelBudgetStatus
-from daimon.core.confirmation import prompt_for_tool_call
+from daimon.core.confirmation import (
+    SEND_BODY_LIMIT,
+    SEND_HEADER_BYTES,
+    WRITE_BODY_BYTES,
+    WRITE_BODY_LIMIT,
+    WRITE_PATH_LIMIT,
+    prompt_for_tool_call,
+    write_body_size,
+)
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_repo_auth import RepoAccess
 from daimon.core.here_card import assemble_here_card
@@ -377,16 +385,19 @@ def _confirmation(state: ConfirmationCardState) -> AdaptiveCard:
     return confirmation_adaptive_card(confirmation, prompt, answered_by=EMOJI * 256)
 
 
-_ADDRESSES = [f"{'a' * 30}{n:02d}@example.com" for n in range(25)]
-#: Microsoft approval cards at the most their tools accept: a 500-character path, a
-#: 2,000-character write body, and 50 recipients with an 8,000-character mail body.
+#: 50 ASCII addresses of 50 bytes, with a long subject and location, fill the 3,000 header bytes.
+#: Wide characters fill them with a subject, location and start of 980 bytes each.
+_ADDRESSES = [f"{'a' * 35}{n:02d}@example.com" for n in range(25)]
+_WIDE = EMOJI * (980 // len(EMOJI.encode()))
+#: Microsoft approval cards at the most their tools accept: a 500-character path, a write body
+#: of 8,000 characters or 14,000 bytes, and a mail of 50 recipients with an 8,000-character body.
 MICROSOFT_CARDS: dict[str, tuple[str, dict[str, object]]] = {
     "write_wide_characters": (
         "microsoft_write",
         {
             "method": "POST",
             "path": f"/me/onenote/pages{EMOJI * 480}",
-            "body": EMOJI * (2_000 // len(EMOJI)),
+            "body": EMOJI * (WRITE_BODY_BYTES // len(EMOJI.encode())),
             "file_handle": EMOJI * 500,
         },
     ),
@@ -395,7 +406,15 @@ MICROSOFT_CARDS: dict[str, tuple[str, dict[str, object]]] = {
         {
             "method": "POST",
             "path": "/me/onenote/sections/" + "s" * 450 + "/pages",
-            "body": "a\n" * 1_000,
+            "body": "a\n" * (WRITE_BODY_LIMIT // 2),
+        },
+    ),
+    "write_json": (
+        "microsoft_write",
+        {
+            "method": "PATCH",
+            "path": "/me/drive/items/x/workbook/worksheets/S/range(address='A1')",
+            "body": {"values": [[EMOJI, 1, "a"]] * ((WRITE_BODY_LIMIT - 30) // 20)},
         },
     ),
     "send_short_lines": (
@@ -404,11 +423,23 @@ MICROSOFT_CARDS: dict[str, tuple[str, dict[str, object]]] = {
             "action": "create_event",
             "to": _ADDRESSES,
             "cc": _ADDRESSES,
-            "subject": "s" * 255,
-            "location": "l" * 255,
+            "subject": "s" * 250,
+            "location": "l" * 200,
             "start": "2026-09-15T10:00",
             "end": "2026-09-15T11:00",
-            "body": "a\n" * 4_000,
+            "body": "a\n" * (SEND_BODY_LIMIT // 2),
+        },
+    ),
+    "send_wide_characters": (
+        "microsoft_send",
+        {
+            "action": "create_event",
+            "to": ["a@example.com"],
+            "subject": _WIDE,
+            "location": _WIDE,
+            "start": _WIDE,
+            "end": "2026-09-15T11:00",
+            "body": "a\n" * (SEND_BODY_LIMIT // 2),
         },
     ),
 }
@@ -530,3 +561,24 @@ def test_dialog_renders_in_teams_when_every_input_is_at_its_worst(case: str) -> 
     assert_card_renders(
         dumped if isinstance(source, AdaptiveCard) else dumped["task"]["value"]["card"]["content"]
     )
+
+
+@pytest.mark.parametrize("case", MICROSOFT_CARDS)
+def test_microsoft_worst_cases_are_inputs_the_tools_accept(case: str) -> None:
+    """The cases above must be calls the tools let through, not larger ones."""
+    tool_name, data = MICROSOFT_CARDS[case]
+    if tool_name == "microsoft_write":
+        size, size_bytes = write_body_size(data.get("body"))
+        assert size <= WRITE_BODY_LIMIT and size_bytes <= WRITE_BODY_BYTES
+        assert len(str(data["path"])) <= WRITE_PATH_LIMIT
+    else:
+        header = [
+            *cast(list[str], data["to"]),
+            *cast(list[str], data.get("cc", [])),
+            *(
+                str(data.get(key) or "")
+                for key in ("subject", "location", "start", "end", "time_zone")
+            ),
+        ]
+        assert sum(len(field.encode()) for field in header) <= SEND_HEADER_BYTES
+        assert len(str(data["body"])) <= SEND_BODY_LIMIT

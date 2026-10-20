@@ -30,6 +30,8 @@ from daimon.adapters.mcp.tools.microsoft._person import (
 )
 from daimon.core.confirmation import (
     SEND_BODY_LIMIT,
+    SEND_HEADER_BYTES,
+    WRITE_BODY_BYTES,
     WRITE_BODY_LIMIT,
     WRITE_PATH_LIMIT,
     is_plain,
@@ -59,7 +61,7 @@ _HIT_KEYS = (
 _ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,63}")
 _ADDRESS = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+")
 _MAX_RECIPIENTS = 50
-#: Longest email address (RFC 5321), so a card with 50 of them still fits.
+#: Longest email address (RFC 5321).
 _MAX_ADDRESS = 254
 _DOWNLOAD_KEYS = frozenset({"@microsoft.graph.downloadurl", "@content.downloadurl"})
 
@@ -325,15 +327,13 @@ async def microsoft_write_impl(
             f"Nothing was written: the path is {len(target.decoded):,} characters and the "
             f"limit is {WRITE_PATH_LIMIT:,}."
         )
-    if (size := write_body_size(body)) > WRITE_BODY_LIMIT:
+    size, size_bytes = write_body_size(body)
+    if size > WRITE_BODY_LIMIT or size_bytes > WRITE_BODY_BYTES:
         raise ToolError(
-            f"Nothing was written: the body is {size:,} characters and the limit is "
-            f"{WRITE_BODY_LIMIT:,}. Make the change in smaller calls."
+            f"Nothing was written: the body is {size:,} characters ({size_bytes:,} bytes) and the "
+            f"limit is {WRITE_BODY_LIMIT:,} characters and {WRITE_BODY_BYTES:,} bytes (emoji and "
+            "most non-Latin text take 3 to 4 bytes each). Make the change in smaller calls."
         )
-    if target.personal:
-        await require_one_to_one(runtime, auth, origin_context_id, what="OneNote")
-    if (kind == "upload") != (file_handle is not None):
-        raise ToolError("A file upload (PUT .../content) takes file_handle; nothing else does.")
     content: bytes | None = None
     headers: dict[str, str] = {}
     payload: JsonValue = None
@@ -369,6 +369,17 @@ async def microsoft_write_impl(
     if response.is_error:
         raise _refused(response)
     return _result(response, links=False)
+
+
+def _check_send_header(fields: list[str]) -> None:
+    """Refuse a send whose approval card could not show every address and field whole."""
+    size = sum(len(field.strip().encode()) for field in fields)
+    if size > SEND_HEADER_BYTES:
+        raise ToolError(
+            f"Nothing was sent: the addresses, subject, location, start, end and time zone "
+            f"total {size:,} bytes and the limit is {SEND_HEADER_BYTES:,} (emoji and most "
+            "non-Latin text take 3 to 4 bytes a character). Shorten them or send to fewer people."
+        )
 
 
 def _recipients(addresses: list[str], field: str) -> list[dict[str, object]]:
@@ -425,6 +436,7 @@ async def microsoft_send_impl(
         )
     if not to or len(to) + len(cc) > _MAX_RECIPIENTS:
         raise ToolError(f"Pass between 1 and {_MAX_RECIPIENTS} recipients.")
+    _check_send_header([*to, *cc, subject, location or "", start or "", end or "", time_zone])
     text = {"contentType": "Text", "content": body}
     if action == "send_mail":
         message: dict[str, object] = {

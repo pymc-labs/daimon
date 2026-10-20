@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from daimon.core.confirmation import (
+    WRITE_BODY_BYTES,
     WRITE_BODY_LIMIT,
     ConfirmationPrompt,
     prompt_for_tool_call,
@@ -173,6 +174,15 @@ def test_the_title_follows_the_tools_own_classification(method: str, path: str, 
 def test_a_body_at_the_limit_is_shown_whole_and_one_over_is_flagged() -> None:
     whole = _prompt(method="POST", path="/me/onenote/pages", body="a\n" * (WRITE_BODY_LIMIT // 2))
     assert not any("not shown" in line for line in whole.detail_lines)
-    assert write_body_size("a\n" * (WRITE_BODY_LIMIT // 2)) == WRITE_BODY_LIMIT
+    assert write_body_size("a\n" * (WRITE_BODY_LIMIT // 2)) == (WRITE_BODY_LIMIT,) * 2
     over = _prompt(method="POST", path="/me/onenote/pages", body="a" * (WRITE_BODY_LIMIT + 1))
     assert "(+1 more characters not shown)" in over.detail_lines[-1]
+
+
+def test_wide_characters_are_cut_by_bytes_and_the_card_says_so() -> None:
+    """Emoji cost 4 bytes a character on the card, so the byte limit binds before the other."""
+    body = "😀" * (WRITE_BODY_BYTES // 4 + 10)
+    prompt = _prompt(method="POST", path="/me/onenote/pages", body=body)
+    shown = "".join(prompt.detail_lines[3:-1])
+    assert len(shown.encode()) <= WRITE_BODY_BYTES
+    assert "(+10 more characters not shown)" in prompt.detail_lines[-1]

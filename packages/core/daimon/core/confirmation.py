@@ -79,9 +79,17 @@ SEND_BODY_LIMIT: Final[int] = 8000
 _SEND_PREVIEW: Final[int] = 400
 #: Longest `microsoft_write` path the tool accepts, so the card shows all of it.
 WRITE_PATH_LIMIT: Final[int] = 500
-#: Longest `microsoft_write` body (a text body's characters, or a JSON body's compact form), so
-#: Details holds all of it and the card stays under Teams' message size cap. The tool refuses more.
-WRITE_BODY_LIMIT: Final[int] = 2000
+#: Longest `microsoft_write` body in characters (a text body's, or a JSON body's compact form).
+WRITE_BODY_LIMIT: Final[int] = 8000
+#: Longest `microsoft_write` body in UTF-8 bytes. Emoji and most CJK text cost 3 to 4 bytes a
+#: character on the card, and Teams refuses a message over about 28 KB, so a body of such text is
+#: cut shorter than WRITE_BODY_LIMIT. Together the two let Details hold the whole body. The tool
+#: refuses more than either.
+WRITE_BODY_BYTES: Final[int] = 14000
+#: Most UTF-8 bytes a `microsoft_send`'s addresses, subject, location, start, end and time zone
+#: may total. The card shows each in three places and Teams refuses a message over about 28 KB,
+#: so this keeps room for a full 8,000-character body. The tool refuses more.
+SEND_HEADER_BYTES: Final[int] = 3000
 #: Longest `microsoft_write` path the card shows before Details.
 _WRITE_PATH_PREVIEW: Final[int] = 120
 
@@ -278,9 +286,16 @@ def _write_body_text(body: object) -> str:
     return json.dumps(body, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-def write_body_size(body: object) -> int:
-    """How many characters of `microsoft_write` body the card has to show."""
-    return len(_write_body_text(body))
+def write_body_size(body: object) -> tuple[int, int]:
+    """How many characters, and UTF-8 bytes, of `microsoft_write` body the card has to show."""
+    text = _write_body_text(body)
+    return len(text), len(text.encode())
+
+
+def _shown_write_body(text: str) -> str:
+    """The part of a `microsoft_write` body the card shows: all of it, up to the tool's limits."""
+    shown = text[:WRITE_BODY_LIMIT].encode()[:WRITE_BODY_BYTES]
+    return shown.decode(errors="ignore")
 
 
 def _microsoft_write_card(data: dict[str, object]) -> tuple[str, str, tuple[str, ...]]:
@@ -291,7 +306,8 @@ def _microsoft_write_card(data: dict[str, object]) -> tuple[str, str, tuple[str,
     path = _one_line(decoded)
     handle = _one_line(data.get("file_handle")) if data.get("file_handle") else None
     text = _write_body_text(data.get("body"))
-    lines = [line for line in map(_plain, text[:WRITE_BODY_LIMIT].splitlines()) if line.strip()]
+    shown_text = _shown_write_body(text)
+    lines = [line for line in map(_plain, shown_text.splitlines()) if line.strip()]
     facts = (
         f"Method: {method}",
         # The end of a path says what is changed, so a long one loses its middle.
@@ -303,7 +319,7 @@ def _microsoft_write_card(data: dict[str, object]) -> tuple[str, str, tuple[str,
     else:
         # An upload's bytes are staged, not in the call; its file handle stands for them.
         shown = () if handle else ("Content: (none)",)
-    cut = len(text) - WRITE_BODY_LIMIT
+    cut = len(text) - len(shown_text)
     details = (
         f"Method: {method}",
         f"Path: {_clip_middle(path, WRITE_PATH_LIMIT)}",

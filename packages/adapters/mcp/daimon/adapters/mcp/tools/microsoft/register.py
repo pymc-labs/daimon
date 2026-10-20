@@ -104,7 +104,8 @@ def register_microsoft_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
           page HTML as a string body; PATCH /me/onenote/pages/{id}/content with a
           JSON list of patch commands.
         Nothing else is accepted: the path is at most 500 characters and the body at most
-        2,000, so make big changes in several calls. Mail and invites go through microsoft_send.
+        8,000 characters (14,000 bytes, so less for emoji and most non-Latin text); make big
+        changes in several calls. Mail and invites go through microsoft_send.
         Where tool safety is on, each call waits for the person's Approve.
         Pass origin_context_id from the current chat (OneNote needs it).
         """
