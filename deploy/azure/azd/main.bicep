@@ -1,4 +1,5 @@
 import { validateNamePrefix } from '../names.bicep'
+import { validateChartStorage } from '../chart-storage.bicep'
 
 targetScope = 'subscription'
 param environmentName string
@@ -12,6 +13,9 @@ param containerImage string = ''
 param deployServices bool = false
 @description('Disable to deploy the existing backend before Azure OpenAI quota is available.')
 param deployAi bool = true
+@allowed(['azure_blob', 'external'])
+@description('azure_blob configures MCP and Blob roles. external leaves artifact configuration and permissions to the operator.')
+param chartStorage string = 'azure_blob'
 @description('Enable for production/tenant-sealed installs. Cannot be disabled again on an existing vault.')
 param vaultPurgeProtection bool = false
 @allowed(['discord', 'teams', 'mcp', 'scheduler'])
@@ -30,6 +34,7 @@ param serviceSecretNames object = {}
 param postgresFirewallRules array = []
 
 var checkedNamePrefix = validateNamePrefix(namePrefix)
+var checkedChartStorage = validateChartStorage(chartStorage, secretNames, serviceSecretNames.?mcp ?? {})
 
 resource group 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: 'rg-${checkedNamePrefix}-${environmentName}'
@@ -46,6 +51,7 @@ module stack '../main.bicep' = {
     containerImage: containerImage
     deployServices: deployServices
     deployAi: deployAi
+    chartStorage: checkedChartStorage
     vaultPurgeProtection: vaultPurgeProtection
     services: services
     gpt5DeploymentName: gpt5DeploymentName

@@ -1,4 +1,5 @@
 import { validateNamePrefix } from './names.bicep'
+import { validateChartStorage, chartArtifactsEnvironment } from './chart-storage.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -31,6 +32,9 @@ param containerImage string = ''
 param deployServices bool = false
 @description('Disable to deploy the existing backend before Azure OpenAI quota is available.')
 param deployAi bool = true
+@allowed(['azure_blob', 'external'])
+@description('azure_blob configures MCP and Blob roles. external leaves artifact configuration and permissions to the operator.')
+param chartStorage string = 'azure_blob'
 @description('Enable for production/tenant-sealed installs. Cannot be disabled again on an existing vault.')
 param vaultPurgeProtection bool = false
 @allowed(['discord', 'teams', 'mcp', 'scheduler'])
@@ -49,6 +53,7 @@ param serviceSecretNames object = {}
 param postgresFirewallRules array = []
 
 var checkedNamePrefix = validateNamePrefix(namePrefix)
+var checkedChartStorage = validateChartStorage(chartStorage, secretNames, serviceSecretNames.?mcp ?? {})
 var suffix = uniqueString(resourceGroup().id)
 var stem = '${checkedNamePrefix}-${suffix}'
 var tags = { application: 'daimon' }
@@ -61,6 +66,7 @@ module foundation './modules/foundation.bicep' = {
     compactName: '${checkedNamePrefix}${suffix}'
     tags: tags
     vaultPurgeProtection: vaultPurgeProtection
+    chartStorage: checkedChartStorage
   }
 }
 
@@ -110,12 +116,12 @@ var commonSecrets = union(
   secretNames
 )
 
-var artifactsEnvironment = {
-  DAIMON_ARTIFACTS__BACKEND: 'azure_blob'
-  DAIMON_ARTIFACTS__ENDPOINT_URL: foundation.outputs.blobEndpoint
-  DAIMON_ARTIFACTS__BUCKET: foundation.outputs.chartsContainerName
-  DAIMON_ARTIFACTS__AZURE_CLIENT_ID: foundation.outputs.identityClientId
-}
+var artifactsEnvironment = chartArtifactsEnvironment(
+  checkedChartStorage,
+  foundation.outputs.blobEndpoint,
+  foundation.outputs.chartsContainerName,
+  foundation.outputs.identityClientId
+)
 
 module init './modules/init.bicep' = if (!empty(containerImage)) {
   name: 'init'

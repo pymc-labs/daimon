@@ -16,9 +16,11 @@ Service secrets use Key Vault references through managed identity.
 
 Deployment is staged: foundation, image publication and successful init, then
 serving apps. The baseline uses public endpoints and does not implement private
-networking. MCP is configured for private Blob chart storage with the runtime
-managed identity: delegation-key access is scoped to the storage account and
-blob data access to the charts container. These templates have been validated
+networking. By default (`chartStorage=azure_blob`), MCP uses private Blob chart
+storage with the runtime managed identity: delegation-key access is scoped to
+the storage account and blob data access to the charts container. Existing S3
+installations must set `chartStorage=external` to omit Blob defaults and roles;
+Blob mode rejects shared or MCP S3 secret mappings before app startup. These templates have been validated
 offline only; subscription deployment and runtime behavior have not been verified. See `deploy/azure/README.md` in the
 repository for parameters, deployment commands, required roles and limitations.
 

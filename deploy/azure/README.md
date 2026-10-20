@@ -105,9 +105,10 @@ Developer CLI (`azd`), Docker with BuildKit, and Bicep first.
   [hosted-agent permissions reference](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-permissions).
 
 The runtime user-assigned identity receives only AcrPull on this registry,
-Key Vault Secrets User on this vault, Storage Blob Delegator on this storage
-account, Storage Blob Data Contributor on the `charts` container, and Cognitive
-Services OpenAI User on the AI account. The account-scoped Blob role only
+Key Vault Secrets User on this vault and Cognitive Services OpenAI User on the
+AI account. With `chartStorage=azure_blob` (the default), it also receives Storage
+Blob Delegator on this storage account and Storage Blob Data Contributor on the
+`charts` container. With `chartStorage=external`, neither Blob role is assigned. The account-scoped Blob role only
 permits delegation-key issuance; blob data access stays scoped to charts.
 The project's system identity also receives Cognitive Services OpenAI User on
 the AI account. No subscription-wide runtime roles are assigned. Hosted-agent
@@ -343,7 +344,8 @@ identity permissions and its invocation endpoint are separate from this stack.
 
 ## Chart storage
 
-The MCP app is configured automatically for private Azure Blob chart links:
+Both entrypoints accept `chartStorage`, either `azure_blob` (default) or
+`external`. With `azure_blob`, MCP receives private Azure Blob chart defaults:
 
 | Environment variable | Template value |
 | --- | --- |
@@ -355,11 +357,30 @@ The MCP app is configured automatically for private Azure Blob chart links:
 These values come from the foundation module's outputs. The artifact settings
 are applied only to MCP; other services and init do not receive them by default.
 `appEnvironment` and `serviceEnvironment.mcp` override these defaults, with
-per-service settings taking precedence. Existing S3 installations can retain
-their explicit backend, endpoint and bucket settings. For Azure Blob, keep S3
-keys and Azurite connection strings unset.
+per-service settings taking precedence. For Azure Blob, keep S3 keys and
+Azurite connection strings unset. A mapping for `DAIMON_ARTIFACTS__ACCESS_KEY_ID`
+or `DAIMON_ARTIFACTS__SECRET_ACCESS_KEY` in shared `secretNames` or
+`serviceSecretNames.mcp` causes early deployment validation to fail with a message
+to set `chartStorage='external'`. The guard checks mapping names, even if the
+backend is omitted or the mapped vault secret is empty.
 
-The runtime identity receives **Storage Blob Delegator** at storage-account
+For existing S3 installations, set `chartStorage='external'` in **every deployment
+stage**, including the foundation, while retaining the endpoint, bucket and
+secret mappings. No `DAIMON_ARTIFACTS__*` defaults or Blob role assignments are
+injected in this mode; an omitted backend retains Daimon's `s3` default. The
+private storage account and charts container are still provisioned. Changing to
+`external` in an incremental deployment does not remove previously granted Blob
+roles; remove those assignments separately when migrating an existing Blob
+installation.
+
+For example, add the following to the parameter file's `parameters` object for
+an S3 installation (retain its existing environment and secret mappings):
+
+```json
+"chartStorage": { "value": "external" }
+```
+
+In `azure_blob` mode, the runtime identity receives **Storage Blob Delegator** at storage-account
 scope to mint user-delegation keys, plus **Storage Blob Data Contributor**
 scoped to the charts container for uploads and reads. There is no account-wide
 Blob data role. See the [Azure storage role definitions](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/storage).

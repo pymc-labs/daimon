@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import ssl
 import subprocess
@@ -232,8 +233,6 @@ def test_ai_is_optional_and_vault_protection_is_opt_in(templates: dict[str, dict
 def test_name_prefix_validation_runs_offline(
     templates: dict[str, dict], tmp_path: Path, prefix: str, valid: bool
 ) -> None:
-    import os
-
     # build-params evaluates the production predicate locally. fail() itself
     # requires ARM; check below that both entrypoints use its guarded wrapper.
     source = tmp_path / "names.bicepparam"
@@ -295,6 +294,7 @@ def test_blob_delegation_is_account_scoped_and_data_access_is_charts_only(
         assert len(matches) == 1
         role = matches[0]
         assert role["scope"] == scope
+        assert role["condition"] == "[equals(parameters('chartStorage'), 'azure_blob')]"
         assert (
             role["properties"]["principalId"]
             == foundation["outputs"]["identityPrincipalId"]["value"]
@@ -307,12 +307,12 @@ def test_only_mcp_receives_blob_settings_from_foundation_outputs(
 ) -> None:
     main = templates["main.bicep"]
     artifacts = main["outputs"]["mcpArtifactsEnvironment"]["value"]
-    assert artifacts == {
-        "DAIMON_ARTIFACTS__BACKEND": "azure_blob",
-        "DAIMON_ARTIFACTS__ENDPOINT_URL": main["outputs"]["chartsBlobEndpoint"]["value"],
-        "DAIMON_ARTIFACTS__BUCKET": main["outputs"]["chartsContainerName"]["value"],
-        "DAIMON_ARTIFACTS__AZURE_CLIENT_ID": "[reference('foundation').outputs.identityClientId.value]",
-    }
+    assert artifacts == (
+        "[__bicep.chartArtifactsEnvironment(variables('checkedChartStorage'), "
+        "reference('foundation').outputs.blobEndpoint.value, "
+        "reference('foundation').outputs.chartsContainerName.value, "
+        "reference('foundation').outputs.identityClientId.value)]"
+    )
     foundation = templates["modules/foundation.bicep"]
     assert foundation["outputs"]["chartsContainerName"]["value"] == "charts"
     assert ".primaryEndpoints.blob" in foundation["outputs"]["blobEndpoint"]["value"]
@@ -321,11 +321,9 @@ def test_only_mcp_receives_blob_settings_from_foundation_outputs(
     environment = app["properties"]["parameters"]["environment"]["value"]
     assert (
         "if(equals(variables('serviceDefinitions')[copyIndex()].name, 'mcp'), "
-        "createObject('DAIMON_ARTIFACTS__BACKEND', 'azure_blob'"
+        "__bicep.chartArtifactsEnvironment(variables('checkedChartStorage')"
     ) in environment
-    for name, value in artifacts.items():
-        assert f"'{name}'" in environment
-        assert value.strip("[]") in environment
+    assert artifacts.strip("[]") in environment
     init = next(r for r in main["resources"] if r["name"] == "init")
     assert "DAIMON_ARTIFACTS__" not in init["properties"]["parameters"]["environment"]["value"]
     assert (
@@ -343,11 +341,105 @@ def test_explicit_artifact_backend_overrides_blob_defaults(templates: dict[str, 
     # per-service overrides must win over both shared settings and defaults.
     assert environment.startswith(
         "[union(if(equals(variables('serviceDefinitions')[copyIndex()].name, 'mcp'), "
-        "createObject('DAIMON_ARTIFACTS__BACKEND', 'azure_blob'"
+        "__bicep.chartArtifactsEnvironment(variables('checkedChartStorage')"
     )
-    assert environment.index("parameters('appEnvironment')") > environment.index("'azure_blob'")
+    assert environment.index("parameters('appEnvironment')") > environment.index(
+        "__bicep.chartArtifactsEnvironment("
+    )
     assert "parameters('appEnvironment')), if(" in environment
     assert environment.endswith(
         "coalesce(tryGet(parameters('serviceEnvironment'), "
         "variables('serviceDefinitions')[copyIndex()].name), createObject()))]"
     )
+
+
+@pytest.mark.parametrize("mode", ["azure_blob", "external"])
+@pytest.mark.parametrize(
+    ("scope", "key"),
+    [
+        ("shared", "DAIMON_ARTIFACTS__ACCESS_KEY_ID"),
+        ("shared", "DAIMON_ARTIFACTS__SECRET_ACCESS_KEY"),
+        ("mcp", "DAIMON_ARTIFACTS__ACCESS_KEY_ID"),
+        ("mcp", "DAIMON_ARTIFACTS__SECRET_ACCESS_KEY"),
+        ("shared", "DAIMON_ANTHROPIC__API_KEY"),
+        ("mcp", "DAIMON_ANTHROPIC__API_KEY"),
+        ("none", ""),
+    ],
+)
+def test_chart_storage_modes_and_implicit_s3_configuration(
+    templates: dict[str, dict], tmp_path: Path, mode: str, scope: str, key: str
+) -> None:
+    # Evaluate the production functions offline. This S3 configuration omits
+    # BACKEND, as existing installations rely on the application's s3 default.
+    shared = {key: "existing-secret"} if scope == "shared" else {}
+    mcp = {key: "existing-secret"} if scope == "mcp" else {}
+    source = tmp_path / "charts.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/chart-storage.bicep", tmp_path)
+    source.write_text(
+        f"using none\nimport {{ isValidChartStorage, chartArtifactsEnvironment }} from '{relative}'\n"
+        f"param valid = isValidChartStorage('{mode}', "
+        f"json('{json.dumps(shared)}'), json('{json.dumps(mcp)}'))\n"
+        f"param defaults = chartArtifactsEnvironment('{mode}', "
+        "'https://storage.blob.core.windows.net/', 'charts', 'identity')\n"
+        "param environment = union(defaults, {\n"
+        "  DAIMON_ARTIFACTS__ENDPOINT_URL: 'https://s3.example.test'\n"
+        "  DAIMON_ARTIFACTS__BUCKET: 'existing-charts'\n"
+        "})\n"
+    )
+    target = tmp_path / "charts.json"
+    result = subprocess.run(
+        ["bicep", "build-params", str(source), "--outfile", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    parameters = json.loads(target.read_text())["parameters"]
+    expected_valid = mode == "external" or not key.startswith("DAIMON_ARTIFACTS__")
+    assert parameters["valid"]["value"] is expected_valid
+    defaults = parameters["defaults"]["value"]
+    if mode == "external":
+        assert defaults == {}
+        assert "DAIMON_ARTIFACTS__BACKEND" not in parameters["environment"]["value"]
+        from daimon.core.config import ArtifactsSettings
+
+        settings = {
+            name.removeprefix("DAIMON_ARTIFACTS__").lower(): value
+            for name, value in parameters["environment"]["value"].items()
+        }
+        settings.update(access_key_id="synthetic", secret_access_key="synthetic")
+        assert ArtifactsSettings.model_validate(settings).backend == "s3"
+    else:
+        assert defaults == {
+            "DAIMON_ARTIFACTS__BACKEND": "azure_blob",
+            "DAIMON_ARTIFACTS__ENDPOINT_URL": "https://storage.blob.core.windows.net/",
+            "DAIMON_ARTIFACTS__BUCKET": "charts",
+            "DAIMON_ARTIFACTS__AZURE_CLIENT_ID": "identity",
+        }
+
+
+def test_chart_storage_guard_controls_defaults_and_role_assignments(
+    templates: dict[str, dict],
+) -> None:
+    for entrypoint, module_name in (("main.bicep", "foundation"), ("azd/main.bicep", "daimon")):
+        template = templates[entrypoint]
+        assert template["parameters"]["chartStorage"]["defaultValue"] == "azure_blob"
+        assert template["parameters"]["chartStorage"]["allowedValues"] == ["azure_blob", "external"]
+        assert template["variables"]["checkedChartStorage"] == (
+            "[__bicep.validateChartStorage(parameters('chartStorage'), parameters('secretNames'), "
+            "coalesce(tryGet(parameters('serviceSecretNames'), 'mcp'), createObject()))]"
+        )
+        module = next(r for r in template["resources"] if r["name"] == module_name)
+        assert module["properties"]["parameters"]["chartStorage"]["value"] == (
+            "[variables('checkedChartStorage')]"
+        )
+        validator = next(
+            f
+            for group in template["functions"]
+            for name, f in group["members"].items()
+            if name == "validateChartStorage"
+        )
+        assert "isValidChartStorage(" in validator["output"]["value"]
+        assert (
+            "fail('S3 artifact secret mappings are incompatible with chartStorage=azure_blob; "
+            "set chartStorage=''external''.')"
+        ) in validator["output"]["value"]
