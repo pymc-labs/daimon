@@ -284,6 +284,20 @@ that lock, including platform markers, and starts the installed application
 directly so startup cannot resolve different packages. Build it from the
 repository root with `docker build -f apps/report-host/Dockerfile .`.
 
+### Self-hosted agent harness
+
+The standalone harness image runs the OpenAI Agents SDK against Azure OpenAI.
+Build it from the repository root with
+`docker build -f apps/harness/Dockerfile -t daimon-harness .`. Its dependencies
+are exported from `uv.lock`; the image includes NumPy, pandas, PyMC and
+PyMC-Marketing. Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
+`AZURE_OPENAI_API_KEY` or managed identity credentials at runtime. Mount a
+persistent home directory at `/home/agent`; run one worker per session sandbox.
+Port 8088 serves authenticated `/v0/*` endpoints and `/invocations`. Model calls,
+tool execution and session files remain in the configured runtime and Azure
+model endpoint. The application README documents environment variables and
+Foundry deployment constraints.
+
 ### Running the processes by hand
 
 Requires [`uv`](https://docs.astral.sh/uv/):

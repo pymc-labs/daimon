@@ -159,6 +159,7 @@ and CI:
 | Only mux.drivers.anthropic / openai / gemini imports its SDK (three contracts) | `mux` → `anthropic`, `openai` or `google`, except from that provider's driver |
 | notebook-host must not import daimon | `notebook_host` → `daimon` |
 | report-host must not import daimon | `report_host` → `daimon` |
+| harness must not import daimon | `daimon_harness` → `daimon` |
 
 The first two make the platform surfaces replaceable: a change to how Slack
 renders a table cannot reach Discord, and core can be exercised without any
@@ -1612,6 +1613,13 @@ responses retain their existing behavior.
 Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the
 `must not import daimon` contracts keep it that way.
+
+`apps/harness/` is a standalone FastAPI agent runtime. It uses the OpenAI Agents SDK
+against Azure OpenAI and imports only mux wire contracts from the Daimon
+workspace. Authenticated HTTP endpoints submit turns, replay durable session
+events, resolve tool approvals and cancel work. Each sandbox owns its workspace
+and SQLite history under its persistent home directory. It needs Azure model
+credentials or managed identity, with no Anthropic dependency.
 
 ## Where to look next
 

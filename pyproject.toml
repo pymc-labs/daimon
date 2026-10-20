@@ -25,7 +25,7 @@ billing = ["daimon-adapter-mcp[billing]"]
 Repository = "https://github.com/pymc-labs/daimon"
 
 [tool.uv.workspace]
-members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host"]
+members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host", "apps/harness"]
 
 [tool.uv.sources]
 daimon-core = { workspace = true }
@@ -37,6 +37,7 @@ daimon-adapter-slack = { workspace = true }
 daimon-adapter-teams = { workspace = true }
 daimon-testing = { workspace = true }
 daimon-mux = { workspace = true }
+daimon-harness = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -57,14 +58,14 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 
 [tool.pyright]
 exclude = ["qa/live/tests"]
-include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
+include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingImports = "error"
 
 [tool.importlinter]
-root_packages = ["daimon", "mux", "notebook_host", "report_host"]
+root_packages = ["daimon", "mux", "notebook_host", "report_host", "daimon_harness"]
 # External packages are in the graph so the mux contracts can forbid provider SDKs.
 include_external_packages = true
 
@@ -378,12 +379,18 @@ type = "forbidden"
 source_modules = ["report_host"]
 forbidden_modules = ["daimon"]
 
+[[tool.importlinter.contracts]]
+name = "harness must not import daimon"
+type = "forbidden"
+source_modules = ["daimon_harness"]
+forbidden_modules = ["daimon"]
+
 [tool.pytest.ini_options]
 pythonpath = [".", "tests/golden"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests"]
+testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests"]
 addopts = "--import-mode=importlib -m 'not contract and not slow and not judge and not platform_contract'"
 markers = [
     "judge: manual Codex subscription transcript judge -- excluded by default",
