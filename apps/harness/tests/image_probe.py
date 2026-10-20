@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from daimon_harness.isolation import validate_session_mode
 from daimon_harness.journal import ConflictError, Journal
@@ -185,20 +186,34 @@ async def main() -> None:
                 command += "; wait"
             first.request.limits.deadline_s = 0.2 if ending == "timeout" else 5
             started = time.monotonic()
-            task = asyncio.create_task(first.bash(command))
-            if ending == "cancel":
-                while True:
-                    try:
-                        first.read(marker)
-                        break
-                    except ValueError:
-                        await asyncio.sleep(0.01)
-                task.cancel()
-            try:
-                await asyncio.wait_for(task, 4)
-                assert ending == "success"
-            except (TimeoutError, asyncio.CancelledError):
-                assert ending != "success"
+            create = asyncio.create_subprocess_exec
+            release_spawn = asyncio.Event()
+
+            async def delayed_spawn(
+                *args, create=create, ending=ending, release_spawn=release_spawn, **kwargs
+            ):
+                child = await create(*args, **kwargs)
+                if ending == "cancel":
+                    await release_spawn.wait()
+                return child
+
+            with patch("asyncio.create_subprocess_exec", delayed_spawn):
+                task = asyncio.create_task(first.bash(command))
+                if ending == "cancel":
+                    while True:
+                        try:
+                            first.read(marker)
+                            break
+                        except ValueError:
+                            await asyncio.sleep(0.01)
+                    assert not first.process_groups, "cancel must land during spawn"
+                    task.cancel()
+                    release_spawn.set()
+                try:
+                    await asyncio.wait_for(task, 4)
+                    assert ending == "success"
+                except (TimeoutError, asyncio.CancelledError):
+                    assert ending != "success"
             assert time.monotonic() - started < 4
             pid = int(first.read(marker))
             # Probe as the owner: hidepid prevents the service from enumerating it.

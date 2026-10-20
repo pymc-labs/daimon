@@ -343,6 +343,8 @@ jobs:
         run: docker run --rm daimon-harness:test python -c 'import numpy, pandas, pymc, pymc_marketing, daimon_harness.service'
       - name: isolated tool identities
         run: docker run --rm -v "$PWD/apps/harness/tests/image_probe.py:/tmp/image_probe.py:ro" daimon-harness:test python /tmp/image_probe.py
+      - name: managed identity startup without an API key
+        run: docker run --rm -v "$PWD/apps/harness/tests/identity_probe.py:/tmp/identity_probe.py:ro" daimon-harness:test python /tmp/identity_probe.py
       - name: multi-session proc and temporary-file isolation
         # Mount configuration needs SYS_ADMIN only during this test's root setup;
         # the harness drops it before any tool process runs.

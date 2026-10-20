@@ -18,6 +18,23 @@ from openai import AsyncAzureOpenAI
 from .conftest import turn
 
 
+async def test_managed_identity_without_api_key_uses_real_async_transport():
+    from azure.identity.aio import get_bearer_token_provider
+
+    from .identity_probe import SCOPE, TOKEN, managed_identity_endpoint
+
+    async with managed_identity_endpoint() as calls:
+        assert "AZURE_OPENAI_API_KEY" not in os.environ
+        adapter = AzureModelAdapter()
+        assert adapter.key is None and adapter.credential is not None
+        try:
+            provider = get_bearer_token_provider(adapter.credential, SCOPE)
+            assert await provider() == TOKEN
+            assert len(calls) == 1
+        finally:
+            await adapter.credential.close()
+
+
 async def test_sdk_tool_loop_meters_each_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -259,3 +259,10 @@ API keys and harness bearer tokens), operator MCP credentials, per-turn MCP
 credentials and acquired Azure bearer tokens. SDK debug logging uses the same
 redaction path. Cancellation waits for protected journal finalization and cleanup
 before acknowledgment, including when it arrives during finalization itself.
+
+Async Azure credentials use the image's explicit `aiohttp` dependency. CI starts
+the production service without an API key and obtains a token from a loopback
+managed-identity endpoint stub through the real Azure async credential transport.
+Command cleanup also covers cancellation while subprocess creation is pending:
+creation is shielded, and cancellation waits for the child to be registered,
+terminated and reaped before returning.

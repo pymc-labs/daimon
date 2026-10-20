@@ -69,6 +69,49 @@ async def test_tool_limit_blocks_execution(tmp_path: Path) -> None:
     assert not called
 
 
+async def test_cancel_during_spawn_waits_for_process_cleanup(tmp_path, monkeypatch):
+    import os
+    import signal
+    from contextlib import suppress
+
+    runtime = context(tmp_path)
+    create = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    release = asyncio.Event()
+    children = []
+
+    async def delayed_spawn(*args, **kwargs):
+        child = await create(*args, **kwargs)
+        children.append(child)
+        started.set()
+        await release.wait()
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    task = asyncio.create_task(runtime.bash("sleep 120"))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        assert not runtime.process_groups
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done(), "cancel must wait for the in-flight spawn"
+        task.cancel()  # Repeated cancellation must not cancel the cleanup task.
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        assert children[0].returncode is not None
+        assert not runtime.process_groups
+        with pytest.raises(ProcessLookupError):
+            os.kill(children[0].pid, 0)
+    finally:
+        release.set()
+        for child in children:
+            with suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGKILL)
+            await child.wait()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_bash_bounds_output_and_cancels_a_flooded_pipe(tmp_path: Path) -> None:
     runtime = context(tmp_path)
     output = await runtime.bash("printf '%0400000d' 0")

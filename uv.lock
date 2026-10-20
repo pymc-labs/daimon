@@ -1199,6 +1199,7 @@ name = "daimon-harness"
 version = "0.1.0"
 source = { editable = "apps/harness" }
 dependencies = [
+    { name = "aiohttp" },
     { name = "azure-identity" },
     { name = "daimon-mux" },
     { name = "fastapi" },
@@ -1219,6 +1220,7 @@ data = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.13.5,<4" },
     { name = "azure-identity", specifier = ">=1.25" },
     { name = "daimon-mux", editable = "packages/mux" },
     { name = "fastapi", specifier = ">=0.115" },

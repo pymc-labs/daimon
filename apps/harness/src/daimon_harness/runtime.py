@@ -148,72 +148,96 @@ class TurnContext:
 
     async def bash(self, command: str) -> str:
         uid, gid, groups = tool_identity(self.home, self.tool_uid)
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("sandbox_exec.py")),
-            str(max(1, min(300, math.ceil(self.request.limits.deadline_s)))),
-            str(4 * 1024 * 1024 * 1024),
-            "1024" if uid is not None else "16384",
-            command,
-            user=uid,
-            group=gid,
-            extra_groups=groups,
-            cwd=self.home,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-            # Model and harness credentials must not be visible in child processes.
-            env={
-                "HOME": str(self.work),
-                "TMPDIR": str(self.home / "tmp"),
-                "PYTHONUSERBASE": str(self.work / ".local"),
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "LANG": "C.UTF-8",
-            },
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                str(Path(__file__).with_name("sandbox_exec.py")),
+                str(max(1, min(300, math.ceil(self.request.limits.deadline_s)))),
+                str(4 * 1024 * 1024 * 1024),
+                "1024" if uid is not None else "16384",
+                command,
+                user=uid,
+                group=gid,
+                extra_groups=groups,
+                cwd=self.home,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+                # Model and harness credentials must not be visible in child processes.
+                env={
+                    "HOME": str(self.work),
+                    "TMPDIR": str(self.home / "tmp"),
+                    "PYTHONUSERBASE": str(self.work / ".local"),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "LANG": "C.UTF-8",
+                },
+            )
         )
-        self.process_groups.add(process.pid)
+        process: asyncio.subprocess.Process | None = None
+        reader: asyncio.Task[None] | None = None
         tail = bytearray()
         truncated = False
 
         async def drain() -> None:
             nonlocal truncated
-            assert process.stdout is not None
+            assert process is not None and process.stdout is not None
             while chunk := await process.stdout.read(65_536):
                 tail.extend(chunk)
                 if len(tail) > 262_144:
                     truncated = True
                     del tail[:-262_144]
 
-        reader = asyncio.create_task(drain())
-        try:
-            async with asyncio.timeout(min(300, self.request.limits.deadline_s)):
-                # Process.wait() can also wait for inherited stdout pipes. The
-                # return code is set at SIGCHLD independently of pipe closure.
-                while process.returncode is None:
-                    await asyncio.sleep(0.01)
-        finally:
+        async def cleanup() -> None:
+            # Creation may already have launched children when cancellation is
+            # delivered. Resolve the shielded spawn before killing the tool UID.
+            child = await spawn
+            self.process_groups.add(child.pid)
             try:
                 self.stop_processes()
             finally:
-                # A held stdout must never keep cancellation or completion open.
                 transport = cast(
                     asyncio.SubprocessTransport,
-                    getattr(cast(object, process), "_transport"),  # noqa: B009 - absent from typeshed
+                    getattr(cast(object, child), "_transport"),  # noqa: B009 - absent from typeshed
                 )
                 try:
-                    async with asyncio.timeout(2):
-                        await reader
+                    if reader is not None:
+                        async with asyncio.timeout(2):
+                            await reader
                 except TimeoutError:
                     pass
                 finally:
                     transport.close()
-                    reader.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await reader
+                    if reader is not None:
+                        reader.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await reader
                     with suppress(TimeoutError):
-                        await asyncio.wait_for(process.communicate(), timeout=2)
-                    self.process_groups.discard(process.pid)
+                        await asyncio.wait_for(child.communicate(), timeout=2)
+                    self.process_groups.discard(child.pid)
+
+        try:
+            child = await asyncio.shield(spawn)
+            process = child
+            self.process_groups.add(child.pid)
+            reader = asyncio.create_task(drain())
+            async with asyncio.timeout(min(300, self.request.limits.deadline_s)):
+                # Process.wait() can also wait for inherited stdout pipes. The
+                # return code is set at SIGCHLD independently of pipe closure.
+                while child.returncode is None:
+                    await asyncio.sleep(0.01)
+        finally:
+            finalization = asyncio.create_task(cleanup())
+            interrupted = False
+            while not finalization.done():
+                try:
+                    await asyncio.shield(finalization)
+                except asyncio.CancelledError:
+                    interrupted = True
+            await finalization
+            if interrupted:
+                raise asyncio.CancelledError
+        assert process is not None
         marker = "[output truncated]\n" if truncated else ""
         return f"exit_code={process.returncode}\n{marker}{tail.decode(errors='replace')}"
 
