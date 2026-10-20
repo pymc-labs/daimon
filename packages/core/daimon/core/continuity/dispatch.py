@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 import anthropic as anthropic_pkg
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationRequest,
@@ -168,123 +169,136 @@ async def dispatch_pending_continuations(
         now=now(),
     )
     for row in rows:
-        claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
-        if claim is None:
-            continue
-        request = ContinuationRequest(
+        async with guard_selfhosted_channel(
+            sessionmaker,
             tenant_id=row.tenant_id,
             platform=platform,
-            parent_channel_id=row.parent_channel_id,
-            thread_id=row.thread_id,
-            requester_account_id=row.requester_account_id,
-            requester_external_user_id=row.requester_external_user_id,
-            target_ma_agent_id=row.target_ma_agent_id,
-            target_name=row.target_name,
-            requested_work=row.requested_work,
-            reason=row.reason,
-            idempotency_key=row.idempotency_key,
-        )
-        decision: ContinuationDecision | None = None
-        decision_now: datetime | None = None
-        latest: datetime | None = None
-        active_turn = False
-        try:
-            if row.reason == "worker_finished":
-                if worker_finished_decision is None:
-                    await release_wake(sessionmaker, claim, retry_at=now() + WAKE_UNAVAILABLE_DELAY)
-                    continue
-                decision = await worker_finished_decision(row, now())
-                if decision is None:
-                    raise ContinuationContextUnavailable("worker_finished_not_ready")
-            else:
-                if decision_context is None:
-                    async with sessionmaker() as session:
-                        live = await get_live_thread_session(
-                            session,
-                            tenant_id=row.tenant_id,
-                            platform=platform,
-                            thread_id=row.thread_id,
-                            account_id=row.requester_account_id,
-                        )
-                    # Preserve core's clock read before the history callback.
-                    decision_now = now()
-                    assert latest_user_message_at is not None
-                    latest = await latest_user_message_at(row)
-                    active_turn = live is not None and live.active_turn_message_id is not None
-                else:
-                    latest, active_turn = await decision_context(row)
-                    decision_now = now()
-        except ContinuationContextUnavailable as exc:
-            # An incomplete history must never authorize a stale handoff.
-            log.warning("continuation.context_unavailable", row_id=str(row.id), reason=str(exc))
-            await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
-            continue
-        if decision is None:
-            assert decision_now is not None
-            decision = await decide_continuation(
-                sessionmaker,
-                anthropic,
-                request=request,
-                now=decision_now,
-                latest_user_message_at=latest,
-                active_turn=active_turn,
+            channel_id=row.parent_channel_id,
+            force=row.target_ma_agent_id.startswith("sh_agent_"),
+        ):
+            claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
+            if claim is None:
+                continue
+            request = ContinuationRequest(
+                tenant_id=row.tenant_id,
+                platform=platform,
+                parent_channel_id=row.parent_channel_id,
+                thread_id=row.thread_id,
+                requester_account_id=row.requester_account_id,
+                requester_external_user_id=row.requester_external_user_id,
+                target_ma_agent_id=row.target_ma_agent_id,
+                target_name=row.target_name,
+                requested_work=row.requested_work,
+                reason=row.reason,
+                idempotency_key=row.idempotency_key,
             )
-        if decision.action == "skip_turn_running" and row.available_at is not None:
-            # A wake has nobody waiting to be told; it runs after the turn in progress.
-            await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
-            continue
-        seed = decision.seed_user_message
-        if decision.action != "dispatch" or (seed is None and run_decision is None):
-            reason = decision.action if decision.action != "dispatch" else "missing_seed"
-            if settle_before_notice:
-                await _settle(sessionmaker, claim, reason, now)
-            if decision.message is not None and (reason != "missing_seed" or notify_missing_seed):
-                await notify(row, decision.message, reason=reason)
-            if not settle_before_notice:
-                await _settle(sessionmaker, claim, reason, now)
-            continue
-        if not await start_wake(sessionmaker, claim, now=now()):
-            continue  # Another dispatcher took the row over while this one decided.
-        try:
-            if row.reason == "worker_finished":
-                async with sessionmaker() as db:
-                    started_row = await get_continuation(db, idempotency_key=row.idempotency_key)
-                if started_row is None or (started_row.lease_owner, started_row.attempts) != (
-                    claim.owner,
-                    claim.attempts,
+            decision: ContinuationDecision | None = None
+            decision_now: datetime | None = None
+            latest: datetime | None = None
+            active_turn = False
+            try:
+                if row.reason == "worker_finished":
+                    if worker_finished_decision is None:
+                        await release_wake(
+                            sessionmaker, claim, retry_at=now() + WAKE_UNAVAILABLE_DELAY
+                        )
+                        continue
+                    decision = await worker_finished_decision(row, now())
+                    if decision is None:
+                        raise ContinuationContextUnavailable("worker_finished_not_ready")
+                else:
+                    if decision_context is None:
+                        async with sessionmaker() as session:
+                            live = await get_live_thread_session(
+                                session,
+                                tenant_id=row.tenant_id,
+                                platform=platform,
+                                thread_id=row.thread_id,
+                                account_id=row.requester_account_id,
+                            )
+                        # Preserve core's clock read before the history callback.
+                        decision_now = now()
+                        assert latest_user_message_at is not None
+                        latest = await latest_user_message_at(row)
+                        active_turn = live is not None and live.active_turn_message_id is not None
+                    else:
+                        latest, active_turn = await decision_context(row)
+                        decision_now = now()
+            except ContinuationContextUnavailable as exc:
+                # An incomplete history must never authorize a stale handoff.
+                log.warning("continuation.context_unavailable", row_id=str(row.id), reason=str(exc))
+                await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
+                continue
+            if decision is None:
+                assert decision_now is not None
+                decision = await decide_continuation(
+                    sessionmaker,
+                    anthropic,
+                    request=request,
+                    now=decision_now,
+                    latest_user_message_at=latest,
+                    active_turn=active_turn,
+                )
+            if decision.action == "skip_turn_running" and row.available_at is not None:
+                # A wake has nobody waiting to be told; it runs after the turn in progress.
+                await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
+                continue
+            seed = decision.seed_user_message
+            if decision.action != "dispatch" or (seed is None and run_decision is None):
+                reason = decision.action if decision.action != "dispatch" else "missing_seed"
+                if settle_before_notice:
+                    await _settle(sessionmaker, claim, reason, now)
+                if decision.message is not None and (
+                    reason != "missing_seed" or notify_missing_seed
                 ):
-                    raise WorkerFinishedRootChanged("Completion claim changed before resume")
-                row = started_row
-            if run_decision is not None:
-                await run_decision(row, decision)
+                    await notify(row, decision.message, reason=reason)
+                if not settle_before_notice:
+                    await _settle(sessionmaker, claim, reason, now)
+                continue
+            if not await start_wake(sessionmaker, claim, now=now()):
+                continue  # Another dispatcher took the row over while this one decided.
+            try:
+                if row.reason == "worker_finished":
+                    async with sessionmaker() as db:
+                        started_row = await get_continuation(
+                            db, idempotency_key=row.idempotency_key
+                        )
+                    if started_row is None or (started_row.lease_owner, started_row.attempts) != (
+                        claim.owner,
+                        claim.attempts,
+                    ):
+                        raise WorkerFinishedRootChanged("Completion claim changed before resume")
+                    row = started_row
+                if run_decision is not None:
+                    await run_decision(row, decision)
+                else:
+                    assert run_follow_up is not None and seed is not None
+                    await run_follow_up(row, seed)
+            except SessionPreparationFailed:
+                await _settle(sessionmaker, claim, "blocked_preparation_failed", now)
+            except ResponderChanged as exc:
+                # A wake whose thread another agent answers now; the turn never started.
+                if settle_before_notice:
+                    await _settle(sessionmaker, claim, "skip_target_changed", now)
+                await notify(row, exc.message, reason="skip_target_changed")
+                if not settle_before_notice:
+                    await _settle(sessionmaker, claim, "skip_target_changed", now)
+            except TurnNotStarted as exc:
+                # The turn never got a slot. A capacity miss goes back to pending,
+                # like a busy thread; a Stop settles it, not delivered.
+                if exc.capacity:
+                    await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+                else:
+                    await _settle(sessionmaker, claim, f"not_started:{exc.result}", now)
+            except AdmissionDenied as exc:
+                # Held to the same gates as a mention, and not retried.
+                await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)
+            except SessionBusyError as busy:
+                # Nothing ran: the same row goes back to pending with its claim refunded.
+                retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
+                await release_wake(sessionmaker, claim, retry_at=retry_at)
+            except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
+                log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
+                await _settle(sessionmaker, claim, "dispatch_failed", now)
             else:
-                assert run_follow_up is not None and seed is not None
-                await run_follow_up(row, seed)
-        except SessionPreparationFailed:
-            await _settle(sessionmaker, claim, "blocked_preparation_failed", now)
-        except ResponderChanged as exc:
-            # A wake whose thread another agent answers now; the turn never started.
-            if settle_before_notice:
-                await _settle(sessionmaker, claim, "skip_target_changed", now)
-            await notify(row, exc.message, reason="skip_target_changed")
-            if not settle_before_notice:
-                await _settle(sessionmaker, claim, "skip_target_changed", now)
-        except TurnNotStarted as exc:
-            # The turn never got a slot. A capacity miss goes back to pending,
-            # like a busy thread; a Stop settles it, not delivered.
-            if exc.capacity:
-                await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
-            else:
-                await _settle(sessionmaker, claim, f"not_started:{exc.result}", now)
-        except AdmissionDenied as exc:
-            # Held to the same gates as a mention, and not retried.
-            await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)
-        except SessionBusyError as busy:
-            # Nothing ran: the same row goes back to pending with its claim refunded.
-            retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
-            await release_wake(sessionmaker, claim, retry_at=retry_at)
-        except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
-            log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
-            await _settle(sessionmaker, claim, "dispatch_failed", now)
-        else:
-            await _settle(sessionmaker, claim, None, now)
+                await _settle(sessionmaker, claim, None, now)

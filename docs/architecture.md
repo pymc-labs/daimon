@@ -44,7 +44,14 @@ participation classifier. Responder-change notices use a generic previous-agent
 label. Automatic Anthropic session-file sweeps are skipped on Discord, Slack
 and Teams; the self-hosted harness can deliver files through Daimon's MCP tools.
 Self-hosted MCP credentials refuse Anthropic-specific management operations
-before any provider request; provider-neutral tools remain available.
+before any provider request; provider-neutral tools remain available. Channel
+authorization resolves their execution identity from tenant-scoped local agent
+records, including agent rules. Cosmetic Slack identity lookup is skipped.
+Adapter turns and continuation dispatch inherit the same Anthropic prohibition.
+Timers and task continuations check self-hosted targets in local records and
+require an installed self-hosted runtime; an unavailable runtime produces a
+clear notice. Self-hosted responder notices omit the Hand over button, and
+previously posted buttons refuse without a provider lookup.
 
 With the mux turn path and channel backends enabled, an admin can choose **Model
 backend** in an agent's setup Details on Discord, Slack or Teams. The preview

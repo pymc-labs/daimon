@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Bind self-hosted harness bearer tokens to operator-approved origins and tenants, preserve MCP approval identity, and enforce host tool-safety policy. Reuse Entra credentials and HTTP connections, cancel abandoned harness work, and reconcile late usage without a lifetime-session usage bound.
 - Self-hosted channels skip Anthropic thread naming, organic participation, cosmetic responder lookups and session-file sweeps. Their MCP credentials block Anthropic-specific operations, and unsupported scheduled routines stop before provider resolution.
+- Self-hosted channels skip Anthropic thread naming, organic participation, cosmetic responder lookups and session-file sweeps. Their MCP credentials block Anthropic-specific operations while keeping message and file posting available under agent rules. Timers and task continuations resolve local targets, and unavailable follow-up runtimes or handovers refuse without provider calls. Unsupported scheduled routines stop before provider resolution.
 
 - Verify self-hosted skill pins using their declared content or ZIP representation, preserve held-version mount names, and load pinned channel bundles for other channel members. Explicit custom skills may use built-in names. Wildcard MCP credentials require single-tenant opt-in; private HTTP MCP destinations require operator exceptions.
 - Refuse shared writable scratch in multi-session harnesses, kill detached tool descendants at completion, and reap orphan processes with tini.

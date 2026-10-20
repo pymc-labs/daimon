@@ -97,6 +97,7 @@ from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
@@ -1368,6 +1369,26 @@ class TeamsApp:
         reraise: bool,
         continuation: TaskContinuationRow | None,
     ) -> None:
+        async with guard_selfhosted_channel(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="teams",
+            channel_id=inbound.channel_id,
+            force=False,
+        ):
+            return await self._run_turn_observed_guarded(
+                inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
+            )
+
+    async def _run_turn_observed_guarded(
+        self,
+        inbound: TeamsInbound,
+        tenant_id: uuid.UUID,
+        *,
+        handoff: HandoffFactory | None,
+        reraise: bool,
+        continuation: TaskContinuationRow | None,
+    ) -> None:
         """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's.
 
         `reraise` (continuations) re-raises a refusal or failure after telling
@@ -1576,9 +1597,11 @@ class TeamsApp:
             new_responder=name,
             owner=owner,
             channel="this chat",
-            offer_button=True,
+            offer_button=not selfhosted,
             new_thread_hint=not direct_chat,
         )
+        if selfhosted:
+            return text, ()
         return text, (hand_over_button(agent_id=agent.id, agent_name=name),)
 
     async def _bind_and_run(

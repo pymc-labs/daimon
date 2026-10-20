@@ -57,6 +57,11 @@ backend stop before provider resolution, with
 Anthropic Managed Agents; switching a channel to self-hosted does not silently
 run its scheduled prompts through Anthropic.
 
+Timers and task continuations in a self-hosted conversation resolve their
+target from tenant-scoped local records. They run through the conversation
+runtime when installed; otherwise they stop with a notice asking the person
+to send a message to continue. They never fall back to Anthropic resolution.
+
 ## Creating one
 
 Operators can opt into requiring a destination for the MCP `create_routine`

@@ -34,6 +34,7 @@ from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
 )
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -44,8 +45,10 @@ from daimon.core.authz import (
     build_agent_ref,
     home_hold,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
+from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import (
     agent_permissions,
     any_agent_rules,
@@ -56,6 +59,7 @@ from daimon.core.permissions import (
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.turn_origins import get_active_origin, list_active_origins
 from fastmcp.exceptions import ToolError
 
@@ -212,6 +216,16 @@ async def _executing_agent(
     executing = auth.chat_agent_id or auth.agent_id
     if executing is None or not (any_agent_rules(policy) or any_own_readers(policy)):
         return AgentRef.none()
+    if auth.anthropic_disabled or anthropic_disabled():
+        record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+            resource_scope(tenant_id=str(auth.tenant_id)), executing
+        )
+        if record is None:
+            return AgentRef.unresolved()
+        return build_agent_ref(
+            record.spec.name,
+            {**dict(record.spec.metadata or {}), MA_METADATA_KEY_NAME: record.spec.name},
+        )
     agent = await find_agent_by_derived_uuid_cached(
         runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=executing
     )

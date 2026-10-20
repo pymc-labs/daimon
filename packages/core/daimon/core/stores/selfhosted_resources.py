@@ -19,6 +19,7 @@ from daimon.core._models import (
     SelfHostedResourceOperation,
     Tenant,
 )
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.privacy_session_deletes import lock_account
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
@@ -463,6 +464,20 @@ class SelfHostedAgents(_Resources[AgentSpec, AgentPatch, Agent]):
     spec_type = AgentSpec
     result_type = Agent
     kind = "agent"
+
+    async def find_by_derived_uuid(self, scope: Scope, agent_id: UUID) -> Agent | None:
+        """Resolve a chat credential's execution identity among this tenant's live records."""
+        async with self.sessionmaker() as session:
+            rows = await session.scalars(
+                select(SelfHostedAgentRecord).where(
+                    SelfHostedAgentRecord.tenant_id == self._tenant(scope),
+                    SelfHostedAgentRecord.archived_at.is_(None),
+                )
+            )
+            for row in rows:
+                if derive_agent_uuid(tenant_id=self._tenant(scope), ma_agent_id=row.id) == agent_id:
+                    return self._result(scope, row)
+        return None
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         return await self._list(scope, filters=filters, page=page)

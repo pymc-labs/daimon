@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -455,6 +456,19 @@ async def switch_thread_on_request(
     and `hand_over_thread` decides it under the lock for the clicker, with
     their live admin role (`caller.is_server_admin`). `channel` names the parent channel.
     """
+    async with guard_selfhosted_channel(
+        sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=parent_channel_id,
+        force=ma_agent_id.startswith("sh_agent_"),
+    ) as selfhosted:
+        if selfhosted:
+            return SwitchOutcome(
+                switched=False,
+                text="Handing over a self-hosted conversation is not available yet. "
+                "Start a new conversation with the selected agent. Nothing was changed.",
+            )
     try:
         agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     except DaimonError:

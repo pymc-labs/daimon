@@ -581,3 +581,27 @@ async def test_package_credentials_never_reach_resources_or_retry_receipts(
     async with db_session_factory() as db:
         assert await db.scalar(select(func.count()).select_from(SelfHostedEnvironmentRecord)) == 1
         assert await db.scalar(select(func.count()).select_from(SelfHostedResourceOperation)) == 1
+
+
+async def test_chat_identity_resolution_is_tenant_scoped_and_live(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    other = await make_tenant(db_session)
+    await db_session.commit()
+    authorized = scope(str(tenant.id), str(account.id))
+    agents = SelfHostedAgents(db_session_factory)
+    agent = await agents.create(authorized, agent_spec(), key="chat-identity")
+    identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.ref.id)
+    assert await agents.find_by_derived_uuid(authorized, identity) == agent
+    assert await agents.find_by_derived_uuid(scope(str(other.id)), identity) is None
+    # Even a UUID derived with the querying tenant cannot resolve a foreign row.
+    forged = derive_agent_uuid(tenant_id=other.id, ma_agent_id=agent.ref.id)
+    assert await agents.find_by_derived_uuid(scope(str(other.id)), forged) is None
+    assert await agents.find_by_derived_uuid(authorized, uuid4()) is None
+    await agents.archive(authorized, agent.ref, key="archive-identity")
+    assert await agents.find_by_derived_uuid(authorized, identity) is None

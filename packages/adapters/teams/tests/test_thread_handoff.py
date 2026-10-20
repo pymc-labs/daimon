@@ -199,7 +199,7 @@ async def test_selfhosted_mismatch_uses_generic_owner_without_anthropic(
         mismatch, ma_agent(name="New agent"), direct_chat=False, tenant_id=TENANT, selfhosted=True
     )
     assert "the previous agent" in text
-    assert actions
+    assert not actions
 
 
 async def test_selfhosted_tool_turn_releases_controls_without_output_sweep(

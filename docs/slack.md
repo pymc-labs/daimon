@@ -42,7 +42,10 @@ argument names another member. See
 
 ### Session output files
 
-Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
+Self-hosted turns do not run the automatic Managed Agents file sweep. Deliver
+files through Daimon's MCP message tools using staged file handles.
+
+For Managed Agents turns, files saved under `/mnt/session/outputs` are uploaded to the Slack
 thread after an interactive turn completes (scheduled routines deliver
 nothing). Delivery runs in the background after the reply is posted — the
 adapter waits for Managed Agents to index newly written files, so files may

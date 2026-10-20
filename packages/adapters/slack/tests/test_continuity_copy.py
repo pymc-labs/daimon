@@ -345,7 +345,7 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
         new_responder="uat-agent",
         owner="the previous agent" if selfhosted else "uat-agent",
         channel=f"<#{channel}>",
-        offer_button=True,
+        offer_button=not selfhosted,
     )
     buttons = [
         element
@@ -353,9 +353,9 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
         if block["type"] == "actions"
         for element in block["elements"]
     ]
-    assert [(b["action_id"], b["value"]) for b in buttons] == [("thread_hand_over", _AGENT_ID)], (
-        "the notice carries the Hand over button for the agent the channel answers with"
-    )
+    assert [(b["action_id"], b["value"]) for b in buttons] == (
+        [] if selfhosted else [("thread_hand_over", _AGENT_ID)]
+    ), "the notice carries the Hand over button for the agent the channel answers with"
 
 
 async def test_is_setup_is_false_for_a_handoff_binding(

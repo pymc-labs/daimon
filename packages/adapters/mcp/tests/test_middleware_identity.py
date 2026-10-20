@@ -1263,8 +1263,14 @@ async def test_identity_middleware_binds_a_channel_only_for_an_agent_key(
     assert captured[0].bound_channel_id == expected
 
 
+@pytest.mark.parametrize("rule", ["unrelated", "allowed", "denied"])
+@pytest.mark.parametrize("with_file", [False, True])
 async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutral_tools(
-    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession,
+    rule: str,
+    with_file: bool,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from typing import cast
 
@@ -1278,11 +1284,100 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
         def __getattribute__(self, name: str) -> object:
             raise AssertionError(f"selfhosted tool accessed Anthropic.{name}")
 
-    token = AccessToken(token="t", client_id="c", scopes=[], claims={"anthropic_disabled": True})
+    import re
+    from datetime import UTC, datetime
+
+    from aioresponses import aioresponses
+    from cryptography.fernet import Fernet
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools.channels import register_channel_tools
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.config import AgentIdentitySettings, CryptoSettings, DatabaseSettings, Settings
+    from daimon.core.github_credentials import build_multifernet, encrypt_token
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.file_uploads import create_upload, store_upload_content
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+    from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+    from daimon.testing.factories import make_account, make_tenant
+    from mux.contracts.ids import ModelRef, Scope
+    from mux.contracts.resources import AgentSpec
+    from pydantic import PostgresDsn, SecretStr
+    from yarl import URL
+
+    tenant_row = await make_tenant(db_session, platform="slack", workspace_id="T_TEST")
+    account_row = await make_account(db_session, tenant=tenant_row)
+    tenant, account = tenant_row.id, account_row.id
+    key = Fernet.generate_key().decode()
+    fernet = build_multifernet((key,))
+    await upsert_slack_bot_token(
+        db_session, team_id="T_TEST", encrypted_token=encrypt_token(fernet, "xoxb-test")
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant,
+        policy=TenantAccessPolicy(
+            agent_rules={
+                "unrelated-agent" if rule == "unrelated" else "local-agent": AgentRule(
+                    runs_in=("C_other" if rule == "denied" else "C1",)
+                )
+            }
+        ),
+    )
+    handles: list[str] = []
+    if with_file:
+        now = datetime.now(UTC)
+        upload, upload_token = await create_upload(
+            db_session,
+            tenant_id=tenant,
+            title="report",
+            display_filename="report.txt",
+            content_type="text/plain",
+            now=now,
+        )
+        await store_upload_content(
+            db_session, upload_token=upload_token, data=b"report bytes", now=now
+        )
+        handles.append(upload.id)
+    await db_session.commit()
+    agent = await SelfHostedAgents(sessionmaker).create(
+        Scope(
+            tenant_id=str(tenant),
+            account_id=str(account),
+            principal_id="test",
+            authorization_id="test",
+        ),
+        AgentSpec(name="local-agent", model=ModelRef(provider="selfhosted", id="gpt-5")),
+        key="local-agent",
+    )
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=cast(AsyncAnthropic, NoAnthropic()),
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            crypto=CryptoSettings(keys=(SecretStr(key),)),
+            agent_identity=AgentIdentitySettings(enabled=True),
+            _env_file=None,  # type: ignore[call-arg]
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=fernet,
+    )
+    token = AccessToken(
+        token="t",
+        client_id="c",
+        scopes=[],
+        claims={
+            "anthropic_disabled": True,
+            "platform": "slack",
+            "external_id": "T_TEST",
+            "platform_user_id": "U_CALLER",
+            "chat_agent_id": str(derive_agent_uuid(tenant_id=tenant, ma_agent_id=agent.ref.id)),
+        },
+    )
     monkeypatch.setattr(
         "daimon.adapters.mcp.middleware.mcp_identity.get_access_token", lambda: token
     )
-    account, tenant = uuid.uuid4(), uuid.uuid4()
 
     async def subject(_ctx: object) -> str:
         return str(account)
@@ -1314,9 +1409,7 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
         managed_agents(cast(AsyncAnthropic, NoAnthropic()))
         return "unexpected"
 
-    @mcp.tool
-    async def neutral_tool() -> str:  # pyright: ignore[reportUnusedFunction]
-        return "neutral tools work"
+    register_channel_tools(mcp, runtime)
 
     @mcp.tool
     async def provider_probe() -> str:  # pyright: ignore[reportUnusedFunction]
@@ -1340,8 +1433,48 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
             await client.get_prompt("provider_prompt")
         with pytest.raises(ToolError, match="unavailable during a self-hosted turn"):
             await client.call_tool("legacy_resource", {})
-        result = await client.call_tool("neutral_tool", {})
-        assert result.data == "neutral tools work"
+        with aioresponses() as http:
+            http.get(  # pyright: ignore[reportUnknownMemberType]
+                re.compile(r"https://slack\.com/api/conversations\.info.*"),
+                payload={"ok": True, "channel": {"id": "C1", "is_private": False}},
+            )
+            http.get(  # pyright: ignore[reportUnknownMemberType]
+                re.compile(r"https://slack\.com/api/users\.info.*"),
+                payload={"ok": True, "user": {"id": "U_CALLER", "is_restricted": False}},
+            )
+            http.post(  # pyright: ignore[reportUnknownMemberType]
+                "https://slack.com/api/chat.postMessage",
+                payload={"ok": True, "ts": "1700000001.000100"},
+            )
+            http.post(  # pyright: ignore[reportUnknownMemberType]
+                re.compile(r"https://slack\.com/api/files\.getUploadURLExternal.*"),
+                payload={
+                    "ok": True,
+                    "upload_url": "https://files.slack.com/upload/test",
+                    "file_id": "F_REPORT",
+                },
+            )
+            http.post("https://files.slack.com/upload/test", body="OK", content_type="text/plain")  # pyright: ignore[reportUnknownMemberType]
+            http.post(  # pyright: ignore[reportUnknownMemberType]
+                re.compile(r"https://slack\.com/api/files\.completeUploadExternal.*"),
+                payload={"ok": True, "files": [{"id": "F_REPORT"}]},
+            )
+            arguments = {"channel_id": "C1", "content": "requested report", "file_handles": handles}
+            if rule == "denied":
+                with pytest.raises(ToolError, match="only in certain channels"):
+                    await client.call_tool("send_message", arguments)
+                assert ("POST", URL("https://slack.com/api/chat.postMessage")) not in http.requests
+            else:
+                result = await client.call_tool("send_message", arguments)
+                assert "1700000001.000100" in str(result.data)
+                post = http.requests[("POST", URL("https://slack.com/api/chat.postMessage"))][0]
+                assert post.kwargs["json"]["text"] == "requested report"  # pyright: ignore[reportUnknownMemberType]
+                assert "username" not in post.kwargs["json"]  # pyright: ignore[reportUnknownMemberType]
+                if with_file:
+                    uploaded = http.requests[("POST", URL("https://files.slack.com/upload/test"))][
+                        0
+                    ]
+                    assert uploaded.kwargs["data"] == b"report bytes"  # pyright: ignore[reportUnknownMemberType]
         with pytest.raises(ToolError, match="unavailable during a self-hosted turn"):
             await client.call_tool("provider_probe", {})
         token.claims["anthropic_disabled"] = False

@@ -55,6 +55,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.slack_customize_scope import (
@@ -224,6 +225,8 @@ async def _post_with_identity(
 
 
 async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, str] | None:
+    if auth.anthropic_disabled or anthropic_disabled():
+        return None
     if not identity_enabled_for(runtime.settings, "slack", auth.external_id):
         return None
     agent_id = auth.chat_agent_id or auth.agent_id

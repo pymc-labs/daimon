@@ -195,6 +195,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -1990,6 +1991,36 @@ class SlackApp:
         content_override: str | None = None,
         files: list[SlackFile] | None = None,
     ) -> None:
+        async with guard_selfhosted_channel(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id=channel,
+            force=False,
+        ):
+            return await self._run_thread_turn_observed_guarded(
+                event,
+                channel=channel,
+                web_client=web_client,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                team_id=team_id,
+                content_override=content_override,
+                files=files,
+            )
+
+    async def _run_thread_turn_observed_guarded(
+        self,
+        event: dict[str, Any],
+        *,
+        channel: str,
+        web_client: AsyncWebClient,
+        tenant_id: uuid.UUID,
+        thread_id: str,
+        team_id: str,
+        content_override: str | None = None,
+        files: list[SlackFile] | None = None,
+    ) -> None:
         """Turn body: admission → card+Cancel → bind_session → marker → context → turn → watermark.
 
         Immediately after admission, the lifecycle is constructed and its
@@ -2402,12 +2433,22 @@ class SlackApp:
                     new_responder=admission.agent.name,
                     owner=owner_name,
                     channel=f"<#{channel}>",
-                    offer_button=True,
+                    offer_button=not (
+                        admission.backend_revision is not None
+                        and admission.backend_revision.backend == "selfhosted"
+                    ),
                 )
-                hand_over = build_hand_over_blocks(
-                    text=explanation,
-                    agent_id=admission.agent.id,
-                    agent_name=admission.agent.name,
+                hand_over = (
+                    []
+                    if (
+                        admission.backend_revision is not None
+                        and admission.backend_revision.backend == "selfhosted"
+                    )
+                    else build_hand_over_blocks(
+                        text=explanation,
+                        agent_id=admission.agent.id,
+                        agent_name=admission.agent.name,
+                    )
                 )
                 if lifecycle.status_ts is not None:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs

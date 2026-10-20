@@ -100,6 +100,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_budget_notice import drain_budget_notices
@@ -4622,6 +4623,46 @@ class DaimonBot(commands.Bot):
         unprompted: bool = False,
         failure_surface: _TurnFailureSurface | None = None,
     ) -> None:
+        async with guard_selfhosted_channel(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=str(
+                message.channel.parent_id
+                if isinstance(message.channel, discord.Thread)
+                else message.channel.id
+            ),
+            force=False,
+        ):
+            return await self._orchestrate_observed_guarded(
+                message,
+                guild_id,
+                tenant_id,
+                origins=origins,
+                content_override=content_override,
+                created_thread_ids=created_thread_ids,
+                attachments_override=attachments_override,
+                admitted_message_ids=admitted_message_ids,
+                query_messages=query_messages,
+                unprompted=unprompted,
+                failure_surface=failure_surface,
+            )
+
+    async def _orchestrate_observed_guarded(
+        self,
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        origins: contextlib.AsyncExitStack | None = None,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
+        query_messages: tuple[discord.Message, ...] = (),
+        unprompted: bool = False,
+        failure_surface: _TurnFailureSurface | None = None,
+    ) -> None:
         """Core orchestration logic extracted for clean error boundary.
 
         ``created_thread_ids``, when provided, receives the id of a
@@ -5184,12 +5225,16 @@ class DaimonBot(commands.Bot):
                 new_responder=agent.name,
                 owner=owner_name,
                 channel=f"<#{parent_channel_id}>",
-                offer_button=True,
+                offer_button=not agent.id.startswith("sh_agent_"),
             )
             # Local import: thread_handoff imports this module.
             from daimon.adapters.discord.thread_handoff import hand_over_view
 
-            view = hand_over_view(agent_id=agent.id, agent_name=agent.name)
+            view = (
+                None
+                if agent.id.startswith("sh_agent_")
+                else hand_over_view(agent_id=agent.id, agent_name=agent.name)
+            )
             summary, separator, remaining = error_text.partition("\nNew thread → ")
             responder, _, request_id_line = remaining.partition("\n`rid: ")
             handoff_embed = discord.Embed(
