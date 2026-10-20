@@ -297,7 +297,7 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     app, dispatch, wire = await setup(db_session, db_session_factory)
-    method = type(app)._orchestrate_observed  # pyright: ignore[reportPrivateUsage]
+    method = type(app)._orchestrate_observed_guarded  # pyright: ignore[reportPrivateUsage]
     tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
     mutations = 0
     for node in ast.walk(tree):
@@ -320,7 +320,9 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     )
     try:
         first = await dispatch(THREAD, USER)
-        with patch.object(type(app), "_orchestrate_observed", namespace["_orchestrate_observed"]):
+        with patch.object(
+            type(app), "_orchestrate_observed_guarded", namespace["_orchestrate_observed_guarded"]
+        ):
             broken = await dispatch(THREAD, USER)
         with pytest.raises(AssertionError):
             assert broken.ma_session_id == first.ma_session_id and broken.reused

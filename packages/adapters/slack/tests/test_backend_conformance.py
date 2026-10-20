@@ -303,7 +303,7 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     fake_slack_web_client: FakeSlackWebClient,
 ) -> None:
     app, dispatch, wire = await setup(db_session, db_session_factory)
-    method = type(app)._run_thread_turn_observed  # pyright: ignore[reportPrivateUsage]
+    method = type(app)._run_thread_turn_observed_guarded  # pyright: ignore[reportPrivateUsage]
     tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
     mutations = 0
     for node in ast.walk(tree):
@@ -327,7 +327,9 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     try:
         first = await dispatch(THREAD, USER)
         with patch.object(
-            type(app), "_run_thread_turn_observed", namespace["_run_thread_turn_observed"]
+            type(app),
+            "_run_thread_turn_observed_guarded",
+            namespace["_run_thread_turn_observed_guarded"],
         ):
             broken = await dispatch(THREAD, USER)
         with pytest.raises(AssertionError):

@@ -435,7 +435,7 @@ async def decide_continuation(
         if not ensure_channel_runtime("selfhosted.loop"):
             return ContinuationDecision(
                 action="blocked_preparation_failed",
-                message="Self-hosted follow-up turns are not available yet. "
+                message="Self-hosted follow-up replies are not available yet. "
                 "Send a message in this conversation to continue.",
             )
         from daimon.core.mux_backend import resource_scope
