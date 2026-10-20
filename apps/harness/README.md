@@ -272,11 +272,19 @@ Model authentication accepts an API key or `ManagedIdentityCredential` only.
 Managed identity requires ACA's header-protected endpoint; IMDS-only and developer
 credential chains are refused. File-backed identity sources, certificate paths,
 and mounted Kubernetes/workload token paths refuse startup even with an API key.
-Startup also checks secret mounts and credential caches for tool-readable files
-(including traversal permissions and ambiguous ACLs). Do not mount credentials
+Startup parses `/proc/self/mountinfo` and checks every external mount for
+tool-readable regular files, regardless of its name or read-only flag (including
+traversal permissions and ambiguous ACLs). Only the image root, container network
+configuration, system filesystems at their system paths, and isolated session
+directories are exempt. Persistent HOME mounts are checked outside `sessions/`.
+Credential caches are checked separately. Do not mount credentials
 into the tool filesystem. The image probe verifies refusal with a projected 0644
 token before the service drops its startup UID.
 
 Incomplete Azure responses preserve their measured usage and partial text but end
 with outcome `errored`, kind `model_incomplete`, and the provider's reason (or
-`unknown` when absent). Incomplete tool calls never execute.
+`unknown` when absent). All other non-completed statuses, including failed,
+cancelled, queued, in-progress and missing statuses, also end errored with kind
+`model_failed` and the provider error code/message when available. These responses
+never execute tool calls. CI also binds a synthetic 0644 `/mnt/model.env` to
+verify that generically named credential mounts refuse startup.

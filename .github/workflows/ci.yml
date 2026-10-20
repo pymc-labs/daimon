@@ -342,18 +342,24 @@ jobs:
       - name: data stack and service imports
         run: docker run --rm daimon-harness:test python -c 'import numpy, pandas, pymc, pymc_marketing, daimon_harness.service'
       - name: isolated tool identities
-        run: docker run --rm -v "$PWD/apps/harness/tests/image_probe.py:/tmp/image_probe.py:ro" daimon-harness:test python /tmp/image_probe.py
+        run: docker run --rm -i daimon-harness:test python - < apps/harness/tests/image_probe.py
       - name: managed identity startup without an API key
-        run: docker run --rm -v "$PWD/apps/harness/tests/identity_probe.py:/tmp/identity_probe.py:ro" daimon-harness:test python /tmp/identity_probe.py
+        run: docker run --rm -i daimon-harness:test python - < apps/harness/tests/identity_probe.py
+      - name: arbitrary credential mount isolation
+        run: |
+          probe_dir=$(mktemp -d)
+          printf '%s\n' 'synthetic-api-key' > "$probe_dir/model.env"
+          chmod 644 "$probe_dir/model.env"
+          docker run --rm -i -v "$probe_dir/model.env:/mnt/model.env:ro" \
+            daimon-harness:test python - < apps/harness/tests/mount_probe.py
       - name: multi-session proc and temporary-file isolation
         # Mount configuration needs SYS_ADMIN only during this test's root setup;
         # the harness drops it before any tool process runs.
         run: |
-          docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+          docker run --rm -i --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
             -e HARNESS_SESSION_MODE=multi \
-            -v "$PWD/apps/harness/tests/image_probe.py:/tmp/image_probe.py:ro" \
             daimon-harness:test bash -c \
-            'mount -o remount,hidepid=2 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python /tmp/image_probe.py'
+            'mount -o remount,hidepid=2 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python -' < apps/harness/tests/image_probe.py
 
   # Unique candidate tags are deliberately not the 7-char SHA tags consumed
   # by promote.yml. Passing digests pins staging to these exact tested images;

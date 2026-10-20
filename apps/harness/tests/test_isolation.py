@@ -104,7 +104,7 @@ def test_multi_app_refuses_startup_without_verified_isolation(tmp_path, monkeypa
     monkeypatch.setattr(isolation, "can_switch_uid", lambda: True)
     monkeypatch.setattr(isolation, "proc_hides_other_users", lambda path: False)
     monkeypatch.setattr("daimon_harness.service.can_switch_uid", lambda: True)
-    monkeypatch.setattr("daimon_harness.service.validate_credential_files", lambda: None)
+    monkeypatch.setattr("daimon_harness.service.validate_credential_files", lambda **kwargs: None)
     with pytest.raises(RuntimeError, match="hidepid"):
         create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
     assert not (tmp_path / ".daimon").exists()
@@ -175,3 +175,84 @@ def test_mi_refuses_an_endpoint_without_a_secret_header(monkeypatch):
     monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1/token")
     with pytest.raises(RuntimeError, match="header-protected"):
         AzureModelAdapter()
+
+
+@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("readonly", [False, True])
+def test_external_mount_files_refused_independent_of_names(
+    tmp_path, monkeypatch, directory, readonly
+):
+    from daimon_harness import isolation
+
+    monkeypatch.setattr(isolation, "TOOL_UID_MIN", os.geteuid())
+    monkeypatch.setattr(isolation, "TOOL_UID_MAX", os.geteuid())
+    mounted = tmp_path / "ordinary mount"
+    if directory:
+        mounted.mkdir()
+        token = mounted / "nested" / "model.env"
+        token.parent.mkdir()
+    else:
+        token = mounted
+    token.write_text("synthetic-api-key")
+    token.chmod(0o644)
+    mountinfo = tmp_path / "mountinfo"
+    escaped = str(mounted).replace(" ", r"\040")
+    option = "ro" if readonly else "rw"
+    mountinfo.write_text(
+        "1 0 0:1 / / rw - overlay overlay rw\n"
+        f"2 1 0:2 / {escaped} {option} - ext4 /dev/disk {option}\n"
+    )
+    roots = isolation.credential_mount_roots(tmp_path / "home", mountinfo)
+    assert roots == (mounted,)
+    with pytest.raises(RuntimeError, match="not be readable"):
+        isolation.validate_credential_files(roots)
+    token.chmod(0o000)
+    isolation.validate_credential_files(roots)
+
+
+def test_mount_allowlist_is_scoped_to_system_filesystems_and_session_dirs(tmp_path):
+    from daimon_harness.isolation import credential_mount_roots
+
+    mountinfo = tmp_path / "mountinfo"
+    mounts = [
+        ("/", "overlay"),
+        ("/proc", "proc"),
+        ("/sys", "sysfs"),
+        ("/sys/fs/cgroup", "cgroup2"),
+        ("/dev", "tmpfs"),
+        ("/dev/pts", "devpts"),
+        ("/dev/shm", "tmpfs"),
+        ("/etc/hosts", "ext4"),
+        ("/etc/hostname", "ext4"),
+        ("/etc/resolv.conf", "ext4"),
+        ("/home/harness/sessions/abc/work", "ext4"),
+        ("/mnt/model.env", "ext4"),
+        ("/dev/model.env", "ext4"),
+        ("/home/harness/sessions-extra/model.env", "ext4"),
+        ("/home/harness", "ext4"),
+        ("/opt/model", "tmpfs"),
+    ]
+    mountinfo.write_text(
+        "".join(
+            f"{index + 1} 0 0:1 / {path} rw - {kind} source rw\n"
+            for index, (path, kind) in enumerate(mounts)
+        )
+    )
+    assert credential_mount_roots(Path("/home/harness"), mountinfo) == tuple(
+        Path(path) for path, _ in mounts[-5:]
+    )
+
+
+def test_home_volume_exempts_session_work_but_checks_other_files(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+
+    monkeypatch.setattr(isolation, "TOOL_UID_MIN", os.geteuid())
+    monkeypatch.setattr(isolation, "TOOL_UID_MAX", os.geteuid())
+    home = tmp_path / "home"
+    work = home / "sessions" / "abc" / "work"
+    work.mkdir(parents=True)
+    (work / "result.txt").write_text("ordinary workspace data")
+    isolation.validate_credential_files((home,), home=home)
+    (home / "model.env").write_text("synthetic-key")
+    with pytest.raises(RuntimeError, match="not be readable"):
+        isolation.validate_credential_files((home,), home=home)

@@ -62,7 +62,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
     def __init__(self, context: TurnContext, client: AsyncAzureOpenAI) -> None:
         super().__init__(model=context.request.model, openai_client=client)
         self.context = context
-        self.incomplete_reason: str | None = None
+        self.response_error: HarnessError | None = None
 
     @overload
     async def _fetch_response(
@@ -119,10 +119,21 @@ class MeteredResponsesModel(OpenAIResponsesModel):
             stream,
             prompt,
         )
-        # The SDK's ModelResponse conversion drops status and incomplete_details.
-        if isinstance(response, Response) and response.status == "incomplete":
-            details = response.incomplete_details
-            self.incomplete_reason = details.reason if details and details.reason else "unknown"
+        # The SDK's ModelResponse conversion drops status and provider errors.
+        if isinstance(response, Response) and response.status != "completed":
+            status = response.status or "unknown"
+            if status == "incomplete":
+                details = response.incomplete_details
+                reason = details.reason if details and details.reason else "unknown"
+                self.response_error = HarnessError(
+                    "model_incomplete", "Model response incomplete: " + reason
+                )
+            else:
+                error = response.error
+                reason = f"{error.code}: {error.message}" if error else "unknown"
+                self.response_error = HarnessError(
+                    "model_failed", f"Model response {status}: {reason}"
+                )
         return response
 
     async def get_response(
@@ -144,7 +155,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                 [{"role": "user", "content": input}] if isinstance(input, str) else input
             ),
         )
-        self.incomplete_reason = None
+        self.response_error = None
         request_id = str(uuid4())
         await self.context.emit(
             "model_request_started", {"request_id": request_id, "model": self.context.request.model}
@@ -244,10 +255,8 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                     "agent_message",
                     {"message_id": message_id, "parts": [{"type": "text", "text": text}]},
                 )
-        if self.incomplete_reason is not None:
-            raise HarnessError(
-                "model_incomplete", "Model response incomplete: " + self.incomplete_reason
-            )
+        if self.response_error is not None:
+            raise self.response_error
         return response
 
     def policy_name(self, name: str) -> str:
@@ -464,7 +473,10 @@ class AzureModelAdapter:
                         root = root.__cause__
                     if isinstance(root, HarnessError) and root.kind == "tool_limit":
                         raise HarnessError("tool_limit", "Maximum tool calls exceeded") from exc
-                    if isinstance(root, HarnessError) and root.kind == "model_incomplete":
+                    if isinstance(root, HarnessError) and root.kind in {
+                        "model_incomplete",
+                        "model_failed",
+                    }:
                         raise HarnessError(root.kind, str(root)) from exc
                     cause = root.__cause__
                     if not (

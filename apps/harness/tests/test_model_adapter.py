@@ -482,10 +482,22 @@ async def test_file_tools_execute_off_the_event_loop(tmp_path, monkeypatch):
     assert len(called) == 3
 
 
-@pytest.mark.parametrize("reason", ["max_output_tokens", "content_filter", None])
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        ("incomplete", "max_output_tokens"),
+        ("incomplete", "content_filter"),
+        ("incomplete", None),
+        ("failed", "server_error"),
+        ("cancelled", None),
+        ("in_progress", None),
+        ("queued", None),
+        (None, None),
+    ],
+)
 @pytest.mark.parametrize("tool_call", [False, True])
-async def test_incomplete_response_preserves_usage_and_ends_errored(
-    tmp_path, monkeypatch, reason, tool_call
+async def test_noncompleted_response_preserves_usage_and_ends_errored(
+    tmp_path, monkeypatch, status, reason, tool_call
 ):
     import asyncio
 
@@ -524,9 +536,14 @@ async def test_incomplete_response_preserves_usage_and_ends_errored(
                 "object": "response",
                 "created_at": 1,
                 "model": "gpt-5",
-                "status": "incomplete",
-                "incomplete_details": {"reason": reason} if reason else None,
-                "output": output,
+                "status": status,
+                "incomplete_details": {"reason": reason}
+                if status == "incomplete" and reason
+                else None,
+                "error": {"code": reason, "message": "provider failed"}
+                if status == "failed"
+                else None,
+                "output": [] if status == "failed" and not tool_call else output,
                 "usage": {
                     "input_tokens": 12,
                     "output_tokens": 8,
@@ -559,10 +576,17 @@ async def test_incomplete_response_preserves_usage_and_ends_errored(
         ended = events[-1]
         assert ended.type == "turn_ended"
         assert ended.data["outcome"] == "errored"
-        assert ended.data["error"]["kind"] == "model_incomplete"
-        assert ended.data["error"]["message"] == "Model response incomplete: " + (
-            reason or "unknown"
-        )
+        if status == "incomplete":
+            assert ended.data["error"]["kind"] == "model_incomplete"
+            assert ended.data["error"]["message"] == "Model response incomplete: " + (
+                reason or "unknown"
+            )
+        else:
+            assert ended.data["error"]["kind"] == "model_failed"
+            provider_error = "server_error: provider failed" if status == "failed" else "unknown"
+            assert ended.data["error"]["message"] == (
+                f"Model response {status or 'unknown'}: {provider_error}"
+            )
         starts = [event for event in events if event.type == "model_request_started"]
         usages = [event for event in events if event.type == "usage"]
         assert len(calls) == len(starts) == len(usages) == 1
@@ -574,7 +598,7 @@ async def test_incomplete_response_preserves_usage_and_ends_errored(
         assert not supervisor.journal.pending_requests(request)
         assert not list(tmp_path.rglob("must-not-execute"))
         assert not any(event.type == "tool_use" for event in events)
-        if not tool_call:
+        if not tool_call and status != "failed":
             assert any(event.type == "agent_message" for event in events)
     finally:
         await supervisor.close()

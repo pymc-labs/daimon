@@ -301,8 +301,11 @@ PyMC-Marketing. Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
 uses only `ManagedIdentityCredential`, with `IDENTITY_ENDPOINT` and
 `IDENTITY_HEADER` required together and an optional `AZURE_CLIENT_ID`; these
 values are captured then scrubbed. File-backed credentials, certificate paths,
-projected workload tokens and tool-readable secret mounts refuse startup.
-Incomplete Azure responses preserve usage but end as `errored` with the reason.
+projected workload tokens and tool-readable regular files on external mounts
+refuse startup. Mount checks use mountinfo rather than filenames and include
+read-only mounts. Only image/runtime system paths and isolated session storage
+are exempt. All non-completed Azure responses preserve usage but end as `errored`
+with the provider reason or error.
 Mount a
 persistent home directory at `/home/harness`; run one worker per HOME. The image
 starts as root, drops the service to UID 10000 and retains the capabilities needed

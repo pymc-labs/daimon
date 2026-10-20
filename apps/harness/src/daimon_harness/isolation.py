@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -44,8 +45,51 @@ def validate_credential_sources() -> None:
             raise RuntimeError(f"file-based credentials are unsupported: {name}")
 
 
-def validate_credential_files(roots: tuple[Path, ...] | None = None) -> None:
-    """Refuse readable secret mounts, projected tokens and local credential caches."""
+def credential_mount_roots(home: Path, mountinfo: Path) -> tuple[Path, ...]:
+    """Inspect every external mount, independent of its name or read-only flag."""
+    roots: list[Path] = []
+    for line in mountinfo.read_text().splitlines():
+        mount, separator, filesystem = line.partition(" - ")
+        fields, backing = mount.split(), filesystem.split()
+        if not separator or len(fields) < 6 or len(backing) < 3:
+            raise RuntimeError("cannot verify mount isolation")
+        path = Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4]))
+        if path == Path("/"):
+            continue  # The image supplies the interpreter and tool binaries.
+        if path in {
+            Path("/etc/hosts"),
+            Path("/etc/hostname"),
+            Path("/etc/resolv.conf"),
+            Path("/sbin/docker-init"),
+            Path("/usr/sbin/docker-init"),
+        }:
+            continue  # Container-runtime network configuration and PID 1 helper.
+        if backing[0] in {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue"} and (
+            path.is_relative_to("/proc")
+            or path.is_relative_to("/sys")
+            or path.is_relative_to("/dev")
+        ):
+            continue
+        if backing[0] == "tmpfs" and (
+            path in {Path("/dev"), Path("/dev/shm")}
+            or path.is_relative_to("/proc")
+            or path.is_relative_to("/sys")
+        ):
+            continue
+        if path.is_relative_to(home / "sessions"):
+            continue  # Per-session ownership is verified/prepared before tools run.
+        roots.append(path)
+    return tuple(roots)
+
+
+def validate_credential_files(
+    roots: tuple[Path, ...] | None = None,
+    *,
+    home: Path | None = None,
+    mountinfo: Path = Path("/proc/self/mountinfo"),
+) -> None:
+    """Refuse tool-readable regular files on external mounts and in credential caches."""
+    session_root = (home / "sessions") if home is not None else None
     if roots is None:
         candidates = {
             Path("/run/secrets"),
@@ -54,18 +98,12 @@ def validate_credential_files(roots: tuple[Path, ...] | None = None) -> None:
             Path("/mnt/secrets"),
             Path("/var/secrets"),
         }
-        for home in {Path.home(), Path("/root"), Path("/home/harness")}:
+        for credential_home in {Path.home(), Path("/root"), Path("/home/harness")}:
             candidates.update(
-                home / name
+                credential_home / name
                 for name in (".azure", ".aws", ".kube", ".ssh", ".docker", ".config/gcloud")
             )
-        for line in Path("/proc/self/mountinfo").read_text().splitlines():
-            fields = line.split()
-            if any(
-                word in (fields[3] + fields[4]).lower()
-                for word in ("secret", "credential", "projected")
-            ):
-                candidates.add(Path(fields[4].replace(r"\040", " ").replace(r"\134", "\\")))
+        candidates.update(credential_mount_roots(home or Path.home(), mountinfo))
         roots = tuple(candidates)
 
     def scan_error(error: OSError) -> None:
@@ -80,6 +118,10 @@ def validate_credential_files(roots: tuple[Path, ...] | None = None) -> None:
         if stat.S_ISDIR(info.st_mode):
             seen: set[tuple[int, int]] = set()
             for directory, children, files in os.walk(root, followlinks=True, onerror=scan_error):
+                if session_root is not None:
+                    children[:] = [
+                        name for name in children if Path(directory) / name != session_root
+                    ]
                 info = Path(directory).stat()
                 identity = (info.st_dev, info.st_ino)
                 if identity in seen:

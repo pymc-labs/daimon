@@ -315,7 +315,7 @@ def create_app(
     elif not can_switch_uid():
         raise RuntimeError("production requires separate service and tool UIDs")
     if not test_mode:
-        validate_credential_files()
+        validate_credential_files(home=root)
     auth = Authenticator(token)
     session_mode = validate_session_mode()
     supervisor = Supervisor(root, adapter or AzureModelAdapter(), session_mode, auth.token)
