@@ -58,6 +58,8 @@ class SelfHostedHostRuntime(TurnRuntime):
     tools_resolver: ToolsResolver | None = None
     record_usage: Callable[[UsageObservation, str], Awaitable[bool]] | None = None
     finalize: Callable[[], Awaitable[None]] | None = None
+    history_cursor: Callable[[ResourceRef], Awaitable[int]] | None = None
+    explicit_ask: Callable[[str], bool] | None = None
     skipped_notice: Callable[[], str] | None = None
 
 
@@ -139,6 +141,8 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
         request.session,
         persistence=active,
         baseline_loader=invocation_baseline,
+        explicit_ask=runtime.explicit_ask,
+        history_cursor=runtime.history_cursor,
         notice_loader=lambda session: skipped_skill_notice(
             session, runtime.skipped_notice() if runtime.skipped_notice is not None else ""
         ),

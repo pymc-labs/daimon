@@ -292,3 +292,46 @@ async def note_pending_reason(
         )
         .values(record=record.model_dump(mode="json"))
     )
+
+
+async def replay_cursor(session: AsyncSession, *, tenant_id: uuid.UUID, binding_id: str) -> int:
+    value = await read_context(
+        session,
+        tenant_id=tenant_id,
+        binding_id=binding_id,
+        key=context_key("replay", binding_id, "cursor"),
+    )
+    cursor = value.get("seq", 0) if value is not None else 0
+    if not isinstance(cursor, int) or cursor < 0:
+        raise ValueError("invalid self-hosted replay cursor")
+    return cursor
+
+
+async def advance_replay_cursor(
+    session: AsyncSession, *, tenant_id: uuid.UUID, binding_id: str, seq: int
+) -> None:
+    """Advance only after every receipt through seq has been durably recorded."""
+    key = context_key("replay", binding_id, "cursor")
+    await create_context(
+        session, tenant_id=tenant_id, binding_id=binding_id, key=key, value={"seq": 0}
+    )
+    current = await replay_cursor(session, tenant_id=tenant_id, binding_id=binding_id)
+    if seq <= current:
+        return
+    body = await session.scalar(
+        select(MuxOperation.record).where(
+            MuxOperation.tenant_id == tenant_id,
+            MuxOperation.account_id == context_account(binding_id),
+            MuxOperation.key == key,
+        )
+    )
+    record = OperationRecord.model_validate(body)
+    await session.execute(
+        update(MuxOperation)
+        .where(
+            MuxOperation.tenant_id == tenant_id,
+            MuxOperation.account_id == context_account(binding_id),
+            MuxOperation.key == key,
+        )
+        .values(record=record.model_copy(update={"result": {"seq": seq}}).model_dump(mode="json"))
+    )

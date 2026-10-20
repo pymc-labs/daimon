@@ -71,15 +71,18 @@ class EntraTokenProvider:
 
 
 def validate_harness_auth(config: HarnessConfig, settings: SelfHostedSettings, tenant: str) -> None:
-    """Validate operator authority before looking up any bearer secret."""
-    if config.auth_mode != "bearer_env":
-        return
-    bindings = {binding.name: binding for binding in settings.harness_auth_bindings}
-    binding = bindings.get(config.auth_ref)
-    parsed = urlsplit(config.harness_url)
+    """Validate origin, audience and tenant before resolving any credential."""
+    bindings = {
+        (binding.auth_mode, binding.name): binding for binding in settings.harness_auth_bindings
+    }
+    binding = bindings.get((config.auth_mode, config.auth_ref))
+    parsed = urlsplit(config.project_endpoint or config.harness_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     if (
-        not config.auth_ref.startswith("DAIMON_SELFHOSTED__HARNESS_TOKEN_")
+        (
+            config.auth_mode == "bearer_env"
+            and not config.auth_ref.startswith("DAIMON_SELFHOSTED__HARNESS_TOKEN_")
+        )
         or binding is None
         or origin != binding.origin
         or not (
@@ -108,8 +111,10 @@ def host_tool_policy(
     asked = set(CONFIRMED_DAIMON_TOOLS) | set(rule_tools)
     if asks_before_publishing:
         asked.update(PUBLISH_TOOLS)
-    # The proxy must pause too: the host unwraps it before evaluating fixed gates.
-    asked.add("call_tool")
+    # A proxy is gated only when host policy needs to inspect the underlying tool.
+    # With default settings, neutral proxy calls retain automatic execution.
+    if safety.enabled or rule_tools or asks_before_publishing:
+        asked.add("call_tool")
     for name in asked:
         policy.setdefault("daimon-mcp/" + name, "ask")
     return policy
@@ -249,7 +254,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     environment_pin: Revision | None = None
     active_turn: tuple[str, str] | None = None
     session_bindings: dict[str, str] = {}
+    receipt_cursors: dict[str, int] = {}
+    history_floors: dict[tuple[str, str | None], int] = {}
     ended_turns: set[str] = set()
+    agent_policy: dict[str, JsonValue] = {}
     host_policy: dict[str, Literal["auto", "ask", "deny"]] = {}
     token_deadline_s = min(
         deployment.deadline_s, (request.deadline - request.now()).total_seconds()
@@ -284,6 +292,9 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         environment_pin = environment.revision
         config = HarnessConfig.model_validate(extension.value)
         validate_harness_auth(config, settings.selfhosted, scope.tenant_id)
+        from mux.drivers.selfhosted.events import agent_tool_policy
+
+        agent_policy.update(agent_tool_policy(agent.spec))
         host_policy = host_tool_policy(
             request.deps.tool_safety,
             tuple(connection.name for connection in agent.spec.mcp_servers or ()),
@@ -388,6 +399,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             if method == "POST" and path == "/v0/turns":
                 if body is not None:
                     body = dict(body)
+                    original_policy = body.get("tool_policy", {})
+                    if not isinstance(original_policy, dict):
+                        raise AdmissionDenied(reason="backend_unsupported")
+                    agent_policy.update(original_policy)
                     body["tool_policy"] = merge_tool_policy(
                         body.get("tool_policy", {}), host_policy
                     )
@@ -468,6 +483,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 or request.deadline > datetime.now(UTC)
                 else datetime.now(UTC) + timedelta(seconds=8)
             )
+            if method == "GET" and "/events?after_seq=" in path:
+                prefix, _, raw_after = path.partition("after_seq=")
+                after = max(int(raw_after), await history_floor(session_id))
+                path = prefix + "after_seq=" + str(after)
             result = await transport_impl.request(
                 method,
                 path,
@@ -482,10 +501,8 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 await reconcile_receipts(session_id, result)
             return result
 
-    async def reconcile_receipts(session_id: str, raw: JsonValue) -> None:
+    async def replay_binding(session_id: str) -> str | None:
         from daimon.core.turn.persistence import current_persistence
-        from mux.drivers.selfhosted import wire
-        from mux.drivers.selfhosted.normalize import usage
 
         active = current_persistence.get()
         binding_id = session_bindings.get(session_id)
@@ -505,9 +522,52 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 )
             )
             if binding is None or binding.native_refs.get("session") != session_id:
-                return
+                return None
             binding_id = binding.id
         session_bindings[session_id] = binding_id
+        return binding_id
+
+    async def receipt_cursor(session_id: str) -> int:
+        from daimon.core.stores.selfhosted_usage import replay_cursor
+
+        if session_id not in receipt_cursors:
+            binding_id = await replay_binding(session_id)
+            if binding_id is None:
+                return 0
+            async with request.deps.sessionmaker() as db:
+                receipt_cursors[session_id] = await replay_cursor(
+                    db, tenant_id=request.tenant_id, binding_id=binding_id
+                )
+        return receipt_cursors[session_id]
+
+    async def history_floor(session_id: str) -> int:
+        from daimon.core.turn.persistence import current_persistence
+
+        active = current_persistence.get()
+        operation = active.operation_key if active is not None else None
+        key = (session_id, operation)
+        if key not in history_floors:
+            floor = await receipt_cursor(session_id)
+            if active is not None:
+                baseline = await active.store.get_operation(
+                    active.scope, active.operation_key + ":baseline:0"
+                )
+                if baseline is not None:
+                    saved = baseline.result.get("after")
+                    if isinstance(saved, int):
+                        floor = saved
+            history_floors[key] = floor
+        return history_floors[key]
+
+    async def reconcile_receipts(session_id: str, raw: JsonValue) -> None:
+        from daimon.core.stores.selfhosted_usage import advance_replay_cursor
+        from mux.drivers.selfhosted import wire
+        from mux.drivers.selfhosted.normalize import usage
+
+        binding_id = await replay_binding(session_id)
+        if binding_id is None:
+            return
+        after = await receipt_cursor(session_id)
         native = ResourceRef(
             id=session_id,
             kind="session",
@@ -517,9 +577,12 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             account_id=scope.account_id,
         )
         receipts: dict[str, UsageObservation] = {}
-        for event in wire.EventsResponse.model_validate(raw).events:
+        events = wire.EventsResponse.model_validate(raw).events
+        for event in events:
             if event.session_id != session_id:
                 raise ScopeViolation(session_id, "foreign usage replay")
+            if event.seq <= after:
+                continue
             if event.type == "turn_ended":
                 ended_turns.add(event.turn_id)
             if event.type in ("usage", "model_request_started") or (
@@ -534,6 +597,13 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         # harness durably reports usage. The original admission survives restart.
         for value in receipts.values():
             await record(value, binding_id)
+        cursor = max((event.seq for event in events), default=after)
+        if cursor > after:
+            async with request.deps.sessionmaker() as db, db.begin():
+                await advance_replay_cursor(
+                    db, tenant_id=request.tenant_id, binding_id=binding_id, seq=cursor
+                )
+            receipt_cursors[session_id] = cursor
 
     def transport(configured: ConfigRevision, authorized: Scope) -> ConfiguredTransport:
         check(configured, authorized)
@@ -593,7 +663,8 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                             )
                     await cleanup.request(
                         "GET",
-                        f"/v0/sessions/{segment(session_id)}/events?after_seq=0",
+                        f"/v0/sessions/{segment(session_id)}/events"
+                        f"?after_seq={await receipt_cursor(session_id)}",
                         session_id=session_id,
                     )
         except Exception:
@@ -634,6 +705,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         record_usage=record,
         finalize=finalize,
         skipped_notice=skipped_notice,
+        history_cursor=lambda ref: history_floor(ref.id),
+        explicit_ask=lambda name: (
+            agent_policy.get(name, agent_policy.get(name.split("/")[0] + "/*", "auto")) == "ask"
+        ),
         tools_resolver=tools,
         price=price,
         infrastructure_usd=deployment.infrastructure_usd,

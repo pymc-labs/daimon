@@ -236,3 +236,40 @@ async def test_entra_refresh_failure_is_retryable_and_credential_is_reused(monke
     assert requests == ["https://harness/.default"] * 2
     await provider.close()
     assert created == closed and len(created) == 1
+
+
+@pytest.mark.parametrize(
+    "audience,url,tenant",
+    [
+        ("https://management.azure.com", "https://attacker.example", SCOPE.tenant_id),
+        ("https://unbound.example", "https://harness", SCOPE.tenant_id),
+        ("https://management.azure.com", "https://harness", "foreign"),
+    ],
+)
+def test_entra_binding_checks_origin_audience_and_tenant_before_minting(
+    monkeypatch, audience, url, tenant
+):
+    from daimon.core.config import HarnessAuthBinding, SelfHostedSettings
+    from daimon.core.turn.selfhosted_deployment import validate_harness_auth
+    from mux.drivers.selfhosted.config import HarnessConfig
+
+    settings = SelfHostedSettings(
+        harness_auth_bindings=(
+            HarnessAuthBinding(
+                auth_mode="entra",
+                name="https://management.azure.com",
+                origin="https://harness",
+                tenants=(SCOPE.tenant_id,),
+            ),
+        )
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unbound destinations must not resolve credentials or send HTTP")
+
+    monkeypatch.setattr("azure.identity.aio.DefaultAzureCredential", forbidden)
+    monkeypatch.setattr(httpx.AsyncClient, "request", forbidden)
+    with pytest.raises(AdmissionDenied):
+        validate_harness_auth(
+            HarnessConfig(harness_url=url, auth_mode="entra", auth_ref=audience), settings, tenant
+        )

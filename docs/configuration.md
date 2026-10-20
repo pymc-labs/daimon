@@ -1019,9 +1019,10 @@ remains allowed; credential-bearing connections still require HTTPS.
 
 `tuple[HarnessAuthBinding, ...]` · optional · default unset
 
-JSON list of harness bearer bindings: name (DAIMON_SELFHOSTED__HARNESS_TOKEN_*), origin
-(exact HTTPS origin), tenants (UUID list). Unbound names and destinations are refused
-before credential resolution. Wildcards require single_tenant.
+JSON list of harness auth bindings: auth_mode (bearer_env or entra), name
+(DAIMON_SELFHOSTED__HARNESS_TOKEN_* variable or exact Entra audience), origin (exact
+HTTPS origin), tenants (UUID list). Unbound names and destinations are refused before
+credential resolution. Wildcards require single_tenant.
 
 ### `DAIMON_SELFHOSTED__MCP_CREDENTIAL_BINDINGS`
 

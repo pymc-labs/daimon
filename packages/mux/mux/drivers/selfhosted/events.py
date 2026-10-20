@@ -30,7 +30,13 @@ from mux.drivers.selfhosted.context import Context
 from mux.drivers.selfhosted.normalize import normalize, usage
 from mux.drivers.selfhosted.sessions import SelfHostedSessions
 from mux.drivers.selfhosted.transport import secure_url
-from mux.errors import ContinuityLost, OperationConflict, ProviderError, ScopeViolation
+from mux.errors import (
+    ContinuityLost,
+    OperationConflict,
+    ProviderError,
+    ScopeViolation,
+    UnsupportedCapability,
+)
 from mux.state.operations import request_digest
 
 SkillResolver = Callable[[Scope, SkillRef], Awaitable[wire.Skill]]
@@ -50,6 +56,52 @@ def segment(value: str) -> str:
     from urllib.parse import quote
 
     return quote(value, safe="")
+
+
+def agent_tool_policy(spec: AgentSpec) -> dict[str, Literal["auto", "ask", "deny"]]:
+    """Compile the pinned agent permissions before adding host safety gates."""
+    builtin_names = {"bash", "read", "write", "edit"}
+    policy: dict[str, Literal["auto", "ask", "deny"]] = {}
+    if spec.tools is not None:
+        if any(
+            tool.kind == "custom" or (tool.kind == "builtin" and tool.name not in builtin_names)
+            for tool in spec.tools
+        ):
+            raise UnsupportedCapability(("custom_tools_or_tool_permissions",), "selfhosted.loop")
+        policy.update(dict.fromkeys(builtin_names, "deny"))
+        for tool in spec.tools:
+            name = tool.name + "/*" if tool.kind == "mcp_toolset" else tool.name
+            policy[name] = tool.permission
+    for connection in spec.mcp_servers or ():
+        configured = connection.tool_policy
+        allowed = configured.get("allowed_tools")
+        default = policy.get(connection.name + "/*", "auto")
+        if "allowed_tools" in configured:
+            if not isinstance(allowed, list) or any(
+                not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name)
+                for name in allowed
+            ):
+                raise UnsupportedCapability(("mcp_allowed_tools",), "selfhosted.loop")
+            policy[connection.name + "/*"] = "deny"
+            for name in allowed:
+                policy[connection.name + "/" + str(name)] = default
+        for name, permission in configured.items():
+            if name == "allowed_tools":
+                continue
+            if permission not in ("auto", "ask", "deny"):
+                raise UnsupportedCapability(("mcp_tool_policy",), "selfhosted.loop")
+            qualified = (
+                name if name.startswith(connection.name + "/") else connection.name + "/" + name
+            )
+            if "/" in name and not name.startswith(connection.name + "/"):
+                raise UnsupportedCapability(("mcp_tool_policy_scope",), "selfhosted.loop")
+            tool_name = qualified.removeprefix(connection.name + "/")
+            if isinstance(allowed, list) and tool_name not in allowed and permission != "deny":
+                raise UnsupportedCapability(
+                    ("mcp_tool_policy_widens_allowlist",), "selfhosted.loop"
+                )
+            policy[qualified] = permission
+    return policy
 
 
 class SelfHostedEvents:
@@ -244,45 +296,7 @@ class SelfHostedEvents:
             raise self._c.unsupported("agent_lifecycle_or_provider")
         if agent.spec.model.options or agent.spec.extensions:
             raise self._c.unsupported("agent_options_or_extensions")
-        builtin_names = {"bash", "read", "write", "edit"}
-        policy: dict[str, Literal["auto", "ask", "deny"]] = {}
-        if agent.spec.tools is not None:
-            if any(
-                tool.kind == "custom" or (tool.kind == "builtin" and tool.name not in builtin_names)
-                for tool in agent.spec.tools
-            ):
-                raise self._c.unsupported("custom_tools_or_tool_permissions")
-            policy.update(dict.fromkeys(builtin_names, "deny"))
-            for tool in agent.spec.tools:
-                name = tool.name + "/*" if tool.kind == "mcp_toolset" else tool.name
-                policy[name] = tool.permission
-        for connection in agent.spec.mcp_servers or ():
-            configured = connection.tool_policy
-            allowed = configured.get("allowed_tools")
-            default = policy.get(connection.name + "/*", "auto")
-            if "allowed_tools" in configured:
-                if not isinstance(allowed, list) or any(
-                    not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name)
-                    for name in allowed
-                ):
-                    raise self._c.unsupported("mcp_allowed_tools")
-                policy[connection.name + "/*"] = "deny"
-                for name in allowed:
-                    policy[connection.name + "/" + str(name)] = default
-            for name, permission in configured.items():
-                if name == "allowed_tools":
-                    continue
-                if permission not in ("auto", "ask", "deny"):
-                    raise self._c.unsupported("mcp_tool_policy")
-                qualified = (
-                    name if name.startswith(connection.name + "/") else connection.name + "/" + name
-                )
-                if "/" in name and not name.startswith(connection.name + "/"):
-                    raise self._c.unsupported("mcp_tool_policy_scope")
-                tool_name = qualified.removeprefix(connection.name + "/")
-                if isinstance(allowed, list) and tool_name not in allowed and permission != "deny":
-                    raise self._c.unsupported("mcp_tool_policy_widens_allowlist")
-                policy[qualified] = permission
+        policy = agent_tool_policy(agent.spec)
         model = self._model or agent.spec.model.id
         if self._deployment is not None and model != self._deployment:
             raise self._c.unsupported("model_deployment_mismatch")

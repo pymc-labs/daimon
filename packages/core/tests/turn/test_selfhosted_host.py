@@ -46,7 +46,10 @@ class Wire:
     def handle(self, request):
         assert request.headers["authorization"] == "Bearer offline"
         if request.method == "GET":
-            return httpx.Response(200, json={"events": self.events, "complete": True})
+            after = int(request.url.params.get("after_seq", "0"))
+            return httpx.Response(
+                200, json={"events": [e for e in self.events if e["seq"] > after], "complete": True}
+            )
         body = json.loads(request.content)
         if body["idempotency_key"] not in self.turns:
             self.turns[body["idempotency_key"]] = body
@@ -435,6 +438,15 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "revoke_failure"),
         (False, False, "entra"),
         (False, False, "entra_refresh"),
+        (False, False, "entra_attack"),
+        (False, False, "ask_accept"),
+        (False, False, "ask_deny"),
+        (False, False, "ask_disabled"),
+        (False, False, "mcp_ask_accept"),
+        (False, False, "stored_deny"),
+        (False, False, "proxy_default"),
+        (False, False, "proxy_safety"),
+        (False, False, "long_history"),
     ],
 )
 async def test_production_shell_admits_before_http_records_and_revokes(
@@ -503,7 +515,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                     name="reports",
                     url="https://reports.example/mcp",
                     credential_ref="HARNESS_MCP_CRED_REPORTS",
-                    tool_policy={"allowed_tools": ["summarize"]},
+                    tool_policy={"allowed_tools": ["summarize", "get_report"]},
                 ),
             ),
         ),
@@ -519,11 +531,13 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 version=1,
                 value={
                     "harness_url": "https://attacker.example"
-                    if scenario in ("attack", "origin")
+                    if scenario in ("attack", "origin", "entra_attack")
                     else "https://harness",
                     "auth_mode": "entra" if scenario.startswith("entra") else "bearer_env",
                     "auth_ref": "DAIMON_MCP__JWT_SECRET"
                     if scenario == "attack"
+                    else "https://management.azure.com"
+                    if scenario == "entra_attack"
                     else "https://harness"
                     if scenario.startswith("entra")
                     else "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
@@ -542,6 +556,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         deps=replace(
             request.deps,
             anthropic=ForbiddenAnthropic(),
+            public_url="https://mcp.example/mcp",
             mcp=McpSettings(
                 public_url="https://mcp.example/mcp",
                 jwt_secret=SecretStr("offline-test-signing-material-32-bytes"),
@@ -577,7 +592,10 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         json.dumps(
             [
                 {
-                    "name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
+                    "auth_mode": "entra" if scenario.startswith("entra") else "bearer_env",
+                    "name": "https://harness"
+                    if scenario.startswith("entra")
+                    else "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
                     "origin": "https://harness",
                     "tenants": [str(TENANT)],
                 }
@@ -654,6 +672,45 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 tool_safety=ToolSafetyPolicy(enabled=True, denied=("reports/delete_report",)),
             ),
         )
+    approval_case = scenario in (
+        "ask_accept",
+        "ask_deny",
+        "ask_disabled",
+        "mcp_ask_accept",
+        "stored_deny",
+        "proxy_safety",
+    )
+    if approval_case and scenario != "ask_disabled":
+        from daimon.core.tool_safety import ToolSafetyPolicy
+
+        request = replace(
+            request,
+            deps=replace(
+                request.deps, tool_safety=ToolSafetyPolicy(enabled=True, agent_rules=True)
+            ),
+        )
+    if scenario == "stored_deny":
+        from daimon.core.authz import Subject
+        from daimon.core.stores.agent_tool_rules import set_rule
+
+        async with request.deps.sessionmaker() as db, db.begin():
+            await set_rule(
+                db,
+                tenant_id=TENANT,
+                agent_id=agent.ref.id,
+                agent_name="test",
+                tool_key="reports/get_report",
+                server_url="https://reports.example/mcp",
+                rule="deny",
+                set_by="admin",
+                actor=Subject(is_admin=True),
+            )
+    cards, actions, executions = [], [], []
+
+    async def confirm(prompt):
+        cards.append(prompt)
+        return "denied" if scenario == "ask_deny" else "approved"
+
     late = scenario in ("late_usage", "late_reconcile")
     deferred = []
     cancellations = []
@@ -662,6 +719,15 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         call = httpx.Request(method, url, json=kwargs.get("json"), headers=kwargs["headers"])
         requests.append(call)
         clients.append(self)
+        if call.url.path.endswith("/actions"):
+            body = json.loads(call.content)
+            actions.append(body)
+            if body["decision"] == "allow":
+                executions.append(body["action_id"])
+            pending = deferred[:]
+            deferred.clear()
+            wire.events.extend(pending)
+            return httpx.Response(200, json={"accepted": True}, request=call)
         if call.url.path.endswith("/cancel"):
             cancellations.append(call)
             if scenario == "late_usage":
@@ -705,11 +771,53 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 "write": "ask",
                 "reports/*": "deny",
                 "reports/summarize": "ask",
+                "reports/get_report": "ask",
             }
             assert body["mcp_servers"][1]["headers_env"] == {
                 "Authorization": "HARNESS_MCP_CRED_REPORTS"
             }
         response = wire.handle(call)
+        if (
+            method == "POST"
+            and call.url.path == "/v0/turns"
+            and (approval_case or scenario == "proxy_default")
+        ):
+            body = json.loads(call.content)
+            tool = (
+                "reports/get_report"
+                if scenario == "stored_deny"
+                else "reports/summarize"
+                if scenario == "mcp_ask_accept"
+                else "daimon-mcp/call_tool"
+                if scenario.startswith("proxy")
+                else "write"
+            )
+            if scenario == "proxy_default":
+                assert body["tool_policy"].get(tool, "auto") == "auto"
+                executions.append("neutral")
+            else:
+                assert body["tool_policy"].get(tool, "auto") == "ask"
+                deferred.extend(wire.events[2:])
+                wire.events[:] = wire.events[:2]
+                wire.events.append(
+                    dict(
+                        seq=3,
+                        session_id=body["session_id"],
+                        turn_id=body["turn_id"],
+                        at=datetime.now(UTC).isoformat(),
+                        type="requires_action",
+                        data=dict(
+                            action_id="approval",
+                            call_id="call-approval",
+                            name=tool,
+                            input={"name": "get_current_time", "arguments": {}}
+                            if scenario.startswith("proxy")
+                            else {"path": "result.txt"},
+                        ),
+                    )
+                )
+                for event in deferred:
+                    event["seq"] += 1
         if late and method == "POST" and call.url.path == "/v0/turns":
             deferred.extend(wire.events[1:])
             measured = deferred[0]
@@ -763,7 +871,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         request,
         deps=replace(request.deps, turn_runtimes={}, turn_runtime_factory=build_channel_runtime),
     )
-    if scenario in ("attack", "origin"):
+    if scenario in ("attack", "origin", "entra_attack"):
         from daimon.core.turn.errors import AdmissionDenied
 
         with pytest.raises(AdmissionDenied):
@@ -778,6 +886,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 reuse_existing=True,
             )
         assert requests == []
+        assert token_calls == [] and credentials == []
         return
     prepared = await bind_session_impl(
         request.deps,
@@ -808,10 +917,22 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         recovery_lifecycle=lambda cancel: RecordingLifecycle(),
         render_interval_s=0.01,
         operation_key="production-shell",
+        confirm_write=confirm,
         # Leave room for durable admission before testing a missing terminal event.
         deadline=datetime.now(UTC) + timedelta(seconds=5) if late else None,
     )
     await drain_outcomes()
+    if approval_case:
+        assert actions == [
+            dict(
+                action_id="approval",
+                decision="deny" if scenario in ("ask_deny", "stored_deny") else "allow",
+            )
+        ]
+        assert len(cards) == (0 if scenario in ("stored_deny", "proxy_safety") else 1)
+        assert bool(executions) == (scenario not in ("ask_deny", "stored_deny"))
+    if scenario == "proxy_default":
+        assert executions == ["neutral"] and cards == [] and actions == []
     assert requests and wire.posts == 1 and len(admitted_keys) == 1
     assert bool(dropped) == drop_stream
     if late:
@@ -880,6 +1001,103 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         )
     else:
         assert not pending.rows
+
+    if scenario == "long_history":
+        import time
+
+        # This checkpoint represents receipts already durably accounted for by
+        # preceding invocations, including 1,000 separate model requests.
+        template = wire.events[0]
+        for index in range(1000):
+            for kind in (
+                "status_running",
+                "model_request_started",
+                "usage",
+                "agent_message_delta",
+                "agent_message",
+                "turn_ended",
+            ):
+                wire.events.append(
+                    {
+                        **template,
+                        "seq": len(wire.events) + 1,
+                        "turn_id": f"prior-{index}",
+                        "type": kind,
+                        "data": {"request_id": f"old-{index}", "model": "gpt-5"},
+                    }
+                )
+        floor = len(wire.events)
+        async with request.deps.sessionmaker() as db, db.begin():
+            await contexts.advance_replay_cursor(
+                db, tenant_id=TENANT, binding_id=binding.id, seq=floor
+            )
+        previous_runtime = prepared.runtime
+        requests.clear()
+        started = time.perf_counter()
+        prepared = await bind_session_impl(
+            request.deps,
+            admitted,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="caller",
+            thread_id=request.thread_id,
+            session_account_id=ACCOUNT,
+            reuse_existing=True,
+        )
+        assert prepared.runtime is not previous_runtime
+        outcome = await run_prepared_turn(
+            request.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            external_user_id="caller",
+            user_message="next question",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+            render_interval_s=0.01,
+            operation_key="after-long-history",
+        )
+        elapsed = time.perf_counter() - started
+        await drain_outcomes()
+        assert outcome.state.error is None
+        assert elapsed < 1, f"turn with 1,000 prior requests took {elapsed:.3f}s"
+        assert wire.posts == 2
+        gets = [call for call in requests if call.method == "GET"]
+        assert gets and all(int(call.url.params["after_seq"]) >= floor for call in gets)
+
+        # Recover the same invocation after a fresh runtime has already loaded
+        # the later accounting checkpoint. Its saved baseline must still win.
+        prepared = await bind_session_impl(
+            request.deps,
+            admitted,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="caller",
+            thread_id=request.thread_id,
+            session_account_id=ACCOUNT,
+            reuse_existing=True,
+        )
+        recovered = await run_prepared_turn(
+            request.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            external_user_id="caller",
+            user_message="next question",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+            render_interval_s=0.01,
+            operation_key="after-long-history",
+        )
+        await drain_outcomes()
+        assert recovered.state.error is None and "answer 2" in str(recovered.state.content)
+        assert wire.posts == 2
 
 
 async def test_preparation_rechecks_disabled_operator_switch_before_harness_io(

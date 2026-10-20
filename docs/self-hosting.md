@@ -400,7 +400,10 @@ unsigned gateway identity headers do not authorize harness calls. `bearer_env`
 only accepts operator variables named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
 Declare each in `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`, a JSON list of
 `{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY", "origin": "https://harness.example", "tenants": ["TENANT_UUID"]}`.
-The exact HTTPS origin and tenant must match before the host resolves the secret.
+Entra mode requires a binding too, with `auth_mode: "entra"` and `name` equal
+to the exact audience, for example `https://harness.example`. The exact HTTPS
+origin and tenant must match before the host resolves a bearer secret or mints
+an Entra token. An audience grant never authorizes another destination.
 Wildcard tenants require `DAIMON_SELFHOSTED__SINGLE_TENANT=true`.
 Environment revision pins are checked before replay and credential resolution.
 `entra` reuses one Azure DefaultAzureCredential and token per runtime, refreshing
@@ -415,6 +418,11 @@ credentials are operator-provisioned environment references on the harness.
 Host tool-safety denies and confirmation gates merge with the pinned agent's
 tool policy; the stricter effective permission wins, including server defaults.
 MCP approvals retain their server and tool names during live delivery and replay.
+Explicit agent `ask` permissions always require confirmation, even for sandbox
+writes or tools the host otherwise permits. Daimon proxy calls use the underlying
+tool's host safety and confirmation rules; neutral calls run with default settings.
+Session replay resumes from a durable accounting cursor, and each invocation
+persists its own starting position for recovery.
 On a deadline or abandonment the finalizer attempts bounded cancellation and
 replays usage. Unmatched requests remain pending under their original admission;
 subsequent session replay also records late receipts from earlier turns.

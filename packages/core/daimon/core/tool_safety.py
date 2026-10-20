@@ -422,6 +422,7 @@ class ToolCall(BaseModel):
     server_name: str | None
     tool_name: str
     input: dict[str, object] = Field(default_factory=dict)
+    permission: Literal["allow", "ask", "deny"] | None = None
 
     @property
     def key(self) -> str:
@@ -621,6 +622,35 @@ def heal_reserved_server(
 
 
 def decide_tool_call(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    *,
+    attended: bool,
+    trusted_servers: frozenset[str] = frozenset(),
+    annotations: ToolAnnotations | None = None,
+    confirmed_tools: frozenset[str] = frozenset(),
+    agent_rule: ResolvedAgentToolRule | None = None,
+) -> ToolVerdict:
+    """Provider permission can tighten a host verdict, never grant consent."""
+    verdict = _decide_tool_call(
+        policy,
+        call,
+        attended=attended,
+        trusted_servers=trusted_servers,
+        annotations=annotations,
+        confirmed_tools=confirmed_tools,
+        agent_rule=agent_rule,
+    )
+    if call.permission == "deny":
+        return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
+    if call.permission == "ask" and verdict.outcome == "allow":
+        return ToolVerdict(
+            outcome="ask" if attended else "deny", effect=verdict.effect, reason="agent_rule_ask"
+        )
+    return verdict
+
+
+def _decide_tool_call(
     policy: ToolSafetyPolicy,
     call: ToolCall,
     *,

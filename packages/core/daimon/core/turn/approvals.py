@@ -323,6 +323,9 @@ def tool_calls_for(state: TurnState, ids: Sequence[str]) -> list[ToolCall]:
                 server_name=block.mcp_server_name,
                 tool_name=block.name,
                 input=dict(block.input),
+                permission=block.evaluated_permission
+                if block.id.startswith("selfhosted:tool:")
+                else None,
             )
         )
     return calls
@@ -586,6 +589,7 @@ def chat_tool_confirmation(
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
     daimon_rules: bool = False,
+    provider_permissions: bool = False,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -594,7 +598,12 @@ def chat_tool_confirmation(
     nobody asked for just now (a wake continuing earlier work): it gets the
     unattended rules even though it renders into a thread.
     """
-    if not policy.enabled and not asks_before_publishing and not confirmed_tools:
+    if (
+        not policy.enabled
+        and not asks_before_publishing
+        and not confirmed_tools
+        and not provider_permissions
+    ):
         return RequireApproval()
     decide = (
         interactive_decider(
@@ -616,7 +625,7 @@ def chat_tool_confirmation(
             daimon_rules=daimon_rules,
         )
     )
-    if not policy.enabled:
+    if not policy.enabled and not provider_permissions:
         decide = _selected_only(
             decide,
             trusted_servers=trusted_servers,

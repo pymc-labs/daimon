@@ -1408,6 +1408,11 @@ reports gaps: it provides no apply/repair command. Runtime journal replay owns
 reconciliation. A missing admitted tariff needs authoritative original admission
 evidence; admitting a new tariff after the request does not repair it.
 
+The runtime advances a per-binding replay cursor only after recording the
+receipts through that position. Later turns read from that cursor, while a
+recovered invocation retains its original baseline. Reconciliation therefore
+processes new receipts without re-recording lifetime session usage.
+
 The Anthropic usage sweep is not a selfhosted recovery path. The harness journals
 request intention before model I/O. On reconcile, an unmatched intention becomes
 an unknown observation with the same stable request ID. Retain it pending until

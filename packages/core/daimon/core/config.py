@@ -1235,9 +1235,21 @@ class McpCredentialBinding(BaseModel):
 
 
 class HarnessAuthBinding(McpCredentialBinding):
-    """Operator authority for a harness bearer token and its destination."""
+    """Operator authority for a harness bearer variable or Entra audience."""
 
-    name: str = Field(pattern=r"^DAIMON_SELFHOSTED__HARNESS_TOKEN_[A-Za-z0-9_]+$")
+    name: str = Field(min_length=1)
+    auth_mode: Literal["bearer_env", "entra"] = "bearer_env"
+
+    @model_validator(mode="after")
+    def valid_reference(self) -> HarnessAuthBinding:
+        from mux.drivers.selfhosted.config import HarnessConfig
+
+        HarnessConfig(harness_url=self.origin, auth_mode=self.auth_mode, auth_ref=self.name)
+        if self.auth_mode == "bearer_env" and not self.name.startswith(
+            "DAIMON_SELFHOSTED__HARNESS_TOKEN_"
+        ):
+            raise ValueError("Harness bearer binding requires an operator token variable")
+        return self
 
 
 class SelfHostedSettings(BaseModel):
@@ -1271,7 +1283,8 @@ class SelfHostedSettings(BaseModel):
     harness_auth_bindings: tuple[HarnessAuthBinding, ...] = Field(
         default=(),
         description=(
-            "JSON list of harness bearer bindings: name (DAIMON_SELFHOSTED__HARNESS_TOKEN_*), "
+            "JSON list of harness auth bindings: auth_mode (bearer_env or entra), name "
+            "(DAIMON_SELFHOSTED__HARNESS_TOKEN_* variable or exact Entra audience), "
             "origin (exact HTTPS origin), tenants (UUID list). Unbound names and destinations "
             "are refused before credential resolution. Wildcards require single_tenant."
         ),
@@ -1282,7 +1295,7 @@ class SelfHostedSettings(BaseModel):
     def unique_harness_names(
         cls, value: tuple[HarnessAuthBinding, ...]
     ) -> tuple[HarnessAuthBinding, ...]:
-        if len({binding.name for binding in value}) != len(value):
+        if len({(binding.auth_mode, binding.name) for binding in value}) != len(value):
             raise ValueError("Harness credential binding names must be unique")
         return value
 

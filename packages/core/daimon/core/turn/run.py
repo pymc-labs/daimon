@@ -102,6 +102,7 @@ from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
+from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -969,6 +970,10 @@ async def run_prepared_turn_impl(
             confirmed_tools = frozenset()
     tool_confirmation = chat_tool_confirmation(
         deps.tool_safety,
+        provider_permissions=(
+            prepared.admission.backend_revision is not None
+            and prepared.admission.backend_revision.profile == SELFHOSTED_LOOP.profile_id
+        ),
         requester_platform_user_id=external_user_id,
         confirm=confirm_write,
         attended=attended if attended is not None else origin != "routine",

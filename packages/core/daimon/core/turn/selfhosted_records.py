@@ -73,7 +73,10 @@ async def resolve_records(
                 MA_METADATA_KEY_TENANT: scope.tenant_id,
             },
             "tools": [],
-            "mcp_servers": [],
+            "mcp_servers": [
+                {"type": "url", "name": server.name, "url": server.url}
+                for server in agent.spec.mcp_servers or ()
+            ],
             "skills": [],
             "created_at": agent.created_at,
             "updated_at": agent.updated_at,

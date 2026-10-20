@@ -17,6 +17,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentMCPToolUseEvent,
+    BetaManagedAgentsAgentToolUseEvent,
     BetaManagedAgentsEventParams,
     BetaManagedAgentsSessionEvent,
 )
@@ -204,9 +206,11 @@ class SelfHostedTurnIO:
         *,
         persistence: SelfHostedPersistence,
         root_turn_id: str | None = None,
+        history_cursor: Callable[[ResourceRef], Awaitable[int]] | None = None,
+        explicit_ask: Callable[[str], bool] | None = None,
         notice_loader: Callable[[ResourceRef], Awaitable[Event | None]] | None = None,
         baseline_loader: Callable[
-            [ResourceRef, tuple[str, ...]], Awaitable[tuple[tuple[str, ...], bool]]
+            [ResourceRef, tuple[str, ...], int], Awaitable[tuple[tuple[str, ...], bool, int]]
         ]
         | None = None,
     ) -> None:
@@ -227,6 +231,9 @@ class SelfHostedTurnIO:
         self._resuming = False
         self._root = root_turn_id
         self._prior_roots: set[str] | None = None
+        self._history_cursor = history_cursor
+        self._explicit_ask = explicit_ask
+        self._after = 0
         self._input_started = root_turn_id is not None
         self._buffered: list[Event] = []
         self._displayed: dict[str, str] = {}
@@ -239,7 +246,7 @@ class SelfHostedTurnIO:
 
     async def _history(self) -> list[Event]:
         values: list[Event] = []
-        cursor: str | None = None
+        cursor: str | None = str(self._after)
         seen: set[str] = set()
         for _ in range(_PAGE_BOUND):
             page = await _edge(
@@ -262,11 +269,21 @@ class SelfHostedTurnIO:
 
     async def _baseline(self) -> None:
         if self._prior_roots is None:
-            values = await self._history()
+            page = await _edge(
+                self._backend.events.list(
+                    self._scope, self._session, page=PageRequest(order="desc", limit=1)
+                )
+            )
+            values = list(page.data)
+            for event in values:
+                self._validate(event)
+            self._after = max((event.sequence for event in values), default=0)
+            if self._history_cursor is not None:
+                self._after = max(self._after, await self._history_cursor(self._session))
             self._prior_roots = {e.turn_id for e in values if e.turn_id is not None}
             if self._baseline_loader is not None:
-                roots, resumed = await self._baseline_loader(
-                    self._session, tuple(sorted(self._prior_roots))
+                roots, resumed, self._after = await self._baseline_loader(
+                    self._session, tuple(sorted(self._prior_roots)), self._after
                 )
                 self._prior_roots = set(roots)
                 self._resuming = resumed
@@ -306,6 +323,19 @@ class SelfHostedTurnIO:
         if event.type == "session.status_terminated":
             self._terminated = True
         for display in display_batch(event, session_id=self._session.id):
+            if self._explicit_ask is not None and isinstance(
+                display, BetaManagedAgentsAgentToolUseEvent | BetaManagedAgentsAgentMCPToolUseEvent
+            ):
+                qualified = (
+                    display.mcp_server_name + "/" + display.name
+                    if display.type == "agent.mcp_tool_use"
+                    else display.name
+                )
+                display = display.model_copy(
+                    update={
+                        "evaluated_permission": "ask" if self._explicit_ask(qualified) else "allow"
+                    }
+                )
             encoded = display.model_dump_json(exclude={"processed_at"})
             if self._displayed.get(display.id) != encoded:
                 self._displayed[display.id] = encoded
@@ -418,11 +448,7 @@ class SelfHostedTurnIO:
     async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
         async with asyncio.timeout(_timeout(read_timeout_s)):
             await self._baseline()
-            history = await self._history()
-            after = max(
-                (event.sequence for event in history if event.turn_id in (self._prior_roots or ())),
-                default=0,
-            )
+            after = self._after
             source = await _edge(
                 self._backend.events.open_stream(self._scope, self._session, after=str(after))
             )

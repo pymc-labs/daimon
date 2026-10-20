@@ -1714,7 +1714,9 @@ async def _consume_with_reconnect(
             # temporary SDK edge preserves legacy's terminal handling of them.
             stop = (
                 normalized_stop_reason(normalized)
-                if normalized is not None and normalized.type != "native.session.status_idle"
+                if normalized is not None
+                and normalized.type != "native.session.status_idle"
+                and event.type == "session.status_idle"
                 else terminal_stop_reason(event)
             )
             if stop == "requires_action":

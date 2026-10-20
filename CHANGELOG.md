@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include async managed-identity transport in the harness image and finish subprocess cleanup when cancellation arrives during launch.
 
 - Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.
+- Bound selfhosted Entra audiences to operator-approved origins and tenants. Fixed approval handling through the turn runner, preserved explicit agent confirmation and stored MCP rules, and resumed session history and usage replay from durable cursors.
+
 - Bind self-hosted harness bearer tokens to operator-approved origins and tenants, preserve MCP approval identity, and enforce host tool-safety policy. Reuse Entra credentials and HTTP connections, cancel abandoned harness work, and reconcile late usage without a lifetime-session usage bound.
 
 - Verify self-hosted skill pins using their declared content or ZIP representation, preserve held-version mount names, and load pinned channel bundles for other channel members. Explicit custom skills may use built-in names. Wildcard MCP credentials require single-tenant opt-in; private HTTP MCP destinations require operator exceptions.
