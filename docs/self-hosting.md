@@ -16,9 +16,10 @@ Service secrets use Key Vault references through managed identity.
 
 Deployment is staged: foundation, image publication and successful init, then
 serving apps. The baseline uses public endpoints and does not implement private
-networking. Blob is provisioned but is not connected to the current S3 artifact
-client. These templates have been validated offline only; subscription deployment
-and runtime behavior have not been verified. See `deploy/azure/README.md` in the
+networking. MCP is configured for private Blob chart storage with the runtime
+managed identity: delegation-key access is scoped to the storage account and
+blob data access to the charts container. These templates have been validated
+offline only; subscription deployment and runtime behavior have not been verified. See `deploy/azure/README.md` in the
 repository for parameters, deployment commands, required roles and limitations.
 
 ## Upgrading an existing installation

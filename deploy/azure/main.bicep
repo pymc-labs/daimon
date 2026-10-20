@@ -110,6 +110,13 @@ var commonSecrets = union(
   secretNames
 )
 
+var artifactsEnvironment = {
+  DAIMON_ARTIFACTS__BACKEND: 'azure_blob'
+  DAIMON_ARTIFACTS__ENDPOINT_URL: foundation.outputs.blobEndpoint
+  DAIMON_ARTIFACTS__BUCKET: foundation.outputs.chartsContainerName
+  DAIMON_ARTIFACTS__AZURE_CLIENT_ID: foundation.outputs.identityClientId
+}
+
 module init './modules/init.bicep' = if (!empty(containerImage)) {
   name: 'init'
   params: {
@@ -175,6 +182,7 @@ module apps './modules/app.bicep' = [
       port: service.port
       environment: union(
         commonEnvironment,
+        service.name == 'mcp' ? artifactsEnvironment : {},
         service.name == 'mcp' && contains(services, 'teams') ? (serviceEnvironment.?teams ?? {}) : {},
         serviceEnvironment[?service.name] ?? {}
       )
@@ -197,7 +205,8 @@ output initJobName string = '${stem}-init'
 output containerAppNames array = [for service in services: '${stem}-${service}']
 output postgresHost string = database.outputs.host
 output chartsBlobEndpoint string = foundation.outputs.blobEndpoint
-output chartsContainerName string = 'charts'
+output chartsContainerName string = foundation.outputs.chartsContainerName
+output mcpArtifactsEnvironment object = artifactsEnvironment
 output foundryProjectId string = deployAi ? ai!.outputs.projectId : ''
 output daimonEnvironment object = commonEnvironment
 output daimonSecretNames object = commonSecrets

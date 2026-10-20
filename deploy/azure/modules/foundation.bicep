@@ -123,6 +123,19 @@ resource chartsRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     )
   }
 }
+// Delegation keys require account scope; blob data access stays container-scoped.
+resource chartsDelegatorRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storage
+  name: guid(storage.id, identity.id, 'blob-delegator')
+  properties: {
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'
+    )
+  }
+}
 output environmentId string = environment.id
 output defaultDomain string = environment.properties.defaultDomain
 output identityId string = identity.id
@@ -133,3 +146,4 @@ output registryServer string = registry.properties.loginServer
 output vaultName string = vault.name
 output vaultUri string = vault.properties.vaultUri
 output blobEndpoint string = storage.properties.primaryEndpoints.blob
+output chartsContainerName string = charts.name

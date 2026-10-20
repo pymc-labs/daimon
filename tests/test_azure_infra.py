@@ -267,3 +267,68 @@ def test_name_prefix_validation_runs_offline(
             "fail('namePrefix must be 3-8 lowercase alphanumeric characters starting with a lowercase letter')"
             in validator["output"]["value"]
         )
+
+
+def test_blob_delegation_is_account_scoped_and_data_access_is_charts_only(
+    templates: dict[str, dict],
+) -> None:
+    foundation = templates["modules/foundation.bicep"]
+    roles = [
+        r
+        for r in foundation["resources"]
+        if r["type"] == "Microsoft.Authorization/roleAssignments"
+        and "Microsoft.Storage/storageAccounts" in r["scope"]
+    ]
+    expected_scopes = {
+        "db58b8e5-c6ad-4a2a-8342-4190687cbf4a": (
+            "[resourceId('Microsoft.Storage/storageAccounts', "
+            "format('{0}s', parameters('compactName')))]"
+        ),
+        "ba92f5b4-2d11-453d-a403-e96b0029c9fe": (
+            "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', "
+            "format('{0}s', parameters('compactName')), 'default', 'charts')]"
+        ),
+    }
+    assert len(roles) == len(expected_scopes), "no additional account-wide Blob data roles"
+    for role_id, scope in expected_scopes.items():
+        matches = [r for r in roles if role_id in r["properties"]["roleDefinitionId"]]
+        assert len(matches) == 1
+        role = matches[0]
+        assert role["scope"] == scope
+        assert (
+            role["properties"]["principalId"]
+            == foundation["outputs"]["identityPrincipalId"]["value"]
+        )
+        assert role["properties"]["principalType"] == "ServicePrincipal"
+
+
+def test_only_mcp_receives_blob_settings_from_foundation_outputs(
+    templates: dict[str, dict],
+) -> None:
+    main = templates["main.bicep"]
+    artifacts = main["outputs"]["mcpArtifactsEnvironment"]["value"]
+    assert artifacts == {
+        "DAIMON_ARTIFACTS__BACKEND": "azure_blob",
+        "DAIMON_ARTIFACTS__ENDPOINT_URL": main["outputs"]["chartsBlobEndpoint"]["value"],
+        "DAIMON_ARTIFACTS__BUCKET": main["outputs"]["chartsContainerName"]["value"],
+        "DAIMON_ARTIFACTS__AZURE_CLIENT_ID": "[reference('foundation').outputs.identityClientId.value]",
+    }
+    foundation = templates["modules/foundation.bicep"]
+    assert foundation["outputs"]["chartsContainerName"]["value"] == "charts"
+    assert ".primaryEndpoints.blob" in foundation["outputs"]["blobEndpoint"]["value"]
+    assert "DAIMON_ARTIFACTS__" not in json.dumps(main["outputs"]["daimonEnvironment"])
+    app = next(r for r in main["resources"] if r.get("copy", {}).get("name") == "apps")
+    environment = app["properties"]["parameters"]["environment"]["value"]
+    assert (
+        "if(equals(variables('serviceDefinitions')[copyIndex()].name, 'mcp'), "
+        "createObject('DAIMON_ARTIFACTS__BACKEND', 'azure_blob'"
+    ) in environment
+    for name, value in artifacts.items():
+        assert f"'{name}'" in environment
+        assert value.strip("[]") in environment
+    init = next(r for r in main["resources"] if r["name"] == "init")
+    assert "DAIMON_ARTIFACTS__" not in init["properties"]["parameters"]["environment"]["value"]
+    assert (
+        templates["azd/main.bicep"]["outputs"]["DAIMON_MCP_ARTIFACTS_ENVIRONMENT"]["value"]
+        == "[reference('stack').outputs.mcpArtifactsEnvironment.value]"
+    )

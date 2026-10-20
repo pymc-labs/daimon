@@ -105,8 +105,10 @@ Developer CLI (`azd`), Docker with BuildKit, and Bicep first.
   [hosted-agent permissions reference](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-permissions).
 
 The runtime user-assigned identity receives only AcrPull on this registry,
-Key Vault Secrets User on this vault, Storage Blob Data Contributor on the
-`charts` container, and Cognitive Services OpenAI User on the AI account.
+Key Vault Secrets User on this vault, Storage Blob Delegator on this storage
+account, Storage Blob Data Contributor on the `charts` container, and Cognitive
+Services OpenAI User on the AI account. The account-scoped Blob role only
+permits delegation-key issuance; blob data access stays scoped to charts.
 The project's system identity also receives Cognitive Services OpenAI User on
 the AI account. No subscription-wide runtime roles are assigned. Hosted-agent
 identities and their inference, registry and invocation access are configured
@@ -324,7 +326,10 @@ do not use this flag as an upgrade drain or rollback mechanism.
 `daimonEnvironment` contains nonsecret shared settings, including the MCP public
 URL and managed identity client ID. `daimonSecretNames` maps database URL, signing
 secret and crypto key-ring environment variables to vault names. Apply per-service
-maps from your parameters as well. `harnessEnvironment` contains:
+maps from your parameters as well. `mcpArtifactsEnvironment` contains the four
+nonsecret artifact settings applied only to MCP, using the foundation outputs.
+The azd wrapper exposes the same map as `DAIMON_MCP_ARTIFACTS_ENVIRONMENT`.
+`harnessEnvironment` contains:
 
 - `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (the parameterized GPT-5
   deployment name) and `AZURE_OPENAI_API_VERSION`.
@@ -336,15 +341,37 @@ an inference-authorized managed identity to the harness. The Foundry project
 resource ID is also an output. Hosted-agent image deployment, its platform
 identity permissions and its invocation endpoint are separate from this stack.
 
-## Chart storage gap
+## Chart storage
 
-The current artifact client uses S3 SigV4 and virtual-hosted bucket addressing.
-Azure Blob does not expose that API. The `charts` container and its managed
-identity role are provisioned, but **no `DAIMON_ARTIFACTS__*` settings point at
-Blob**. Blob URLs are not S3 endpoints. Chart URL delivery requires a Blob
-adapter or a separately deployed compatible object store; neither is included.
-Versioning/soft delete do not impose an object-retention lifecycle or replace a
-backup. Plan retention and cleanup before storing artifacts.
+The MCP app is configured automatically for private Azure Blob chart links:
+
+| Environment variable | Template value |
+| --- | --- |
+| `DAIMON_ARTIFACTS__BACKEND` | `azure_blob` |
+| `DAIMON_ARTIFACTS__ENDPOINT_URL` | Storage account Blob endpoint |
+| `DAIMON_ARTIFACTS__BUCKET` | Provisioned `charts` container name |
+| `DAIMON_ARTIFACTS__AZURE_CLIENT_ID` | Runtime user-assigned identity client id |
+
+These values come from the foundation module's outputs. The artifact settings
+are applied only to MCP; other services and init do not receive them by default.
+`serviceEnvironment.mcp` can override them using the existing per-service
+configuration mechanism. Keep S3 keys and Azurite connection strings unset.
+
+The runtime identity receives **Storage Blob Delegator** at storage-account
+scope to mint user-delegation keys, plus **Storage Blob Data Contributor**
+scoped to the charts container for uploads and reads. There is no account-wide
+Blob data role. See the [Azure storage role definitions](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/storage).
+The account disables shared keys and anonymous access. Links use read-only,
+per-blob HTTPS user-delegation SAS; `ManagedIdentityCredential` uses the explicit
+artifact client id with no developer-login or service-principal fallback.
+
+URL expiry defaults to ten minutes. Optional overrides belong in
+`serviceEnvironment.mcp`, for example `DAIMON_ARTIFACTS__URL_TTL_SECONDS` or
+`DAIMON_ARTIFACTS__EMBED_IMAGES`. Expiry does not remove blobs; versioning and
+soft delete do not impose an object-retention lifecycle or replace a backup.
+Plan retention and cleanup before storing artifacts. Offline tests validate
+wiring and role scopes; live identity, RBAC propagation and signed-download
+verification remain deployment checks.
 
 ## Monthly budget
 

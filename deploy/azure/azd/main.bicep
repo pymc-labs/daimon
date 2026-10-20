@@ -68,3 +68,4 @@ output AZURE_AI_PROJECT_ENDPOINT string = deployAi ? stack.outputs.harnessEnviro
 output AZURE_OPENAI_ENDPOINT string = deployAi ? stack.outputs.harnessEnvironment.AZURE_OPENAI_ENDPOINT : ''
 output AZURE_OPENAI_DEPLOYMENT string = deployAi ? stack.outputs.harnessEnvironment.AZURE_OPENAI_DEPLOYMENT : ''
 output AZURE_CLIENT_ID string = stack.outputs.harnessEnvironment.AZURE_CLIENT_ID
+output DAIMON_MCP_ARTIFACTS_ENVIRONMENT object = stack.outputs.mcpArtifactsEnvironment

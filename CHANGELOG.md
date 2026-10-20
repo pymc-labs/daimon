@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Validate binary harness skill bundles with shared SHA-256 digests and decoded size limits; require stable assistant message identities.
+- Azure deployment templates now wire MCP chart storage to the provisioned Blob account and explicit managed identity, with account-scoped delegation-key permission and container-scoped data access.
 
 - Hosted MCP chart links can use private Azure Blob Storage with managed identity and read-only user-delegation SAS. Select `DAIMON_ARTIFACTS__BACKEND=azure_blob` and set `DAIMON_ARTIFACTS__AZURE_CLIENT_ID` for an explicit managed identity, with no developer or service-principal fallback; S3 remains the default. A loopback-only Azurite connection string is supported for local development.
 
