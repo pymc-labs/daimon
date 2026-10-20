@@ -253,7 +253,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
-from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -623,6 +623,37 @@ class SlackApp:
         """Done-callback: drop the chain entry only if it still points at ``task``."""
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
+
+    def _schedule_output_sweep(
+        self,
+        outcome: RunOutcome,
+        web_client: AsyncWebClient,
+        *,
+        channel: str,
+        thread_id: str,
+        team_id: str,
+        selfhosted: bool,
+    ) -> None:
+        """Serialize the optional Anthropic file sweep after a tool turn."""
+
+        if selfhosted or not any(
+            isinstance(block, ToolUseBlock) for block in outcome.state.content
+        ):
+            return
+        # Read the chain link synchronously, before spawning, so it cannot be lost.
+        previous = self._output_sweeps.get(outcome.ma_session_id)
+        task = self._spawn(
+            self._sweep_session_outputs(
+                previous,
+                web_client,
+                session_id=outcome.ma_session_id,
+                channel_id=channel,
+                thread_ts=thread_id,
+                team_id=team_id,
+            )
+        )
+        self._output_sweeps[outcome.ma_session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, outcome.ma_session_id))
 
     async def _sweep_session_outputs(
         self,
@@ -2355,12 +2386,16 @@ class SlackApp:
                 # failing the whole explanation.
                 owner_name = "the previous agent"
                 try:
-                    owner_agent = await retrieve_agent(
-                        self.runtime.anthropic,
-                        error.source_agent_id,
-                        scope=resource_scope(tenant_id=str(tenant_id)),
-                    )
-                    owner_name = owner_agent.name
+                    if (
+                        admission.backend_revision is None
+                        or admission.backend_revision.backend != "selfhosted"
+                    ):
+                        owner_agent = await retrieve_agent(
+                            self.runtime.anthropic,
+                            error.source_agent_id,
+                            scope=resource_scope(tenant_id=str(tenant_id)),
+                        )
+                        owner_name = owner_agent.name
                 except (anthropic.APIStatusError, ScopeViolation):
                     pass
                 explanation = render_responder_changed_without_handoff(
@@ -2878,30 +2913,16 @@ class SlackApp:
                 team_id=team_id,
             )
 
-            # Detached output sweep. `outcome.ma_session_id` is the post-recovery
-            # session id, so outputs stranded in a dead session are not
-            # recoverable. A detached sweep is not counted by drain_and_close's
-            # `_processing` poll, so SIGTERM can kill one mid-flight —
-            # post-then-delete makes that self-healing (redelivered on the next
-            # turn's sweep, or double-posted inside the already-accepted
-            # post-then-delete crash window).
-            if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-                return
-            # Read the chain link synchronously, before spawning, so it cannot be lost.
-            previous = self._output_sweeps.get(outcome.ma_session_id)
-            task = self._spawn(
-                self._sweep_session_outputs(
-                    previous,
-                    web_client,
-                    session_id=outcome.ma_session_id,
-                    channel_id=channel,
-                    thread_ts=thread_id,
-                    team_id=team_id,
-                )
-            )
-            self._output_sweeps[outcome.ma_session_id] = task
-            task.add_done_callback(
-                functools.partial(self._forget_output_sweep, outcome.ma_session_id)
+            self._schedule_output_sweep(
+                outcome,
+                web_client,
+                channel=channel,
+                thread_id=thread_id,
+                team_id=team_id,
+                selfhosted=(
+                    admission.backend_revision is not None
+                    and admission.backend_revision.backend == "selfhosted"
+                ),
             )
         finally:
             # Bookkeeping only -- see the comment above the try. Deregister

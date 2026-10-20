@@ -341,6 +341,13 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
         secret=b"t" * 32,
         now=NOW,
     )
+    claims = jwt.decode(
+        header.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert claims["anthropic_disabled"] is True
     for deadline in (3540.001, 3600, 10**100, float("nan"), float("inf"), 0, -1):
         with pytest.raises(ValueError, match="deadline"):
             await mint_turn_mcp_authorization(

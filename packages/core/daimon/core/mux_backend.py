@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import require_anthropic_allowed
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
@@ -89,6 +90,7 @@ def register_turn_backend(profile: str, factory: BackendFactory, *, fallback: bo
 
 
 def _anthropic_turn_backend(request: TurnBackendRequest) -> TurnBackend:
+    require_anthropic_allowed()
     workspace = request.session.account_scope_id if request.session is not None else str(uuid4())
     authorization = ResourceAuthorization(
         request.scope, frozenset({("session", request.session_id)})
@@ -169,6 +171,7 @@ def managed_agents(
     resources: frozenset[tuple[str, str]] = frozenset(),
     secrets: SecretResolver | None = None,
 ) -> AnthropicManagedAgents:
+    require_anthropic_allowed()
     return AnthropicManagedAgents(
         client,
         authorization=ResourceAuthorization(scope, resources) if scope is not None else None,

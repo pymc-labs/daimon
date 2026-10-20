@@ -388,6 +388,7 @@ async def mint_turn_mcp_authorization(
             secret=secret,
             now=now,
             ttl=timedelta(seconds=deadline_s + 60),
+            anthropic_disabled=True,
             slack_turn_context_id=slack_turn_context_id,
         )
     return MintedMcpAuthorization(SecretStr(f"Bearer {token}"), jti, expires_at)

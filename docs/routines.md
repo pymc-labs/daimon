@@ -51,6 +51,12 @@ Slot arithmetic lives in `packages/core/daimon/core/cron.py`, whose
 `next_slot_at_or_after` converts into the routine's zone, steps one second
 past the reference instant so it cannot land on it, and returns UTC.
 
+Routines whose saved channel or delivery destination selects the self-hosted
+backend stop before provider resolution, with
+`last_error=selfhosted_routines_unsupported`. Headless routines currently require
+Anthropic Managed Agents; switching a channel to self-hosted does not silently
+run its scheduled prompts through Anthropic.
+
 ## Creating one
 
 Operators can opt into requiring a destination for the MCP `create_routine`

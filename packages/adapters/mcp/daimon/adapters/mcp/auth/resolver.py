@@ -61,6 +61,8 @@ class AuthIdentity:
     # The channel the agent key was minted in, from its mcp_tokens row; read
     # through `token_channel_id`.
     bound_channel_id: str | None = None
+    # Signed provider prohibition survives agent deletion until token expiry.
+    anthropic_disabled: bool = False
 
     @property
     def is_operator(self) -> bool:

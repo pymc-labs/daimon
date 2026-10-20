@@ -1261,3 +1261,89 @@ async def test_identity_middleware_binds_a_channel_only_for_an_agent_key(
         await client.call_tool("whoami", {})
 
     assert captured[0].bound_channel_id == expected
+
+
+async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutral_tools(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import cast
+
+    from anthropic import AsyncAnthropic
+    from daimon.core.anthropic_guard import require_anthropic_allowed
+    from daimon.core.mux_backend import managed_agents
+    from fastmcp.exceptions import ToolError
+    from mcp.shared.exceptions import McpError
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"selfhosted tool accessed Anthropic.{name}")
+
+    token = AccessToken(token="t", client_id="c", scopes=[], claims={"anthropic_disabled": True})
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.middleware.mcp_identity.get_access_token", lambda: token
+    )
+    account, tenant = uuid.uuid4(), uuid.uuid4()
+
+    async def subject(_ctx: object) -> str:
+        return str(account)
+
+    async def tenant_resolver(_ctx: object) -> str:
+        return str(tenant)
+
+    async def role(_ctx: object) -> str:
+        return "user"
+
+    async def no_agent(_ctx: object) -> str | None:
+        return None
+
+    mcp = FastMCP(name="selfhosted-guard-test")
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=subject,
+            tenant_resolver=tenant_resolver,
+            role_resolver=role,
+            agent_id_resolver=no_agent,
+            is_admin_resolver=_fixture_is_admin_resolver_false,
+            internal_resolver=_fixture_internal_resolver_false,
+            sessionmaker=sessionmaker,
+        )
+    )
+
+    @mcp.tool
+    async def legacy_resource() -> str:  # pyright: ignore[reportUnusedFunction]
+        managed_agents(cast(AsyncAnthropic, NoAnthropic()))
+        return "unexpected"
+
+    @mcp.tool
+    async def neutral_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "neutral tools work"
+
+    @mcp.tool
+    async def provider_probe() -> str:  # pyright: ignore[reportUnusedFunction]
+        require_anthropic_allowed()
+        return "allowed"
+
+    @mcp.resource("test://anthropic")
+    async def provider_resource() -> str:  # pyright: ignore[reportUnusedFunction]
+        managed_agents(cast(AsyncAnthropic, NoAnthropic()))
+        return "unexpected"
+
+    @mcp.prompt
+    async def provider_prompt() -> str:  # pyright: ignore[reportUnusedFunction]
+        managed_agents(cast(AsyncAnthropic, NoAnthropic()))
+        return "unexpected"
+
+    async with Client(mcp) as client:
+        with pytest.raises(McpError, match="unavailable during a self-hosted turn"):
+            await client.read_resource("test://anthropic")
+        with pytest.raises(McpError, match="unavailable during a self-hosted turn"):
+            await client.get_prompt("provider_prompt")
+        with pytest.raises(ToolError, match="unavailable during a self-hosted turn"):
+            await client.call_tool("legacy_resource", {})
+        result = await client.call_tool("neutral_tool", {})
+        assert result.data == "neutral tools work"
+        with pytest.raises(ToolError, match="unavailable during a self-hosted turn"):
+            await client.call_tool("provider_probe", {})
+        token.claims["anthropic_disabled"] = False
+        assert (await client.call_tool("provider_probe", {})).data == "allowed"
+    require_anthropic_allowed()  # A completed request must restore its caller's context.

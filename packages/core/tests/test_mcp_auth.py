@@ -555,3 +555,24 @@ async def test_registered_chat_execution_claims_and_registry_share_exact_agent(
     assert row is not None and row.kind == "agent" and row.agent_id == str(agent_id)
     assert row.account_id == account_id and row.tenant_id == tenant_id
     assert claims["exp"] == int((now + dt.timedelta(seconds=900)).timestamp())
+
+
+async def test_selfhosted_chat_credential_keeps_no_anthropic_flag_without_resource_row(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.mcp_auth import mint_chat_mcp_token
+    from daimon.testing.factories import make_account, make_tenant
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    secret = b"selfhosted-test-signing-key-32bytes"
+    token, _, _ = await mint_chat_mcp_token(
+        db_session,
+        account_id=account.id,
+        agent_id=uuid.uuid4(),
+        secret=secret,
+        now=dt.datetime.now(dt.UTC),
+        anthropic_disabled=True,
+    )
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    assert claims["anthropic_disabled"] is True

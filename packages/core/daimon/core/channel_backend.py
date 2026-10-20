@@ -99,6 +99,14 @@ async def current_backend(session: AsyncSession, channel: ChannelRef) -> ConfigR
     return await mux_state.latest_config_revision(session, channel, overrides_only=True)
 
 
+async def is_selfhosted_channel(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+) -> bool:
+    """Whether this channel forbids auxiliary Anthropic calls, even while admission is off."""
+    revision = await current_backend(session, channel_ref(tenant_id, platform, channel_id))
+    return revision is not None and revision.backend == "selfhosted"
+
+
 async def current_backend_and_sharing(
     session: AsyncSession, channel: ChannelRef
 ) -> tuple[ConfigRevision | None, bool]:

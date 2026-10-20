@@ -38,6 +38,14 @@ orchestrator answer is delivered only after authoritative collection and
 required result reviews succeed. Default fleet settings create no card,
 service discovery or additional sender.
 
+Self-hosted channels use the opening message as the Discord thread title and
+stay mention-only on Discord and Teams, without the optional Anthropic
+participation classifier. Responder-change notices use a generic previous-agent
+label. Automatic Anthropic session-file sweeps are skipped on Discord, Slack
+and Teams; the self-hosted harness can deliver files through Daimon's MCP tools.
+Self-hosted MCP credentials refuse Anthropic-specific management operations
+before any provider request; provider-neutral tools remain available.
+
 With the mux turn path and channel backends enabled, an admin can choose **Model
 backend** in an agent's setup Details on Discord, Slack or Teams. The preview
 lists unsupported skills, connectors and capabilities, shared-thread limits,

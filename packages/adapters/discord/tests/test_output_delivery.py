@@ -974,3 +974,24 @@ async def test_neutral_answer_full_falls_back_to_real_discord_file() -> None:
     file = thread.send.call_args.kwargs["file"]  # type: ignore[attr-defined]
     assert isinstance(file, discord.File)
     assert (file.filename, file.fp.read()) == ("report.txt", b"data")
+
+
+def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
+    runtime = MagicMock()
+    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tool", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sh_session_test",
+        None,
+        False,
+    )
+    with patch.object(bot, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
+        bot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
+        )

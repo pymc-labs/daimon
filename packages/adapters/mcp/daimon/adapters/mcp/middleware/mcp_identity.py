@@ -35,6 +35,8 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_KIND_CLAIM,
 )
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
+from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
+from daimon.core.channel_backend import is_selfhosted_channel
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
@@ -346,6 +348,9 @@ class IdentityMiddleware(Middleware):
             external_id=external_id,
             agent_id=agent_id,
             chat_agent_id=chat_agent_id,
+            anthropic_disabled=(
+                _token is not None and _token.claims.get("anthropic_disabled") is True
+            ),
             slack_turn_context_id=slack_turn_context_id,
             platform_user_id=platform_user_id,
             is_admin=is_admin,
@@ -389,7 +394,29 @@ class IdentityMiddleware(Middleware):
         if agent_id is not None:
             await disable_components(fastmcp_ctx, match_all=True)
             await enable_components(fastmcp_ctx, tags={"agent-chat"})
-        return await call_next(context)
+        return await self._dispatch_for_backend(context, call_next, identity)
+
+    async def _dispatch_for_backend(
+        self, context: MiddlewareContext, call_next: CallNext, identity: AuthIdentity
+    ) -> object:
+        if context.method not in {"tools/call", "resources/read", "prompts/get"}:
+            return await call_next(context)
+        selfhosted = identity.anthropic_disabled
+        if identity.bound_channel_id is not None and identity.platform is not None:
+            async with self._sessionmaker() as session:
+                selfhosted = selfhosted or await is_selfhosted_channel(
+                    session,
+                    tenant_id=identity.tenant_id,
+                    platform=identity.platform,
+                    channel_id=identity.bound_channel_id,
+                )
+        if not selfhosted:
+            return await call_next(context)
+        try:
+            with without_anthropic():
+                return await call_next(context)
+        except AnthropicDisabled as exc:
+            raise ToolError(str(exc)) from exc
 
     async def _resolve_operator(
         self, context: MiddlewareContext, call_next: CallNext, identity: AuthIdentity

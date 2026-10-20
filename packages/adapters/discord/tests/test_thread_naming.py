@@ -473,3 +473,80 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
         "settings must reach the call unchanged"
     )
     assert handed["anthropic"] is runtime.anthropic, "the runtime client is reused"
+
+
+@pytest.mark.parametrize("mismatch", [False, True], ids=["bind_failure", "responder_mismatch"])
+async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    mismatch: bool,
+) -> None:
+    from dataclasses import replace
+    from datetime import UTC, datetime
+    from typing import cast
+
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.errors import SessionAgentMismatch, SessionPreparationFailed
+    from daimon.testing import ma_agent, ma_environment
+    from daimon.testing.factories import make_account
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.contracts.ids import ChannelRef
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"selfhosted opening accessed Anthropic.{name}")
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("5"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.commit()
+    revision = ConfigRevision.create(
+        ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="789"),
+        1,
+        resolve_default(
+            BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5")
+        ),
+    )
+    admission = Admission(
+        account_id=account.id,
+        agent=ma_agent(id="sh_agent_test"),
+        environment=ma_environment(),
+        config=ResolvedConfig(agent_name="test", environment_name="default"),
+        backend_revision=revision,
+        backend_revision_origin="channel",
+    )
+    runtime = replace(
+        _runtime(db_session_factory, router=MARouter(), thread_naming=ThreadNamingSettings()),
+        anthropic=cast(AsyncAnthropic, NoAnthropic()),
+    )
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fleet_enabled=False))
+    bot = _bot(runtime)
+    message = _channel_message(guild_id=12345, content="<@999> keep this private\nsecond line")
+    message.id = 8001
+    message.create_thread.return_value = _thread(thread_id=8001)
+    refused: Exception = SessionPreparationFailed(
+        reasons=("test_stop_after_open",), stage="test", retry_after=datetime.now(UTC)
+    )
+    if mismatch:
+        refused = SessionAgentMismatch(
+            mapping_id=account.id,
+            session_id="sh_session_test",
+            source_agent_id="sh_agent_previous",
+            destination_agent_id="sh_agent_test",
+        )
+    with (
+        patch("daimon.adapters.discord.bot.admit", AsyncMock(return_value=admission)),
+        patch("daimon.adapters.discord.bot.bind_session", AsyncMock(side_effect=refused)) as bind,
+        patch.object(bot, "_wait_for_orphan_recovery", AsyncMock()),
+    ):
+        await bot._orchestrate_observed(message, "12345", tenant.id)  # pyright: ignore[reportPrivateUsage]
+    message.create_thread.assert_awaited_once_with(
+        name="Keep this private", auto_archive_duration=10080
+    )
+    bind.assert_awaited_once()

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types import TextBlock
+from daimon.core.anthropic_guard import require_anthropic_allowed
 from daimon.core.thread_participation import (
     SILENCE_ON_ERROR,
     ClassifierMessage,
@@ -58,6 +59,7 @@ async def classify(
     recent: list[ClassifierMessage],
     candidates: list[ClassifierMessage],
 ) -> ClassifierOutcome:
+    require_anthropic_allowed()
     prompt = build_classifier_prompt(recent, candidates, bot_display_name=bot_display_name)
     usage: ClassifierUsage | None = None
     try:

@@ -255,10 +255,12 @@ async def test_session_preparation_failed_renders_copy_and_does_not_run_turn(
     assert body["text"] == render_preparation_failed("uat-agent")
 
 
+@pytest.mark.parametrize("selfhosted", [False, True])
 async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_turn(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    selfhosted: bool,
 ) -> None:
     team_id = "T_RESPONDER_MISMATCH"
     channel = "C_TEST"
@@ -279,7 +281,27 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
 
     event = _event(channel=channel, thread_ts=thread_ts, user="U_MISMATCH")
 
+    from dataclasses import replace
+
+    from daimon.core.turn.admission import admit as real_admit
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.contracts.ids import ChannelRef
+
+    async def admitted(*args: Any, **kwargs: Any) -> Admission:
+        original = await real_admit(*args, **kwargs)
+        if not selfhosted:
+            return original
+        revision = ConfigRevision.create(
+            ChannelRef(tenant_id=str(tenant_id), platform="slack", channel_id=channel),
+            1,
+            resolve_default(
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5")
+            ),
+        )
+        return replace(original, backend_revision=revision, backend_revision_origin="channel")
+
     with (
+        patch("daimon.adapters.slack.app.admit", side_effect=admitted),
         patch(
             "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
         ) as mock_resolve_agent,
@@ -320,7 +342,10 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
     # renderer call shape, not a distinct owner name (there is only one
     # agent in this fake).
     assert body["text"] == render_responder_changed_without_handoff(
-        new_responder="uat-agent", owner="uat-agent", channel=f"<#{channel}>", offer_button=True
+        new_responder="uat-agent",
+        owner="the previous agent" if selfhosted else "uat-agent",
+        channel=f"<#{channel}>",
+        offer_button=True,
     )
     buttons = [
         element
@@ -1254,3 +1279,32 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         channel,
         thread_ts,
     )
+
+
+def test_selfhosted_tool_turn_skips_output_sweep(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.turn.state import ToolUseBlock
+
+    app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tool", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sh_session_test",
+        None,
+        False,
+    )
+    with patch.object(app, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
+        app._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            outcome,
+            MagicMock(),
+            channel="C_TEST",
+            thread_id="1.2",
+            team_id="T_TEST",
+            selfhosted=True,
+        )

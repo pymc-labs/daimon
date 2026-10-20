@@ -3066,3 +3066,52 @@ async def test_fleet_deadline_sweep_uses_store_owner_and_isolates_tick_failures(
     sessions = object()
     await _sweep_fleet_deadlines(sessions)
     assert calls == [sessions]
+
+
+@pytest.mark.parametrize("at_destination", [False, True], ids=["origin", "destination"])
+async def test_selfhosted_routine_refuses_before_any_anthropic_access(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    at_destination: bool,
+) -> None:
+    from typing import cast
+
+    from daimon.core.channel_backend import channel_ref, set_channel_backend
+    from mux.contracts.config import BackendConfig
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"selfhosted routine accessed Anthropic.{name}")
+
+    tenant = await make_tenant(db_session)
+    await set_channel_backend(
+        db_session,
+        channel_ref(tenant.id, tenant.platform, "dest" if at_destination else "origin"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+    )
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="sh_agent_test",
+        agent_name="test",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="private scheduled content",
+        channel_id="origin",
+        destination_kind="channel",
+        destination_id="dest",
+    )
+    await db_session.commit()
+    fire = await _build_fire(
+        client=cast(AsyncAnthropic, NoAnthropic()),
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    await fire(row)
+    after = await get_routine(db_session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.last_error == "selfhosted_routines_unsupported"

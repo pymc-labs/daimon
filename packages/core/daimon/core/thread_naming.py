@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
 from anthropic.types import TextBlock
+from daimon.core.anthropic_guard import require_anthropic_allowed
 from daimon.core.name_mentions import strip_name_mentions
 
 # Priced in AGENT_MODEL_PRICING; a title must never run on an unmetered model.
@@ -172,6 +173,7 @@ async def suggest_thread_name(
     naming means (fall back to the message-derived title). A refusal is
     treated like a blank answer: no title, usage still reported.
     """
+    require_anthropic_allowed()
     response = await anthropic.messages.create(
         model=THREAD_NAMING_MODEL,
         max_tokens=_MAX_OUTPUT_TOKENS,

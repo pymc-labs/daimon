@@ -115,6 +115,7 @@ def mint_jwt(
     expires_at: dt.datetime | None = None,
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    anthropic_disabled: bool = False,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -159,6 +160,8 @@ def mint_jwt(
         claims["chat_agent_id"] = str(chat_agent_id)
     if slack_turn_context_id is not None:
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
+    if anthropic_disabled:
+        claims["anthropic_disabled"] = True
     if is_admin:
         claims["is_admin"] = True
     return pyjwt.encode(claims, secret, algorithm="HS256")
@@ -186,6 +189,7 @@ async def mint_chat_mcp_token(
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
+    anthropic_disabled: bool = False,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
     """Register one expiring ordinary-chat credential with the existing token owner.
 
@@ -193,6 +197,8 @@ async def mint_chat_mcp_token(
     chat_agent_id rather than the restricted external agent-chat agent_id claim.
     Old tokens remain independently revocable until their bounded expiry; rotating
     a shared vault does not revoke credentials of an already-running turn.
+    Self-hosted callers sign the Anthropic prohibition into the credential so it
+    remains enforceable even if the underlying agent record is later removed.
     """
     from daimon.core.stores.accounts import get_account_with_tenant
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
@@ -217,6 +223,7 @@ async def mint_chat_mcp_token(
     token = mint_jwt(
         account_id=account_id,
         chat_agent_id=agent_id,
+        anthropic_disabled=anthropic_disabled,
         secret=secret,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
