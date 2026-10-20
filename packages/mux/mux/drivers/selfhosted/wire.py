@@ -17,6 +17,12 @@ class WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ResponseModel(WireModel):
+    """Readers tolerate fields added by newer harness versions."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class TextPart(WireModel):
     type: Literal["text"] = "text"
     text: str
@@ -73,42 +79,42 @@ class ActionRequest(WireModel):
     result: JsonValue = None
 
 
-class CancelResponse(WireModel):
+class CancelResponse(ResponseModel):
     cancelled: bool
 
 
-class HealthResponse(WireModel):
+class HealthResponse(ResponseModel):
     ok: Literal[True] = True
     protocol: Literal["daimon-harness/0"] = PROTOCOL
     version: str
 
 
-class StatusRunningData(WireModel):
+class StatusRunningData(ResponseModel):
     pass
 
 
-class AgentMessageDeltaData(WireModel):
+class AgentMessageDeltaData(ResponseModel):
     text: str
 
 
-class AgentMessageData(WireModel):
+class AgentMessageData(ResponseModel):
     parts: list[Part]
 
 
-class ToolUseData(WireModel):
+class ToolUseData(ResponseModel):
     call_id: str
     name: str
     input: JsonValue
     executor: Literal["agent", "mcp"]
 
 
-class ToolResultData(WireModel):
+class ToolResultData(ResponseModel):
     call_id: str
     output: JsonValue
     is_error: bool
 
 
-class RequiresActionData(WireModel):
+class RequiresActionData(ResponseModel):
     action_id: str
     kind: Literal["tool_confirmation"] = "tool_confirmation"
     call_id: str
@@ -116,7 +122,7 @@ class RequiresActionData(WireModel):
     input: JsonValue
 
 
-class UsageData(WireModel):
+class UsageData(ResponseModel):
     request_id: str
     model: str
     input_tokens: int = Field(ge=0)
@@ -125,18 +131,25 @@ class UsageData(WireModel):
     reasoning_tokens: int = Field(ge=0)
 
 
-class TurnError(WireModel):
+class TurnError(ResponseModel):
     kind: str
     message: str
 
 
-class TurnEndedData(WireModel):
+class TurnEndedData(ResponseModel):
     outcome: Literal["completed", "interrupted", "errored"]
     error: TurnError | None = None
+
+    @model_validator(mode="after")
+    def require_error(self) -> TurnEndedData:
+        if self.outcome == "errored" and self.error is None:
+            raise ValueError("errored turn requires error details")
+        return self
 
 
 class ErrorData(TurnError):
     retryable: bool
+    request_id: str | None = None
 
 
 EventType = Literal[
@@ -174,7 +187,7 @@ DATA_MODELS: dict[EventType, type[WireModel]] = {
 }
 
 
-class Event(WireModel):
+class Event(ResponseModel):
     seq: int = Field(ge=0)
     session_id: str
     turn_id: str
@@ -191,6 +204,22 @@ class Event(WireModel):
         return DATA_MODELS[self.type].model_validate(self.data)
 
 
-class EventsResponse(WireModel):
+class EventsResponse(ResponseModel):
     events: list[Event]
     complete: bool
+
+
+class InvocationRequest(WireModel):
+    method: Literal["GET", "POST"]
+    path: str
+    query: dict[str, JsonValue] = Field(default_factory=dict)
+    body: dict[str, JsonValue] | None = None
+
+
+class InvocationEnvelope(WireModel):
+    c3: InvocationRequest
+
+
+class TurnAccepted(ResponseModel):
+    accepted: Literal[True] = True
+    turn_id: str

@@ -49,7 +49,6 @@ def test_event_round_trip(kind: str) -> None:
 @pytest.mark.parametrize(
     "kind,data",
     [
-        ("status_running", {"extra": True}),
         ("usage", {**DATA["usage"], "input_tokens": -1}),
         ("turn_ended", {"outcome": "unknown"}),
         ("agent_message", {"parts": [{"type": "artifact_ref"}]}),
@@ -97,3 +96,63 @@ def test_request_round_trip() -> None:
     )
     assert TurnRequest.model_validate_json(request.model_dump_json()) == request
     assert request.mcp_servers[0].headers_env == {"Authorization": "MCP_TOKEN"}
+
+
+def test_forward_compatible_event_and_response_fields() -> None:
+    from mux.drivers.selfhosted.wire import CancelResponse, EventsResponse, HealthResponse
+
+    event = Event.model_validate(
+        {
+            "seq": 1,
+            "session_id": "s",
+            "turn_id": "t",
+            "at": "2026-10-20T00:00:00Z",
+            "type": "usage",
+            "data": {**DATA["usage"], "future": True},
+            "future_envelope": "ignored",
+        }
+    )
+    assert event.typed_data().model_dump()["input_tokens"] == 5
+    assert HealthResponse.model_validate({"version": "sha", "future": 1}).ok
+    assert CancelResponse.model_validate({"cancelled": True, "future": 1}).cancelled
+    assert EventsResponse.model_validate(
+        {"events": [event.model_dump()], "complete": True, "future": 1}
+    ).complete
+
+
+def test_requests_remain_closed_and_invocations_round_trip() -> None:
+    from mux.drivers.selfhosted.wire import ActionRequest, InvocationEnvelope, TurnAccepted
+
+    envelope = InvocationEnvelope.model_validate(
+        {
+            "c3": {
+                "method": "GET",
+                "path": "/v0/sessions/s/events",
+                "query": {"after_seq": 2},
+                "body": None,
+            }
+        }
+    )
+    assert InvocationEnvelope.model_validate_json(envelope.model_dump_json()) == envelope
+    assert (
+        TurnAccepted.model_validate({"accepted": True, "turn_id": "t", "future": 1}).turn_id == "t"
+    )
+    with pytest.raises(ValidationError):
+        ActionRequest.model_validate({"action_id": "a", "decision": "allow", "future": 1})
+    with pytest.raises(ValidationError):
+        InvocationEnvelope.model_validate(
+            {"c3": {"method": "GET", "path": "/v0/healthz", "unexpected": True}}
+        )
+
+
+def test_errored_turn_requires_error_details() -> None:
+    from mux.drivers.selfhosted.wire import TurnEndedData
+
+    with pytest.raises(ValidationError, match="requires error details"):
+        TurnEndedData(outcome="errored")
+    assert (
+        TurnEndedData.model_validate(
+            {"outcome": "errored", "error": {"kind": "usage_missing", "message": "Missing usage"}}
+        ).error
+        is not None
+    )
