@@ -905,6 +905,76 @@ async def test_send_refuses_a_body_longer_than_the_card_shows(
     assert not fake.graph_requests, "a body the card could not show must not be sent"
 
 
+_WORKBOOK = "/me/drive/items/i1/workbook/worksheets/S/range(address='A1')"
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "refusal"),
+    [
+        (_WORKBOOK, {"values": [["x" * 2000]]}, r"body is 2,017 characters and the limit is 2,000"),
+        (_WORKBOOK + "/" + "s" * 500, {"values": [[1]]}, r"limit is 500"),
+    ],
+)
+async def test_write_refuses_what_the_card_could_not_show_whole(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    path: str,
+    body: dict[str, Any],
+    refusal: str,
+) -> None:
+    """The approval card holds 500 characters of path and 2,000 of body; more never runs."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    with pytest.raises(ToolError, match=f"Nothing was written.*{refusal}"):
+        await microsoft_write_impl(
+            _runtime(committing_sessionmaker, fake),
+            auth,
+            method="PATCH",
+            path=path,
+            body=body,
+            file_handle=None,
+            origin_context_id="",
+        )
+    assert not fake.graph_requests, "a change the person could not see whole must not run"
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["ada@example.com\u200b", "a\u202eda@example.com", "ada@exa\x00mple.com", "a@" + "b" * 260],
+)
+async def test_send_refuses_an_address_the_card_would_show_differently(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+    address: str,
+) -> None:
+    """Invisible characters are stripped on the card, so the address sent must hold none."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    origin = await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
+
+    async def approved(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(graph_module, "session_card_gap", approved)
+    with pytest.raises(ToolError, match="not one email address"):
+        await microsoft_send_impl(
+            _runtime(committing_sessionmaker, fake),
+            auth,
+            action="send_mail",
+            to=[address],
+            subject="Hi",
+            body="Hello",
+            cc=[],
+            start=None,
+            end=None,
+            time_zone="UTC",
+            location=None,
+            origin_context_id=origin,
+        )
+    assert not fake.graph_requests, "the card and the mail must name the same address"
+
+
 async def _saved(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity) -> bool:
     async with sm() as session:
         row = await tokens_store.get_microsoft_user_token(

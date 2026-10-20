@@ -377,21 +377,50 @@ def _confirmation(state: ConfirmationCardState) -> AdaptiveCard:
     return confirmation_adaptive_card(confirmation, prompt, answered_by=EMOJI * 256)
 
 
-def _microsoft_confirmation(tool_name: str) -> AdaptiveCard:
-    """A microsoft_write approval card with every model-supplied field at its worst."""
-    inputs: dict[str, dict[str, object]] = {
-        "microsoft_write": {
-            "method": "PATCH",
-            "path": f"/me/drive/items/x/workbook/{EMOJI * 2_000}",
-            "body": {"values": [[EMOJI * 100] * 100]},
+_ADDRESSES = [f"{'a' * 30}{n:02d}@example.com" for n in range(25)]
+#: Microsoft approval cards at the most their tools accept: a 500-character path, a
+#: 2,000-character write body, and 50 recipients with an 8,000-character mail body.
+MICROSOFT_CARDS: dict[str, tuple[str, dict[str, object]]] = {
+    "write_wide_characters": (
+        "microsoft_write",
+        {
+            "method": "POST",
+            "path": f"/me/onenote/pages{EMOJI * 480}",
+            "body": EMOJI * (2_000 // len(EMOJI)),
             "file_handle": EMOJI * 500,
         },
-    }
+    ),
+    "write_short_lines": (
+        "microsoft_write",
+        {
+            "method": "POST",
+            "path": "/me/onenote/sections/" + "s" * 450 + "/pages",
+            "body": "a\n" * 1_000,
+        },
+    ),
+    "send_short_lines": (
+        "microsoft_send",
+        {
+            "action": "create_event",
+            "to": _ADDRESSES,
+            "cc": _ADDRESSES,
+            "subject": "s" * 255,
+            "location": "l" * 255,
+            "start": "2026-09-15T10:00",
+            "end": "2026-09-15T11:00",
+            "body": "a\n" * 4_000,
+        },
+    ),
+}
+
+
+def _microsoft_confirmation(case: str) -> AdaptiveCard:
+    tool_name, tool_input = MICROSOFT_CARDS[case]
     call = ToolCall(
         tool_use_id="toolu_1",
         server_name=DAIMON_SERVER_NAME,
         tool_name=tool_name,
-        input=inputs[tool_name],
+        input=tool_input,
     )
     prompt = prompt_for_tool_call(call, requester_platform_user_id=str(uuid.UUID(int=0)), now=NOW)
     confirmation = build_confirmation_card(prompt, state="pending", token="t" * 64)
@@ -463,8 +492,8 @@ MESSAGES: dict[str, Callable[[], MessageSource]] = {
         for state in get_args(ConfirmationCardState)
     },
     **{
-        f"confirmation_{tool}": lambda tool=tool: _microsoft_confirmation(tool)
-        for tool in ("microsoft_write",)
+        f"confirmation_{case}": lambda case=case: _microsoft_confirmation(case)
+        for case in MICROSOFT_CARDS
     },
 }
 # Dialogs are invoke responses, never posted, so the message cap does not apply.

@@ -587,15 +587,17 @@ The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
 - **`microsoft_write`** uploads or replaces files, edits workbooks and
   creates or updates OneNote pages. It has no delete or move call, but
   replacing a file or a workbook call (clearing or deleting a range or sheet)
-  can still destroy data. With tool safety on, each call waits for the
-  person's Approve on a card showing the method, the path and a preview of
-  what is written (the file handle for an upload), with up to 2,000
-  characters of it under **Details**; the card says when more was cut.
+  can still destroy data. A path over 500 characters or a body over 2,000
+  is refused. With tool safety on, each call waits for the person's Approve
+  on a card that names the change (a workbook, a file, a OneNote page) and
+  shows the method, the path, and the whole body under **Details** (the file
+  handle for an upload).
 - **`microsoft_send`** sends an email or a calendar invite, each time only
   after the person presses Approve on a card showing every recipient, the
   subject, time and time zone, location and the start of the message, with
   the whole message under **Details**, whether or not tool safety is on. A
-  message over 8,000 characters is refused.
+  message over 8,000 characters, or an address with an invisible character,
+  is refused. If the card can't be shown, nothing is sent.
 
 Mail, calendar and OneNote are reachable only from the person's 1:1 chat
 with Daimon, never from a channel or group chat. The chat is the one recorded

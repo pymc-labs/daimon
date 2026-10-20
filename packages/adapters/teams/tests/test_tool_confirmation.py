@@ -110,6 +110,19 @@ def test_tool_words_stay_literal_in_title_and_details(value: str) -> None:
     assert details["items"][0]["inlines"][0]["text"] == f"File: {value}"
 
 
+def test_details_use_a_bounded_number_of_blocks_and_keep_every_line() -> None:
+    lines = tuple(f"line {n}" for n in range(500))
+    prompt = _prompt().model_copy(update={"detail_lines": lines})
+    card = confirmation_adaptive_card(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
+    )
+    items = card.model_dump(by_alias=True, exclude_none=True)["body"][0]["items"]
+    details = next(item for item in items if item.get("id") == "approval-details")
+    texts = [block["inlines"][0]["text"] for block in details["items"]]
+    assert len(texts) <= confirmation_module.MAX_DETAIL_BLOCKS
+    assert "\n".join(texts).split("\n") == list(lines), "every line, in order"
+
+
 async def _post(
     cards: TeamsConfirmationCards, sender: FakeSender
 ) -> tuple[asyncio.Task[ConfirmationAnswer], str]:

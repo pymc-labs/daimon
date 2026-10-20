@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 from daimon.core.confirmation import (
     SEND_BODY_LIMIT,
@@ -22,7 +23,9 @@ from daimon.core.tool_safety import (
     microsoft_send_tools,
     session_tools_for_policy,
 )
+from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.posture import PolicyApproval
 
 _TRUSTED = frozenset({DAIMON_SERVER_NAME})
 _TOOLS: list[dict[str, object]] = [
@@ -251,3 +254,29 @@ def test_location_and_addresses_stay_on_their_own_lines() -> None:
         "Message",
     ], "each field is one line, whatever its text held"
     assert "\u202e" not in shown and "\u2028" not in shown, "no direction or line separators"
+
+
+def test_a_long_body_of_short_lines_is_still_whole_in_details() -> None:
+    body = "a\n" * (SEND_BODY_LIMIT // 2)
+    prompt = prompt_for_tool_call(
+        _call(body=body), requester_platform_user_id="requester", now=datetime.now(UTC)
+    )
+    assert prompt.detail_lines.count("a") == SEND_BODY_LIMIT // 2, "every line is in Details"
+
+
+async def test_a_card_that_cannot_be_shown_is_not_reported_as_a_refusal() -> None:
+    """Nothing runs, and the model is told the card failed, not that the person said no."""
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=AsyncMock(side_effect=RuntimeError("Teams is down")),
+        trusted_servers=_TRUSTED,
+        confirmed_tools=microsoft_send_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(_call())
+    assert result.allow is False, "a send must never run because its card failed"
+    message = result.deny_message or ""
+    assert "approval card" in message and "could not be shown" in message
+    assert "did not run" in message and "denied" not in message
+    assert "did not refuse" in message, "the person must not be blamed for the failure"

@@ -99,6 +99,10 @@ APPROVAL_NOTICE = "Waiting for your approval"
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
 
+#: Most blocks the Details of one card use; Teams refuses a message over about 28 KB, and
+#: every block costs bytes of its own.
+MAX_DETAIL_BLOCKS = 12
+
 
 async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
     """A live admin check at a click: a revoked team ownership counts at once.
@@ -129,6 +133,19 @@ def _footer(
             return (card.footer.format(actor=answered_by or card.answered_by_platform_user_id),)
         return (f"by {answered_by or name}",)
     return ()
+
+
+def _detail_blocks(lines: tuple[str, ...]) -> list[CardElement]:
+    """Details as at most `MAX_DETAIL_BLOCKS` blocks, so a long body can't bloat the card.
+
+    A short list gets one block a line; a longer one is cut into runs of lines
+    that each share a block, with the line breaks kept.
+    """
+    run = -(-len(lines) // MAX_DETAIL_BLOCKS) or 1
+    return [
+        RichTextBlock(inlines=[TextRun(text="\n".join(lines[start : start + run]))])
+        for start in range(0, len(lines), run)
+    ]
 
 
 def confirmation_adaptive_card(
@@ -169,7 +186,7 @@ def confirmation_adaptive_card(
             Container(
                 id="approval-details",
                 is_visible=False,
-                items=[RichTextBlock(inlines=[TextRun(text=line)]) for line in detail_lines],
+                items=_detail_blocks(tuple(detail_lines)),
             )
         )
         body.append(

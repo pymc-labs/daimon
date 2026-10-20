@@ -373,6 +373,14 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
     )
 
 
+def _card_failed_message(call: ToolCall) -> str:
+    return (
+        f"The approval card for {call.key} could not be shown, so it did not run and the "
+        "person did not refuse it. Do not retry it. Tell the person in one line that the "
+        "approval card could not be shown, so nothing was changed, and they can ask again."
+    )
+
+
 def _answer_message(call: ToolCall, answer: str) -> str:
     if answer == "expired":
         return (
@@ -447,8 +455,9 @@ def interactive_decider(
     """Decider for chat: reads run, writes wait for `confirm`.
 
     `confirm` is the adapter's card hook; the default refuses, which is what a
-    surface without cards gets. A hook that raises is logged and counts as a
-    refusal — a write never runs because the card failed to post.
+    surface without cards gets. A hook that raises is logged and the write is
+    refused, with words saying the card could not be shown — a write never
+    runs because the card failed to post.
     """
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
@@ -507,7 +516,7 @@ def interactive_decider(
             # Named boundary: prompt validation and the adapter's card must
             # both succeed before the write may run.
             log.warning("tool_safety.confirm_failed", tool=call.key, error=str(err))
-            response = "denied"
+            return ToolConfirmationResult(allow=False, deny_message=_card_failed_message(call))
         answer = response.answer if isinstance(response, ApprovedConfirmation) else response
         log.info("tool_safety.answered", tool=call.key, answer=answer)
         if answer == "approved":

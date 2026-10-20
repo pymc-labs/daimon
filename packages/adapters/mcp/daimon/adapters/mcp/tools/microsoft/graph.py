@@ -28,7 +28,13 @@ from daimon.adapters.mcp.tools.microsoft._person import (
     require_one_to_one,
     require_person,
 )
-from daimon.core.confirmation import SEND_BODY_LIMIT
+from daimon.core.confirmation import (
+    SEND_BODY_LIMIT,
+    WRITE_BODY_LIMIT,
+    WRITE_PATH_LIMIT,
+    is_plain,
+    write_body_size,
+)
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -53,6 +59,8 @@ _HIT_KEYS = (
 _ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,63}")
 _ADDRESS = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+")
 _MAX_RECIPIENTS = 50
+#: Longest email address (RFC 5321), so a card with 50 of them still fits.
+_MAX_ADDRESS = 254
 _DOWNLOAD_KEYS = frozenset({"@microsoft.graph.downloadurl", "@content.downloadurl"})
 
 
@@ -311,6 +319,17 @@ async def microsoft_write_impl(
 ) -> GraphResult:
     graph, user_id = require_person(runtime, auth)
     target, kind = check_write(method, path)
+    # The approval card shows the whole path and body, so nothing longer is written.
+    if len(target.decoded) > WRITE_PATH_LIMIT:
+        raise ToolError(
+            f"Nothing was written: the path is {len(target.decoded):,} characters and the "
+            f"limit is {WRITE_PATH_LIMIT:,}."
+        )
+    if (size := write_body_size(body)) > WRITE_BODY_LIMIT:
+        raise ToolError(
+            f"Nothing was written: the body is {size:,} characters and the limit is "
+            f"{WRITE_BODY_LIMIT:,}. Make the change in smaller calls."
+        )
     if target.personal:
         await require_one_to_one(runtime, auth, origin_context_id, what="OneNote")
     if (kind == "upload") != (file_handle is not None):
@@ -354,7 +373,10 @@ async def microsoft_write_impl(
 
 def _recipients(addresses: list[str], field: str) -> list[dict[str, object]]:
     for address in addresses:
-        if not _ADDRESS.fullmatch(address.strip()):
+        # The approval card shows an address without invisible characters, so one
+        # that holds any is refused rather than sent as something else.
+        clean = address.strip()
+        if not _ADDRESS.fullmatch(clean) or not is_plain(clean) or len(clean) > _MAX_ADDRESS:
             raise ToolError(f"{field} has {address!r}, which is not one email address.")
     return [{"emailAddress": {"address": a.strip()}} for a in addresses]
 

@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from daimon.core.confirmation import ConfirmationPrompt, prompt_for_tool_call
+import pytest
+from daimon.core.confirmation import (
+    WRITE_BODY_LIMIT,
+    ConfirmationPrompt,
+    prompt_for_tool_call,
+    write_body_size,
+)
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 
 _RANGE = "/me/drive/items/01ABC/workbook/worksheets/Sheet1/range(address='A1:B2')"
@@ -97,7 +103,7 @@ def test_long_path_is_clipped_in_the_card_and_whole_in_details() -> None:
     path = _RANGE + "/" + "segment/" * 40
     prompt = _prompt(path=path)
     path_line = next(line for line in (prompt.consequence or "").splitlines() if "Path:" in line)
-    assert len(path_line) < 200 and path_line.endswith("…")
+    assert len(path_line) < 200 and "…" in path_line and path_line.endswith("segment/")
     assert f"Path: {path}" in prompt.detail_lines
 
 
@@ -109,5 +115,64 @@ def test_hostile_text_is_stripped_of_controls() -> None:
 
 def test_details_stay_within_a_bounded_size() -> None:
     prompt = _prompt(body={"values": [["x" * 100] * 1000]})
-    assert sum(len(line) for line in prompt.detail_lines) < 2500
+    assert sum(len(line) for line in prompt.detail_lines) < WRITE_BODY_LIMIT + 200
     assert "not shown" in prompt.detail_lines[-1], "an approver is told when Details is cut"
+
+
+_FOLDER = "OneNote/" + "n" * 100
+
+
+def test_a_folder_named_onenote_does_not_make_a_workbook_change_a_notebook_edit() -> None:
+    """The reviewer's first path: the operative end stays visible and the title is the call's."""
+    path = f"/me/drive/root:/{_FOLDER}/Budget.xlsx:/workbook/worksheets/Summary/delete"
+    prompt = _prompt(method="POST", path=path)
+    shown = prompt.consequence or ""
+    assert prompt.title == "Change an Excel workbook in your Microsoft 365?"
+    path_line = next(line for line in shown.splitlines() if line.startswith("Path:"))
+    assert path_line.endswith("/workbook/worksheets/Summary/delete"), "the operative end shows"
+    assert path_line.startswith("Path: /me/drive/root:/"), "the start shows too"
+    assert "…" in path_line and len(path_line) <= len("Path: ") + 120
+    assert f"Path: {path}" in prompt.detail_lines, "Details holds the whole path"
+
+
+def test_a_folder_named_onenote_does_not_make_an_upload_a_notebook_edit() -> None:
+    prompt = _prompt(
+        method="PUT", path="/me/drive/root:/OneNote/Q3 Budget.xlsx:/content", file_handle="fh_1"
+    )
+    assert prompt.title == "Upload or replace a file in your Microsoft 365?"
+
+
+def test_a_folder_named_workbook_does_not_make_an_upload_a_workbook_change() -> None:
+    prompt = _prompt(
+        method="PUT", path="/me/drive/root:/a/workbook/b.xlsx:/content", file_handle="fh_1"
+    )
+    assert prompt.title == "Upload or replace a file in your Microsoft 365?"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "title"),
+    [
+        ("PUT", "/me/drive/root:/Docs/a.docx:/content", "Upload or replace a file"),
+        ("PUT", "/drives/d1/items/i1/content", "Upload or replace a file"),
+        (
+            "PATCH",
+            "/v1.0/me/drive/items/i1/workbook/worksheets/S/range(address='A1')",
+            "Change an Excel workbook",
+        ),
+        ("POST", "/me/drive/items/i1/workbook/tables/T/rows", "Change an Excel workbook"),
+        ("POST", "/me/onenote/sections/s1/pages", "Add a OneNote page"),
+        ("PATCH", "/me/onenote/pages/p1/content", "Change a OneNote page"),
+        ("DELETE", "/me/drive/items/i1", "Change something"),
+        ("POST", "/me/drive/root:/OneNote/x.docx:/children", "Change something"),
+    ],
+)
+def test_the_title_follows_the_tools_own_classification(method: str, path: str, title: str) -> None:
+    assert _prompt(method=method, path=path).title == f"{title} in your Microsoft 365?"
+
+
+def test_a_body_at_the_limit_is_shown_whole_and_one_over_is_flagged() -> None:
+    whole = _prompt(method="POST", path="/me/onenote/pages", body="a\n" * (WRITE_BODY_LIMIT // 2))
+    assert not any("not shown" in line for line in whole.detail_lines)
+    assert write_body_size("a\n" * (WRITE_BODY_LIMIT // 2)) == WRITE_BODY_LIMIT
+    over = _prompt(method="POST", path="/me/onenote/pages", body="a" * (WRITE_BODY_LIMIT + 1))
+    assert "(+1 more characters not shown)" in over.detail_lines[-1]

@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 from urllib.parse import unquote
 
+from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
@@ -76,13 +77,13 @@ CONFIRMATION_TIMEOUT: Final[timedelta] = timedelta(minutes=10)
 SEND_BODY_LIMIT: Final[int] = 8000
 #: How much of that body the card shows before Details.
 _SEND_PREVIEW: Final[int] = 400
-#: Longest `microsoft_write` path shown before Details, which holds it whole.
+#: Longest `microsoft_write` path the tool accepts, so the card shows all of it.
+WRITE_PATH_LIMIT: Final[int] = 500
+#: Longest `microsoft_write` body (a text body's characters, or a JSON body's compact form), so
+#: Details holds all of it and the card stays under Teams' message size cap. The tool refuses more.
+WRITE_BODY_LIMIT: Final[int] = 2000
+#: Longest `microsoft_write` path the card shows before Details.
 _WRITE_PATH_PREVIEW: Final[int] = 120
-#: Longest path or file handle Details shows for a `microsoft_write`.
-_WRITE_DETAILS_FIELD: Final[int] = 500
-#: Characters of a `microsoft_write` body Details shows, so the card stays under Teams' message
-#: size cap; it says when more was cut.
-_WRITE_DETAILS_LIMIT: Final[int] = 2000
 
 
 class BackendSwitchReference(BaseModel):
@@ -190,6 +191,11 @@ def _plain(text: str) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch) not in {"Cc", "Cf", "Zl", "Zp"})
 
 
+def is_plain(text: str) -> bool:
+    """Whether `text` holds no control, invisible or line-break characters."""
+    return _plain(text) == text
+
+
 def _one_line(value: object, *, limit: int | None = None) -> str:
     """A model-supplied field as one plain line, so it can't start a line of the card.
 
@@ -197,6 +203,14 @@ def _one_line(value: object, *, limit: int | None = None) -> str:
     """
     text = _plain(" ".join(str(value).split()))
     return text if limit is None else _short(text, limit=limit)
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters in the middle, so its start and its end both show."""
+    if len(text) <= limit:
+        return text
+    head = (limit - 1) // 3
+    return f"{text[:head]}…{text[len(text) - (limit - 1 - head) :]}"
 
 
 def _preview(text: str) -> str:
@@ -241,55 +255,64 @@ def _recipients(value: object) -> str:
     return ", ".join(_one_line(name) for name in names)
 
 
+_WRITE_VERBS: Final[dict[str | None, str]] = {
+    "upload": "Upload or replace a file",
+    "workbook": "Change an Excel workbook",
+    "onenote_create": "Add a OneNote page",
+    "onenote_update": "Change a OneNote page",
+    None: "Change something",
+}
+
+
 def _microsoft_write_action(method: str, path: str) -> str:
-    """What a `microsoft_write` does, in words, from its method and decoded path."""
-    lowered = path.lower()
-    if "/onenote/" in lowered:
-        verb = "Add a OneNote page" if method == "POST" else "Change a OneNote page"
-    elif "/workbook/" in lowered:
-        verb = "Change an Excel workbook"
-    elif method == "PUT":
-        verb = "Upload or replace a file"
-    else:
-        verb = "Change something"
-    return f"{verb} in your Microsoft 365"
+    """What a `microsoft_write` does, in words, as the tool itself classifies the call."""
+    return f"{_WRITE_VERBS[write_kind(method.upper(), path)]} in your Microsoft 365"
 
 
-def _microsoft_write_content(body: object) -> list[str]:
-    """The body of a `microsoft_write` as lines: compact JSON on one, or a text body's own."""
+def _write_body_text(body: object) -> str:
+    """A `microsoft_write` body as text: a text body as is, JSON in its compact form."""
+    if body is None:
+        return ""
     if isinstance(body, str):
-        return [line for line in map(_plain, body.splitlines()) if line.strip()]
-    return [_plain(json.dumps(body, separators=(",", ":"), ensure_ascii=False, default=str))]
+        return body
+    return json.dumps(body, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def write_body_size(body: object) -> int:
+    """How many characters of `microsoft_write` body the card has to show."""
+    return len(_write_body_text(body))
 
 
 def _microsoft_write_card(data: dict[str, object]) -> tuple[str, str, tuple[str, ...]]:
     """The action, always-visible text and Details of one `microsoft_write` approval."""
-    method = _one_line(data.get("method"))
-    path = _one_line(unquote(str(data.get("path") or "")))
+    method = _one_line(data.get("method")).upper()
+    decoded = unquote(str(data.get("path") or ""))
+    decoded = decoded.removeprefix("/v1.0") if decoded.lower().startswith("/v1.0/") else decoded
+    path = _one_line(decoded)
     handle = _one_line(data.get("file_handle")) if data.get("file_handle") else None
-    body = data.get("body")
-    content = [] if body is None else _microsoft_write_content(body)
+    text = _write_body_text(data.get("body"))
+    lines = [line for line in map(_plain, text[:WRITE_BODY_LIMIT].splitlines()) if line.strip()]
     facts = (
         f"Method: {method}",
-        f"Path: {_short(path, limit=_WRITE_PATH_PREVIEW)}",
+        # The end of a path says what is changed, so a long one loses its middle.
+        f"Path: {_clip_middle(path, _WRITE_PATH_PREVIEW)}",
         *((f"File handle: {_short(handle)}",) if handle else ()),
     )
-    if content:
-        shown = (f"Content: {_preview(_one_line(' '.join(content)))}",)
+    if lines:
+        shown = (f"Content: {_preview(_one_line(' '.join(lines)))}",)
     else:
         # An upload's bytes are staged, not in the call; its file handle stands for them.
         shown = () if handle else ("Content: (none)",)
-    consequence = "\n".join(("It acts as you in Microsoft 365.", *facts, *shown))
-    text = "\n".join(content)
-    cut = text[_WRITE_DETAILS_LIMIT:]
+    cut = len(text) - WRITE_BODY_LIMIT
     details = (
         f"Method: {method}",
-        f"Path: {_short(path, limit=_WRITE_DETAILS_FIELD)}",
-        *((f"File handle: {_short(handle, limit=_WRITE_DETAILS_FIELD)}",) if handle else ()),
-        *(("Content:", *text[:_WRITE_DETAILS_LIMIT].splitlines()) if content else ()),
-        *((f"… (+{len(cut)} more characters not shown)",) if cut else ()),
+        f"Path: {_clip_middle(path, WRITE_PATH_LIMIT)}",
+        *((f"File handle: {_short(handle, limit=WRITE_PATH_LIMIT)}",) if handle else ()),
+        *(("Content:", *lines) if lines else ()),
+        *((f"… (+{cut} more characters not shown)",) if cut > 0 else ()),
     )
-    return _microsoft_write_action(method, path), consequence, details
+    consequence = "\n".join(("It acts as you in Microsoft 365.", *facts, *shown))
+    return _microsoft_write_action(method, decoded), consequence, details
 
 
 def prompt_for_tool_call(
