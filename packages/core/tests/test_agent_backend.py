@@ -884,12 +884,19 @@ async def test_selfhosted_agent_selection_refuses_before_source_capture(owned):
         compatibility_preview(agent, "selfhosted", await service.tenant_policy(agent.tenant_id))
 
 
+@pytest.mark.fresh_schema
 async def test_legacy_selfhosted_agent_revision_cannot_materialize(owned):
     from daimon.core.stores import agent_backends
 
     service, agent, actor, sessions = owned
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="channel")
+    from sqlalchemy import text
+
     async with sessions.begin() as db:
+        # Model an invalid legacy row inside this test's isolated DDL schema.
+        await db.execute(
+            text("ALTER TABLE agent_backend_revision DROP CONSTRAINT ck_agent_backend_provider")
+        )
         await agent_backends.put_revision(
             db,
             tenant_id=agent.tenant_id,

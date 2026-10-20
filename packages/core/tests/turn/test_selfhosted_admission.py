@@ -180,6 +180,7 @@ async def test_bound_responder_is_an_exact_id_never_a_name(db_session, db_sessio
         )
 
 
+@pytest.mark.fresh_schema
 @pytest.mark.parametrize("agent_backends", [False, True])
 async def test_agent_selected_selfhosted_is_refused_before_anthropic(
     db_session, db_session_factory, monkeypatch, agent_backends
@@ -194,6 +195,12 @@ async def test_agent_selected_selfhosted_is_refused_before_anthropic(
     tenant = await make_tenant(db_session)
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    from sqlalchemy import text
+
+    # Model an invalid legacy row inside this test's isolated DDL schema.
+    await db_session.execute(
+        text("ALTER TABLE agent_backend_revision DROP CONSTRAINT ck_agent_backend_provider")
     )
     await preferences.put_revision(
         db_session,
