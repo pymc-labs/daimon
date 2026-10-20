@@ -23,6 +23,7 @@ from daimon.adapters.mcp.tools._untrusted import UntrustedResult
 from daimon.adapters.mcp.tools.microsoft._access import GRAPH_ROOT
 from daimon.adapters.mcp.tools.microsoft._paths import check_write, parse_path
 from daimon.adapters.mcp.tools.microsoft._person import (
+    NEEDS_ORIGIN,
     origin_facts,
     require_one_to_one,
     require_person,
@@ -59,8 +60,9 @@ _NO_LINK = (
     "This file's download link is given only in the person's 1:1 chat with Daimon, since "
     "anyone holding it could open the file. Ask them there."
 )
-_NO_LINK_UNKNOWN = (
-    "This file's download link can't be given here, since anyone holding it could open the file."
+_NO_LINK_UNVERIFIED = (
+    "This file's download link is given only in the person's own chat, since anyone holding it "
+    "could open the file. " + NEEDS_ORIGIN
 )
 _NO_LINK_FOREIGN = (
     "This file's download link works only for people in the organisation that added "
@@ -158,7 +160,7 @@ def _next_path(data: dict[str, JsonValue]) -> str | None:
 
 def _no_link(foreign: bool | None) -> str:
     if foreign is None:
-        return _NO_LINK_UNKNOWN
+        return _NO_LINK_UNVERIFIED
     return _NO_LINK_FOREIGN if foreign else _NO_LINK
 
 
@@ -166,7 +168,8 @@ def _result(response: httpx.Response, *, links: bool, foreign: bool | None = Fal
     """A bounded result: JSON trimmed by dropping list items, text cut, never bytes.
 
     `links` (the person's 1:1 chat only) returns a /content redirect's link. `foreign` is
-    whether the sender is from another organisation, None when that is not known.
+    whether the sender is from another organisation, None when no turn origin verified and
+    the sender is not known to be a guest.
     """
     status = response.status_code
     if response.is_redirect:
@@ -205,7 +208,7 @@ def _result(response: httpx.Response, *, links: bool, foreign: bool | None = Fal
         if foreign is False
         else " for people in the organisation that added Daimon."
         if foreign
-        else " where one can be given."
+        else " once the origin_context_id from the current chat is passed."
     )
     text = "Binary content is not returned. GET .../content for a download link"
     return GraphResult(status=status, text=text + where)

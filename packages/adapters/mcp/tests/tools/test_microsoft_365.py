@@ -395,25 +395,18 @@ async def test_no_pre_authenticated_link_outside_the_one_to_one_chat(
     )
 
 
-@pytest.mark.parametrize(
-    ("running", "link"),
-    [
-        ([ONE_TO_ONE], True),
-        ([CHANNEL], False),
-        ([ONE_TO_ONE, CHANNEL], False),
-        ([ONE_TO_ONE, ONE_TO_ONE], False),
-        ([], False),
-    ],
-    ids=["sole 1:1 turn", "sole channel turn", "1:1 and channel", "two 1:1 turns", "none"],
-)
-async def test_download_link_without_origin_follows_the_sole_running_turn(
+RUNNING_TURNS = [[ONE_TO_ONE], [CHANNEL], [ONE_TO_ONE, CHANNEL], []]
+RUNNING_IDS = ["a 1:1 turn", "a channel turn", "1:1 and channel", "no turn"]
+
+
+@pytest.mark.parametrize("running", RUNNING_TURNS, ids=RUNNING_IDS)
+async def test_a_call_without_origin_gets_no_link_and_is_asked_for_it(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     fake: FakeMicrosoft,
     running: list[str],
-    link: bool,
 ) -> None:
-    """A model that drops `origin_context_id` in a real 1:1 still gets the link, as mail
-    paths do (`require_turn_origin`); with no turn or several, nobody gets one on a guess."""
+    """A routine runs on the person's chat credential and opens no origin. A running 1:1
+    turn of the person must not stand in for it: the link needs the id on every call."""
     _, auth = await _person(committing_sessionmaker)
     await _connect(committing_sessionmaker, auth)
     for parent in running:
@@ -421,22 +414,83 @@ async def test_download_link_without_origin_follows_the_sole_running_turn(
     fake.graph[("GET", "/me/drive/items/i1/content")] = httpx.Response(
         302, headers={"location": "https://files.example/download?sig=1"}
     )
-
-    result = await microsoft_get_impl(
-        _runtime(committing_sessionmaker, fake),
-        auth,
-        path="/me/drive/items/i1/content",
-        origin_context_id="",
+    fake.graph[("GET", "/me/drive/items/i2")] = httpx.Response(
+        200, content=b"x", headers={"content-type": "application/pdf"}
     )
+    runtime = _runtime(committing_sessionmaker, fake)
 
-    assert (result.download_url == "https://files.example/download?sig=1") is link
-    assert link or "files.example" not in result.model_dump_json(), "no link outside a 1:1"
+    notes = [
+        await microsoft_get_impl(runtime, auth, path=path, origin_context_id="")
+        for path in ("/me/drive/items/i1/content", "/me/drive/items/i2")
+    ]
+
+    for note in notes:
+        assert note.download_url is None and "files.example" not in note.model_dump_json()
+        assert "origin_context_id" in (note.text or ""), note.text
+        assert "1:1" not in (note.text or ""), "do not send the person elsewhere on a guess"
 
 
-async def test_a_named_origin_that_is_not_the_one_to_one_is_not_replaced_by_the_sole_turn(
+@pytest.mark.parametrize("running", RUNNING_TURNS, ids=RUNNING_IDS)
+@pytest.mark.parametrize("call", ["search", "get", "write", "send"])
+async def test_one_to_one_only_tools_without_origin_ask_for_it_and_touch_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    running: list[str],
+    call: str,
+) -> None:
+    """Mail, calendar, OneNote and sending need the id on every call, even while the
+    person has a live 1:1 turn: no Graph request is made without it."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    for parent in running:
+        await _origin(committing_sessionmaker, auth, parent)
+    runtime = _runtime(committing_sessionmaker, fake)
+    calls = {
+        "search": microsoft_search_impl(
+            runtime, auth, query="q", kinds=["message"], size=5, origin_context_id=""
+        ),
+        "get": microsoft_get_impl(runtime, auth, path="/me/messages", origin_context_id=""),
+        "write": microsoft_write_impl(
+            runtime,
+            auth,
+            method="POST",
+            path="/me/onenote/pages",
+            body="<p>x</p>",
+            file_handle=None,
+            origin_context_id="",
+        ),
+        "send": microsoft_send_impl(
+            runtime,
+            auth,
+            action="send_mail",
+            to=["a@example.com"],
+            subject="s",
+            body="b",
+            cc=[],
+            start=None,
+            end=None,
+            time_zone="UTC",
+            location=None,
+            origin_context_id="",
+        ),
+    }
+    for name, pending in calls.items():
+        if name != call:
+            pending.close()
+
+    with pytest.raises(ToolError) as refused:
+        await calls[call]
+
+    assert "origin_context_id" in str(refused.value) and "Nothing was read or sent" in str(
+        refused.value
+    )
+    assert not fake.graph_requests, "nothing may reach Graph without the origin"
+
+
+async def test_a_named_origin_that_does_not_verify_gets_no_link(
     committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
 ) -> None:
-    """The fallback is for a dropped argument only: a stale or foreign id gets no link."""
+    """A stale or foreign id is not replaced by the person's running 1:1 turn."""
     _, auth = await _person(committing_sessionmaker)
     await _connect(committing_sessionmaker, auth)
     await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
@@ -454,34 +508,26 @@ async def test_a_named_origin_that_is_not_the_one_to_one_is_not_replaced_by_the_
     assert result.download_url is None and "files.example" not in result.model_dump_json()
 
 
-@pytest.mark.parametrize("running", ["guest", "local", "none"])
-async def test_a_file_link_note_without_a_verified_origin_follows_the_person_not_a_guess(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft, running: str
+async def test_a_guest_without_origin_is_told_the_link_is_for_the_organisation(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
 ) -> None:
-    """No `origin_context_id`: a guest's running turn says so, a local sender's says not,
-    and with no running turn nobody is sent to a 1:1 chat on a guess."""
+    """A person known to be from another organisation is never pointed at a 1:1 chat."""
     _, auth = await _person(committing_sessionmaker)
     await _connect(committing_sessionmaker, auth)
-    if running != "none":
-        await _origin(committing_sessionmaker, auth, CHANNEL, foreign=running == "guest")
+    await _origin(committing_sessionmaker, auth, CHANNEL, foreign=True)
     fake.graph[("GET", "/me/drive/items/i1/content")] = httpx.Response(
         302, headers={"location": "https://files.example/download?sig=1"}
     )
-    fake.graph[("GET", "/me/drive/items/i2")] = httpx.Response(
-        200, content=b"x", headers={"content-type": "application/pdf"}
+
+    result = await microsoft_get_impl(
+        _runtime(committing_sessionmaker, fake),
+        auth,
+        path="/me/drive/items/i1/content",
+        origin_context_id="",
     )
-    runtime = _runtime(committing_sessionmaker, fake)
 
-    notes = [
-        (await microsoft_get_impl(runtime, auth, path=path, origin_context_id="")).text or ""
-        for path in ("/me/drive/items/i1/content", "/me/drive/items/i2")
-    ]
-
-    for note in notes:
-        assert ("1:1 chat" in note) is (running == "local"), note
-        assert ("organisation that added Daimon" in note) is (running == "guest"), note
-    if running == "none":
-        assert "can't be given here" in notes[0] and "where one can be given" in notes[1]
+    assert "organisation that added Daimon" in (result.text or "")
+    assert "files.example" not in result.model_dump_json()
 
 
 async def test_graph_error_text_is_not_echoed(
