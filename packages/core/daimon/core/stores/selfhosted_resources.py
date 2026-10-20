@@ -13,11 +13,13 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from daimon.core._models import (
+    Account,
     SelfHostedAgentRecord,
     SelfHostedEnvironmentRecord,
     SelfHostedResourceOperation,
     Tenant,
 )
+from daimon.core.stores.privacy_session_deletes import lock_account
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
 from mux.contracts.resources import (
@@ -140,6 +142,27 @@ class _Resources[
         try:
             async with self.sessionmaker() as session, session.begin():
                 tenant = self._tenant(scope)
+                # Bootstrap runs as the deployment operator, without a personal
+                # account. Every personal writer coordinates with erasure before
+                # taking tenant locks or creating any resource/receipt rows.
+                operator = (
+                    scope.account_id == "operator"
+                    and scope.principal_id == "cli"
+                    and scope.authorization_id == "cli-deployment-operator"
+                )
+                if not operator:
+                    try:
+                        account_id = UUID(scope.account_id)
+                    except ValueError:
+                        raise ScopeViolation("selfhosted", "an account UUID is required") from None
+                    await lock_account(session, account_id=account_id)
+                    account = await session.scalar(
+                        select(Account.id)
+                        .where(Account.id == account_id)
+                        .with_for_update(read=True, key_share=True)
+                    )
+                    if account is None:
+                        raise ScopeViolation("selfhosted", "account no longer exists")
                 await session.execute(
                     select(
                         func.pg_advisory_xact_lock(
@@ -179,7 +202,8 @@ class _Resources[
         self, session: AsyncSession, scope: Scope, key: str, digest: str
     ) -> SelfHostedResourceOperation | None:
         row = await session.get(
-            SelfHostedResourceOperation, (self._tenant(scope), scope.account_id, self.kind, key)
+            SelfHostedResourceOperation,
+            (self._tenant(scope), self._account_key(scope), self.kind, key),
         )
         if row is None:
             return None
@@ -201,7 +225,7 @@ class _Resources[
     ) -> SelfHostedResourceOperation:
         receipt = SelfHostedResourceOperation(
             tenant_id=self._tenant(scope),
-            account_id=scope.account_id,
+            account_id=self._account_key(scope),
             principal_id=scope.principal_id,
             kind=self.kind,
             key=key,
@@ -216,6 +240,10 @@ class _Resources[
         session.add(receipt)
         await session.flush()
         return receipt
+
+    def _account_key(self, scope: Scope) -> str:
+        # UUID spellings share the same erasure lock and persisted receipt key.
+        return "operator" if scope.account_id == "operator" else str(UUID(scope.account_id))
 
     async def _replay(
         self, session: AsyncSession, scope: Scope, receipt: SelfHostedResourceOperation

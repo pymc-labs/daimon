@@ -71,8 +71,6 @@ def spec_for(vector):
         ]
     elif vector == "metadata":
         agent["metadata"] = {"api_key": "secret-marker"}
-    elif vector == "instructions":
-        agent["system"] = "Bearer secret-marker"
     elif vector == "model_options":
         agent["model"] = ModelRef(
             provider=LOOP.provider, id="gpt-5", options={"access_token": "secret-marker"}
@@ -99,7 +97,6 @@ def spec_for(vector):
         "mcp_url",
         "extensions",
         "metadata",
-        "instructions",
         "model_options",
     ],
 )
@@ -226,3 +223,33 @@ def test_foundry_agent_name_boundaries_are_valid(name):
         project_endpoint="https://foundry.example/api/projects/test",
     )
     assert config.agent_name == name
+
+
+@pytest.mark.parametrize(
+    "prose", ["Do not print Bearer tokens.", "Explain Authorization and Cookie headers."]
+)
+def test_free_text_fields_accept_harmless_credential_prose(prose):
+    validate_resource_spec(
+        AgentSpec(
+            name=prose,
+            description=prose,
+            system=prose,
+            model=ModelRef(provider=LOOP.provider, id="gpt-5"),
+        )
+    )
+    validate_resource_spec(
+        EnvironmentSpec(
+            name=prose,
+            description=prose,
+            execution="self_hosted",
+            native_config=ExtensionConfig(
+                namespace="selfhosted.environment",
+                version=1,
+                value={
+                    "harness_url": "https://harness.example",
+                    "auth_ref": "TOKEN",
+                    "packages_note": prose,
+                },
+            ),
+        )
+    )

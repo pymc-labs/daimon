@@ -11,7 +11,7 @@ from daimon.core.stores.selfhosted_resources import (
     SelfHostedAgents,
     SelfHostedEnvironments,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, PageRequest, Revision, Scope
 from mux.contracts.ports import Agents, Environments
@@ -31,9 +31,12 @@ from mux.profiles.selfhosted import LOOP
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-def scope(tenant: str) -> Scope:
+def scope(tenant: str, account: str | None = None) -> Scope:
     return Scope(
-        tenant_id=tenant, account_id=str(uuid4()), principal_id="operator", authorization_id="test"
+        tenant_id=tenant,
+        account_id=account or str(uuid4()),
+        principal_id="operator",
+        authorization_id="test",
     )
 
 
@@ -76,9 +79,10 @@ async def test_ports_roundtrip_idempotency_and_tenant_isolation(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     other = await make_tenant(db_session)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents: Agents = SelfHostedAgents(db_session_factory)
     environments: Environments = SelfHostedEnvironments(db_session_factory)
     agent = await agents.create(authorized, agent_spec(), key="agent")
@@ -114,8 +118,9 @@ async def test_update_archive_delete_and_replay(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
     agent = await agents.create(authorized, agent_spec(), key="create")
     updated = await agents.update(
@@ -163,8 +168,9 @@ async def test_pagination_filters_and_environment_update(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
     for name in ("one", "two", "three"):
         await agents.create(authorized, agent_spec(name), key=name)
@@ -218,7 +224,8 @@ async def test_concurrent_retries_commit_one_resource(db_committing_engine):
     sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
-    authorized = scope(str(tenant.id))
+        account = await make_account(db, tenant=tenant)
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(sessions)
     results = await asyncio.gather(
         *(agents.create(authorized, agent_spec(), key="same-operation") for _ in range(4))
@@ -274,8 +281,9 @@ async def test_receipts_are_reference_only_owned_and_separate_by_account_and_kin
     from sqlalchemy import select
 
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
     agent = await agents.create(authorized, agent_spec(), key="same-key")
     env = await SelfHostedEnvironments(db_session_factory).create(
@@ -287,8 +295,10 @@ async def test_receipts_are_reference_only_owned_and_separate_by_account_and_kin
             agent_spec(),
             key="same-key",
         )
+    other_row = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
     other_account = authorized.model_copy(
-        update={"account_id": str(uuid4()), "principal_id": "other-principal"}
+        update={"account_id": str(other_row.id), "principal_id": "other-principal"}
     )
     other = await agents.create(other_account, agent_spec("other"), key="same-key")
     assert len({agent.ref.id, env.ref.id, other.ref.id}) == 3
@@ -304,8 +314,9 @@ async def test_deleted_create_replay_fails_and_archived_names_can_be_reused(
     db_session, db_session_factory
 ):
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
     old = await agents.create(authorized, agent_spec(), key="create")
     await agents.archive(authorized, old.ref, key="archive")
@@ -327,8 +338,9 @@ async def test_explicit_null_patches_clear_optional_fields(db_session, db_sessio
     from daimon.core._models import SelfHostedAgentRecord
 
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
     agent = await agents.create(authorized, agent_spec(), key="agent")
     # Simulate a record from before the v1 extension allowlist. Clearing it
@@ -376,8 +388,9 @@ async def test_receipt_ttl_prunes_idle_and_active_tenants(db_session, db_session
     from sqlalchemy import select, update
 
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
     await agents.create(authorized, agent_spec(), key="expired")
     async with db_session_factory.begin() as db:
@@ -407,8 +420,9 @@ async def test_bad_input_uses_mux_errors_and_does_not_write_receipts(
     from sqlalchemy import func, select
 
     tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    authorized = scope(str(tenant.id))
+    authorized = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
     for name in ("", "sh_reserved"):
         with pytest.raises(ProviderError) as error:
@@ -443,3 +457,87 @@ async def test_bad_input_uses_mux_errors_and_does_not_write_receipts(
             )
         assert error.value.category == "invalid_request"
     assert await agents.retrieve(authorized, agent.ref) == agent
+
+
+@pytest.mark.parametrize("purge_first", [True, False])
+async def test_account_erasure_serializes_resource_writes(
+    db_committing_engine, monkeypatch, purge_first
+):
+    from daimon.core._models import Account, SelfHostedResourceOperation
+    from daimon.core.purge import purge_account
+    from daimon.core.stores import privacy_session_deletes, selfhosted_resources
+    from sqlalchemy import func, select
+
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    authorized = scope(str(tenant.id), str(account.id).upper())
+    agents = SelfHostedAgents(sessions)
+    held, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    waiter_pid = None
+    real_lock = privacy_session_deletes.lock_account
+
+    async def hold_lock(session, *, account_id):
+        await real_lock(session, account_id=account_id)
+        held.set()
+        await release.wait()
+
+    async def wait_for_lock(session, *, account_id):
+        nonlocal waiter_pid
+        waiter_pid = await session.scalar(select(func.pg_backend_pid()))
+        waiting.set()
+        await real_lock(session, account_id=account_id)
+
+    monkeypatch.setattr(
+        privacy_session_deletes, "lock_account", hold_lock if purge_first else wait_for_lock
+    )
+    monkeypatch.setattr(
+        selfhosted_resources, "lock_account", wait_for_lock if purge_first else hold_lock
+    )
+
+    async def write():
+        return await agents.create(authorized, agent_spec(), key="concurrent")
+
+    async def erase():
+        return await purge_account(sm=sessions, account_id=account.id)
+
+    first = asyncio.create_task(erase() if purge_first else write())
+    second = None
+    try:
+        async with asyncio.timeout(10):
+            await held.wait()
+            second = asyncio.create_task(write() if purge_first else erase())
+            await waiting.wait()
+            async with sessions() as db:
+                while not await db.scalar(
+                    select(func.cardinality(func.pg_blocking_pids(waiter_pid)))
+                ):
+                    await asyncio.sleep(0.01)
+        release.set()
+        await first
+        if purge_first:
+            with pytest.raises(ScopeViolation, match="account no longer exists"):
+                await second
+        else:
+            await second
+        async with sessions() as db:
+            assert await db.get(Account, account.id) is None
+            assert (
+                await db.scalar(
+                    select(func.count())
+                    .select_from(SelfHostedResourceOperation)
+                    .where(SelfHostedResourceOperation.account_id == str(account.id))
+                )
+                == 0
+            )
+        with pytest.raises(ScopeViolation, match="account no longer exists"):
+            await agents.create(authorized, agent_spec("after-erasure"), key="late")
+    finally:
+        release.set()
+        for task in (first, second):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (first, second) if task is not None), return_exceptions=True
+        )

@@ -102,7 +102,7 @@ class HarnessConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_routing(self) -> HarnessConfig:
-        _reject_credentials(self.model_dump(mode="json"))
+        _reject_credentials([self.harness_url, self.auth_ref, self.project_endpoint])
         _url(self.harness_url, allow_internal_http=self.allow_insecure_http)
         if self.auth_mode == "bearer_env":
             if not _ENV.fullmatch(self.auth_ref):
@@ -134,15 +134,17 @@ def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
     accepting arbitrary dictionaries there would bypass reference validation.
     """
     try:
-        _reject_credentials(spec.model_dump(mode="json"))
+        _reject_credentials(dict(spec.metadata or {}))
         if not spec.name.strip() or spec.name.startswith("sh_"):
             raise ValueError(
                 "resource names must be nonblank and cannot use the reserved sh_ prefix"
             )
         if isinstance(spec, AgentSpec):
+            _reject_credentials(dict(spec.model.options or {}))
             if spec.model.provider != LOOP.provider or spec.extensions:
                 raise ValueError("selfhosted agents require their own model and no extensions")
             for server in spec.mcp_servers or ():
+                _reject_credentials(server.model_dump(mode="json", exclude={"name"}))
                 _url(server.url, allow_internal_http=server.credential_ref is None)
                 if server.credential_ref is not None and not _MCP_CREDENTIAL_ENV.fullmatch(
                     server.credential_ref
@@ -160,6 +162,12 @@ def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
                 raise ValueError("unsupported environment configuration")
             HarnessConfig.model_validate(dict(spec.native_config.value))
             for source in spec.sources or ():
+                _reject_credentials(
+                    {
+                        "repository_url": source.repository_url,
+                        "credential_ref": source.credential_ref,
+                    }
+                )
                 if source.repository_url is not None:
                     _url(source.repository_url)
                 if source.credential_ref is not None and not _ENV.fullmatch(source.credential_ref):
