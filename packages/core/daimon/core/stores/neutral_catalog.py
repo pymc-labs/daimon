@@ -19,6 +19,7 @@ from typing import Any
 
 from daimon.core._models import (
     Account,
+    ChannelSkill,
     NeutralAgentRevision,
     NeutralSkillVersion,
 )
@@ -269,6 +270,57 @@ class PostgresNeutralCatalog:
                 )
             )
             return None if row is None else self._skill(row)
+
+    async def get_channel_skill(
+        self,
+        scope: Scope,
+        skill_id: str,
+        version: str,
+        *,
+        platform: str,
+        channel_id: str,
+        agent_names: tuple[str, ...],
+    ) -> SkillVersion | None:
+        """Read an exact persisted channel grant for an admitted channel member.
+
+        Unlike personal catalog reads, this can cross uploader accounts inside
+        the tenant/workspace. The channel rule must still pin this version and
+        permit the answering agent. Admission owns the caller's channel access.
+        Conflicting retained copies are ambiguous and fail closed.
+        """
+        key = self._key(scope)
+        async with self._sessions() as session:
+            await self._authorize(session, scope)
+            grant = await session.scalar(
+                select(ChannelSkill).where(
+                    ChannelSkill.tenant_id == key["tenant_id"],
+                    ChannelSkill.platform == platform,
+                    ChannelSkill.channel_id == channel_id,
+                    ChannelSkill.skill_id == skill_id,
+                    ChannelSkill.version == version,
+                )
+            )
+            if grant is None or (
+                grant.owner_agent_name is not None and grant.owner_agent_name not in agent_names
+            ):
+                return None
+            rows = tuple(
+                await session.scalars(
+                    select(NeutralSkillVersion).where(
+                        NeutralSkillVersion.tenant_id == key["tenant_id"],
+                        NeutralSkillVersion.provider == self._provider,
+                        NeutralSkillVersion.account_scope_id == self._workspace,
+                        NeutralSkillVersion.skill_id == skill_id,
+                        NeutralSkillVersion.version == version,
+                    )
+                )
+            )
+            if not rows:
+                return None
+            versions = tuple(self._skill(row) for row in rows)
+            if any(row.bundle != versions[0].bundle for row in versions[1:]):
+                raise ScopeViolation(skill_id, "channel skill has ambiguous retained content")
+            return versions[0]
 
     async def list_skills(self, scope: Scope) -> tuple[SkillVersion, ...]:
         self._key(scope)

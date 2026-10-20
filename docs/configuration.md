@@ -1000,6 +1000,21 @@ Allow explicitly configured selfhosted channels to pass backend admission. Defau
 false. Enabling this still requires the profile's usage observations capability and a
 configured self-hosted core runtime.
 
+### `DAIMON_SELFHOSTED__SINGLE_TENANT`
+
+`bool` · optional · default `False`
+
+Declare this self-hosted installation single-tenant. Required for wildcard MCP
+credential bindings; leave false for shared installations.
+
+### `DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`
+
+`tuple[str, ...]` · optional · default unset
+
+Operator-authorized exact hostnames or IP literals for credential-free HTTP MCP
+connections to private, link-local or metadata destinations. Empty by default. Loopback
+remains allowed; credential-bearing connections still require HTTPS.
+
 ### `DAIMON_SELFHOSTED__MCP_CREDENTIAL_BINDINGS`
 
 `tuple[McpCredentialBinding, ...]` · optional · default unset

@@ -15,6 +15,7 @@ import jwt
 import pytest
 from daimon.core.config import McpCredentialBinding, SelfHostedSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.neutral_resources import skill_upload
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_files
 from daimon.core.stores.domain import ChannelSkillRow
 from daimon.core.turn.selfhosted_tools import (
@@ -30,6 +31,7 @@ from daimon.core.turn.selfhosted_tools import (
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import Agents
 from mux.contracts.resources import Agent, AgentSpec, MCPConnection
+from mux.drivers.openai.skills import bundle_digest
 from mux.errors import ProviderError, ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,6 +56,8 @@ def build(
     rows: tuple[ChannelSkillRow, ...] = (),
     bundles: dict[tuple[str, str | None], SkillBundle] | None = None,
     bindings: tuple[McpCredentialBinding, ...] = (),
+    single_tenant: bool = False,
+    allowed_http_hosts: tuple[str, ...] = (),
 ) -> TurnTools:
     return build_turn_tools(
         daimon_mcp_url="https://mcp.example/mcp",
@@ -64,6 +68,8 @@ def build(
         skill_bundles=bundles or {},
         mcp_servers=servers,
         mcp_credential_bindings=bindings,
+        single_tenant=single_tenant,
+        mcp_allowed_http_hosts=allowed_http_hosts,
         agent_skills=refs,
         platform_skills=platform_refs,
         channel_skills=rows,
@@ -163,7 +169,7 @@ def test_agent_platform_and_channel_skills_keep_files_pins_and_order() -> None:
         ("platform", None): a,
         ("extra", "v1"): c,
     }
-    refs = (SkillRef(id="own", version="v2", digest=z.preview.content_hash),)
+    refs = (SkillRef(id="own", version="v2", digest=bundle_digest(skill_upload(z))),)
     rows = (
         row("extra", "channel"),
         row("private", "private", owner_agent_name="another"),
@@ -566,9 +572,13 @@ async def test_retained_channel_pin_loads_exact_authorized_catalog_bytes(
             display_title="retained",
             bundle=source,
         )
-    refs = (SkillRef(id="uploaded", version="v1"), SkillRef(id="missing", version="v1"))
+    refs = (
+        SkillRef(id="uploaded", version="v1", digest=bundle_digest(skill_upload(first))),
+        SkillRef(id="missing", version="v1"),
+    )
     loaded = await load_turn_skill_bundles(tmp_path, refs, scope=scope, catalog=catalog)
     assert loaded == {("uploaded", "v1"): first}
+    assert build(refs=refs[:1], bundles=loaded).skills[0].name == "retained"
     tools = build_turn_tools(
         daimon_mcp_url="https://mcp.example/mcp",
         tenant_id=tenant.id,
@@ -635,7 +645,15 @@ def test_binding_json_setting_and_single_tenant_wildcard(monkeypatch: pytest.Mon
         name="service", url="https://service.example/mcp", credential_ref=binding.name
     )
     single_tenant = McpCredentialBinding(name=binding.name, origin=binding.origin, tenants=("*",))
-    assert build(servers=(server,), bindings=(single_tenant,)).mcp_servers[1].name == "service"
+    with pytest.raises(ValueError, match="single-tenant"):
+        build(servers=(server,), bindings=(single_tenant,))
+    assert (
+        build(servers=(server,), bindings=(single_tenant,), single_tenant=True).mcp_servers[1].name
+        == "service"
+    )
+    with pytest.raises(ValueError, match="single-tenant"):
+        SelfHostedSettings(mcp_credential_bindings=(single_tenant,))
+    assert SelfHostedSettings(single_tenant=True, mcp_credential_bindings=(single_tenant,))
     with pytest.raises(ValueError, match="unique"):
         SelfHostedSettings(mcp_credential_bindings=(binding, binding))
 
@@ -654,3 +672,253 @@ def test_binding_json_setting_and_single_tenant_wildcard(monkeypatch: pytest.Mon
 def test_invalid_credential_binding_origin_is_refused(origin: str) -> None:
     with pytest.raises(ValueError):
         McpCredentialBinding(name="HARNESS_MCP_CRED_SERVICE", origin=origin, tenants=(TENANT,))
+
+
+def test_native_content_pin_matches_retained_bundle_not_zip() -> None:
+    original = bundle("native", **{"asset.bin": b"\xff\x00", "notes.txt": b"retained"})
+    from daimon.core.skills.ingest import bundle_from_retained_archive
+
+    retained = bundle_from_retained_archive(original.zip_bytes)
+    pin = bundle_digest(skill_upload(original))
+    assert pin != retained.preview.content_hash
+    refs = (SkillRef(id="native", version="v1", digest=pin),)
+    assert build(refs=refs, bundles={("native", "v1"): retained}).skills[0].name == "native"
+    changed = bundle("native", **{"asset.bin": b"\xff\x01", "notes.txt": b"retained"})
+    with pytest.raises(SkillIngestError, match="digest"):
+        build(refs=refs, bundles={("native", "v1"): changed})
+    with pytest.raises(SkillIngestError, match="digest"):
+        build(
+            refs=(SkillRef(id="native", digest=retained.preview.content_hash),),
+            bundles={("native", None): retained},
+        )
+    tools = build_turn_tools(
+        daimon_mcp_url="https://mcp.example/mcp",
+        tenant_id=TENANT,
+        platform="discord",
+        channel_id="channel",
+        agent_names=(),
+        skill_bundles={("native", None): retained},
+        skill_digest_kind="zip",
+        agent_skills=(SkillRef(id="native", digest=retained.preview.content_hash),),
+    )
+    assert tools.skills[0].name == "native"
+
+
+def test_held_version_names_win_over_old_channel_pins() -> None:
+    tools = build(
+        refs=(SkillRef(id="own", version="v2"),),
+        rows=(row("own", "old-name"), row("extra", "new-name")),
+        bundles={
+            ("own", "v2"): bundle("new-name"),
+            ("own", "v1"): bundle("old-name"),
+            ("extra", "v1"): bundle("new-name"),
+        },
+    )
+    assert [skill.name for skill in tools.skills] == ["new-name"]
+
+
+def test_channel_clashes_use_final_bundle_names() -> None:
+    tools = build(
+        refs=(SkillRef(id="own"),),
+        rows=(row("extra", "stale-name"), row("next", "other-stale-name")),
+        bundles={
+            ("own", None): bundle("held-name"),
+            ("extra", "v1"): bundle("held-name"),
+            ("next", "v1"): bundle("next-name"),
+        },
+    )
+    assert [skill.name for skill in tools.skills] == ["held-name", "next-name"]
+
+
+@pytest.mark.parametrize("name", ["pdf", "docx", "pptx", "xlsx"])
+def test_explicit_custom_source_overrides_builtin_id(name: str) -> None:
+    tools = build(refs=(SkillRef(id=name, source="custom"),), bundles={(name, None): bundle(name)})
+    assert [skill.name for skill in tools.skills] == [name]
+    assert tools.skipped == ()
+    assert build(refs=(SkillRef(id=name),)).skipped == (SkippedSkill(name, "provider_builtin"),)
+
+
+@pytest.mark.parametrize("name", ["pdf", "docx"])
+def test_channel_skills_are_explicitly_custom_even_with_builtin_ids(name: str) -> None:
+    tools = build(rows=(row(name, name),), bundles={(name, "v1"): bundle(name)})
+    assert [skill.name for skill in tools.skills] == [name]
+    assert tools.skipped == ()
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "169.254.169.254",
+        "169.254.170.2",
+        "10.1.2.3",
+        "172.16.0.1",
+        "192.168.0.1",
+        "100.100.100.200",
+        "0.0.0.0",
+        "[fe80::1]",
+        "[fd00::1]",
+        "[::ffff:169.254.169.254]",
+        "2852039166",
+        "0xa9fea9fe",
+        "0251.0376.0251.0376",
+        "10.1",
+        "metadata.google.internal",
+        "metadata",
+        "mcp.internal",
+        "mcp.svc.cluster.local",
+        "mcp.local",
+    ],
+)
+def test_credential_free_private_http_requires_operator_exception(host: str) -> None:
+    server = MCPConnection(name="private", url=f"http://{host}/mcp")
+    with pytest.raises(ValueError, match="allowed host"):
+        build(servers=(server,))
+    allowed = host.strip("[]")
+    assert build(servers=(server,), allowed_http_hosts=(allowed,)).mcp_servers[1].name == "private"
+    with pytest.raises(ValueError, match="allowed host"):
+        build(servers=(server,), allowed_http_hosts=("different.example",))
+
+
+async def test_channel_member_loads_only_persisted_exact_channel_grants(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    from daimon.core.stores.channel_skills import add_channel_skill
+    from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+    from daimon.testing.factories import make_account, make_tenant
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        uploader = await make_account(session, tenant=tenant)
+        member = await make_account(session, tenant=tenant)
+        foreign = await make_tenant(session)
+        outsider = await make_account(session, tenant=foreign)
+    scope = Scope(
+        tenant_id=str(tenant.id),
+        account_id=str(uploader.id),
+        principal_id="uploader",
+        authorization_id="admitted",
+    )
+    member_scope = scope.model_copy(update={"account_id": str(member.id), "principal_id": "member"})
+    catalog = PostgresNeutralCatalog(
+        db_session_factory, provider="openai", account_scope_id="workspace"
+    )
+    first, second = (
+        bundle("shared", **{"data.bin": b"\xff\x00"}),
+        bundle("shared", **{"data.bin": b"\xff\x01"}),
+    )
+    for version, source in (("v1", first), ("v2", second)):
+        await catalog.put_skill(
+            scope,
+            skill_id="shared",
+            version=version,
+            agent_name="agent",
+            display_title="shared",
+            bundle=source,
+        )
+    async with db_session_factory() as session, session.begin():
+        grant = await add_channel_skill(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="channel",
+            skill_id="shared",
+            version="v1",
+            name="shared",
+            owner_agent_name="agent",
+            actor_account_id=uploader.id,
+        )
+    assert await catalog.get_skill(member_scope, "shared", "v1") is None
+
+    async def load(
+        authorized: Scope,
+        *,
+        channel: str = "channel",
+        names: tuple[str, ...] = ("agent",),
+        rows: tuple[ChannelSkillRow, ...] = (grant,),
+    ) -> dict[tuple[str, str | None], SkillBundle]:
+        return await load_turn_skill_bundles(
+            tmp_path,
+            (),
+            scope=authorized,
+            catalog=catalog,
+            platform="discord",
+            channel_id=channel,
+            agent_names=names,
+            channel_skills=rows,
+        )
+
+    loaded = await load(member_scope)
+    assert loaded == {("shared", "v1"): first}
+    assert await load(scope) == loaded
+    assert (
+        await load_turn_skill_bundles(
+            tmp_path, (SkillRef(id="shared", version="v1"),), scope=member_scope, catalog=catalog
+        )
+        == {}
+    )
+    tools = build_turn_tools(
+        daimon_mcp_url="https://mcp.example/mcp",
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="channel",
+        agent_names=("agent",),
+        skill_bundles=loaded,
+        channel_skills=(grant,),
+    )
+    assert base64.b64decode(tools.skills[0].binary_files["data.bin"]) == b"\xff\x00"
+    assert await load(member_scope, names=("different",)) == {}
+    assert (
+        await load(
+            member_scope, channel="other", rows=(grant.model_copy(update={"channel_id": "other"}),)
+        )
+        == {}
+    )
+    assert await load(member_scope, rows=(grant.model_copy(update={"version": "v2"}),)) == {}
+    foreign_scope = member_scope.model_copy(
+        update={"tenant_id": str(foreign.id), "account_id": str(outsider.id)}
+    )
+    with pytest.raises(ScopeViolation):
+        await load(foreign_scope)
+    assert (
+        await load(foreign_scope, rows=(grant.model_copy(update={"tenant_id": foreign.id}),)) == {}
+    )
+    other_workspace = PostgresNeutralCatalog(
+        db_session_factory, provider="openai", account_scope_id="other"
+    )
+    assert (
+        await load_turn_skill_bundles(
+            tmp_path,
+            (),
+            scope=member_scope,
+            catalog=other_workspace,
+            platform="discord",
+            channel_id="channel",
+            agent_names=("agent",),
+            channel_skills=(grant,),
+        )
+        == {}
+    )
+
+    await catalog.put_skill(
+        member_scope,
+        skill_id="shared",
+        version="v1",
+        agent_name="agent",
+        display_title="shared",
+        bundle=second,
+    )
+    with pytest.raises(ScopeViolation, match="ambiguous"):
+        await load(member_scope)
+
+
+@pytest.mark.parametrize("name", ["pdf", "docx"])
+def test_explicit_custom_builtin_named_seed_loads(tmp_path: Path, name: str) -> None:
+    path = tmp_path / name
+    path.mkdir()
+    (path / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Custom skill.\n---\nCustom.")
+    refs = (SkillRef(id=name, source="custom"),)
+    assert (
+        build(refs=refs, bundles=load_seeded_turn_skill_bundles(tmp_path, refs)).skills[0].name
+        == name
+    )

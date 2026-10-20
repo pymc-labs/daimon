@@ -1237,5 +1237,6 @@ It returns credential-free wire fields; the registered Daimon MCP credential
 travels only in the per-turn `X-Daimon-MCP-Authorization` transport header.
 
 `mux.profiles.anthropic.is_builtin_skill` recognizes native built-in skill refs
-by source or reserved id when imported refs omit source. Hosts can skip native
+by source or reserved id when imported refs omit source. Explicit custom refs
+with reserved names remain custom skills. Hosts can skip native
 bundles on other backends without duplicating provider policy.

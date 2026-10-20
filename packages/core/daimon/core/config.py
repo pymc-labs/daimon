@@ -1246,6 +1246,22 @@ class SelfHostedSettings(BaseModel):
         ),
     )
 
+    single_tenant: bool = Field(
+        default=False,
+        description=(
+            "Declare this self-hosted installation single-tenant. Required for wildcard "
+            "MCP credential bindings; leave false for shared installations."
+        ),
+    )
+    mcp_allowed_http_hosts: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Operator-authorized exact hostnames or IP literals for credential-free HTTP MCP "
+            "connections to private, link-local or metadata destinations. Empty by default. "
+            "Loopback remains allowed; credential-bearing connections still require HTTPS."
+        ),
+    )
+
     mcp_credential_bindings: tuple[McpCredentialBinding, ...] = Field(
         default=(),
         description=(
@@ -1265,6 +1281,16 @@ class SelfHostedSettings(BaseModel):
         if len({binding.name for binding in value}) != len(value):
             raise ValueError("MCP credential binding names must be unique")
         return value
+
+    @model_validator(mode="after")
+    def wildcard_requires_single_tenant(self) -> SelfHostedSettings:
+        if not self.single_tenant and any(
+            b.tenants == ("*",) for b in self.mcp_credential_bindings
+        ):
+            raise ValueError(
+                "Wildcard MCP credential bindings require a single-tenant installation"
+            )
+        return self
 
 
 class GeminiSettings(BaseModel):

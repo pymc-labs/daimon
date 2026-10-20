@@ -69,6 +69,14 @@ and a profile that supplies usage observations. Select selfhosted on the channel
 agent backend preferences cannot choose it. Existing setup/handoff threads that
 reference Managed Agents responders cannot continue on a selfhosted channel.
 
+For self-hosted tool preparation, wildcard MCP credential bindings require
+`DAIMON_SELFHOSTED__SINGLE_TENANT=true`; shared installations must list tenant
+UUIDs. Credential-free HTTP MCP destinations in private or metadata ranges are
+refused, except loopback. Operators can allow exact hosts through the JSON list
+`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`. This host check classifies literals
+and internal names; configure harness egress to prevent DNS rebinding and
+redirects into private networks too.
+
 ## Upgrading an existing installation
 
 The new MCP server is strict immediately by default: credentials need a live

@@ -20,7 +20,11 @@ addition. Conflicting agent pins or mount names fail preparation.
 
 Use `await load_turn_skill_bundles(skills_root, refs, scope=scope, catalog=catalog)`
 to load unpinned local defaults off the event loop and exact retained versions
-from an optional authorized neutral catalog. Existing seed names (including
+from an optional authorized neutral catalog. To load channel grants for every
+member, also pass `channel_skills`, the admitted `platform` and `channel_id`, and
+`agent_names`. The loader rechecks the persisted channel pin before reading an
+uploader's bundle across accounts in the same tenant/provider workspace; ordinary
+catalog reads remain account-scoped. Existing seed names (including
 underscores) remain valid. The synchronous `load_seeded_turn_skill_bundles` is
 also available. There is no provider lookup or fallback from a missing pin to
 latest. Bundle provenance, including the catalog's provider workspace, belongs
@@ -30,7 +34,13 @@ not infer defaults from an agent's display name. Call the pure builder through
 
 Inline skills preserve UTF-8 text in `files` and other bytes as base64 in
 `binary_files`, with the shared wire `skill_sha256` over every decoded file.
-Skills and paths are sorted. Decoded bytes are capped at 8 MiB per skill and
+`SkillRef.digest` uses canonical mux `SkillUpload` hashing by default. Set
+`skill_digest_kind="zip"` only for refs whose digests explicitly describe ZIP
+archives; archive-preview integrity is always checked separately. Held agent
+versions retain their own mount names when channel pins name older versions.
+Clash checks use final bundle names. Explicit `source="custom"` skills named
+`pdf` or `docx` load normally; bare built-in IDs are skipped only without source
+metadata (or with `source="anthropic"`). Skills and paths are sorted. Decoded bytes are capped at 8 MiB per skill and
 24 MiB per turn, with bounded decompression; exceeding either refuses the turn.
 Provider built-ins and unavailable channel pins are skipped. Platform/channel
 additions use the shared skill selection and count-cap helpers to fit the
@@ -47,7 +57,16 @@ Authorization value (including `Bearer ` when needed). Inject
 The operator sets `DAIMON_SELFHOSTED__MCP_CREDENTIAL_BINDINGS` to a JSON list
 of `{name, origin, tenants}` records. Each credential requires its exact HTTPS
 origin (including any nondefault port) and the admitted tenant UUID; unbound
-names are refused. `tenants: ["*"]` declares a single-tenant installation only.
+names are refused. `tenants: ["*"]` requires
+`DAIMON_SELFHOSTED__SINGLE_TENANT=true`; both settings validation and the builder
+refuse it otherwise. Inject `settings.selfhosted.single_tenant` as `single_tenant`.
+Credential-free HTTP refuses nonpublic IP literals (including alternate IPv4
+encodings and mapped IPv6), metadata addresses and internal service names except
+loopback. For explicit operator exceptions, inject
+`settings.selfhosted.mcp_allowed_http_hosts` as `mcp_allowed_http_hosts`.
+`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS` is a JSON list of exact hostnames/IPs.
+This pure builder does not resolve DNS; harness network isolation must also
+prevent DNS rebinding and redirect access to private destinations.
 Configure harness `HARNESS_MCP_CRED_BINDINGS` from the same operator source.
 The reserved Daimon connection permits loopback HTTP; operator-bound credentials
 require HTTPS. URLs are

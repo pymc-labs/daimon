@@ -8,12 +8,14 @@ import hashlib
 import ipaddress
 import math
 import re
+import socket
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from anthropic.types.beta import BetaManagedAgentsCustomSkill
@@ -33,12 +35,13 @@ from daimon.core.stores.domain import ChannelSkillRow
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.ports import Agents
-from mux.contracts.resources import MCPConnection
+from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
 from mux.drivers.selfhosted.wire import SKILL_MAX_BYTES as MAX_SKILL_BYTES
 from mux.drivers.selfhosted.wire import TURN_SKILLS_MAX_BYTES as MAX_TURN_SKILL_BYTES
 from mux.drivers.selfhosted.wire import InlineSkill, MCPServer, skill_sha256
 from mux.errors import ScopeViolation
 from mux.profiles.anthropic import is_builtin_skill
+from mux.state.operations import request_digest
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -97,19 +100,74 @@ def _mcp_url(url: str, *, credential: bool = False) -> str:
     return canonical_mcp_url(url)
 
 
-def _inline_skill(ref: SkillRef, bundle: SkillBundle, *, remaining_bytes: int) -> InlineSkill:
+def _check_http_destination(url: str, *, allowed_hosts: Sequence[str]) -> None:
+    """Classify literals and internal names without DNS in the pure builder.
+
+    The harness network boundary must also prevent DNS rebinding and redirects
+    into private networks. An operator exception authorizes an exact hostname.
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme != "http":
+        return
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host in {value.lower().rstrip(".") for value in allowed_hosts}:
+        return
+    address = None
+    with suppress(ValueError):
+        address = ipaddress.ip_address(host)
+    if address is None:
+        with suppress(OSError):
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if host == "localhost" or (address is not None and address.is_loopback):
+        return
+    internal = (
+        not address.is_global
+        if address is not None
+        else "." not in host
+        or host.endswith((".internal", ".local", ".localhost", ".svc.cluster.local"))
+        or (".internal." in host and host.endswith(".azurecontainerapps.io"))
+        or host in {"metadata.google.internal", "metadata.azure.internal"}
+    )
+    if internal:
+        raise ValueError("Private HTTP MCP destination requires an operator allowed host")
+
+
+def _inline_skill(
+    ref: SkillRef,
+    bundle: SkillBundle,
+    *,
+    remaining_bytes: int,
+    digest_kind: Literal["content", "zip"],
+) -> InlineSkill:
     cap = min(MAX_SKILL_BYTES, remaining_bytes)
     if bundle.preview.total_bytes > cap:
         raise SkillIngestError(
             "Harness skills exceed decoded byte caps (8 MiB/skill, 24 MiB/turn)."
         )
     digest = hashlib.sha256(bundle.zip_bytes).hexdigest()
-    if digest != bundle.preview.content_hash or (ref.digest is not None and ref.digest != digest):
+    if digest != bundle.preview.content_hash:
         raise SkillIngestError("An admitted skill bundle has a different content digest.")
     checked = bundle_from_retained_archive(bundle.zip_bytes, max_uncompressed_bytes=cap)
     if checked.preview != bundle.preview:
         raise SkillIngestError("An admitted skill bundle differs from its preview.")
     files = retained_archive_files(checked.zip_bytes, max_uncompressed_bytes=cap)
+    if ref.digest is not None:
+        # Native mux content pins cover canonical SkillUpload, independently of
+        # ZIP packaging and the harness digest (which includes the mount name).
+        canonical = SkillUpload(
+            files=tuple(
+                SkillUploadFile(path=path, content=body) for path, body in sorted(files.items())
+            )
+        )
+        expected = (
+            request_digest(canonical.model_dump(mode="json"))
+            if digest_kind == "content"
+            else digest
+        )
+        if ref.digest != expected:
+            raise SkillIngestError("An admitted skill bundle has a different content digest.")
     text: dict[str, str] = {}
     binary: dict[str, str] = {}
     for path, body in sorted(files.items()):
@@ -135,6 +193,9 @@ def build_turn_tools(
     skill_bundles: Mapping[tuple[str, str | None], SkillBundle],
     mcp_servers: Sequence[MCPConnection] = (),
     mcp_credential_bindings: Sequence[McpCredentialBinding] = (),
+    single_tenant: bool = False,
+    mcp_allowed_http_hosts: Sequence[str] = (),
+    skill_digest_kind: Literal["content", "zip"] = "content",
     agent_skills: Sequence[SkillRef] = (),
     platform_skills: Sequence[SkillRef] = (),
     channel_skills: Sequence[ChannelSkillRow] = (),
@@ -157,9 +218,13 @@ def build_turn_tools(
     bindings = {binding.name: binding for binding in mcp_credential_bindings}
     if len(bindings) != len(mcp_credential_bindings):
         raise ValueError("MCP credential binding names must be unique")
+    if not single_tenant and any(binding.tenants == ("*",) for binding in bindings.values()):
+        raise ValueError("Wildcard MCP credential bindings require a single-tenant installation")
     names = {DAIMON_MCP_SERVER}
     for connection in sorted(mcp_servers, key=lambda item: item.name):
         url = _mcp_url(connection.url, credential=connection.credential_ref is not None)
+        if connection.credential_ref is None:
+            _check_http_destination(url, allowed_hosts=mcp_allowed_http_hosts)
         if get_reserved_mcp_rejection(
             server_name=connection.name, url=url, public_url=daimon_mcp_url
         ):
@@ -204,7 +269,12 @@ def build_turn_tools(
         bundle = skill_bundles.get((ref.id, ref.version))
         if bundle is None:
             raise SkillIngestError("An admitted skill version has no local bundle.")
-        skill = _inline_skill(ref, bundle, remaining_bytes=MAX_TURN_SKILL_BYTES - consumed)
+        skill = _inline_skill(
+            ref,
+            bundle,
+            remaining_bytes=MAX_TURN_SKILL_BYTES - consumed,
+            digest_kind=skill_digest_kind,
+        )
         if skill.name in mounts:
             raise SkillIngestError("Admitted skills have conflicting mount names.")
         if len(skills) >= AGENT_SKILL_CAP:
@@ -235,19 +305,17 @@ def build_turn_tools(
     for row in rows:
         if (row.tenant_id, row.platform, row.channel_id) != (tenant_id, platform, channel_id):
             raise ScopeViolation(row.skill_id, "channel skill is outside the admitted channel")
+    # Use final mount names. Channel pins for held IDs cannot replace an
+    # agent's selected version or its mount name.
     bodies = {id_: skill_bundles[(id_, ref.version)].preview.name for id_, ref in held.items()}
-    bodies.update(
-        {
-            row.skill_id: (
-                skill_bundles[(row.skill_id, row.version)].preview.name
-                if (row.skill_id, row.version) in skill_bundles
-                else row.name
-            )
-            for row in rows
-        }
-    )
+    named_rows = [
+        row.model_copy(update={"name": skill_bundles[(row.skill_id, row.version)].preview.name})
+        if (row.skill_id, row.version) in skill_bundles
+        else row
+        for row in rows
+    ]
     candidates = applicable_skills(
-        rows, agent=holder(), agent_names=tuple(agent_names), bodies=bodies
+        named_rows, agent=holder(), agent_names=tuple(agent_names), bodies=bodies
     )
     for extra in candidates:
         if (extra.skill_id, extra.version) not in skill_bundles:
@@ -255,7 +323,7 @@ def build_turn_tools(
         elif not skill_room(holder()):
             skipped.append(SkippedSkill(extra.skill_id, "skill_cap"))
         else:
-            add(SkillRef(id=extra.skill_id, version=extra.version))
+            add(SkillRef(id=extra.skill_id, version=extra.version, source="custom"))
     return TurnTools(
         tuple(servers),
         tuple(sorted(skills, key=lambda skill: skill.name)),
@@ -360,6 +428,10 @@ async def load_turn_skill_bundles(
     *,
     scope: Scope,
     catalog: PostgresNeutralCatalog | None = None,
+    platform: str | None = None,
+    channel_id: str | None = None,
+    agent_names: Sequence[str] = (),
+    channel_skills: Sequence[ChannelSkillRow] = (),
 ) -> dict[tuple[str, str | None], SkillBundle]:
     """Load local seeds off-loop and exact retained versions from an authorized catalog.
 
@@ -373,4 +445,25 @@ async def load_turn_skill_bundles(
                 stored = await catalog.get_skill(scope, ref.id, ref.version)
                 if stored is not None:
                     bundles[(ref.id, ref.version)] = stored.bundle
+    if channel_skills:
+        if platform is None or channel_id is None:
+            raise ValueError("Channel skill loading requires an admitted platform and channel")
+        for row in channel_skills:
+            if (str(row.tenant_id), row.platform, row.channel_id) != (
+                scope.tenant_id,
+                platform,
+                channel_id,
+            ):
+                raise ScopeViolation(row.skill_id, "channel skill is outside the admitted channel")
+            if catalog is not None:
+                stored = await catalog.get_channel_skill(
+                    scope,
+                    row.skill_id,
+                    row.version,
+                    platform=platform,
+                    channel_id=channel_id,
+                    agent_names=tuple(agent_names),
+                )
+                if stored is not None:
+                    bundles.setdefault((row.skill_id, row.version), stored.bundle)
     return bundles

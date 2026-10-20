@@ -45,4 +45,6 @@ MANAGED_AGENTS = Profile(
 
 def is_builtin_skill(ref: SkillRef) -> bool:
     """Recognize native built-ins even when an imported ref omits its source."""
-    return ref.source == "anthropic" or ref.id in {"docx", "pptx", "xlsx", "pdf"}
+    return ref.source == "anthropic" or (
+        ref.source is None and ref.id in {"docx", "pptx", "xlsx", "pdf"}
+    )
