@@ -316,3 +316,55 @@ def test_per_tool_policy_defaults_to_auto_and_validates_choices():
     )
     with pytest.raises(ValidationError):
         TurnRequest.model_validate({**fields, "tool_policy": {"write": "allow"}})
+
+
+@pytest.mark.parametrize(
+    "key", ["bash", "read", "write", "edit", "sample/tool", "sample/*", "my_server/tool.name"]
+)
+@pytest.mark.parametrize("decision", ["auto", "ask", "deny"])
+def test_tool_policy_accepts_builtin_and_mcp_keys(key, decision):
+    request = TurnRequest(
+        session_id="s",
+        turn_id="t",
+        idempotency_key="k",
+        model="m",
+        instructions="",
+        input=[],
+        mcp_servers=[],
+        skills=[],
+        limits={"max_tool_calls": 1, "deadline_s": 1},
+        tool_policy={key: decision},
+    )
+    assert request.tool_policy == {key: decision}
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",
+        "unknown",
+        "*",
+        "*/tool",
+        "/tool",
+        "server/",
+        "server/a/b",
+        "server/to*",
+        "server/**",
+        "server/ tool",
+        "server name/tool",
+    ],
+)
+def test_tool_policy_rejects_invalid_keys(key):
+    with pytest.raises(ValidationError, match="tool policy keys"):
+        TurnRequest(
+            session_id="s",
+            turn_id="t",
+            idempotency_key="k",
+            model="m",
+            instructions="",
+            input=[],
+            mcp_servers=[],
+            skills=[],
+            limits={"max_tool_calls": 1, "deadline_s": 1},
+            tool_policy={key: "deny"},
+        )

@@ -1119,5 +1119,11 @@ Assistant message deltas and snapshots require the same session-unique
 `message_id`, allowing a driver to accumulate deltas and replace them with the
 final snapshot.
 
-A turn may supply `tool_policy: {tool_name: "auto" | "ask"}`. The default is
+A turn may supply `tool_policy: {tool_name: "auto" | "ask" | "deny"}`. The default is
 empty; unlisted tools execute automatically. Explicit `ask` requires approval.
+`deny` omits the tool from model discovery and refuses any attempted execution.
+Keys are `bash`, `read`, `write`, `edit`, `<server>/<tool>`, or `<server>/*`.
+MCP server/tool components use letters, digits, underscores, hyphens and dots.
+An exact key overrides `<server>/*`, which overrides the default `auto`.
+For example, `{"sample/*": "deny", "sample/search": "ask"}` exposes only
+`sample/search` from that server and requires approval before it runs.

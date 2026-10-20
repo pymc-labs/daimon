@@ -21,6 +21,7 @@ from pydantic import (
     Field,
     JsonValue,
     SerializerFunctionWrapHandler,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -146,7 +147,20 @@ class TurnRequest(WireModel):
     mcp_servers: list[MCPServer]
     skills: list[Skill]
     limits: Limits
-    tool_policy: dict[str, Literal["auto", "ask"]] = Field(default_factory=dict)
+    tool_policy: dict[str, Literal["auto", "ask", "deny"]] = Field(default_factory=dict)
+
+    @field_validator("tool_policy")
+    @classmethod
+    def validate_tool_policy(
+        cls, policy: dict[str, Literal["auto", "ask", "deny"]]
+    ) -> dict[str, Literal["auto", "ask", "deny"]]:
+        """Exact tools override server/*; unspecified tools default to auto."""
+        for name in policy:
+            if name not in {"bash", "read", "write", "edit"} and not re.fullmatch(
+                r"[A-Za-z0-9_.-]+/(?:[A-Za-z0-9_.-]+|\*)", name
+            ):
+                raise ValueError("tool policy keys must be built-ins, server/tool, or server/*")
+        return policy
 
     @model_validator(mode="after")
     def validate_skills(self) -> TurnRequest:

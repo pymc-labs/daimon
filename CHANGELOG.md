@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Harness tool policies accept explicit denial and validated built-in, MCP tool and server wildcard keys.
+
 - Validate binary harness skill bundles with shared SHA-256 digests and decoded size limits; require stable assistant message identities.
 
 - Hosted MCP chart links can use private Azure Blob Storage with managed identity and read-only user-delegation SAS. Select `DAIMON_ARTIFACTS__BACKEND=azure_blob` and set `DAIMON_ARTIFACTS__AZURE_CLIENT_ID` for an explicit managed identity, with no developer or service-principal fallback; S3 remains the default. A loopback-only Azurite connection string is supported for local development.
