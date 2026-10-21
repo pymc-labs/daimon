@@ -1,0 +1,95 @@
+images:
+  registry: ""
+  host: {repository: daimon, tag: azure-selfhost, digest: "", pullPolicy: IfNotPresent}
+  harness: {repository: daimon-harness, tag: azure-selfhost, digest: "", pullPolicy: IfNotPresent}
+  postgres: {repository: postgres, tag: 18-alpine, digest: "", pullPolicy: IfNotPresent}
+imagePullSecrets: []
+# Names only. Create Secrets separately, never commit credentials in values.
+secrets: {host: daimon-host, harness: daimon-harness}
+postgres:
+  bundled: true
+  existingSecret: daimon-postgres
+  # Required when bundled=false; used by readiness checks, not URL construction.
+  host: ""
+  port: 5432
+  waitTimeoutSeconds: 300
+  user: daimon
+  database: daimon
+  storage: 10Gi
+  storageClassName: null
+init: {enabled: true, backoffLimit: 2, activeDeadlineSeconds: 900}
+services:
+  enabled: true
+  mcp: {enabled: true, port: 8765, healthPath: /healthz, readyPath: /readyz, env: {}}
+  teams: {enabled: false, port: 3978, healthPath: /healthz, readyPath: /readyz, env: {}}
+  scheduler: {enabled: true, port: 8082, healthPath: /healthz, env: {}}
+  discord: {enabled: false, port: 8081, healthPath: /healthz, env: {}}
+  slack: {enabled: false, port: 0, healthPath: "", env: {}}
+mcpTLS:
+  # Empty: generate a CA and leaf with Helm, retaining the Secret on upgrades.
+  # Optional cert-manager/operator Secret: ca.crt, tls.crt, tls.key, matching SANs.
+  existingSecret: ""
+  validityDays: 365
+  clusterDomain: cluster.local
+host:
+  # Existing Secret with a credential-free provider grant file at key runtime.json.
+  runtimeSecret: ""
+  env: {DAIMON_SELFHOSTED__ADMISSION_ENABLED: "false"}
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {memory: 1536Mi}
+harness:
+  enabled: true
+  # F72: router and pod-per-session are future work. Only multi is implemented.
+  sessions: {mode: multi}
+  storage: 20Gi
+  storageClassName: null
+  env: {}
+  resources:
+    requests: {cpu: 100m, memory: 768Mi}
+    limits: {memory: 4Gi}
+  securityContext:
+    runAsUser: 0
+    capabilities:
+      drop: [ALL]
+      add: [SETPCAP, SYS_ADMIN, DAC_OVERRIDE, FOWNER, CHOWN, KILL, SETGID, SETUID]
+    seccompProfile: {type: RuntimeDefault}
+    appArmorProfile: {type: Unconfined}
+  # Stub only: requires a reviewed App Service MI-protocol proxy image.
+  miProxy:
+    enabled: false
+    image: ""
+    clientId: ""
+    tenantId: ""
+    headerSecret: daimon-mi-proxy
+    port: 8089
+azureOpenAI:
+  # Explicit M2 opt-in; an existing Secret, never a value containing the key.
+  apiKeySecretRef: {name: "", key: AZURE_OPENAI_API_KEY}
+  endpoint: ""
+  deployment: gpt-5.4-mini
+  smokeDeployment: gpt-5.4-mini
+  apiVersion: 2025-04-01-preview
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  mcpAnnotations: {}
+  teamsHost: teams.example.invalid
+  mcpHost: mcp.example.invalid
+  tls: []
+networkPolicy:
+  enabled: true
+  # Empty lists deny external HTTPS. Use private endpoint /32s, never broad ranges.
+  azureOpenAICidrs: []
+  blobCidrs: []
+  # External PG only: explicit IPv4 /32 destinations for the host pods.
+  hostPostgresCidrs: []
+  # Host Teams pod only; never selects the harness. Resolve Bot Framework/Entra
+  # endpoint IPs and keep the /32 list current before enabling Teams delivery.
+  teamsEgress: {enabled: false, cidrs: []}
+  # Federation needs Entra HTTPS in the proxy pod too.
+  entraCidrs: []
+keyVaultCSI:
+  enabled: false
+  secretProviderClass: ""

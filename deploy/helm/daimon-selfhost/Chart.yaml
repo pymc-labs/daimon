@@ -1,0 +1,6 @@
+apiVersion: v2
+name: daimon-selfhost
+description: Daimon host and persistent multi-session harness for AKS
+type: application
+version: 0.1.0
+appVersion: azure-selfhost

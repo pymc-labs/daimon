@@ -1,0 +1,40 @@
+name: Helm
+on:
+  pull_request:
+    paths:
+      - deploy/helm/**
+      - .github/workflows/helm.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install checksum-verified Helm
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d)
+          trap 'rm -r "$scratch"' EXIT
+          cd "$scratch"
+          curl -fsSLO https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz
+          curl -fsSLO https://get.helm.sh/helm-v3.19.0-linux-amd64.tar.gz.sha256sum
+          sha256sum -c helm-v3.19.0-linux-amd64.tar.gz.sha256sum
+          tar xzf helm-v3.19.0-linux-amd64.tar.gz
+          mkdir -p "$HOME/.local/bin"
+          install -m755 linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Lint and render chart variants
+        run: bash deploy/helm/daimon-selfhost/tests/chart-check.sh
+      - name: Test runtime grants and host egress policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          chart_test_env=$(mktemp -d)
+          trap 'rm -r "$chart_test_env"' EXIT
+          python3 -m venv "$chart_test_env"
+          "$chart_test_env/bin/pip" install --disable-pip-version-check PyYAML==6.0.3
+          "$chart_test_env/bin/python" -m unittest discover -s deploy/helm/daimon-selfhost/tests -p test_host_configuration.py

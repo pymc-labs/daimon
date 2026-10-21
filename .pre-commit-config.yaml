@@ -21,7 +21,8 @@ repos:
         exclude: (^|/)__snapshots__/.*\.ambr$
       - id: end-of-file-fixer
       - id: check-yaml
-        exclude: ^mkdocs\.yml$
+        # Helm templates are Go templates, validated after rendering by the Helm CI job.
+        exclude: ^(mkdocs\.yml|deploy/helm/[^/]+/templates/.*)$
       - id: check-yaml
         name: check mkdocs yaml
         files: ^mkdocs\.yml$
