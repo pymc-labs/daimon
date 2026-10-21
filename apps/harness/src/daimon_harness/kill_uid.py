@@ -13,7 +13,15 @@ def terminated(pid: int) -> bool:
         state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
         return state in {"Z", "X"}
     except FileNotFoundError:
-        return True
+        # hidepid can return ENOENT for a live, non-dumpable process. Only
+        # ESRCH from the kernel signal probe proves it disappeared.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        return False
     except (OSError, IndexError):
         return False  # Hidden/non-dumpable live tasks are never dismissed.
 

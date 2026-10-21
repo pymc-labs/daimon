@@ -63,9 +63,11 @@ def test_termination_check_distinguishes_zombies_from_live_syscalls(monkeypatch,
     assert kill_uid.terminated(9) is dead
 
 
-def test_hidden_process_is_not_assumed_dead(monkeypatch):
+@pytest.mark.parametrize("error", [PermissionError, FileNotFoundError])
+def test_hidden_process_is_not_assumed_dead(monkeypatch, error):
     def denied(self):
-        raise PermissionError
+        raise error
 
     monkeypatch.setattr(kill_uid.Path, "read_text", denied)
+    monkeypatch.setattr(kill_uid.os, "kill", lambda pid, sig: None)
     assert not kill_uid.terminated(9)
