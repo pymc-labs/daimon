@@ -320,6 +320,10 @@ OPERATIONS = st.lists(
 @example(trace=[("cleanup_failure", 0, 0)] * 8)
 @example(trace=[("empty_remote_cursor", 3000, 0)] * 8)
 async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trace):
+    # The ordinary CI property also exercises the production filesystem store.
+    monkeypatch.setenv(
+        "HARNESS_RECOVERY_STORE", __import__("os").environ.get("HARNESS_RECOVERY_STORE", "http")
+    )
     with tempfile.TemporaryDirectory(prefix="sequence-reservation-", dir=tmp_path) as scratch:
         root, blobs, oracle = Path(scratch), ReservationBlobs(), HostSeen()
         blobs.oracle = oracle

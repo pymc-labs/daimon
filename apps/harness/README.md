@@ -820,3 +820,160 @@ use HTTPS or loopback HTTP when `X-Daimon-MCP-Authorization` is present. Generic
 `allow_insecure_http` consent cannot override C3.9a; non-loopback HTTP turns with
 MCP credentials are refused by the driver before any I/O. AKS uses HTTPS for
 both hops with the chart CA.
+
+## Kubernetes pod per conversation (F72)
+
+Set `harness.mode: perConversation` in the lane-14 Helm chart. Apply
+`deploy/helm/patches/per-conversation.patch` to PR #1273 at
+`473a53a2ad0e315314c53d2615243ab46645a6f5`. The chart is not vendored here.
+The host uses `https://<release>-daimon-harness.<namespace>.svc:8088`, direct
+transport and `session_pool: false`. Host code and the MCP CA client integrate
+with PR #1276. The controller preserves C3 JSON/SSE, cursors, MCP headers and
+single-session routing, while replacing host authorization with a pod credential.
+
+### Trust model (security redesign)
+
+The host alone holds the deployment C3 bearer and MCP signing authority. It
+connects to the controller on HTTPS 8088, verified against the chart CA. Only
+same-release host pods may reach that port. The controller holds its HTTPS key,
+a dedicated sandbox signing CA and client certificate, and a persistent random
+capability derivation key on its private PVC. It never forwards the host bearer.
+
+Sandboxes live in a separate `<release>-sandboxes` namespace. Pod Security is
+`baseline`: root startup and CHOWN/DAC_OVERRIDE/FOWNER/KILL/SETUID/SETGID are
+required for the existing service/tool UID separation, so `restricted` cannot
+admit this image. RuntimeDefault, no SYS_ADMIN, no host mounts, no API token,
+and no RoleBinding remain mandatory. Only explicitly selected AOAI/operator
+MCP credentials are copied by the operator into that namespace; the host/harness
+Secret, MCP signing secret and PostgreSQL credentials never enter it.
+
+Each sandbox creates a private TLS key locally before starting tools. It sends
+only a CSR and its downward-API UID to HTTPS 8089, verifying the chart CA.
+The signer accepts only a UID and source PodIP already in the controller's
+Kubernetes inventory cache, checks the CSR signature, and durably pins the first
+public key for that UID. It issues a server certificate for that PodIP, never a
+CA or client certificate. NetworkPolicy permits only the sandbox namespace on
+8089. This bootstrap trusts Kubernetes PodIP assignment and the cluster network's
+source-address integrity; node/CNI compromise is outside this boundary. Forwarded
+headers are disabled. A later process cannot replace the pinned public key.
+
+Controller→sandbox uses verified TLS and a dedicated controller client certificate
+(mutual TLS). On claim, an internal bootstrap call delivers distinct per-pod C3
+and checkpoint capabilities; the sandbox retains them in service memory only.
+No capability or TLS private key appears in pod env/spec, labels, journal or logs.
+The controller reconstructs capabilities from its private persistent key and pod
+UID after restart. Pod-read access reveals public configuration only. MCP headers
+are forwarded only after this verified channel is established. Sandbox→MCP uses
+HTTPS and HARNESS_MCP_CA_BUNDLE=/etc/daimon/mcp-ca/ca.crt.
+
+Sandbox→controller checkpoints use HTTPS 8089 and a per-pod capability scoped to
+one bound session prefix. Authentication and per-capability rate limiting precede
+all storage work and never call Kubernetes. Sandboxes cannot reach controller
+C3 port 8088. Neither a checkpoint capability nor a sandbox C3 capability grants
+host authority. Controller memory compromise exposes all active conversations;
+a sandbox service compromise exposes that sandbox only. Tool UID separation
+continues to protect service memory, TLS keys and credentials inside each pod.
+
+The controller ServiceAccount has one Role, ONLY in the sandbox namespace:
+`create` starts sandboxes; `delete` reaps using UID preconditions; `list` rebuilds
+inventory; `get` refetches after resourceVersion conflicts; `patch` atomically
+claims warm pods and records activity (and inherently permits image mutation
+there). No watch, Secrets, exec, PVC, Service, node or cluster-wide verbs exist.
+Helm/operator privileges create namespaces, fixed resources and credential copies.
+
+Admission caps total sandboxes (including warm and terminating pods), default 4
+on the D2s_v6 when replacing the shared harness. Warm pods count toward capacity and can be claimed at the cap.
+Sandboxes have negative priority below host/Postgres/controller and never preempt.
+Requests are controller 25m/128Mi and sandbox 50m/256Mi. Capacity measurements
+must use these defaults and include the existing release's reserved resources.
+Template hashes cover image, configuration, Secret data observed by Helm and an operator rotation revision;
+stale warm pods are deleted before reuse; stale bound pods recycle once idle and checkpointed. Active turns are checked in the sandbox
+before idle reaping, including after a controller restart. Maintenance failure
+fails readiness. Session-specific locks serialize claims; no global lock spans
+Kubernetes calls.
+
+Checkpoint objects remain fsync + atomic rename + directory fsync before ack;
+I1–I5 recovery logic above the store is unchanged. Listing visits only the requested
+session directory. An operator-configurable idle retention (default 30 days)
+expires unbound session directories; explicit authenticated session deletion removes
+its pod and durable directory. Expiry/deletion forfeits resume and requires host
+lifecycle coordination. Active/bound sessions are never retention-collected.
+Readiness reports low disk and new admission returns retryable busy below
+10% or 1 GiB; existing-turn events, cancellation and idempotent replay remain reachable. The single controller/PVC is an availability and backup boundary;
+PVC loss remains data loss. HTTP has no production fallback on any credential hop.
+
+### Operation and recovery
+
+One Recreate controller holds a PVC flock. Kubernetes labels and UID/resourceVersion
+preconditions retain single-flight routing across restart and warm-claim conflicts.
+A 10-second maintenance loop retains a warm pool (default 1, configurable 0–2),
+reaps idle sandboxes after `idleSeconds` (default 300), and expires unbound checkpoints after
+`harness.perConversation.retentionSeconds` (default 30 days). `maxSandboxes`
+(default 4) includes warm, active and terminating pods. Admission at capacity
+returns 503 with a prompt “Busy, try again shortly” message and Retry-After.
+With cap 1, a second user gets busy; at the default cap, a fifth does.
+Removing the replaced shared harness and temporary proof pods from the original
+D2s_v6 measurement gives 1547m baseline + 25m controller + 200m for four
+sandboxes = 1772m of 1900m allocatable CPU; memory requests also fit.
+This is a requests budget, not a concurrent model throughput guarantee. Increase the cap and warm count only with a measured
+node budget; large PyMC workloads need larger requests and limits.
+
+The sandbox namespace defaults to `<release>-sandboxes`; the operator supplies
+`harness.perConversation.sandboxSecret` there with ONLY AOAI/operator MCP keys.
+The controller Role has no Secret access. Do not copy the deployment harness
+Secret. On in-place credential rotation, run Helm upgrade with a changed
+`rotationRevision`; Helm also hashes the observed Secret data into the pod
+template. Explicit rotation revisions cover offline renders where lookup cannot
+observe the live Secret. TLS CA keys remain in the release namespace; sandboxes
+mount public bundles only. Baseline admission is required for UID separation.
+
+`DELETE /v0/sessions/{session_id}` with host authentication deletes the sandbox;
+retry 503 until its deletion completes, then the durable directory is removed.
+The host's conversation lifecycle must call this endpoint on deletion. Otherwise
+idle retention expires it. Retention is the documented point after which an
+abandoned conversation cannot resume. Back up the PVC for longer retention.
+
+Listing visits only the requested session directory, and missing-object deletion
+is idempotent. Disk admission thresholds are `minFreeBytes` (default
+1 GiB) and `minFreeFraction` (default 0.1). Existing remote WAL/reservation barriers
+remain fail-closed before paid work. Checkpoint writes retain temp-file fsync,
+atomic rename and parent-directory fsync before acknowledgment. Each sandbox activity/bootstrap probe has a four-second bound and a separate
+HTTP client. After a fresh successful durability report, unknown activity is
+evicted after three failed probes unless a later probe reported a pending
+checkpoint. Pending checkpoints are recorded in the pod's
+`daimon-checkpoint-pending` annotation and restored before maintenance starts.
+After controller restart, all discovered bound pods remain protected until a
+fresh `durable=true` report, including pods whose last known checkpoint succeeded. Pods reporting `durable=false`
+survive idle, template and age eviction, including the 48-hour hard age; idle
+activity polls retry their checkpoint. Readiness exposes
+`checkpoint_blocked_sandboxes`, and maintenance logs `sandbox_eviction_blocked`.
+After a successful checkpoint, idle pods recycle after 24 hours with a 48-hour
+hard limit below the 7-day server certificate validity. A stale maintenance heartbeat
+fails liveness and readiness; per-pod failures are logged and isolated. Checkpoints use a separate HTTPS listener on 8089, and
+initial capability checks use the in-memory inventory before any storage/API work.
+Checkpoint commits and deletes additionally take the session lock and recheck
+live pod binding before disk changes, so a late upload cannot recreate a deleted
+session.
+Per-capability 100 requests/second limits return 429; store clients retry boundedly.
+
+Run recovery against the controller HTTP store path (ASGI transport for deterministic
+fault injection); kind/AKS validate the actual verified TLS listeners separately:
+
+```sh
+scratch=$(mktemp -d)
+HARNESS_RECOVERY_STORE=http uv run pytest --basetemp="$scratch/pytest" apps/harness/tests/test_sequence_ratchet.py apps/harness/tests/test_checkpoints.py
+HARNESS_RECOVERY_STORE=http uv run python apps/harness/tests/recovery_mutations.py "$scratch/mutations"
+```
+
+The recovery oracle preserves I1–I5, including stale-first restore, cold cancel,
+first-turn loss, WAL-only recovery, reservation failure and measured usage identity.
+Mutation 10 removes the reservation floor; store mutations remove file fsync,
+atomic rename and directory fsync. The commit-order test detects those missing
+barriers; it does not simulate a physical power failure. Kindnet does not enforce
+NetworkPolicy; AKS negative probes establish the network boundary. Measurement
+receipts live with the program's lane status, not in the public documentation.
+
+Per-conversation MCP URLs are chart-owned and namespace-qualified. Remove the
+short-name overrides written by #1273 register.sh or replace both with the
+chart URL; conflicting overrides fail rendering. See deploy/helm/patches/README.md
+for installation ordering and certificate rotation.

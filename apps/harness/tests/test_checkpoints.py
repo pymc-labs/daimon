@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import shutil
 import tarfile
 from collections.abc import AsyncGenerator
@@ -24,6 +25,24 @@ from .conftest import FakeModelAdapter, turn
 
 
 class MemoryBlobs:
+    @property
+    def blobs(self):
+        return self._blobs
+
+    @blobs.setter
+    def blobs(self, values):
+        if os.environ.get("HARNESS_RECOVERY_STORE") in {"pvc", "http"}:
+            from .pvc_recovery import DiskObjects, HTTPObjects
+
+            self._blobs = (
+                HTTPObjects()
+                if os.environ.get("HARNESS_RECOVERY_STORE") == "http"
+                else DiskObjects()
+            )
+            self._blobs.update(values)
+        else:
+            self._blobs = values
+
     def __init__(self):
         self.blobs = {}
         self.uploads = []

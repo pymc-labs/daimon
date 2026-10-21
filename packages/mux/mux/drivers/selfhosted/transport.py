@@ -59,6 +59,13 @@ class Transport(Protocol):
 def checked(response: httpx.Response) -> None:
     if response.is_success:
         return
+    if response.status_code == 503 and response.headers.get("X-Daimon-Error") == "sandbox_busy":
+        raise ProviderError(
+            "rate_limited",
+            retryable=True,
+            native_code="sandbox_busy",
+            native_message="Busy, try again shortly",
+        )
     categories: dict[int, ProviderErrorCategory] = {
         400: "invalid_request",
         401: "auth",
@@ -177,6 +184,8 @@ class DirectTransport:
                         headers=headers,
                         follow_redirects=False,
                     )
+                if response.headers.get("X-Daimon-Error") == "sandbox_busy":
+                    checked(response)
                 if replay and response.status_code in (429, 502, 503, 504) and attempt < 5:
                     delay = retry_delay(response, attempt)
                     remaining = (

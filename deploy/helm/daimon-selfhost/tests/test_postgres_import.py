@@ -40,6 +40,7 @@ def now():
 def advance(seconds):
     clock.write_text(str(now() + seconds))
 real_popen = subprocess.Popen
+real_sleep = time.sleep
 class TimedPopen:
     def __init__(self, args, **kwargs):
         self.args = args
@@ -70,6 +71,10 @@ class TimedPopen:
             advance(25)
         return self.process.communicate(timeout=timeout)
 def sleeping(seconds):
+    # Popen.wait uses short real sleeps while reaping a killed child. They are
+    # process cleanup, not importer backoff, and must not consume virtual budget.
+    if seconds < 1:
+        return real_sleep(seconds)
     with (clock.parent/'sleeps').open('a') as out:
         out.write(str(seconds) + '\n')
     advance(seconds)

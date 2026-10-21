@@ -108,6 +108,22 @@ class AzureCheckpointStore:
 
 
 def configured_checkpoints(identity: CapturedIdentity | None = None) -> Checkpoints | None:
+    controller = os.environ.pop("HARNESS_CHECKPOINT_CONTROLLER_URL", "")
+    capability = os.environ.pop("HARNESS_CHECKPOINT_TOKEN", "")
+    if capability and not controller:
+        raise ValueError("checkpoint capability requires a controller URL")
+    if controller:
+        from .pvc_store import ControllerStore
+
+        if not capability or any(
+            os.environ.get(name)
+            for name in ("HARNESS_CHECKPOINT_ACCOUNT_URL", "HARNESS_CHECKPOINT_CONTAINER")
+        ):
+            raise ValueError("controller checkpoints require a token and no Blob configuration")
+        return Checkpoints(
+            ControllerStore(controller, capability),
+            keep=int(os.environ.get("HARNESS_CHECKPOINT_KEEP", "3")),
+        )
     account = os.environ.get("HARNESS_CHECKPOINT_ACCOUNT_URL")
     container = os.environ.get("HARNESS_CHECKPOINT_CONTAINER")
     if not account and not container:
