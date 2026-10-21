@@ -65,8 +65,8 @@ for number in range(1, 7):
     else:
         change(
             "service.py",
-            "                # Retain the context until worker cleanup succeeds (I5).",
-            "                self.contexts.pop(request.turn_id, None)",
+            "                if workers_stopped:\n",
+            "                if True:\n",
         )
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:

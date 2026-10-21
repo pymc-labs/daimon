@@ -360,12 +360,12 @@ class Supervisor:
         # A claimed turn can have executed tools. Never retry it after a process crash.
         for request in self.journal.turns():
             if not self.journal.ended(request.turn_id):
-                if request.turn_id in self.contexts:
-                    # Task completion is not proof of worker termination (I5).
-                    raise HarnessError("workers_active", "Tool cleanup incomplete; session sealed")
                 task = self.tasks.get(request.turn_id)
                 if task is not None and not task.done():
                     continue
+                if request.turn_id in self.contexts:
+                    # Task completion is not proof of worker termination (I5).
+                    raise HarnessError("workers_active", "Tool cleanup incomplete; session sealed")
                 if not any(
                     event.turn_id == request.turn_id
                     and event.type == "error"
@@ -448,6 +448,7 @@ class Supervisor:
 
         outcome = "completed"
         context: TurnContext | None = None
+        workers_stopped = False
         try:
             await self.write_ahead(request)
             await self.io(self.deliver_checkpoint_notice, request)
@@ -511,10 +512,10 @@ class Supervisor:
         finally:
 
             async def finalize() -> None:
-                nonlocal failure
+                nonlocal failure, workers_stopped
                 if context is not None:
                     await context.stop_workers()
-                    self.contexts.pop(request.turn_id, None)
+                    workers_stopped = True
                 original_failure = failure
                 for request_id in await self.io(self.journal.pending_requests, request):
                     await emit(
@@ -551,6 +552,8 @@ class Supervisor:
             finally:
                 credentials.clear()
                 # Retain the context until worker cleanup succeeds (I5).
+                if workers_stopped:
+                    self.contexts.pop(request.turn_id, None)
                 self.changed.set()
 
     async def submit(
