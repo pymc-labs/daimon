@@ -213,7 +213,7 @@ class Checkpoints:
             for event in journal.events(request.session_id, include_pending=True)
             if event.turn_id == request.turn_id
             and (
-                event.type in {"model_request_started", "usage"}
+                event.type in {"model_request_started", "usage", "turn_ended"}
                 or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
             )
         ]
@@ -240,8 +240,6 @@ class Checkpoints:
         after_seq = journal.record_cursor(session_id, after_seq)
         pending = journal.root / "restore.pending"
         cursor_file = journal.root / "restore.cursor"
-        if journal.turns() and not pending.exists() and not cursor_file.exists():
-            return journal
         if cursor_file.exists():
             saved = json.loads(cursor_file.read_bytes())
             if saved["session_id"] != session_id:
@@ -266,7 +264,7 @@ class Checkpoints:
                 event.session_id != session_id
                 or event.turn_id != record.request.turn_id
                 or event.seq > record.high_water
-                or event.type not in {"model_request_started", "usage", "error"}
+                or event.type not in {"model_request_started", "usage", "error", "turn_ended"}
                 for event in record.inventory
             ):
                 raise ValueError("invalid write-ahead inventory")
@@ -306,16 +304,16 @@ class Checkpoints:
             Journal.record_cursor_db(journal.connection(session_id), after_seq, remote_seq)
             known = {
                 (event.type, event.data.get("request_id"))
-                for event in journal.events(session_id)
+                for event in journal.events(session_id, include_pending=True)
                 if event.turn_id == request.turn_id
                 and (
-                    event.type in {"model_request_started", "usage"}
+                    event.type in {"model_request_started", "usage", "turn_ended"}
                     or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
                 )
             }
             for event in record.inventory:
                 if (
-                    event.type in {"model_request_started", "usage"}
+                    event.type in {"model_request_started", "usage", "turn_ended"}
                     or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
                 ) and (event.type, event.data.get("request_id")) not in known:
                     # Import an existing event, never allocate a new identity or
@@ -333,6 +331,11 @@ class Checkpoints:
                             (event.seq, event.model_dump_json(), event.turn_id, event.type),
                         )
                     known.add((event.type, event.data.get("request_id")))
+            if any(event.type == "turn_ended" for event in record.inventory):
+                with journal.db:
+                    journal.db.execute(
+                        "UPDATE turns SET ended=1 WHERE turn_id=?", (request.turn_id,)
+                    )
         return journal
 
     def names(self, session_id: str) -> list[tuple[int, str]]:

@@ -79,11 +79,11 @@ async def test_restore_after_sandbox_destruction_continues_seq_history_and_idemp
         await supervisor.tasks["turn-1"]
 
         await supervisor.flush_checkpoints()
-        workspace, _ = supervisor.journal.sandbox("session-1")
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         (workspace / "work/result.txt").chmod(0o700)
         await supervisor.checkpoint("session-1")
         before = (await client.get("/v0/sessions/session-1/events")).json()
-        history = supervisor.journal.history("session-1")
+        history = await supervisor.io(supervisor.journal.history, "session-1")
         seq = before["events"][-1]["seq"]
         assert blobs.uploads[-1] == f"sessions/{sandbox_id('session-1')}/{seq}.tar.zst"
     shutil.rmtree(home)
@@ -95,10 +95,10 @@ async def test_restore_after_sandbox_destruction_continues_seq_history_and_idemp
         assert restored["complete"] == before["complete"]
         assert restored["events"][-1]["type"] == "history_gap"
         assert restored["events"][-1]["seq"] == BLOCK + 1
-        workspace, _ = supervisor.journal.sandbox("session-1")
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         assert (workspace / "work/result.txt").read_text() == "durable"
         assert (workspace / "work/result.txt").stat().st_mode & 0o777 == 0o700
-        assert supervisor.journal.history("session-1") == history
+        assert await supervisor.io(supervisor.journal.history, "session-1") == history
         assert (await client.post("/v0/turns", json=turn("tool"))).status_code == 202
         assert model.calls == 0
         assert (
@@ -194,8 +194,13 @@ async def test_failed_checkpoint_warns_without_blocking_polls_or_new_turns(tmp_p
         assert (
             await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
         ).status_code == 202
+        await supervisor.tasks["next"]
         assert (
-            sum(e.type == "checkpoint_warning" for e in supervisor.journal.events("session-1")) == 1
+            sum(
+                e.type == "checkpoint_warning"
+                for e in await supervisor.io(supervisor.journal.events, "session-1")
+            )
+            == 1
         )
         await supervisor.tasks["next"]
 
@@ -271,7 +276,7 @@ async def test_authentication_and_session_binding_precede_any_restore(tmp_path):
         )
         assert response.status_code == 401
         assert supervisor.restored is False
-        assert not supervisor.journal.turns()
+        assert not await supervisor.io(supervisor.journal.turns)
         assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
         response = await client.post("/v0/turns/turn-1/cancel", params={"session_id": "other"})
         assert response.status_code == 409
@@ -321,7 +326,7 @@ async def test_interrupted_restore_retries_before_serving(tmp_path, monkeypatch)
         await supervisor.tasks["turn-1"]
 
         await supervisor.flush_checkpoints()
-        expected = supervisor.journal.events("session-1")
+        expected = await supervisor.io(supervisor.journal.events, "session-1")
     original = Path.replace
     failed = False
 
@@ -337,11 +342,11 @@ async def test_interrupted_restore_retries_before_serving(tmp_path, monkeypatch)
         assert (await client.get("/v0/sessions/session-1/events")).status_code == 503
         assert (supervisor.journal.root / "restore.pending").exists()
         assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
-        actual = supervisor.journal.events("session-1")
+        actual = await supervisor.io(supervisor.journal.events, "session-1")
         assert actual[:-1] == expected
         assert actual[-1].type == "history_gap" and actual[-1].seq == BLOCK + 1
         assert not (supervisor.journal.root / "restore.pending").exists()
-        workspace, _ = supervisor.journal.sandbox("session-1")
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         assert (workspace / "work/result.txt").read_text() == "durable"
 
 
@@ -352,7 +357,7 @@ async def test_workspace_link_cannot_export_service_files(tmp_path):
         await supervisor.tasks["turn-1"]
 
         await supervisor.flush_checkpoints()
-        workspace, _ = supervisor.journal.sandbox("session-1")
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         secret = tmp_path / "secret"
         secret.write_text("service credential")
         (workspace / "work/link").symlink_to(secret)
@@ -361,7 +366,8 @@ async def test_workspace_link_cannot_export_service_files(tmp_path):
         assert blobs.blobs != before
         assert (supervisor.journal.root / "checkpoint.notice").exists()
         await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
-        events = supervisor.journal.events("session-1")
+        await supervisor.tasks["next"]
+        events = await supervisor.io(supervisor.journal.events, "session-1")
         warning = next(event for event in events if event.type == "checkpoint_warning")
         assert warning.turn_id == "next"
         assert all(b"service credential" not in data for data in blobs.blobs.values())
@@ -774,7 +780,7 @@ async def test_manifest_bytes_and_unsupported_names_remain_restorable(tmp_path):
     async with harness(tmp_path / "old", blobs) as (supervisor, client):
         await client.post("/v0/turns", json=turn())
         await supervisor.tasks["turn-1"]
-        sandbox, _ = supervisor.journal.sandbox("session-1")
+        sandbox, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         nested = sandbox / "work"
         for _ in range(4):
             nested /= "界" * 70
@@ -830,7 +836,7 @@ async def test_restore_fence_survives_crash_before_supervisor_recovery(tmp_path,
     assert (local.root / "restore.cursor").exists()
     local.close()  # Process dies after publication, before prepare_session/recover.
     async with harness(tmp_path / "new", crash) as (supervisor, client):
-        assert not supervisor.journal.ended("turn-1")
+        assert not await supervisor.io(supervisor.journal.ended, "turn-1")
         result = (await client.get("/v0/sessions/session-1/events", params={"after_seq": 9})).json()
         assert result["events"][0]["type"] == "history_gap"
         assert result["events"][0]["seq"] == BLOCK + 1
@@ -880,7 +886,7 @@ async def test_combined_archive_budget_degrades_workspace_and_keeps_journals(tmp
         await client.post("/v0/turns", json=turn())
         await supervisor.tasks["turn-1"]
         await supervisor.flush_checkpoints()
-        sandbox, _ = supervisor.journal.sandbox("session-1")
+        sandbox, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         (sandbox / "work/large").write_bytes(b"a" * (2 * 1024 * 1024))
         monkeypatch.setattr(module, "MAX_ARCHIVE_BYTES", 2 * 1024 * 1024)
         await supervisor.checkpoint("session-1")
@@ -888,7 +894,7 @@ async def test_combined_archive_budget_degrades_workspace_and_keeps_journals(tmp
     async with harness(tmp_path / "new", blobs) as (supervisor, client):
         result = await client.get("/v0/sessions/session-1/events")
         assert result.status_code == 200 and result.json()["complete"]
-        sandbox, _ = supervisor.journal.sandbox("session-1")
+        sandbox, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         assert not (sandbox / "work/large").exists()
 
 
@@ -957,8 +963,13 @@ async def test_snapshot_failure_does_not_fail_the_turn(tmp_path, monkeypatch):
         )
         assert (supervisor.journal.root / "checkpoint.notice").exists()
         await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
+        await supervisor.tasks["next"]
         assert (
-            sum(e.type == "checkpoint_warning" for e in supervisor.journal.events("session-1")) == 1
+            sum(
+                e.type == "checkpoint_warning"
+                for e in await supervisor.io(supervisor.journal.events, "session-1")
+            )
+            == 1
         )
 
 
@@ -1003,8 +1014,11 @@ async def test_old_baseline_with_newer_high_water_replays_without_false_gap(tmp_
             response = await client.get("/v0/sessions/session-1/events", params=query)
         assert response.status_code == 200
         events = response.json()["events"]
-        assert [event["seq"] for event in events] == list(range(991, 1003))
-        assert not any(event["type"] == "history_gap" for event in events)
+        assert [event["seq"] for event in events if event["type"] != "history_gap"] == list(
+            range(991, 1003)
+        )
+        gap = next(event for event in events if event["type"] == "history_gap")
+        assert gap["data"] == {"from_seq": 1003, "to_seq": BLOCK, "reason": "sandbox_restored"}
         clamped = await client.get(
             "/v0/sessions/session-1/events",
             params={
@@ -1012,7 +1026,7 @@ async def test_old_baseline_with_newer_high_water_replays_without_false_gap(tmp_
                 "replay_after_seq": 2000,
             },
         )
-        assert clamped.json()["events"] == []
+        assert clamped.json()["events"] == [gap]
         negative = await client.get(
             "/v0/sessions/session-1/events",
             params={
@@ -1065,7 +1079,7 @@ async def test_observed_session_without_any_checkpoint_cannot_reuse_sequences(tm
     async with harness(tmp_path, MemoryBlobs()) as (supervisor, client):
         response = await client.post("/v0/turns", json=turn(), params={"after_seq": 13})
         assert response.status_code == 503
-        assert not supervisor.journal.turns()
+        assert not await supervisor.io(supervisor.journal.turns)
         assert not supervisor.tasks
 
 
@@ -1084,11 +1098,11 @@ async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoi
         await supervisor.tasks["paid"]
         await supervisor.flush_checkpoints()
         assert model.calls == 2
-        workspace, _ = supervisor.journal.sandbox("session-1")
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         assert (workspace / "work/result.txt").read_text() == "durable"
-        assert supervisor.journal.ended("paid")
+        assert await supervisor.io(supervisor.journal.ended, "paid")
         assert {name for name in blobs.blobs if name.endswith(".tar.zst")} == checkpoint_names
-        seq = supervisor.journal.latest_seq("session-1")
+        seq = await supervisor.io(supervisor.journal.latest_seq, "session-1")
     shutil.rmtree(tmp_path / "old")
     blobs.fail = False
     fresh = FakeModelAdapter()
@@ -1097,13 +1111,15 @@ async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoi
             await client.post("/v0/turns", json=body, params={"after_seq": seq})
         ).status_code == 202
         assert fresh.calls == 0 and not supervisor.tasks
-        events = supervisor.journal.events("session-1")
-        recovered = [event for event in events if event.turn_id == "paid"]
+        events = await supervisor.io(supervisor.journal.events, "session-1")
+        recovered = [
+            event for event in events if event.turn_id == "paid" and event.type != "history_gap"
+        ]
         assert recovered[-1].type == "turn_ended"
-        assert recovered[-1].data["outcome"] == "interrupted"
+        assert recovered[-1].data["outcome"] == "completed"
         assert any(event.type == "usage" for event in recovered)
         assert not any(event.data.get("kind") == "usage_unavailable" for event in recovered)
-        workspace, _ = supervisor.journal.sandbox("session-1")
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
         assert not (workspace / "work/result.txt").exists()
         changed = body | {"instructions": "changed"}
         assert (await client.post("/v0/turns", json=changed)).status_code == 409
@@ -1112,18 +1128,29 @@ async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoi
 
 async def test_failed_remote_write_ahead_refuses_paid_work(tmp_path):
     class FailedWal(MemoryBlobs):
+        unavailable = True
+
         def upload(self, name, source):
-            if "/wal/" in name:
+            if self.unavailable and "/wal/" in name:
                 raise OSError("unavailable")
             super().upload(name, source)
 
     model = FakeModelAdapter()
-    async with harness(tmp_path, FailedWal(), model) as (supervisor, client):
+    blobs = FailedWal()
+    async with harness(tmp_path, blobs, model) as (supervisor, client):
+        from daimon_harness.errors import HarnessError
+
         await client.post("/v0/turns", json=turn("tool"))
-        await supervisor.tasks["turn-1"]
+        with pytest.raises(HarnessError, match="inventory"):
+            await supervisor.tasks["turn-1"]
         assert model.calls == 0
+        assert (await client.get("/v0/sessions/session-1/events")).status_code == 503
+        blobs.unavailable = False
+        assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
         terminal = next(
-            event for event in supervisor.journal.events("session-1") if event.type == "turn_ended"
+            event
+            for event in await supervisor.io(supervisor.journal.events, "session-1")
+            if event.type == "turn_ended"
         )
         assert terminal.data["outcome"] == "errored"
         assert terminal.data["error"] == {
@@ -1204,7 +1231,7 @@ async def test_write_ahead_failure_before_second_model_request_stops_that_reques
         store.unavailable = False
         assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
         assert model.calls == 1
-        events = supervisor.journal.events("session-1")
+        events = await supervisor.io(supervisor.journal.events, "session-1")
         assert (
             sum(
                 event.data.get("kind") == "usage_unavailable"
@@ -1251,9 +1278,9 @@ async def test_remote_inventory_recovery_retries_after_local_publication_crash(
     async with harness(home, blobs) as (supervisor, client):
         result = await client.get("/v0/sessions/session-1/events", params={"after_seq": 13})
         assert result.status_code == 200
-        events = supervisor.journal.events("session-1")
+        events = await supervisor.io(supervisor.journal.events, "session-1")
         assert any(event.turn_id == "paid" and event.type == "usage" for event in events)
-        assert supervisor.journal.ended("paid")
+        assert await supervisor.io(supervisor.journal.ended, "paid")
 
 
 @pytest.mark.parametrize("checkpoint", ["none", "started", "measured"])
@@ -1294,7 +1321,7 @@ async def test_restore_preserves_remote_measured_usage_and_only_marks_unmatched_
     async with harness(tmp_path / "new", blobs, model) as (supervisor, client):
         response = await client.get("/v0/sessions/session-1/events", params={"after_seq": seq})
         assert response.status_code == 200
-        events = supervisor.journal.events("session-1")
+        events = await supervisor.io(supervisor.journal.events, "session-1")
         assert [event.data for event in events if event.type == "usage"] == [measured]
         unknown = [
             event.data["request_id"]
@@ -1309,7 +1336,11 @@ async def test_restore_preserves_remote_measured_usage_and_only_marks_unmatched_
         assert model.calls == 0
         assert (
             len(
-                [event for event in supervisor.journal.events("session-1") if event.type == "usage"]
+                [
+                    event
+                    for event in await supervisor.io(supervisor.journal.events, "session-1")
+                    if event.type == "usage"
+                ]
             )
             == 1
         )
@@ -1359,7 +1390,7 @@ async def test_delayed_checkpoint_failure_is_delivered_on_next_turn_after_reader
         assert (
             sum(
                 event.type == "checkpoint_warning"
-                for event in supervisor.journal.events("session-1")
+                for event in await supervisor.io(supervisor.journal.events, "session-1")
             )
             == 1
         )
@@ -1478,14 +1509,15 @@ async def test_shutdown_flushes_delayed_upload_before_closing_shared_captured_id
     blobs = DelayedBlob()
     supervisor = Supervisor(tmp_path, adapter, checkpoints=Checkpoints(blobs))
     request = TurnRequest.model_validate(turn())
-    supervisor.journal.claim(request)
-    supervisor.journal.append(request, "turn_ended", {"outcome": "completed"})
+    await supervisor.io(supervisor.journal.claim, request)
+    await supervisor.io(supervisor.journal.append, request, "turn_ended", {"outcome": "completed"})
     supervisor.schedule_checkpoint(request.session_id)
     await supervisor.close()
-    assert issued == [("https://storage.azure.com/.default",)] * 2
+    assert issued == [("https://storage.azure.com/.default",)] * 3
     assert identity.closed
-    assert len(blobs.uploads) == 2
-    assert "/reservations/" in blobs.uploads[0] and blobs.uploads[1].endswith(".tar.zst")
+    assert len(blobs.uploads) == 3
+    assert "/reservations/" in blobs.uploads[0]
+    assert "/wal/" in blobs.uploads[1] and blobs.uploads[2].endswith(".tar.zst")
     assert not (tmp_path / ".daimon/checkpoint.pending").exists()
 
 
@@ -1563,11 +1595,13 @@ async def test_surviving_real_driver_recovers_wal_usage_once_after_sandbox_loss(
             unknown = [value for value in observations if value.completeness == "unknown"]
             assert measured == list(first_usage)
             assert len(unknown) == 1 and unknown[0].id.endswith(":request:B")
-            assert supervisor.journal.ended(receipt.turn_id)
-            recovered = supervisor.journal.events(session.ref.id, acknowledged)
+            assert await supervisor.io(supervisor.journal.ended, receipt.turn_id)
+            recovered = await supervisor.io(supervisor.journal.events, session.ref.id, acknowledged)
             assert not any(
                 event.type == "usage" and event.data["request_id"] == "A" for event in recovered
             )
-            assert recovered[-1].type == "turn_ended"
+            assert (
+                next(e for e in reversed(recovered) if e.type != "history_gap").type == "turn_ended"
+            )
             assert model.calls == 1 and new_model.calls == 0
             assert await driver.usage.reconcile(SCOPE, session.ref) == observations

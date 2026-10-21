@@ -157,6 +157,10 @@ class Journal:
                 "CREATE TABLE IF NOT EXISTS pending_inventory "
                 "(turn_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS pending_usage "
+                "(request_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL, body TEXT NOT NULL)"
+            )
             db.commit()
             self.connections[session_id] = db
         return self.connections[session_id]
@@ -226,16 +230,24 @@ class Journal:
 
     def append(self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]) -> Event:
         db = self.connection(request.session_id)
-        self.reserve_append(request.session_id)
+        if db.execute(
+            "SELECT 1 FROM events WHERE turn_id=? AND type='turn_ended' LIMIT 1",
+            (request.turn_id,),
+        ).fetchone():
+            raise ConflictError("turn already ended; events refused")
+        try:
+            self.reserve_append(request.session_id)
+        except Exception:
+            if kind == "usage":
+                # The paid response survives a failed reservation before it can
+                # acquire an event sequence. Recovery drains it before repair.
+                with db:
+                    db.execute(
+                        "INSERT OR REPLACE INTO pending_usage VALUES (?, ?, ?)",
+                        (data["request_id"], request.turn_id, json.dumps(data)),
+                    )
+            raise
         with db:
-            if (
-                kind in {"tool_use", "tool_result", "requires_action"}
-                and db.execute(
-                    "SELECT 1 FROM events WHERE turn_id=? AND type='turn_ended' LIMIT 1",
-                    (request.turn_id,),
-                ).fetchone()
-            ):
-                raise ConflictError("turn already ended; tool events refused")
             self._announce_gap(db, request.session_id, request.turn_id)
             seq = self._next_seq(db)
             event = Event(
@@ -259,7 +271,7 @@ class Journal:
                 )
                 db.execute("INSERT OR REPLACE INTO history VALUES (1, ?)", (json.dumps(history),))
             if self.commit_inventory is not None and (
-                kind in {"model_request_started", "usage"}
+                kind in {"model_request_started", "usage", "turn_ended"}
                 or (kind == "error" and data.get("kind") == "usage_unavailable")
             ):
                 # Remote outcome commits before this transaction can become visible.
@@ -374,15 +386,21 @@ class Journal:
         return row[0]
 
     def reserved_high_water(self, session_id: str) -> int:
-        return (
-            self.connection(session_id)
-            .execute("SELECT reserved_high_water FROM event_sequence WHERE id=1")
-            .fetchone()[0]
-        )
+        db = self.connection(session_id)
+        with db:
+            self.sequence_state(db)
+        return db.execute("SELECT reserved_high_water FROM event_sequence WHERE id=1").fetchone()[0]
 
     def flush_inventory(self, session_id: str) -> None:
-        if self.commit_inventory is None:
+        if getattr(self, "flushing_inventory", False):
             return
+        self.flushing_inventory = True
+        try:
+            self._flush_inventory(session_id)
+        finally:
+            self.flushing_inventory = False
+
+    def _flush_inventory(self, session_id: str) -> None:
         db = self.connection(session_id)
         for (turn_id,) in db.execute(
             "SELECT turn_id FROM pending_inventory ORDER BY seq"
@@ -390,9 +408,29 @@ class Journal:
             request = self.find(turn_id)
             if request is None:
                 raise HarnessError("durability_unavailable", "Pending inventory has no turn claim")
-            self.commit_inventory(request)
+            if self.commit_inventory is not None:
+                self.commit_inventory(request)
             with db:
                 db.execute("DELETE FROM pending_inventory WHERE turn_id=?", (turn_id,))
+            if any(
+                event.turn_id == turn_id and event.type == "turn_ended"
+                for event in self.events(session_id, include_pending=True)
+            ):
+                with self.db:
+                    self.db.execute("UPDATE turns SET ended=1 WHERE turn_id=?", (turn_id,))
+        for request_id, turn_id, body in db.execute(
+            "SELECT request_id, turn_id, body FROM pending_usage"
+        ).fetchall():
+            request = self.find(turn_id)
+            if request is None:
+                raise HarnessError("durability_unavailable", "Pending usage has no turn claim")
+            if not any(
+                event.type == "usage" and event.data.get("request_id") == request_id
+                for event in self.events(session_id, include_pending=True)
+            ):
+                self.append(request, "usage", json.loads(body))
+            with db:
+                db.execute("DELETE FROM pending_usage WHERE request_id=?", (request_id,))
 
     def reserve_append(self, session_id: str) -> None:
         self.flush_inventory(session_id)
@@ -424,6 +462,7 @@ class Journal:
 
     @staticmethod
     def _next_seq(db: sqlite3.Connection) -> int:
+        Journal.sequence_state(db)
         local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
         # floor is the legacy column name for the local next-position
         # reservation retained in checkpoints and remote write-ahead records.
@@ -434,6 +473,7 @@ class Journal:
 
     @staticmethod
     def _announce_gap(db: sqlite3.Connection, session_id: str, turn_id: str) -> None:
+        Journal.sequence_state(db)
         local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
         gap_from = db.execute("SELECT gap_from FROM event_sequence WHERE id=1").fetchone()[0]
         if gap_from is not None:
@@ -463,10 +503,16 @@ class Journal:
         # A cursor is a valid fence even before this process knows any turn.
         turn_id = requests[-1].turn_id if requests else "session"
         db = self.connection(session_id)
-        if (
-            self._next_seq(db)
-            > db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM events").fetchone()[0]
+        self.sequence_state(db)
+        local_next = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM events").fetchone()[0]
+        gap_from = db.execute("SELECT gap_from FROM event_sequence WHERE id=1").fetchone()[0]
+        if gap_from is not None:
+            local_next = min(local_next, gap_from)
+        if self._next_seq(db) > local_next and self._next_seq(db) > self.reserved_high_water(
+            session_id
         ):
+            # Compare the actual allocation against reserved capacity, including
+            # when imported inventory has already brought MAX(seq) up to floor.
             self.reserve_append(session_id)
         with db:
             self._announce_gap(db, session_id, turn_id)
@@ -491,6 +537,10 @@ class Journal:
                 pending[request_id] = str(event.data["model"])
             elif event.type == "usage" or event.data.get("kind") == "usage_unavailable":
                 pending.pop(request_id, None)
+        for (request_id,) in self.connection(request.session_id).execute(
+            "SELECT request_id FROM pending_usage WHERE turn_id=?", (request.turn_id,)
+        ):
+            pending.pop(request_id, None)
         return pending
 
     def close(self) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -30,12 +31,12 @@ async def test_stale_poll_restore_then_newer_cursor_never_reuses_13_or_14(tmp_pa
         await client.post("/v0/turns", json=turn())
         await supervisor.tasks["turn-1"]
         await supervisor.flush_checkpoints()
-        assert supervisor.journal.latest_seq(SESSION) == 6
+        assert await supervisor.io(supervisor.journal.latest_seq, SESSION) == 6
         blobs.fail = True
         await client.post("/v0/turns", json=turn("tool", turn_id="second", key="second"))
         await supervisor.tasks["second"]
         await supervisor.flush_checkpoints()
-        assert supervisor.journal.latest_seq(SESSION) == 14
+        assert await supervisor.io(supervisor.journal.latest_seq, SESSION) == 14
         seen = {
             raw["seq"]: Event.model_validate(raw)
             for raw in (await client.get(EVENTS, params={"after_seq": 0})).json()["events"]
@@ -77,7 +78,11 @@ async def test_stale_poll_restore_then_newer_cursor_never_reuses_13_or_14(tmp_pa
         if route != "turn":
             await client.post("/v0/turns", json=turn(turn_id="third", key="third"))
             await supervisor.tasks["third"]
-        third = [e for e in supervisor.journal.events(SESSION) if e.turn_id == "third"]
+        third = [
+            e
+            for e in await supervisor.io(supervisor.journal.events, SESSION)
+            if e.turn_id == "third"
+        ]
         assert third and min(e.seq for e in third) > BLOCK
         assert third[-1].type == "turn_ended"
         all_events = await supervisor.io(supervisor.journal.events, SESSION)
@@ -88,7 +93,7 @@ async def test_stale_poll_restore_then_newer_cursor_never_reuses_13_or_14(tmp_pa
                 assert by_seq[seq] == original, "host-seen sequence reused"
             else:
                 assert any(g["from_seq"] <= seq <= g["to_seq"] for g in gaps)
-        assert supervisor.journal.client_cursor(SESSION) == 14
+        assert await supervisor.io(supervisor.journal.client_cursor, SESSION) == 14
 
 
 async def test_cursor_ratchet_is_durable_before_append_and_accepts_large_fences(tmp_path):
@@ -152,11 +157,22 @@ class ReservationBlobs(MemoryBlobs):
     def __init__(self):
         super().__init__()
         self.fail_reservations = False
+        self.fail_recovery = False
+        self.oracle = None
 
     def upload(self, name, source):
+        raw = source.read()
+        if self.fail_recovery and b'"kind":"usage_unavailable"' in raw:
+            self.fail_recovery = False
+            raise OSError("partial recovery upload failed")
         if self.fail_reservations and "/reservations/" in name:
             raise OSError("reservation unavailable")
-        return super().upload(name, source)
+        result = super().upload(name, io.BytesIO(raw))
+        if self.oracle is not None and "/wal/" in name:
+            for event in json.loads(raw)["inventory"]:
+                if event["type"] == "usage":
+                    self.oracle.durable(event["turn_id"], event["data"])
+        return result
 
 
 class HostSeen:
@@ -164,12 +180,29 @@ class HostSeen:
 
     def __init__(self):
         self.events, self.outcomes, self.started, self.turns = {}, {}, set(), {}
+        self.measured, self.terminals = {}, {}
+
+    def durable(self, turn_id, data):
+        identity = (turn_id, data["request_id"])
+        assert self.measured.setdefault(identity, data) == data
 
     def observe(self, events):
         for event in events:
             seq = event["seq"]
             assert self.events.setdefault(seq, event) == event, "host-seen sequence reused"
             kind, data = event["type"], event["data"]
+            turn_id = event["turn_id"]
+            if kind == "turn_ended":
+                assert self.terminals.setdefault(turn_id, event) == event, "two terminals"
+            if kind != "history_gap":
+                terminal = self.terminals.get(turn_id)
+                assert terminal is None or seq <= terminal["seq"], "event after terminal"
+                assert not any(
+                    old["turn_id"] == turn_id
+                    and old["type"] != "history_gap"
+                    and old["seq"] > self.terminals.get(turn_id, {"seq": 2**63})["seq"]
+                    for old in self.events.values()
+                ), "event after terminal"
             if kind != "history_gap":
                 self.turns[event["turn_id"]] = max(seq, self.turns.get(event["turn_id"], 0))
             identity = (event["turn_id"], data.get("request_id"))
@@ -185,6 +218,10 @@ class HostSeen:
         for turn_id, last in self.turns.items():
             assert turn_id in terminal or any(g["from_seq"] <= last <= g["to_seq"] for g in gaps)
         assert self.started <= self.outcomes.keys(), "model request has no usage outcome"
+        for identity, data in self.measured.items():
+            assert identity in self.outcomes, "durable measured usage disappeared"
+            outcome = self.outcomes[identity]
+            assert outcome["type"] == "usage" and outcome["data"] == data, "measured became unknown"
 
 
 OPERATIONS = st.lists(
@@ -201,6 +238,10 @@ OPERATIONS = st.lists(
                 "concurrent",
                 "reservation_failure",
                 "cold_cancel",
+                "remote_usage_crash",
+                "paid_reservation_failure",
+                "warning_reservation_failure",
+                "recover_retry",
             ]
         ),
         st.integers(min_value=0, max_value=3000),
@@ -227,9 +268,14 @@ OPERATIONS = st.lists(
         ("poll", 0, 2),
     ]
 )
+@example(trace=[("remote_usage_crash", 0, 0)] * 8)
+@example(trace=[("paid_reservation_failure", 0, 0)] * 8)
+@example(trace=[("warning_reservation_failure", 0, 0)] * 8)
+@example(trace=[("recover_retry", 0, 0)] * 8)
 async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trace):
     with tempfile.TemporaryDirectory(prefix="sequence-reservation-", dir=tmp_path) as scratch:
         root, blobs, oracle = Path(scratch), ReservationBlobs(), HostSeen()
+        blobs.oracle = oracle
         generation = serial = 0
         clients = [0, 0, 0]
         manager = harness(root / "0", blobs, ControlledModel())
@@ -252,14 +298,26 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
             oracle.observe(events)
             return events
 
-        async def restart(cursor=0, *, local=False, cancel_first=False):
+        async def restart(
+            cursor=0,
+            *,
+            local=False,
+            cancel_first=False,
+            local_home=None,
+            remote_blobs=None,
+            recover_retry=False,
+        ):
             nonlocal generation, manager, supervisor, client, blobs
             generation += 1
             home = root / str(generation)
-            if local:
+            if local_home is not None:
+                shutil.copytree(local_home, home)
+            elif local:
                 await supervisor.io(clone_local, supervisor.journal, home)
             remote = ReservationBlobs()
-            remote.blobs = blobs.blobs.copy()
+            remote.blobs = (blobs.blobs if remote_blobs is None else remote_blobs).copy()
+            remote.oracle = oracle
+            remote.fail_recovery = recover_retry
             await manager.__aexit__(None, None, None)
             blobs = remote
             manager = harness(home, blobs, ControlledModel())
@@ -270,8 +328,25 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                     f"/v0/turns/{active}/cancel", params={"after_seq": cursor}
                 )
                 assert result.status_code == 200, result.text
+            if recover_retry:
+                result = await client.get(EVENTS)
+                assert result.status_code == 503, result.text
+                # Diagnostic local reads never populate the host event oracle.
+                partial = await supervisor.io(supervisor.journal.events, SESSION)
+                last_gap = max(e.seq for e in partial if e.type == "history_gap")
             # Critically, this never raises a stale cursor to the host high-water.
-            await poll(cursor)
+            events = await poll(cursor)
+            if recover_retry:
+                assert sum(e["type"] == "history_gap" and e["seq"] >= last_gap for e in events) == 1
+                repairs = [
+                    e
+                    for e in events
+                    if e["type"] == "error"
+                    and e["data"].get("kind") in {"sandbox_lost", "process_interrupted"}
+                ]
+                assert len({e["turn_id"] for e in repairs}) == len(repairs), (
+                    "duplicate recovery error"
+                )
 
         try:
             # Every example begins with a FIRST-TURN crash, NO checkpoint,
@@ -297,6 +372,135 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                         local=operation == "crash",
                         cancel_first=operation == "cold_cancel",
                     )
+                elif operation in {
+                    "remote_usage_crash",
+                    "paid_reservation_failure",
+                    "warning_reservation_failure",
+                    "recover_retry",
+                }:
+                    for turn_id, task in list(supervisor.tasks.items()):
+                        if not task.done():
+                            await client.post(f"/v0/turns/{turn_id}/cancel")
+                    await settle()
+                    serial += 1
+                    special = f"fault-{serial}"
+                    frozen_home = root / f"frozen-{serial}"
+                    frozen_remote = {}
+                    ready, release = asyncio.Event(), asyncio.Event()
+
+                    class FaultModel:
+                        async def run(
+                            self,
+                            context,
+                            history,
+                            operation=operation,
+                            special=special,
+                            ready=ready,
+                            release=release,
+                        ):
+                            request_id = special + ":request"
+                            await context.emit(
+                                "model_request_started",
+                                {
+                                    "request_id": request_id,
+                                    "model": "gpt-6-luna",
+                                },
+                            )
+                            if operation in {"remote_usage_crash", "recover_retry"}:
+                                ready.set()
+                                await release.wait()
+                            data = dict(
+                                request_id=request_id,
+                                model="gpt-6-luna",
+                                input_tokens=123,
+                                cached_input_tokens=0,
+                                output_tokens=45,
+                                reasoning_tokens=0,
+                            )
+                            if operation == "paid_reservation_failure":
+                                fence = await supervisor.io(
+                                    supervisor.journal.reserved_high_water, SESSION
+                                )
+                                await supervisor.io(
+                                    supervisor.journal.record_cursor, SESSION, fence
+                                )
+                                blobs.fail_reservations = True
+                            try:
+                                await context.emit("usage", data)
+                            finally:
+                                if operation == "paid_reservation_failure":
+                                    oracle.durable(special, data)
+                                    blobs.fail_reservations = False
+                            if operation == "warning_reservation_failure":
+                                fence = await supervisor.io(
+                                    supervisor.journal.reserved_high_water, SESSION
+                                )
+                                await supervisor.io(
+                                    supervisor.journal.record_cursor, SESSION, fence - 2
+                                )
+                            return history
+
+                    supervisor.adapter = FaultModel()
+                    blobs.fail = True  # Preserve a WAL-only turn beyond the checkpoint.
+                    result = await client.post("/v0/turns", json=turn(turn_id=special, key=special))
+                    assert result.status_code == 202, result.text
+                    if operation in {"remote_usage_crash", "recover_retry"}:
+                        await asyncio.wait_for(ready.wait(), 5)
+                        await poll()
+                        await supervisor.io(clone_local, supervisor.journal, frozen_home)
+                        if operation == "remote_usage_crash":
+                            original = supervisor.journal.commit_inventory
+
+                            def capture(
+                                request,
+                                original=original,
+                                frozen_remote=frozen_remote,
+                                special=special,
+                            ):
+                                original(request)
+                                events = supervisor.journal.events(SESSION, include_pending=True)
+                                if not frozen_remote and any(
+                                    e.type == "usage" and e.turn_id == special for e in events
+                                ):
+                                    frozen_remote.update(blobs.blobs)
+
+                            supervisor.journal.commit_inventory = capture
+                            release.set()
+                            await settle()
+                            supervisor.journal.commit_inventory = original
+                            assert frozen_remote
+                            await restart(local_home=frozen_home, remote_blobs=frozen_remote)
+                        else:
+                            # Crash before the model responds, then fail after the
+                            # first recovery error but before its usage outcome commits.
+                            frozen_remote.update(blobs.blobs)
+                            release.set()
+                            await restart(remote_blobs=frozen_remote, recover_retry=True)
+                    else:
+                        await settle()
+                        await poll()
+                        if operation == "warning_reservation_failure":
+                            assert await supervisor.io(
+                                supervisor.journal.latest_seq, SESSION
+                            ) == await supervisor.io(
+                                supervisor.journal.reserved_high_water, SESSION
+                            )
+                            await supervisor.io(supervisor.checkpoint_notice, SESSION)
+                            blobs.fail_reservations = True
+                            warning_turn = special + "-warning"
+                            result = await client.post(
+                                "/v0/turns", json=turn(turn_id=warning_turn, key=warning_turn)
+                            )
+                            claimed = await supervisor.io(supervisor.journal.find, warning_turn)
+                            assert claimed is None or warning_turn in supervisor.tasks, (
+                                "claim has no executor"
+                            )
+                            await asyncio.gather(*supervisor.tasks.values(), return_exceptions=True)
+                            blobs.fail_reservations = False
+                            await poll()
+                            assert await supervisor.io(supervisor.journal.ended, warning_turn)
+                    supervisor.adapter = ControlledModel()
+                    blobs.fail = False
                 elif operation == "reservation_failure":
                     blobs.fail_reservations = True
                     # A warm cursor ahead of the block forces a reservation.
@@ -380,7 +584,7 @@ async def test_unauthenticated_request_cannot_raise_the_ratchet(tmp_path):
             EVENTS, params={"after_seq": 10**9 + 7}, headers={"Authorization": "Bearer wrong"}
         )
         assert result.status_code == 401
-        assert supervisor.journal.client_cursor(SESSION) == 6
+        assert await supervisor.io(supervisor.journal.client_cursor, SESSION) == 6
 
 
 async def test_large_cursor_on_warm_and_restored_session_survives_restart(tmp_path):
@@ -401,8 +605,12 @@ async def test_large_cursor_on_warm_and_restored_session_survives_restart(tmp_pa
     async with harness(home, blobs) as (supervisor, client):
         await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
         await supervisor.tasks["next"]
-        assert supervisor.journal.client_cursor(SESSION) == cursor + 5
-        events = [event for event in supervisor.journal.events(SESSION) if event.turn_id == "next"]
+        assert await supervisor.io(supervisor.journal.client_cursor, SESSION) == cursor + 5
+        events = [
+            event
+            for event in await supervisor.io(supervisor.journal.events, SESSION)
+            if event.turn_id == "next"
+        ]
         assert min(event.seq for event in events) > cursor + 5
 
 
@@ -572,14 +780,93 @@ async def test_measured_usage_with_lost_ack_is_withheld_then_recovered_without_u
         )
         frozen = ReservationBlobs()
         frozen.blobs = blobs.blobs.copy()
+        # The frozen store represents a crash here, before the old process's
+        # later recovery terminal. Keep these two possible futures separate.
+        frozen_oracle = HostSeen()
+        frozen_oracle.observe(list(oracle.events.values()))
         blobs.unavailable = False
         response = await client.get(EVENTS)
         oracle.complete(response.json()["events"])
     async with harness(tmp_path / "new", frozen) as (_, client):
         response = await client.get(EVENTS, params={"after_seq": 0})
-        oracle.complete(response.json()["events"])
+        frozen_oracle.complete(response.json()["events"])
         assert not any(
             e["data"].get("kind") == "usage_unavailable" for e in response.json()["events"]
         )
         usage = [e for e in response.json()["events"] if e["type"] == "usage"]
         assert len(usage) == 1 and usage[0]["data"]["input_tokens"] == 1000
+
+
+async def test_warning_reservation_failure_at_seq_1024_keeps_claim_owned(tmp_path):
+    class FillBlock(ControlledModel):
+        async def run(self, context, history):
+            history = await super().run(context, history)
+            await supervisor.io(supervisor.journal.record_cursor, SESSION, BLOCK - 2)
+            return history
+
+    blobs = ReservationBlobs()
+    async with harness(tmp_path, blobs, FillBlock()) as (supervisor, client):
+        await client.post("/v0/turns", json=turn())
+        await supervisor.tasks["turn-1"]
+        assert await supervisor.io(supervisor.journal.latest_seq, SESSION) == BLOCK
+        await supervisor.flush_checkpoints()
+        await supervisor.io(supervisor.checkpoint_notice, SESSION)
+        supervisor.adapter = ControlledModel()
+        blobs.fail_reservations = True
+        result = await client.post("/v0/turns", json=turn(turn_id="warning", key="warning"))
+        assert result.status_code == 202
+        assert "warning" in supervisor.tasks
+        await asyncio.gather(supervisor.tasks["warning"], return_exceptions=True)
+        blobs.fail_reservations = False
+        assert (await client.get(EVENTS)).status_code == 200
+        assert await supervisor.io(supervisor.journal.ended, "warning")
+        assert (
+            await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
+        ).status_code == 202
+        await supervisor.tasks["next"]
+        assert await supervisor.io(supervisor.journal.ended, "next")
+
+
+@pytest.mark.parametrize("operation", ["reserved", "next", "gap"])
+def test_all_sequence_readers_repair_missing_singleton(tmp_path, operation):
+    journal = Journal(tmp_path)
+    try:
+        db = journal.connection(SESSION)
+        with db:
+            db.execute("DELETE FROM event_sequence")
+        if operation == "reserved":
+            assert journal.reserved_high_water(SESSION) == 0
+        elif operation == "next":
+            assert journal._next_seq(db) == 1
+        else:
+            journal._announce_gap(db, SESSION, "session")
+        db.commit()
+        assert db.execute("SELECT COUNT(*) FROM event_sequence").fetchone()[0] == 1
+    finally:
+        journal.close()
+
+
+def test_gap_reserves_even_when_imported_inventory_reaches_floor(tmp_path):
+    from daimon_harness.checkpoints import Checkpoints
+    from daimon_harness.errors import HarnessError
+
+    journal = Journal(tmp_path)
+    blobs = ReservationBlobs()
+    try:
+        journal.reserve = Checkpoints(blobs).reserve_sequences
+        request = TurnRequest.model_validate(turn())
+        journal.claim(request)
+        journal.append(request, "status_running", {})
+        db = journal.connection(SESSION)
+        with db:
+            db.execute("UPDATE event_sequence SET floor=2, gap_from=1, reserved_high_water=1")
+        blobs.fail_reservations = True
+        with pytest.raises(HarnessError, match="reservation"):
+            journal.announce_gap(SESSION)
+        assert journal.latest_seq(SESSION) == 1
+        blobs.fail_reservations = False
+        journal.announce_gap(SESSION)
+        assert journal.events(SESSION)[-1].type == "history_gap"
+        assert journal.reserved_high_water(SESSION) >= 2
+    finally:
+        journal.close()

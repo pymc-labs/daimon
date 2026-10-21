@@ -651,3 +651,53 @@ Mutation check: copy the harness package to a private temporary directory, chang
 first on `PYTHONPATH`. The explicit stale-first example must fail with
 `host-seen sequence reused`; the production implementation must pass. Do not run
 this mutation against the working source or commit it.
+
+
+### Recovery order and invariants
+
+Before paid I/O, commit the turn claim, sequence reservation, and request start
+locally and remotely. Retain every measured response locally even if its next
+sequence reservation fails. Usage and terminal events reach the remote WAL
+before replay exposes them. Full workspace checkpoints remain best effort.
+
+On startup, authenticate and persist the caller cursor, then load remote
+reservations and WAL inventory **even when the local journal is populated**.
+Restore an empty sandbox from its checkpoint; merge immutable WAL events at
+their original sequences. Flush local pending inventory and measured responses
+only after that merge. Then repair unfinished claims: close unmatched requests
+as unknown, and append one interrupted terminal. A durable terminal skips repair.
+Only after repair succeeds may a new turn be claimed. The claim's task owns
+warning delivery and finalization; submit performs no fallible work between
+committing a claim and registering its executor. Failed recovery is retryable.
+
+- **I1:** A sequence the host has seen never receives a different event.
+- **I2:** Each started request has exactly one usage outcome. Measured usage
+  durable in the local journal, pending response, or remote WAL is never
+  replaced with `usage_unavailable`.
+- **I3:** Each claim reaches exactly one terminal; no turn event follows it.
+  Session-level history gaps may follow a completed turn.
+- **I4:** Every claim has an executor or is repaired on the next authenticated
+  request. Failed warning delivery cannot leave an unowned claim.
+
+
+The recovery property generator includes remote usage upload before local commit,
+paid-response reservation failure, warning delivery at an exhausted block, and
+partial recovery failure followed by retry. Its host oracle checks immutable
+sequences, durable measured outcomes, one terminal with no later turn events,
+and executor ownership of claims. A separate regression uses the real 1024
+boundary for warning delivery. Remote uploads extend a measurement-only oracle;
+they never advance the simulated host's event cursor.
+
+Reproduce the four isolated mutation checks from the repository root:
+
+```sh
+scratch=$(mktemp -d)
+uv run python apps/harness/tests/recovery_mutations.py "$scratch"
+```
+
+The script reverts each fix separately in copied source, using the same Hypothesis
+property (seed 7, including explicit regression traces). Expected pytest exit: 1
+for all four. Restoring startup repair before WAL reconciliation loses measured
+usage; restoring submit-owned warning delivery strands a claim; removing pending
+measured-response persistence loses measured usage; removing terminal WAL records
+emits events after a terminal. The original source remains untouched.

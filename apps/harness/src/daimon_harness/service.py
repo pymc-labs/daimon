@@ -258,7 +258,6 @@ class Supervisor:
         if self.session_mode == "single":
             self.journal.bind_session(session_id)
         after_seq = self.journal.record_cursor(session_id, after_seq)
-        self.journal.flush_inventory(session_id)
         if self.checkpoints is not None and not self.restored:
             try:
                 self.journal = self.checkpoints.restore(self.journal, session_id, after_seq)
@@ -271,6 +270,9 @@ class Supervisor:
                     if saved["session_id"] != session_id:
                         raise ConflictError("session_bound")
                     self.journal.record_cursor(session_id, max(after_seq, saved["after_seq"]))
+                # WAL reconciliation is complete. If repair fails, retry it
+                # against this incarnation instead of abandoning its new block.
+                self.restored = True
                 self.recover(sandbox_lost=cursor_file.exists())
             except ConflictError:
                 raise
@@ -286,10 +288,13 @@ class Supervisor:
                     raise exc
                 raise HTTPException(status_code=503, detail="Session restore unavailable") from None
             self.restored = True
+        self.journal.flush_inventory(session_id)
         if any(
-            task.done() and not self.journal.ended(turn_id) for turn_id, task in self.tasks.items()
+            not self.journal.ended(request.turn_id)
+            and (request.turn_id not in self.tasks or self.tasks[request.turn_id].done())
+            for request in self.journal.turns(session_id)
         ):
-            self.recover()
+            self.recover(sandbox_lost=(self.journal.root / "restore.cursor").exists())
         self.journal.announce_gap(session_id)
 
     async def ensure_session(self, session_id: str, after_seq: int = 0) -> None:
@@ -311,15 +316,21 @@ class Supervisor:
         # A claimed turn can have executed tools. Never retry it after a process crash.
         for request in self.journal.turns():
             if not self.journal.ended(request.turn_id):
-                self.journal.append(
-                    request,
-                    "error",
-                    {
-                        "kind": "sandbox_lost" if sandbox_lost else "process_interrupted",
-                        "message": "Harness restarted during the turn",
-                        "retryable": False,
-                    },
-                )
+                if not any(
+                    event.turn_id == request.turn_id
+                    and event.type == "error"
+                    and event.data.get("kind") in {"sandbox_lost", "process_interrupted"}
+                    for event in self.journal.events(request.session_id, include_pending=True)
+                ):
+                    self.journal.append(
+                        request,
+                        "error",
+                        {
+                            "kind": "sandbox_lost" if sandbox_lost else "process_interrupted",
+                            "message": "Harness restarted during the turn",
+                            "retryable": False,
+                        },
+                    )
                 for request_id in self.journal.pending_requests(request):
                     self.journal.append(
                         request,
@@ -389,6 +400,7 @@ class Supervisor:
         context: TurnContext | None = None
         try:
             await self.write_ahead(request)
+            await self.io(self.deliver_checkpoint_notice, request)
             sandbox, uid = await self.io(self.journal.sandbox, request.session_id)
             context = TurnContext(
                 request,
@@ -508,7 +520,6 @@ class Supervisor:
             self.tasks = {key: task for key, task in self.tasks.items() if not task.done()}
             await self.io(self.journal.sandbox, request.session_id)
             if await self.io(self.journal.claim, request):
-                await self.io(self.deliver_checkpoint_notice, request)
                 self.tasks[request.turn_id] = asyncio.create_task(self.run(request, credentials))
 
     async def stream(self, request: TurnRequest) -> AsyncIterator[str]:
@@ -675,7 +686,8 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with (supervisor.journal.root / "process.lock").open("a") as lease:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            await supervisor.io(supervisor.recover)
+            if supervisor.checkpoints is None:
+                await supervisor.io(supervisor.recover)
             try:
                 yield
             finally:

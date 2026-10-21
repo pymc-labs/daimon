@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user input, preserve checkpoint compaction prompts and summaries, and honor
   cancellation or deadlines during controller shutdown. Meter internal compaction
   separately from the ordinary continuation budget.
+- Preserve remotely committed usage during harness restart, retain measured responses
+  across reservation outages, recover failed warning delivery, and replay completed
+  turns with their original terminal event.
+
 - Use `gpt-6-luna` for selfhosted test and smoke fixtures, refuse other live-test deployments, and reserve `gpt-6.1-sol` for production defaults.
 
 - Reserve harness event sequences in remote blocks so stale cursors cannot reuse events after sandbox loss; retain measured usage through WAL acknowledgement failures.
