@@ -157,7 +157,7 @@ class WriteAhead(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request: TurnRequest
     digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    high_water: int = Field(ge=0, le=MAX_CURSOR)
+    high_water: int = Field(ge=0, le=2**63 - 1)
     inventory: list[Event]
 
 
@@ -167,6 +167,35 @@ class Checkpoints:
             raise ValueError("checkpoint retention must be between 1 and 100")
         self.store, self.keep = store, keep
         self.restored_seq: int | None = None
+
+    def reserve_sequences(self, session_id: str, high_water: int) -> None:
+        record = json.dumps(
+            {"session_id": identifier(session_id), "reserved_high_water": high_water}
+        ).encode()
+        self.store.upload(
+            f"sessions/{sandbox_id(session_id)}/reservations/{high_water}.json", io.BytesIO(record)
+        )
+
+    def reservation_high_water(self, session_id: str) -> int:
+        prefix = f"sessions/{sandbox_id(session_id)}/reservations/"
+        high_water = 0
+        for name in self.store.list(prefix):
+            suffix = name.removeprefix(prefix).removesuffix(".json")
+            if not name.startswith(prefix) or not suffix.isascii() or not suffix.isdigit():
+                raise ValueError("invalid sequence reservation path")
+            value = int(suffix)
+            output = io.BytesIO()
+            self.store.download(name, output)
+            if output.tell() > 1024:
+                raise ValueError("sequence reservation too large")
+            if (
+                json.loads(output.getvalue())
+                != {"session_id": session_id, "reserved_high_water": value}
+                or not 0 < value < 2**63
+            ):
+                raise ValueError("invalid sequence reservation")
+            high_water = max(high_water, value)
+        return high_water
 
     def write_ahead(self, journal: Journal, request: TurnRequest) -> bytes:
         body = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
@@ -181,17 +210,20 @@ class Checkpoints:
         )
         inventory = [
             event
-            for event in journal.events(request.session_id)
+            for event in journal.events(request.session_id, include_pending=True)
             if event.turn_id == request.turn_id
             and (
                 event.type in {"model_request_started", "usage"}
                 or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
             )
         ]
+        recovered = journal.db.execute(
+            "SELECT digest FROM recovery_digests WHERE turn_id=?", (request.turn_id,)
+        ).fetchone()
         return (
             WriteAhead(
                 request=minimal,
-                digest=hashlib.sha256(body.encode()).hexdigest(),
+                digest=recovered[0] if recovered else hashlib.sha256(body.encode()).hexdigest(),
                 high_water=journal.latest_seq(request.session_id),
                 inventory=inventory,
             )
@@ -239,8 +271,11 @@ class Checkpoints:
             ):
                 raise ValueError("invalid write-ahead inventory")
             records.append(record)
-        remote_seq = max((record.high_water for record in records), default=0)
-        if records and not self.names(session_id) and not pending.exists():
+        remote_seq = max(
+            self.reservation_high_water(session_id),
+            max((record.high_water for record in records), default=0),
+        )
+        if (records or remote_seq) and not self.names(session_id) and not pending.exists():
             cursor_file = journal.root / "restore.cursor"
             stage = cursor_file.with_suffix(".next")
             with stage.open("w") as output_file:
@@ -260,6 +295,7 @@ class Checkpoints:
             self.restored_seq = 0
         else:
             journal = self.restore_checkpoint(journal, session_id, after_seq, remote_seq)
+        Journal.record_cursor_db(journal.connection(session_id), after_seq, remote_seq)
         for record in sorted(records, key=lambda value: value.high_water):
             request = record.request
             existing = journal.find(request.turn_id)

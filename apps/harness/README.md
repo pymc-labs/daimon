@@ -281,7 +281,7 @@ never repeats tools or model calls. Measured usage in the remote inventory is
 replayed with its original request ID, model and token counts. Only started
 requests with no usage record become `usage_unavailable` for reconciliation.
 
-Each `model_request_started` is committed locally before its remote write-ahead. After tool workers stop, every terminal turn (including
+Each `model_request_started` commits its remote write-ahead before replay exposes it. After tool workers stop, every terminal turn (including
 cancellation) checkpoints the SQLite journal, history, turn/idempotency inventory
 and `work/` to `sessions/<sandbox_id>/<seq>.tar.zst`. SQLite's backup API includes
 committed WAL data. Upload failures are logged by stage and exception class and
@@ -619,3 +619,32 @@ sequence assignments, terminal-or-gap coverage for three clients and unique
 usage identity. Clients retain their observed high-water when restoring, as
 required by C4.8; a separate regression covers a stale poll restoring before a
 later request supplies the newer cursor. No cloud or live model is used.
+
+### Remote sequence reservations
+
+With Blob durability enabled, the journal reserves sequence blocks of 1024 in
+`sessions/<sandbox_id>/reservations/<reserved_high_water>.json` before allocating
+outside its current block. On sandbox restore, the next event is above the
+checkpoint, every abandoned remote reservation, and the persisted client cursor.
+A covering `history_gap` announces the abandoned range, even for a stale first
+poll or cold cleanup cancel. WAL inventory retains its original event bodies and
+sequences; recovery outcomes use the new block. Client cursors remain an extra
+fence and `replay_after_seq` still only selects the replay range.
+
+Model starts and usage outcomes commit to the remote WAL before replay exposes
+them. A lost upload acknowledgement leaves the same event in a local pending
+inventory record; replay withholds it until retry confirms the remote commit.
+Measured usage is retained through that failure and never replaced by unknown
+usage. Reservation/inventory failure returns retryable `durability_unavailable`
+and prevents paid work from crossing the failed barrier.
+
+The CI guard in `tests/test_sequence_ratchet.py` uses only host-visible HTTP event
+responses as its oracle, independently of request cursors. Its 100 generated
+traces exercise stale-first recovery, cold cancel, first-turn crashes with no
+checkpoint, failed reservation writes, and turn/action/cancel interleavings.
+Mutation check: copy the harness package to a private temporary directory, change
+`Journal._next_seq()` from `max(local_next, floor, cursor + 1)` to
+`max(local_next, cursor + 1)`, and run the random-interleavings test with that copy
+first on `PYTHONPATH`. The explicit stale-first example must fail with
+`host-seen sequence reused`; the production implementation must pass. Do not run
+this mutation against the working source or commit it.

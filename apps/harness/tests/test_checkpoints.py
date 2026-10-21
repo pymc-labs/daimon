@@ -14,6 +14,7 @@ import httpx
 import pytest
 from daimon_harness.checkpoint_archive import restore_work
 from daimon_harness.checkpoints import Checkpoints
+from daimon_harness.journal import BLOCK
 from daimon_harness.runtime import TurnContext
 from daimon_harness.service import create_app
 from mux.drivers.selfhosted.transport import DirectTransport, sandbox_id
@@ -90,7 +91,10 @@ async def test_restore_after_sandbox_destruction_continues_seq_history_and_idemp
     async with harness(home, blobs, model) as (supervisor, client):
         # Polling is the first request to a completely new sandbox.
         restored = (await client.get("/v0/sessions/session-1/events")).json()
-        assert restored == before
+        assert restored["events"][:-1] == before["events"]
+        assert restored["complete"] == before["complete"]
+        assert restored["events"][-1]["type"] == "history_gap"
+        assert restored["events"][-1]["seq"] == BLOCK + 1
         workspace, _ = supervisor.journal.sandbox("session-1")
         assert (workspace / "work/result.txt").read_text() == "durable"
         assert (workspace / "work/result.txt").stat().st_mode & 0o777 == 0o700
@@ -129,13 +133,18 @@ async def test_cancel_ack_waits_for_checkpoint_and_cold_cancel_restores(tmp_path
     async with harness(home, blobs) as (supervisor, client):
         assert (await client.post("/v0/turns/turn-1/cancel")).json() == {"cancelled": False}
         restored = (await client.get("/v0/sessions/session-1/events")).json()
-        assert restored == before
+        assert restored["events"][:-1] == before["events"]
+        assert restored["complete"] == before["complete"]
+        assert restored["events"][-1]["type"] == "history_gap"
+        assert restored["events"][-1]["seq"] == BLOCK + 1
 
 
 async def test_crash_checkpoint_records_unknown_usage_and_never_reexecutes(tmp_path):
     class CrashWindow(FakeModelAdapter):
         async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
-            await context.emit("model_request_started", {"request_id": "pending", "model": "gpt-5"})
+            await context.emit(
+                "model_request_started", {"request_id": "pending", "model": "gpt-6-luna"}
+            )
             self.started.set()
             await asyncio.Event().wait()
             return []
@@ -328,7 +337,9 @@ async def test_interrupted_restore_retries_before_serving(tmp_path, monkeypatch)
         assert (await client.get("/v0/sessions/session-1/events")).status_code == 503
         assert (supervisor.journal.root / "restore.pending").exists()
         assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
-        assert supervisor.journal.events("session-1") == expected
+        actual = supervisor.journal.events("session-1")
+        assert actual[:-1] == expected
+        assert actual[-1].type == "history_gap" and actual[-1].seq == BLOCK + 1
         assert not (supervisor.journal.root / "restore.pending").exists()
         workspace, _ = supervisor.journal.sandbox("session-1")
         assert (workspace / "work/result.txt").read_text() == "durable"
@@ -407,7 +418,9 @@ async def test_process_restart_during_restore_does_not_checkpoint_partial_state(
 
     class WaitingModel(FakeModelAdapter):
         async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
-            await context.emit("model_request_started", {"request_id": "pending", "model": "gpt-5"})
+            await context.emit(
+                "model_request_started", {"request_id": "pending", "model": "gpt-6-luna"}
+            )
             self.started.set()
             await asyncio.Event().wait()
             return []
@@ -641,7 +654,9 @@ def test_degraded_archive_skips_caps_special_and_unreadable_entries(tmp_path, mo
 async def test_cold_post_cursor_fences_recovery_before_acting(tmp_path, operation):
     class Pending(FakeModelAdapter):
         async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
-            await context.emit("model_request_started", {"request_id": "pending", "model": "test"})
+            await context.emit(
+                "model_request_started", {"request_id": "pending", "model": "gpt-6-luna"}
+            )
             self.started.set()
             await asyncio.Event().wait()
             return []
@@ -670,7 +685,7 @@ async def test_cold_post_cursor_fences_recovery_before_acting(tmp_path, operatio
             await client.get("/v0/sessions/session-1/events", params={"after_seq": 9})
         ).json()
         assert response["complete"]
-        assert response["events"][0]["seq"] == 10
+        assert response["events"][0]["seq"] == BLOCK + 1
         assert response["events"][0]["type"] == "history_gap"
         assert response["events"][-1]["data"]["error"]["kind"] == "sandbox_lost"
         assert any(e["data"].get("kind") == "usage_unavailable" for e in response["events"])
@@ -744,7 +759,7 @@ async def test_fresh_driver_uses_persisted_projection_and_delivers_next_turn_usa
             assert received[-1].type == "session.turn_ended"
             assert all(event.sequence > 12 for event in received)
             usage = await fresh.usage.reconcile(SCOPE, resumed.ref)
-            assert {item.completeness for item in usage} == {"measured", "unknown"}
+            assert {item.completeness for item in usage} == {"measured"}
             assert any(item.turn_id == received[-1].turn_id for item in usage)
         await fresh.aclose()
 
@@ -794,7 +809,9 @@ async def test_restore_fence_survives_crash_before_supervisor_recovery(tmp_path,
 
     class Waiting(FakeModelAdapter):
         async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
-            await context.emit("model_request_started", {"request_id": "lost", "model": "test"})
+            await context.emit(
+                "model_request_started", {"request_id": "lost", "model": "gpt-6-luna"}
+            )
             self.started.set()
             await asyncio.Event().wait()
             return []
@@ -816,7 +833,7 @@ async def test_restore_fence_survives_crash_before_supervisor_recovery(tmp_path,
         assert not supervisor.journal.ended("turn-1")
         result = (await client.get("/v0/sessions/session-1/events", params={"after_seq": 9})).json()
         assert result["events"][0]["type"] == "history_gap"
-        assert result["events"][0]["seq"] == 10
+        assert result["events"][0]["seq"] == BLOCK + 1
         assert result["events"][-1]["data"]["error"]["kind"] == "sandbox_lost"
         assert result["complete"]
 
@@ -883,7 +900,7 @@ async def test_cursor_outside_safe_integer_range_is_rejected(tmp_path, cursor):
         ).status_code == 422
 
 
-async def test_clean_restore_preserves_wake_usable_projection(tmp_path):
+async def test_clean_restore_announces_abandoned_reservation_to_projection(tmp_path):
     from .interop_support import SCOPE, driver_session, message
 
     blobs = MemoryBlobs()
@@ -916,10 +933,9 @@ async def test_clean_restore_preserves_wake_usable_projection(tmp_path):
         fresh, resumed = await driver_session(client)
         async with active.router.lifespan_context(active):
             after = await fresh.events.reconcile(SCOPE, resumed.ref)
-            # Continuity wakes reject any projection gap or terminated state.
-            assert after.gaps == before.gaps == ()
+            assert before.gaps == () and len(after.gaps) == 1
             assert after.state == before.state == "idle"
-            assert after.cursor == before.cursor
+            assert int(after.cursor) == BLOCK + 1 > int(before.cursor)
         await fresh.aclose()
 
 
@@ -970,7 +986,7 @@ async def test_old_baseline_with_newer_high_water_replays_without_false_gap(tmp_
 
         await supervisor.io(populate)
         await supervisor.checkpoint("session-1")
-    async with harness(tmp_path / "new", blobs) as (_, client):
+    async with harness(tmp_path / "old", blobs) as (_, client):
         query = {"after_seq": 1002, "replay_after_seq": 990, "session_id": "session-1"}
         if foundry:
             response = await client.post(
@@ -1018,7 +1034,7 @@ async def test_restore_replay_range_does_not_lower_the_high_water_fence(tmp_path
     journal.bind_session("session-1")
     journal.claim(request)
     journal.append(request, "status_running", {})
-    journal.append(request, "model_request_started", {"request_id": "lost", "model": "test"})
+    journal.append(request, "model_request_started", {"request_id": "lost", "model": "gpt-6-luna"})
     Checkpoints(blobs).save(journal, "session-1")
     journal.close()
     async with harness(tmp_path / "new", blobs) as (_, client):
@@ -1085,7 +1101,8 @@ async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoi
         recovered = [event for event in events if event.turn_id == "paid"]
         assert recovered[-1].type == "turn_ended"
         assert recovered[-1].data["outcome"] == "interrupted"
-        assert any(event.data.get("kind") == "usage_unavailable" for event in recovered)
+        assert any(event.type == "usage" for event in recovered)
+        assert not any(event.data.get("kind") == "usage_unavailable" for event in recovered)
         workspace, _ = supervisor.journal.sandbox("session-1")
         assert not (workspace / "work/result.txt").exists()
         changed = body | {"instructions": "changed"}
@@ -1125,7 +1142,7 @@ async def test_cleanup_cancel_transport_carries_the_persisted_high_water(tmp_pat
     request = TurnRequest.model_validate(turn())
     journal.claim(request)
     journal.append(request, "status_running", {})
-    journal.append(request, "model_request_started", {"request_id": "lost", "model": "test"})
+    journal.append(request, "model_request_started", {"request_id": "lost", "model": "gpt-6-luna"})
     Checkpoints(blobs).save(journal, "session-1")
     assert journal.latest_seq("session-1") == 2
     journal.close()
@@ -1150,14 +1167,14 @@ async def test_write_ahead_failure_before_second_model_request_stops_that_reques
         async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
             for index in range(2):
                 await context.emit(
-                    "model_request_started", {"request_id": str(index), "model": "test"}
+                    "model_request_started", {"request_id": str(index), "model": "gpt-6-luna"}
                 )
                 self.calls += 1  # Paid I/O happens only after the write-ahead barrier.
                 await context.emit(
                     "usage",
                     {
                         "request_id": str(index),
-                        "model": "test",
+                        "model": "gpt-6-luna",
                         "input_tokens": 1,
                         "cached_input_tokens": 0,
                         "output_tokens": 1,
@@ -1167,24 +1184,37 @@ async def test_write_ahead_failure_before_second_model_request_stops_that_reques
             return []
 
     class FailSecondRequest(MemoryBlobs):
+        unavailable = True
+
         def upload(self, name, source):
             raw = source.read()
-            if "/wal/" in name and b'"request_id":"1"' in raw:
+            if self.unavailable and "/wal/" in name and b'"request_id":"1"' in raw:
                 raise OSError("unavailable")
             super().upload(name, io.BytesIO(raw))
 
     model = TwoRequests()
-    async with harness(tmp_path, FailSecondRequest(), model) as (supervisor, client):
+    store = FailSecondRequest()
+    async with harness(tmp_path, store, model) as (supervisor, client):
         await client.post("/v0/turns", json=turn())
-        await supervisor.tasks["turn-1"]
+        from daimon_harness.errors import HarnessError
+
+        with pytest.raises(HarnessError, match="inventory"):
+            await supervisor.tasks["turn-1"]
+        assert (await client.get("/v0/sessions/session-1/events")).status_code == 503
+        store.unavailable = False
+        assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
         assert model.calls == 1
         events = supervisor.journal.events("session-1")
-        assert any(
-            event.data.get("kind") == "usage_unavailable" and event.data.get("request_id") == "1"
-            for event in events
+        assert (
+            sum(
+                event.data.get("kind") == "usage_unavailable"
+                and event.data.get("request_id") == "1"
+                for event in events
+            )
+            == 1
         )
         terminal = next(event for event in events if event.type == "turn_ended")
-        assert terminal.data["error"]["kind"] == "durability_unavailable"
+        assert terminal.data["error"]["kind"] == "process_interrupted"
 
 
 async def test_remote_inventory_recovery_retries_after_local_publication_crash(
@@ -1222,10 +1252,7 @@ async def test_remote_inventory_recovery_retries_after_local_publication_crash(
         result = await client.get("/v0/sessions/session-1/events", params={"after_seq": 13})
         assert result.status_code == 200
         events = supervisor.journal.events("session-1")
-        assert any(
-            event.turn_id == "paid" and event.data.get("kind") == "usage_unavailable"
-            for event in events
-        )
+        assert any(event.turn_id == "paid" and event.type == "usage" for event in events)
         assert supervisor.journal.ended("paid")
 
 
@@ -1241,12 +1268,12 @@ async def test_restore_preserves_remote_measured_usage_and_only_marks_unmatched_
     request = TurnRequest.model_validate(turn())
     journal.claim(request)
     journal.append(request, "status_running", {})
-    journal.append(request, "model_request_started", {"request_id": "A", "model": "test"})
+    journal.append(request, "model_request_started", {"request_id": "A", "model": "gpt-6-luna"})
     if checkpoint == "started":
         Checkpoints(blobs).save(journal, "session-1")
     measured = dict(
         request_id="A",
-        model="test",
+        model="gpt-6-luna",
         input_tokens=1000,
         cached_input_tokens=10,
         output_tokens=100,
@@ -1255,7 +1282,7 @@ async def test_restore_preserves_remote_measured_usage_and_only_marks_unmatched_
     journal.append(request, "usage", measured)
     if checkpoint == "measured":
         Checkpoints(blobs).save(journal, "session-1")
-    journal.append(request, "model_request_started", {"request_id": "B", "model": "test"})
+    journal.append(request, "model_request_started", {"request_id": "B", "model": "gpt-6-luna"})
     checkpoints = Checkpoints(blobs)
     checkpoints.upload_write_ahead(
         "session-1", request.turn_id, checkpoints.write_ahead(journal, request)
@@ -1455,9 +1482,10 @@ async def test_shutdown_flushes_delayed_upload_before_closing_shared_captured_id
     supervisor.journal.append(request, "turn_ended", {"outcome": "completed"})
     supervisor.schedule_checkpoint(request.session_id)
     await supervisor.close()
-    assert issued == [("https://storage.azure.com/.default",)]
+    assert issued == [("https://storage.azure.com/.default",)] * 2
     assert identity.closed
-    assert len(blobs.uploads) == 1 and blobs.uploads[0].endswith(".tar.zst")
+    assert len(blobs.uploads) == 2
+    assert "/reservations/" in blobs.uploads[0] and blobs.uploads[1].endswith(".tar.zst")
     assert not (tmp_path / ".daimon/checkpoint.pending").exists()
 
 
@@ -1471,12 +1499,12 @@ async def test_surviving_real_driver_recovers_wal_usage_once_after_sandbox_loss(
 
         async def run(self, context, history):
             self.calls += 1
-            await context.emit("model_request_started", {"request_id": "A", "model": "test"})
+            await context.emit("model_request_started", {"request_id": "A", "model": "gpt-6-luna"})
             await context.emit(
                 "usage",
                 dict(
                     request_id="A",
-                    model="test",
+                    model="gpt-6-luna",
                     input_tokens=1000,
                     cached_input_tokens=0,
                     output_tokens=100,
@@ -1485,7 +1513,7 @@ async def test_surviving_real_driver_recovers_wal_usage_once_after_sandbox_loss(
             )
             ready_a.set()
             await allow_b.wait()
-            await context.emit("model_request_started", {"request_id": "B", "model": "test"})
+            await context.emit("model_request_started", {"request_id": "B", "model": "gpt-6-luna"})
             ready_b.set()
             await asyncio.Event().wait()
 

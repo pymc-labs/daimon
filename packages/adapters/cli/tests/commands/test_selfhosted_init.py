@@ -331,3 +331,12 @@ def test_main_expected_initialization_failures_are_friendly(monkeypatch, capsys,
     assert "Initialization refused" in output.err or "Initialization failed" in output.err
     assert "Traceback" not in output.err
     assert "DbPasswordMarker927" not in output.err
+
+
+def test_production_model_default_is_sol_without_calling_a_model():
+    import inspect
+
+    assert (
+        inspect.signature(selfhosted.selfhosted_init_command).parameters["model"].default
+        == "gpt-6.1-sol"
+    )

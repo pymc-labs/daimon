@@ -29,6 +29,7 @@ from mux.drivers.selfhosted.wire import (
     URLSkill,
 )
 from pydantic import JsonValue, ValidationError
+from starlette.requests import Request
 
 from .auth import Authenticator
 from .checkpoints import Checkpoints, Snapshot, configured_checkpoints, sync_directory
@@ -81,6 +82,7 @@ class Supervisor:
         self.checkpoint_warned = False
         self.storage_worker = StorageWorker("harness-storage")
         self.wal_worker = StorageWorker("harness-wal")
+        self.reservation_worker = StorageWorker("harness-reservations")
         self.checkpoint_task: asyncio.Task[None] | None = None
         self.checkpoint_dirty: str | None = None
         self.pending_snapshot: Snapshot | None = None
@@ -94,6 +96,7 @@ class Supervisor:
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="harness-journal")
         self.submissions = asyncio.Lock()
         self.journal = Journal(home)
+        self.attach_durability()
         pending = self.journal.root / "checkpoint.pending"
         if pending.exists():
             if checkpoints is None:
@@ -106,6 +109,7 @@ class Supervisor:
             except BaseException:
                 self.journal.close()
                 self.wal_worker.shutdown(wait=False)
+                self.reservation_worker.shutdown(wait=False)
                 self.storage_worker.shutdown(wait=True)
                 self.worker.shutdown(wait=True)
                 raise
@@ -119,6 +123,27 @@ class Supervisor:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.contexts: dict[str, TurnContext] = {}
         self.changed = asyncio.Event()
+
+    def attach_durability(self) -> None:
+        if self.checkpoints is not None:
+            self.journal.reserve = self.reserve_sequences
+            self.journal.commit_inventory = self.commit_inventory
+
+    def reserve_sequences(self, session_id: str, high_water: int) -> None:
+        assert self.checkpoints is not None
+        self.reservation_worker.submit(
+            self.checkpoints.reserve_sequences, session_id, high_water
+        ).result(timeout=15)
+
+    def commit_inventory(self, request: TurnRequest) -> None:
+        assert self.checkpoints is not None
+        record = self.checkpoints.write_ahead(self.journal, request)
+        try:
+            self.wal_worker.submit(
+                self.checkpoints.upload_write_ahead, request.session_id, request.turn_id, record
+            ).result(timeout=15)
+        except Exception:
+            raise HarnessError("durability_unavailable", "Usage inventory is unavailable") from None
 
     async def io(self, operation: Callable[..., T], *args: object) -> T:
         # One worker owns all SQLite operations, including ordered event commits.
@@ -233,9 +258,12 @@ class Supervisor:
         if self.session_mode == "single":
             self.journal.bind_session(session_id)
         after_seq = self.journal.record_cursor(session_id, after_seq)
+        self.journal.flush_inventory(session_id)
         if self.checkpoints is not None and not self.restored:
             try:
                 self.journal = self.checkpoints.restore(self.journal, session_id, after_seq)
+                self.attach_durability()
+                self.journal.flush_inventory(session_id)
                 self.journal.bind_session(session_id)
                 cursor_file = self.journal.root / "restore.cursor"
                 if cursor_file.exists():
@@ -252,8 +280,16 @@ class Supervisor:
                 )
                 self.journal.close()
                 self.journal = Journal(self.home)
+                self.attach_durability()
+                self.journal.record_cursor(session_id, after_seq)
+                if isinstance(exc, HarnessError):
+                    raise exc
                 raise HTTPException(status_code=503, detail="Session restore unavailable") from None
             self.restored = True
+        if any(
+            task.done() and not self.journal.ended(turn_id) for turn_id, task in self.tasks.items()
+        ):
+            self.recover()
         self.journal.announce_gap(session_id)
 
     async def ensure_session(self, session_id: str, after_seq: int = 0) -> None:
@@ -345,8 +381,6 @@ class Supervisor:
                 kind,
                 cast(dict[str, JsonValue], redact(data, credentials)),
             )
-            if kind == "model_request_started":
-                await self.write_ahead(request)
             if kind == "turn_ended":
                 self.schedule_checkpoint(request.session_id, snapshot)
             self.changed.set()
@@ -405,7 +439,12 @@ class Supervisor:
                 failure = {"kind": kind, "message": str(exc)}
             if failure is None:
                 await emit(
-                    "error", {"kind": kind, "message": "Harness turn failed", "retryable": False}
+                    "error",
+                    {
+                        "kind": kind,
+                        "message": "Harness turn failed",
+                        "retryable": kind == "durability_unavailable",
+                    },
                 )
         finally:
 
@@ -440,12 +479,17 @@ class Supervisor:
                     self.changed.set()
 
             finalization = asyncio.create_task(finalize())
-            while not finalization.done():
-                try:
-                    await asyncio.shield(finalization)
-                except asyncio.CancelledError:
-                    outcome = "interrupted"
-            await finalization
+            try:
+                while not finalization.done():
+                    try:
+                        await asyncio.shield(finalization)
+                    except asyncio.CancelledError:
+                        outcome = "interrupted"
+                await finalization
+            finally:
+                credentials.clear()
+                self.contexts.pop(request.turn_id, None)
+                self.changed.set()
 
     async def submit(
         self, request: TurnRequest, mcp_authorization: str | None = None, after_seq: int = 0
@@ -505,7 +549,7 @@ class Supervisor:
         try:
             async with asyncio.timeout(CHECKPOINT_SHUTDOWN_TIMEOUT):
                 await self.flush_checkpoints()
-                if not self.wal_worker.busy:
+                if not self.wal_worker.busy and not self.reservation_worker.busy:
                     closing = asyncio.get_running_loop().run_in_executor(
                         self.storage_worker, close_resources
                     )
@@ -521,6 +565,7 @@ class Supervisor:
             self.pending_snapshot = None
         await self.io(self.journal.close)
         self.wal_worker.shutdown(wait=False, cancel_futures=True)
+        self.reservation_worker.shutdown(wait=False, cancel_futures=True)
         self.storage_worker.shutdown(wait=False, cancel_futures=True)
         self.worker.shutdown(wait=True)
 
@@ -528,7 +573,7 @@ class Supervisor:
             # Keep redaction active while an abandoned SDK call can still log.
             # Cleanup is also daemonized: closing a broken network client must
             # not become a second unbounded shutdown wait.
-            for worker in (self.storage_worker, self.wal_worker):
+            for worker in (self.storage_worker, self.wal_worker, self.reservation_worker):
                 if worker.active is not None:
                     with suppress(BaseException):
                         worker.active.result()
@@ -684,6 +729,15 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    async def durability_error(_request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, HarnessError)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"kind": exc.kind, "message": str(exc), "retryable": True}},
+        )
+
+    app.add_exception_handler(HarnessError, durability_error)
 
     async def restore_for_turn(turn_id: str, session_id: str | None, after_seq: int) -> None:
         if supervisor.checkpoints is not None and session_id is None:

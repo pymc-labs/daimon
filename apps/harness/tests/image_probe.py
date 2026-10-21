@@ -48,7 +48,7 @@ async def checkpoint_probe(home: Path) -> None:
         session_id="probe",
         turn_id="probe",
         idempotency_key="probe",
-        model="test",
+        model="gpt-6-luna",
         instructions="",
         input=[],
         mcp_servers=[],

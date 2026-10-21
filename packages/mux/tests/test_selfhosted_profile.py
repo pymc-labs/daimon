@@ -44,7 +44,7 @@ def test_selfhosted_refuses_profiles_without_usage() -> None:
     config = ConfigRevision.create(
         ChannelRef(tenant_id="tenant", platform="test", channel_id="channel"),
         1,
-        backend_selection("selfhosted"),
+        backend_selection("selfhosted").model_copy(update={"model": "gpt-6-luna"}),
     )
     with pytest.raises(UnsupportedCapability, match="usage_observations"):
         admit(

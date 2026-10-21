@@ -1310,3 +1310,7 @@ The harness records a durable maximum of authenticated `after_seq` cursors for
 the session. This ratchet governs every append, including after an earlier poll
 has already restored the sandbox; any sequence jump emits a covering history
 gap. Lower cursors cannot lower it, and `replay_after_seq` remains read-only.
+
+Selfhosted production profile defaults to `gpt-6.1-sol`. All harness tests,
+interop and live test deployments use `gpt-6-luna`; production defaults are
+asserted as strings only and are never sent to a model in tests.

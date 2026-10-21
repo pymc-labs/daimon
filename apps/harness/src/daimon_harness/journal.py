@@ -6,15 +6,18 @@ import hashlib
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 from mux.drivers.selfhosted.wire import Event, EventType, TurnRequest
 from pydantic import JsonValue
 
+from .errors import HarnessError
 from .isolation import TOOL_UID_MAX
 
 MAX_CURSOR = 2**53
+BLOCK = 1024
 
 
 def identifier(value: str) -> str:
@@ -41,6 +44,8 @@ class Journal:
         self.root.chmod(0o700)
         self.db = connect(self.root / "turns.sqlite3")
         self.connections: dict[str, sqlite3.Connection] = {}
+        self.reserve: Callable[[str, int], None] | None = None
+        self.commit_inventory: Callable[[TurnRequest], None] | None = None
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS turns (turn_id TEXT PRIMARY KEY, "
             "session_id TEXT NOT NULL, key TEXT UNIQUE NOT NULL, request TEXT NOT NULL, "
@@ -148,6 +153,10 @@ class Journal:
                 "CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT)"
             )
             self.sequence_state(db)
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS pending_inventory "
+                "(turn_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)"
+            )
             db.commit()
             self.connections[session_id] = db
         return self.connections[session_id]
@@ -217,6 +226,7 @@ class Journal:
 
     def append(self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]) -> Event:
         db = self.connection(request.session_id)
+        self.reserve_append(request.session_id)
         with db:
             if (
                 kind in {"tool_use", "tool_result", "requires_action"}
@@ -248,20 +258,44 @@ class Journal:
                     {"role": "user", "content": "Interrupted-turn tool record: " + json.dumps(data)}
                 )
                 db.execute("INSERT OR REPLACE INTO history VALUES (1, ?)", (json.dumps(history),))
+            if self.commit_inventory is not None and (
+                kind in {"model_request_started", "usage"}
+                or (kind == "error" and data.get("kind") == "usage_unavailable")
+            ):
+                # Remote outcome commits before this transaction can become visible.
+                try:
+                    self.commit_inventory(request)
+                except Exception:
+                    # Keep the immutable event locally, but withhold it from
+                    # replay until its remote inventory commit is confirmed.
+                    db.execute(
+                        "INSERT OR REPLACE INTO pending_inventory VALUES (?, ?)",
+                        (request.turn_id, seq),
+                    )
+                    db.commit()
+                    raise
         if kind == "turn_ended":
             with self.db:
                 self.db.execute("UPDATE turns SET ended=1 WHERE turn_id=?", (request.turn_id,))
         return event
 
-    def events(self, session_id: str, after: int = 0) -> list[Event]:
+    def events(
+        self, session_id: str, after: int = 0, *, include_pending: bool = False
+    ) -> list[Event]:
         identifier(session_id)
         if not (self.root / "sessions" / session_id / "journal.sqlite3").exists():
             return []
-        rows = (
-            self.connection(session_id)
-            .execute("SELECT body FROM events WHERE seq>? ORDER BY seq", (after,))
-            .fetchall()
+        db = self.connection(session_id)
+        upper = (
+            2**63 - 1
+            if include_pending
+            else db.execute(
+                "SELECT COALESCE(MIN(seq), 9223372036854775807) FROM pending_inventory"
+            ).fetchone()[0]
         )
+        rows = db.execute(
+            "SELECT body FROM events WHERE seq>? AND seq<? ORDER BY seq", (after, upper)
+        ).fetchall()
         return [Event.model_validate_json(row[0]) for row in rows]
 
     def ended(self, turn_id: str) -> bool:
@@ -301,6 +335,13 @@ class Journal:
             db.execute(
                 "ALTER TABLE event_sequence ADD COLUMN max_client_cursor INTEGER NOT NULL DEFAULT 0"
             )
+        columns = {row[1] for row in db.execute("PRAGMA table_info(event_sequence)")}
+        for name, definition in (
+            ("reserved_high_water", "INTEGER NOT NULL DEFAULT 0"),
+            ("gap_from", "INTEGER"),
+        ):
+            if name not in columns:
+                db.execute(f"ALTER TABLE event_sequence ADD COLUMN {name} {definition}")
         db.execute("INSERT OR IGNORE INTO event_sequence(id, floor) VALUES (1, 0)")
 
     @staticmethod
@@ -309,6 +350,12 @@ class Journal:
             raise ValueError("invalid client cursor")
         with db:
             Journal.sequence_state(db)
+            local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
+            if reserved >= local_next:
+                db.execute(
+                    "UPDATE event_sequence SET gap_from=MIN(COALESCE(gap_from, ?), ?) WHERE id=1",
+                    (local_next, local_next),
+                )
             db.execute(
                 "UPDATE event_sequence SET max_client_cursor=MAX(max_client_cursor, ?), "
                 "floor=MAX(floor, ?) WHERE id=1",
@@ -316,11 +363,58 @@ class Journal:
             )
 
     def client_cursor(self, session_id: str) -> int:
+        db = self.connection(session_id)
+        row = db.execute("SELECT max_client_cursor FROM event_sequence WHERE id=1").fetchone()
+        if row is None:
+            # A failed restore/rolled-back schema transaction can leave an open
+            # cached connection without the singleton. Repair it durably.
+            with db:
+                self.sequence_state(db)
+            row = db.execute("SELECT max_client_cursor FROM event_sequence WHERE id=1").fetchone()
+        return row[0]
+
+    def reserved_high_water(self, session_id: str) -> int:
         return (
             self.connection(session_id)
-            .execute("SELECT max_client_cursor FROM event_sequence WHERE id=1")
+            .execute("SELECT reserved_high_water FROM event_sequence WHERE id=1")
             .fetchone()[0]
         )
+
+    def flush_inventory(self, session_id: str) -> None:
+        if self.commit_inventory is None:
+            return
+        db = self.connection(session_id)
+        for (turn_id,) in db.execute(
+            "SELECT turn_id FROM pending_inventory ORDER BY seq"
+        ).fetchall():
+            request = self.find(turn_id)
+            if request is None:
+                raise HarnessError("durability_unavailable", "Pending inventory has no turn claim")
+            self.commit_inventory(request)
+            with db:
+                db.execute("DELETE FROM pending_inventory WHERE turn_id=?", (turn_id,))
+
+    def reserve_append(self, session_id: str) -> None:
+        self.flush_inventory(session_id)
+        if self.reserve is None:
+            return
+        db = self.connection(session_id)
+        next_seq = self._next_seq(db)
+        local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
+        # A gap itself consumes a sequence before the requested event.
+        needed = next_seq + int(next_seq > local_next)
+        if needed > self.reserved_high_water(session_id):
+            high_water = next_seq + BLOCK - 1
+            try:
+                self.reserve(session_id, high_water)
+            except Exception:
+                raise HarnessError(
+                    "durability_unavailable", "Sequence reservation is unavailable"
+                ) from None
+            with db:
+                db.execute(
+                    "UPDATE event_sequence SET reserved_high_water=? WHERE id=1", (high_water,)
+                )
 
     def record_cursor(self, session_id: str, cursor: int) -> int:
         # FULL SQLite commit precedes restore, recovery or request side effects.
@@ -341,6 +435,9 @@ class Journal:
     @staticmethod
     def _announce_gap(db: sqlite3.Connection, session_id: str, turn_id: str) -> None:
         local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
+        gap_from = db.execute("SELECT gap_from FROM event_sequence WHERE id=1").fetchone()[0]
+        if gap_from is not None:
+            local_next = min(local_next, gap_from)
         seq = Journal._next_seq(db)
         if seq > local_next:
             event = Event(
@@ -359,12 +456,19 @@ class Journal:
                 "INSERT INTO events(seq, body, turn_id, type) VALUES (?, ?, ?, ?)",
                 (seq, event.model_dump_json(), turn_id, event.type),
             )
+            db.execute("UPDATE event_sequence SET gap_from=NULL WHERE id=1")
 
     def announce_gap(self, session_id: str) -> None:
         requests = self.turns(session_id)
         # A cursor is a valid fence even before this process knows any turn.
         turn_id = requests[-1].turn_id if requests else "session"
-        with self.connection(session_id) as db:
+        db = self.connection(session_id)
+        if (
+            self._next_seq(db)
+            > db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM events").fetchone()[0]
+        ):
+            self.reserve_append(session_id)
+        with db:
             self._announce_gap(db, session_id, turn_id)
 
     def save_history(self, session_id: str, history: list[JsonValue]) -> None:

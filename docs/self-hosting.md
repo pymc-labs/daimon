@@ -40,6 +40,7 @@ with a new active record.
 daimon selfhosted init \
   --tenant-id <tenant-uuid> \
   --harness-url https://harness.example \
+  --model gpt-6-luna \
   --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY
 ```
 
