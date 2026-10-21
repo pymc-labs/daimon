@@ -1248,6 +1248,10 @@ by source or reserved id when imported refs omit source. Explicit custom refs
 with reserved names remain custom skills. Hosts can skip native
 bundles on other backends without duplicating provider policy.
 
+Host retained-backend resolution reads the legacy provider from
+`mux.profiles.MANAGED_AGENTS.provider` and the unconfigured-channel default from
+`mux.contracts.config.DEFAULT_BACKEND`.
+
 `apps/harness` is a standalone consumer of `daimon-mux` for the shared self-hosted
 wire models. It does not import Daimon core or adapters. It implements the C3 HTTP
 service, Azure Responses model loop, durable request inventory and per-session
