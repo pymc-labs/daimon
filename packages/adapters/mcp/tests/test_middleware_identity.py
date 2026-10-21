@@ -1392,17 +1392,16 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
         return None
 
     mcp = FastMCP(name="selfhosted-guard-test")
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=subject,
-            tenant_resolver=tenant_resolver,
-            role_resolver=role,
-            agent_id_resolver=no_agent,
-            is_admin_resolver=_fixture_is_admin_resolver_false,
-            internal_resolver=_fixture_internal_resolver_false,
-            sessionmaker=sessionmaker,
-        )
+    middleware = IdentityMiddleware(
+        subject_resolver=subject,
+        tenant_resolver=tenant_resolver,
+        role_resolver=role,
+        agent_id_resolver=no_agent,
+        is_admin_resolver=_fixture_is_admin_resolver_false,
+        internal_resolver=_fixture_internal_resolver_false,
+        sessionmaker=sessionmaker,
     )
+    mcp.add_middleware(middleware)
 
     @mcp.tool
     async def legacy_resource() -> str:  # pyright: ignore[reportUnusedFunction]
@@ -1479,4 +1478,5 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
             await client.call_tool("provider_probe", {})
         token.claims["anthropic_disabled"] = False
         assert (await client.call_tool("provider_probe", {})).data == "allowed"
+    await middleware.drain_audit()
     require_anthropic_allowed()  # A completed request must restore its caller's context.

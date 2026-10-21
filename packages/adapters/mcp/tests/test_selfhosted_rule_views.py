@@ -163,17 +163,16 @@ async def test_real_neutral_tools_resolve_local_isolation(
         return "false"
 
     mcp = FastMCP(name="neutral-local-reads")
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=subject,
-            tenant_resolver=tenant_resolver,
-            role_resolver=role,
-            agent_id_resolver=no_agent,
-            is_admin_resolver=yes,
-            internal_resolver=no,
-            sessionmaker=sessionmaker,
-        )
+    middleware = IdentityMiddleware(
+        subject_resolver=subject,
+        tenant_resolver=tenant_resolver,
+        role_resolver=role,
+        agent_id_resolver=no_agent,
+        is_admin_resolver=yes,
+        internal_resolver=no,
+        sessionmaker=sessionmaker,
     )
+    mcp.add_middleware(middleware)
     register_timer_tools(mcp, runtime)
     register_here_tools(mcp, runtime)
     register_tenant_summary_tools(mcp, runtime)
@@ -200,6 +199,7 @@ async def test_real_neutral_tools_resolve_local_isolation(
             ):
                 with pytest.raises(ToolError, match="agent could not be found"):
                     await client.call_tool(tool, args)
+            await middleware.drain_audit()
             return
         timers = await client.call_tool("list_timers", {})
         assert [timer.agent_name for timer in timers.data] == ["local"]
@@ -213,3 +213,4 @@ async def test_real_neutral_tools_resolve_local_isolation(
         channels = {row.channel_id: row for row in summary.data.channels}
         assert channels["C_HOME"].agent_name == "local"
         assert channels["C_SECRET"].agent_name is None
+    await middleware.drain_audit()
