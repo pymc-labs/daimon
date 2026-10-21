@@ -36,6 +36,21 @@ def without_anthropic() -> Iterator[None]:
 
 
 @asynccontextmanager
+async def independent_wake_provider_context() -> AsyncIterator[None]:
+    """Start a host-owned queued wake outside the draining turn's provider context.
+
+    The dispatcher must immediately resolve the wake's own backend guard.
+    Ordinary nested work and MCP calls must keep inheriting their prohibition.
+    This changes only provider context, never the caller's thread lock.
+    """
+    token = _disabled.set(False)
+    try:
+        yield
+    finally:
+        _disabled.reset(token)
+
+
+@asynccontextmanager
 async def guard_selfhosted_channel(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,

@@ -17,7 +17,11 @@ from datetime import UTC, datetime
 import anthropic as anthropic_pkg
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.anthropic_guard import (
+    AnthropicDisabled,
+    guard_selfhosted_channel,
+    independent_wake_provider_context,
+)
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationRequest,
@@ -122,7 +126,9 @@ async def dispatch_pending_continuations(
     `admission_denied:<reason>`; a busy thread releases the row (claim
     refunded) for the next turn tail or, for a wake, a later poll; a
     `DaimonError`, `anthropic.APIError` or one of `dispatch_errors` settles
-    `dispatch_failed`.
+    `dispatch_failed`. Provider guard denials release the claim for retry;
+    they never mean that a target is missing. Each wake resolves its own guard
+    outside the originating turn's provider context, under the same thread lock.
 
     Adapter ports preserve their history/active-turn read order and may-post
     checks. Discord runs the full decision; Slack and Teams run its seed.
@@ -169,14 +175,17 @@ async def dispatch_pending_continuations(
         now=now(),
     )
     for row in rows:
-        async with guard_selfhosted_channel(
-            sessionmaker,
-            tenant_id=row.tenant_id,
-            platform=platform,
-            channel_id=row.parent_channel_id,
-            thread_id=row.thread_id,
-            caller_id=row.requester_external_user_id,
-            force=row.target_ma_agent_id.startswith("sh_agent_"),
+        async with (
+            independent_wake_provider_context(),
+            guard_selfhosted_channel(
+                sessionmaker,
+                tenant_id=row.tenant_id,
+                platform=platform,
+                channel_id=row.parent_channel_id,
+                thread_id=row.thread_id,
+                caller_id=row.requester_external_user_id,
+                force=row.target_ma_agent_id.startswith("sh_agent_"),
+            ),
         ):
             claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())
             if claim is None:
@@ -226,21 +235,25 @@ async def dispatch_pending_continuations(
                     else:
                         latest, active_turn = await decision_context(row)
                         decision_now = now()
+                if decision is None:
+                    assert decision_now is not None
+                    decision = await decide_continuation(
+                        sessionmaker,
+                        anthropic,
+                        request=request,
+                        now=decision_now,
+                        latest_user_message_at=latest,
+                        active_turn=active_turn,
+                    )
+            except AnthropicDisabled:
+                log.warning("continuation.provider_guard_denied", row_id=str(row.id))
+                await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+                continue
             except ContinuationContextUnavailable as exc:
                 # An incomplete history must never authorize a stale handoff.
                 log.warning("continuation.context_unavailable", row_id=str(row.id), reason=str(exc))
                 await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
                 continue
-            if decision is None:
-                assert decision_now is not None
-                decision = await decide_continuation(
-                    sessionmaker,
-                    anthropic,
-                    request=request,
-                    now=decision_now,
-                    latest_user_message_at=latest,
-                    active_turn=active_turn,
-                )
             if decision.action == "skip_turn_running" and row.available_at is not None:
                 # A wake has nobody waiting to be told; it runs after the turn in progress.
                 await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
@@ -276,6 +289,9 @@ async def dispatch_pending_continuations(
                 else:
                     assert run_follow_up is not None and seed is not None
                     await run_follow_up(row, seed)
+            except AnthropicDisabled:
+                log.warning("continuation.provider_guard_denied", row_id=str(row.id))
+                await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
             except SessionPreparationFailed:
                 await _settle(sessionmaker, claim, "blocked_preparation_failed", now)
             except ResponderChanged as exc:

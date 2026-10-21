@@ -471,12 +471,9 @@ async def decide_continuation(
                 anthropic, tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
             )
         except AnthropicDisabled:
-            return ContinuationDecision(
-                action="blocked_preparation_failed",
-                message="This follow-up requires Anthropic, which is disabled "
-                "for this conversation. "
-                "Send a message in this conversation to continue.",
-            )
+            # A provider prohibition says nothing about whether the target exists.
+            # The dispatcher releases this claim instead of discarding the work.
+            raise
         except DaimonError:
             # `get_setup_agent` already distinguishes "gone" from "not yours" and
             # raises for both; either way this continuation has no destination.

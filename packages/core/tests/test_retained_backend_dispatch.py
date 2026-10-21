@@ -8,7 +8,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.anthropic_guard import AnthropicDisabled, anthropic_disabled, without_anthropic
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.continuity.continuation import ContinuationRequest, decide_continuation
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
@@ -182,15 +182,15 @@ async def test_handover_and_timer_use_retained_backend_after_channel_switch(
             assert len(seeds) == 1 and "Check build" in seeds[0]
             assert len(requests) == 2, "handover and timer both resolve the retained provider"
         else:
-            assert after.status == "skipped"
-            assert after.skip_reason == "blocked_preparation_failed"
+            assert after.status == "pending"
+            assert after.skip_reason is None
+            assert after.attempts == 0 and after.started_at is None
+            assert after.lease_owner is None
             assert not seeds and not requests
         # A guard refusal is never evidence that a destination was deleted.
         if retained == "selfhosted":
-            from daimon.core.anthropic_guard import without_anthropic
-
-            with without_anthropic():
-                decision = await decide_continuation(
+            with without_anthropic(), pytest.raises(AnthropicDisabled):
+                await decide_continuation(
                     db_session_factory,
                     client,
                     request=request,
@@ -198,7 +198,6 @@ async def test_handover_and_timer_use_retained_backend_after_channel_switch(
                     latest_user_message_at=None,
                     active_turn=False,
                 )
-            assert decision.action == "blocked_preparation_failed"
     finally:
         if retained == "anthropic":
             await client.close()

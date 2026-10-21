@@ -49,7 +49,11 @@ authorization resolves their execution identity from tenant-scoped local agent
 records, including agent rules. Isolation views, timer lists, current-place cards
 and tenant summaries use the same live local records and retain channel
 visibility boundaries. Cosmetic Slack identity lookup is skipped.
-Adapter turns and continuation dispatch inherit the same Anthropic prohibition.
+Adapter turns and their child tasks inherit the same Anthropic prohibition.
+Queued continuations retain the thread concurrency lock but start a fresh provider
+context for each wake, then apply the requesting caller's own retained-backend
+guard. Draining another caller's timer never transfers the originating turn's
+provider prohibition. A guard denial defers the queued work for retry.
 Organic participation, adapter turns, handovers and continuation guards use one
 effective backend resolver with the thread and caller identity. It checks the
 retained backend binding before the channel's current selection. A retained self-hosted thread

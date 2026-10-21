@@ -59,8 +59,9 @@ run its scheduled prompts through Anthropic.
 
 Timers and task continuations retain their thread's backend after a channel
 backend change, including Anthropic timers in channels switched to self-hosted.
-A follow-up that requires a prohibited provider reports a preparation block,
-not a missing target.
+Each queued wake resolves its own provider guard, even when another caller's
+turn drains the queue. A provider guard denial releases the claim for retry and
+never discards the timer or counts as a failed attempt.
 
 Timers and task continuations in a self-hosted conversation resolve their
 target from tenant-scoped local records. They run through the conversation
