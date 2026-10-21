@@ -1282,3 +1282,107 @@ async def test_send_message_into_a_protected_channel_is_refused_and_posts_nothin
             channel_id=target_id,
             content="internal notes",
         )
+
+
+@pytest.mark.parametrize("provider_guard", ["token", "context"])
+@pytest.mark.parametrize("actor_state", ["active", "archived", "foreign"])
+async def test_selfhosted_send_uses_local_persona_without_anthropic(
+    monkeypatch, db_session, db_session_factory, provider_guard, actor_state
+):
+    import time
+    from contextlib import nullcontext
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools.discord import _post_transport
+    from daimon.core.anthropic_guard import without_anthropic
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.stores.agent_avatars import generate_default_png, replace_avatar
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+    from daimon.testing.factories import make_account
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec
+    from pydantic import HttpUrl
+
+    tenant = await make_tenant(db_session)
+    owner = await make_tenant(db_session) if actor_state == "foreign" else tenant
+    creator = await make_account(db_session, tenant=owner)
+    avatar = await replace_avatar(
+        db_session,
+        tenant_id=owner.id,
+        agent_name="Local Researcher",
+        png=generate_default_png("Local Researcher"),
+        source="upload",
+    )
+    await db_session.commit()
+    scope = resource_scope(tenant_id=str(owner.id), account_id=str(creator.id))
+    agents = SelfHostedAgents(db_session_factory)
+    agent = await agents.create(
+        scope,
+        AgentSpec(name="Local Researcher", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
+        key="local-persona",
+    )
+    if actor_state == "archived":
+        await agents.archive(scope, agent.ref, key="archive-persona")
+    actor_id = derive_agent_uuid(tenant_id=owner.id, ma_agent_id=agent.ref.id)
+    auth = replace(
+        _auth(),
+        tenant_id=tenant.id,
+        chat_agent_id=actor_id,
+        anthropic_disabled=provider_guard == "token",
+    )
+    # Selfhosted records, including missing/archived ones, must bypass stale remote names.
+    monkeypatch.setitem(
+        _send_mod._actor_names, (tenant.id, actor_id), ("stale name", time.monotonic() + 600)
+    )
+    forbidden_lookup = AsyncMock(side_effect=AssertionError("Anthropic lookup attempted"))
+    monkeypatch.setattr(_send_mod, "find_agent_by_derived_uuid_cached", forbidden_lookup)
+    runtime = _runtime_with_discord_token(session_factory=db_session_factory)
+    runtime.settings.agent_identity.enabled = True
+    runtime.settings.mcp.public_url = HttpUrl("https://daimon.example/mcp")
+    webhook_posts = []
+    bot_posts = []
+
+    async def own_webhook(client, channel, *, create):
+        async def send(**kwargs):
+            webhook_posts.append(kwargs)
+            return discord.Message(
+                state=client._connection,
+                channel=channel,
+                data=_message_payload(message_id="9001", content=kwargs["content"]),
+            )
+
+        return SimpleNamespace(send=send)
+
+    monkeypatch.setattr(_post_transport, "own_webhook", own_webhook)
+
+    async def handler(route, kwargs):
+        if route.path == "/guilds/{guild_id}":
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            return _member_payload()
+        if route.path == "/channels/{channel_id}":
+            return _text_channel_payload()
+        if route.method == "POST" and route.path == "/channels/{channel_id}/messages":
+            bot_posts.append(kwargs["json"]["content"])
+            return _message_payload(message_id="9001", content=kwargs["json"]["content"])
+        raise AssertionError(f"unexpected route {route.method} {route.path}")
+
+    patch_discord_http(monkeypatch, handler)
+    with without_anthropic() if provider_guard == "context" else nullcontext():
+        row = await _send_message_impl(runtime, auth, channel_id="222", content="posted")
+    assert row.content == "posted"
+    forbidden_lookup.assert_not_awaited()
+    if actor_state == "active":
+        assert len(webhook_posts) == 1
+        assert webhook_posts[0]["username"] == "Local Researcher"
+        assert webhook_posts[0]["avatar_url"] == (
+            f"https://daimon.example/avatars/{avatar.token}/{avatar.sha256[:12]}.png"
+        )
+        assert bot_posts == []
+    else:
+        assert webhook_posts == []
+        assert bot_posts == ["posted"]

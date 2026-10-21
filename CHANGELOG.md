@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
 
+- Discord MCP posts from self-hosted agents use their local name and avatar when agent identity is enabled, without an Anthropic lookup.
+
 - Scheduled routines refuse thread destinations with an unknown parent channel and check retained thread backends before resolving Anthropic agents.
 
 - Preserve each thread's retained backend when checking organic participation, handovers, timers and provider access after a channel backend change. Valid Anthropic timers keep firing after a channel switches to self-hosted; each queued wake resolves its own provider context, and provider guard denials defer work for retry. Discord, Slack and Teams `here` commands use local self-hosted agent records.
