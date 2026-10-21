@@ -210,6 +210,9 @@ Both Bicep entrypoints accept `modelName` (default `gpt-6.1-sol`),
 `modelDeploymentName` (defaults to `modelName`),
 `modelSku` (`DataZoneStandard`) and `modelCapacity` (1 quota unit).
 `AZURE_OPENAI_DEPLOYMENT` follows `modelDeploymentName`, including custom aliases.
+Known model names are reserved: a deployment named `gpt-6-luna` must serve
+Luna, and one named `gpt-6.1-sol` must serve Sol. Both entrypoints reject
+misleading aliases before passing them to the AI module.
 These replace the earlier `gpt5*` parameter names; update local parameter files.
 
 As verified against Microsoft's availability table on 2026-10-21,

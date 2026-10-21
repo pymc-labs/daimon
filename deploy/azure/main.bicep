@@ -1,4 +1,4 @@
-import { defaultModelVersion } from './models.bicep'
+import { defaultModelVersion, validateModelDeploymentName } from './models.bicep'
 import { validateNamePrefix } from './names.bicep'
 import { validateChartStorage, chartArtifactsEnvironment } from './chart-storage.bicep'
 
@@ -54,6 +54,7 @@ param serviceSecretNames object = {}
 @description('Optional additional Postgres firewall ranges: [{name, startIpAddress, endIpAddress}]. Azure-service access is enabled for ACA.')
 param postgresFirewallRules array = []
 
+var checkedModelDeploymentName = validateModelDeploymentName(modelName, modelDeploymentName)
 var checkedNamePrefix = validateNamePrefix(namePrefix)
 var checkedChartStorage = validateChartStorage(chartStorage, secretNames, serviceSecretNames.?mcp ?? {})
 var suffix = uniqueString(resourceGroup().id)
@@ -92,7 +93,7 @@ module ai './modules/ai.bicep' = if (deployAi) {
     tags: tags
     runtimePrincipalId: foundation.outputs.identityPrincipalId
     modelName: modelName
-    modelDeploymentName: modelDeploymentName
+    modelDeploymentName: checkedModelDeploymentName
     modelCapacity: modelCapacity
     modelSku: modelSku
     modelVersion: modelVersion
@@ -222,7 +223,7 @@ output daimonSecretNames object = commonSecrets
 output harnessEnvironment object = {
   AZURE_CLIENT_ID: foundation.outputs.identityClientId
   AZURE_OPENAI_ENDPOINT: deployAi ? ai!.outputs.openaiEndpoint : ''
-  AZURE_OPENAI_DEPLOYMENT: deployAi ? modelDeploymentName : ''
+  AZURE_OPENAI_DEPLOYMENT: deployAi ? checkedModelDeploymentName : ''
   AZURE_OPENAI_API_VERSION: deployAi ? '2025-04-01-preview' : ''
   AZURE_AI_PROJECT_ENDPOINT: deployAi ? ai!.outputs.projectEndpoint : ''
 }

@@ -264,7 +264,9 @@ and either `AZURE_OPENAI_API_KEY` or `AZURE_CLIENT_ID` are set; it uses
 `AZURE_OPENAI_DEPLOYMENT` (test default `gpt-6-luna`) and incurs model usage.
 The live test refuses any deployment other than `gpt-6-luna` (C12). It also
 checks the Responses model echo before the SDK continues, accepting Luna or
-a dated Luna version and aborting on another model. The echo check happens
+a dated Luna version and aborting on another model with the distinct,
+non-retryable `c12_model_mismatch` probe error. SDK retries are disabled.
+The echo check happens
 after the first request: never alias another model as `gpt-6-luna`.
 For cheap smoke tests, deploy `gpt-6-luna` version `2026-09-22` and set
 `AZURE_OPENAI_DEPLOYMENT=gpt-6-luna`. The harness uses each request's model

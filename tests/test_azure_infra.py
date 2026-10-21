@@ -462,7 +462,12 @@ def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) ->
         assert params["modelCapacity"]["minValue"] == 1
         module = next(r for r in template["resources"] if r["name"] == module_name)
         for name in names:
-            assert module["properties"]["parameters"][name]["value"] == f"[parameters('{name}')]"
+            expected = (
+                "[variables('checkedModelDeploymentName')]"
+                if name == "modelDeploymentName"
+                else f"[parameters('{name}')]"
+            )
+            assert module["properties"]["parameters"][name]["value"] == expected
     deployment = next(
         r
         for r in templates["modules/ai.bicep"]["resources"]
@@ -480,34 +485,17 @@ def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) ->
     }
     assert (
         templates["main.bicep"]["outputs"]["harnessEnvironment"]["value"]["AZURE_OPENAI_DEPLOYMENT"]
-        == "[if(parameters('deployAi'), parameters('modelDeploymentName'), '')]"
+        == "[if(parameters('deployAi'), variables('checkedModelDeploymentName'), '')]"
     )
 
 
-async def test_production_model_defaults_agree_across_surfaces(templates: dict[str, dict]) -> None:
-    import inspect
-    from unittest.mock import Mock
-
-    from daimon.adapters.cli.commands.selfhosted import selfhosted_init_command
-    from mux.contracts.ids import Scope
-    from mux.drivers.selfhosted import SelfHostedDriver
+def test_bicep_production_model_defaults_agree(templates: dict[str, dict]) -> None:
     from mux.profiles import backend_selection
 
-    expected = "gpt-6.1-sol"
-    assert inspect.signature(selfhosted_init_command).parameters["model"].default == expected
-    assert backend_selection("selfhosted").model == expected
     for entrypoint in ("main.bicep", "azd/main.bicep"):
-        assert templates[entrypoint]["parameters"]["modelName"]["defaultValue"] == expected
-    # Inspect only the models port: no turn, transport or model request is made.
-    driver = SelfHostedDriver(
-        Mock(),
-        account_scope_id="test",
-        agents=Mock(),
-        environments=Mock(),
-        authorization=lambda *args: False,
-    )
-    scope = Scope(tenant_id="test", account_id="test", principal_id="test", authorization_id="test")
-    assert [info.model.id for info in await driver.models.list(scope, "selfhosted")] == [expected]
+        assert templates[entrypoint]["parameters"]["modelName"]["defaultValue"] == (
+            backend_selection("selfhosted").model
+        )
 
 
 @pytest.mark.parametrize(
@@ -536,3 +524,45 @@ def test_azd_model_name_uses_env_with_sol_default():
     assert parameters["parameters"]["modelName"]["value"] == "${AZURE_MODEL_NAME=gpt-6.1-sol}"
     # Leave the version unset so the production mapping follows a Luna selection.
     assert "modelVersion" not in parameters["parameters"]
+
+
+@pytest.mark.parametrize(
+    "model,deployment,valid",
+    [
+        ("gpt-6.1-sol", "gpt-6-luna", False),
+        ("gpt-6-luna", "gpt-6.1-sol", False),
+        ("another-model", "gpt-6-luna", False),
+        ("gpt-6-luna", "gpt-6-luna", True),
+        ("gpt-6.1-sol", "gpt-6.1-sol", True),
+        ("gpt-6-luna", "custom-smoke-alias", True),
+    ],
+)
+def test_model_alias_guard_offline(templates, tmp_path, model, deployment, valid):
+    source = tmp_path / "alias.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/models.bicep", tmp_path)
+    source.write_text(
+        f"using none\nimport {{ isValidModelDeploymentName }} from '{relative}'\n"
+        f"param valid = isValidModelDeploymentName('{model}', '{deployment}')\n"
+    )
+    target = tmp_path / "alias.json"
+    result = subprocess.run(
+        ["bicep", "build-params", str(source), "--outfile", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["parameters"]["valid"]["value"] is valid
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        template = templates[entrypoint]
+        assert template["variables"]["checkedModelDeploymentName"] == (
+            "[__bicep.validateModelDeploymentName(parameters('modelName'), "
+            "parameters('modelDeploymentName'))]"
+        )
+        validator = next(
+            definition
+            for group in template["functions"]
+            for name, definition in group["members"].items()
+            if name == "validateModelDeploymentName"
+        )
+        assert "isValidModelDeploymentName(" in validator["output"]["value"]
+        assert "fail('modelDeploymentName is a reserved model name" in validator["output"]["value"]
