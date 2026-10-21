@@ -48,6 +48,7 @@ class Transport(Protocol):
         path: str,
         *,
         session_id: str,
+        after_seq: int,
         body: Mapping[str, JsonValue] | None = None,
         mcp_authorization: str | None = None,
         deadline: datetime | None = None,
@@ -192,20 +193,24 @@ class DirectTransport:
         path: str,
         *,
         session_id: str,
+        after_seq: int,
         body: Mapping[str, JsonValue] | None = None,
         mcp_authorization: str | None = None,
         deadline: datetime | None = None,
     ) -> JsonValue:
         if not session_id.strip():
             raise ValueError("session id is required")
+        if not 0 <= after_seq <= 2**53:
+            raise ValueError("invalid persisted high-water")
         parsed = urlsplit(path)
         if parsed.scheme or parsed.netloc or parsed.fragment or not parsed.path.startswith("/v0/"):
             raise ValueError("direct transport requires an absolute C3 path")
         query = parse_qsl(parsed.query, keep_blank_values=True)
         if any(key.lower() == "session_id" for key, _ in query):
             raise ValueError("session context is derived from the mux session")
-        if not any(key == "after_seq" for key, _ in query):
-            query.append(("after_seq", "0"))
+        fence = max([after_seq, *(int(value) for key, value in query if key == "after_seq")])
+        query = [(key, value) for key, value in query if key != "after_seq"]
+        query.insert(0, ("after_seq", str(fence)))
         query.append(("session_id", session_id))
         path = parsed.path + "?" + urlencode(query)
         turn = method == "POST" and parsed.path == "/v0/turns"
@@ -250,18 +255,22 @@ class FoundryInvocationsTransport(DirectTransport):
         path: str,
         *,
         session_id: str,
+        after_seq: int,
         body: Mapping[str, JsonValue] | None = None,
         mcp_authorization: str | None = None,
         deadline: datetime | None = None,
     ) -> JsonValue:
         if not session_id.strip():
             raise ValueError("session id is required")
+        if not 0 <= after_seq <= 2**53:
+            raise ValueError("invalid persisted high-water")
         parsed = urlsplit(path)
         query_params = parse_qsl(parsed.query, keep_blank_values=True)
         if any(key.lower() == "session_id" for key, _ in query_params):
             raise ValueError("session context is derived from the mux session")
-        if not any(key == "after_seq" for key, _ in query_params):
-            query_params.append(("after_seq", "0"))
+        fence = max([after_seq, *(int(value) for key, value in query_params if key == "after_seq")])
+        query_params = [(key, value) for key, value in query_params if key != "after_seq"]
+        query_params.insert(0, ("after_seq", str(fence)))
         query_params.append(("session_id", session_id))
         turn = method == "POST" and parsed.path == "/v0/turns"
         if mcp_authorization is not None and not turn:

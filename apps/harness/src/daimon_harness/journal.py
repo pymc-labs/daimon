@@ -59,6 +59,10 @@ class Journal:
             "CREATE TABLE IF NOT EXISTS session_binding "
             "(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL)"
         )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS recovery_digests "
+            "(turn_id TEXT PRIMARY KEY, digest TEXT NOT NULL)"
+        )
         self.db.commit()
         # Repair only the terminal-event/global-index crash window, once at startup.
         for turn_id, session_id in self.db.execute(
@@ -157,6 +161,19 @@ class Journal:
         identifier(request.session_id)
         identifier(request.turn_id)
         body = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        recovered = self.db.execute(
+            "SELECT turns.turn_id, turns.session_id, turns.key, recovery_digests.digest "
+            "FROM turns JOIN recovery_digests USING(turn_id) WHERE key=? OR turns.turn_id=?",
+            (request.idempotency_key, request.turn_id),
+        ).fetchall()
+        if recovered:
+            digest = hashlib.sha256(body.encode()).hexdigest()
+            if any(
+                row != (request.turn_id, request.session_id, request.idempotency_key, digest)
+                for row in recovered
+            ):
+                raise ConflictError("turn id or idempotency key already has a different request")
+            return True
         previous = self.db.execute(
             "SELECT request FROM turns WHERE key=? OR turn_id=?",
             (request.idempotency_key, request.turn_id),
@@ -166,6 +183,16 @@ class Journal:
                 raise ConflictError("turn id or idempotency key already has a different request")
             return True
         return False
+
+    def remember_recovery(self, request: TurnRequest, digest: str) -> None:
+        """Recover a compact remote claim without retaining prompts or skill bundles."""
+        body = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        with self.db:
+            self.db.execute(
+                "INSERT INTO turns(turn_id, session_id, key, request) VALUES (?, ?, ?, ?)",
+                (request.turn_id, request.session_id, request.idempotency_key, body),
+            )
+            self.db.execute("INSERT INTO recovery_digests VALUES (?, ?)", (request.turn_id, digest))
 
     def claim(self, request: TurnRequest) -> bool:
         if self.is_replay(request):
@@ -269,7 +296,11 @@ class Journal:
 
     @staticmethod
     def fence_restore(
-        db: sqlite3.Connection, request: TurnRequest, checkpoint_seq: int, after_seq: int
+        db: sqlite3.Connection,
+        request: TurnRequest,
+        checkpoint_seq: int,
+        after_seq: int,
+        remote_seq: int = 0,
     ) -> None:
         if not 0 <= after_seq <= min(MAX_CURSOR, checkpoint_seq + MAX_CURSOR_SLACK):
             raise ValueError("restore cursor exceeds permitted range")
@@ -279,7 +310,7 @@ class Journal:
                 "(id INTEGER PRIMARY KEY CHECK(id=1), floor INTEGER)"
             )
             db.execute("INSERT OR IGNORE INTO event_sequence VALUES (1, 0)")
-            floor = max(checkpoint_seq, after_seq) + 1
+            floor = max(checkpoint_seq, after_seq, remote_seq) + 1
             db.execute("UPDATE event_sequence SET floor=MAX(floor, ?) WHERE id=1", (floor,))
             latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
             if after_seq > checkpoint_seq and latest <= after_seq:

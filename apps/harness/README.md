@@ -268,8 +268,19 @@ storage client. If the live pool exposes only a tool-reachable session identity,
 keep admission disabled until a host-minted, per-session SAS carrier exists.
 Live authentication and identity isolation still require deployment verification.
 
-Before model I/O, each `model_request_started` is committed locally and included
-in a remote checkpoint. After tool workers stop, every terminal turn (including
+Before any model I/O, the service writes a compact turn claim to
+`sessions/<sandbox_id>/wal/<turn_id>.json` and updates it with each durably
+journaled `model_request_started` before that request reaches the model. The
+record contains the original request digest, a credential-free recovery identity,
+request inventory and event high-water; prompts and skill bundles are omitted.
+If write-ahead storage fails, the turn ends with retryable
+`durability_unavailable` before paid work. These small writes use a separate
+worker from asynchronous workspace uploads. Restore loads remote claims newer
+than the checkpoint; a known idempotency key replays an interrupted outcome and
+never repeats tools or model calls. Unresolved request inventory becomes
+`usage_unavailable` for reconciliation.
+
+Each `model_request_started` is committed locally before its remote write-ahead. After tool workers stop, every terminal turn (including
 cancellation) checkpoints the SQLite journal, history, turn/idempotency inventory
 and `work/` to `sessions/<sandbox_id>/<seq>.tar.zst`. SQLite's backup API includes
 committed WAL data. Upload failures are logged by stage and exception class and
@@ -300,6 +311,8 @@ usage becomes `usage_unavailable`, preserving unknown usage for reconciliation.
 A completed request whose usage missed the latest checkpoint also stays unknown;
 no zero-token observation is fabricated.
 
+Every transport call requires an explicit persisted `after_seq` high-water,
+including cleanup cancellation; the transport never defaults it to zero.
 Every C3 request carries the nonsecret `session_id` query parameter. For cold
 actions/cancel it is required when checkpointing is enabled, and must match the
 sandbox's binding and the turn's session. For turns and polls it must match the

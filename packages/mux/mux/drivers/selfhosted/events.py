@@ -211,6 +211,7 @@ class SelfHostedEvents:
             "GET",
             f"/v0/sessions/{segment(ref.id)}/events?{urlencode(query)}",
             session_id=ref.id,
+            after_seq=after,
             deadline=deadline,
         )
         try:
@@ -464,6 +465,7 @@ class SelfHostedEvents:
                     "POST",
                     f"/v0/turns?after_seq={await self.cursor(session)}",
                     session_id=session.id,
+                    after_seq=await self.cursor(session),
                     body=request.model_dump(mode="json"),
                     mcp_authorization=mcp_authorization,
                 )
@@ -547,6 +549,7 @@ class SelfHostedEvents:
                         f"?after_seq={await self.cursor(session)}",
                         body=body.model_dump(mode="json", exclude_unset=True),
                         session_id=session.id,
+                        after_seq=await self.cursor(session),
                     )
                 except ProviderError as error:
                     if not error.retryable:
@@ -698,6 +701,7 @@ class SelfHostedEvents:
                 f"/v0/turns/{segment(turn_id)}/cancel?after_seq={await self.cursor(session)}",
                 body={},
                 session_id=session.id,
+                after_seq=await self.cursor(session),
             )
             result = wire.CancelResponse.model_validate(raw)
             status = "requested" if result.cancelled else "outcome_unknown"

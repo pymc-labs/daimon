@@ -85,6 +85,15 @@ def display_event(event: Event, *, session_id: str) -> DisplayEvent | None:
         raise ScopeViolation(session_id, "foreign event in self-hosted host codec")
     if event.authority not in ("record", "reconciled") or event.thread_id is not None:
         return None
+    if event.type == "native.selfhosted.checkpoint_warning":
+        return BetaManagedAgentsAgentMessageEvent.model_validate(
+            {
+                "id": "selfhosted:checkpoint-warning:" + session_id,
+                "type": "agent.message",
+                "processed_at": event.occurred_at or event.observed_at,
+                "content": [{"type": "text", "text": "Session state is not fully durable"}],
+            }
+        )
     payload = event.typed_payload()
     timestamp = event.occurred_at or event.observed_at
     if isinstance(payload, UserMessagePayload):

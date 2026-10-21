@@ -1158,6 +1158,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         await prepared.backend.events._c.transport.request(
             "GET",
             f"/v0/sessions/{prepared.session_ref.id}/events?replay_after_seq=0&after_seq=0",
+            after_seq=0,
             session_id=prepared.session_ref.id,
         )
         assert any("replay_after_seq" in call.url.params for call in requests)

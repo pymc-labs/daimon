@@ -314,7 +314,10 @@ before scrubbing the tool environment, and refuses an IMDS fallback.
 
 The harness checkpoints workspace files, conversation history and request
 inventory before model I/O and after each terminal turn, including cancellation.
-A new sandbox restores before serving authenticated session requests. Storage
+Before paid work, small Blob write-ahead records protect turn idempotency and
+request inventory independently of workspace uploads. A write-ahead failure
+refuses paid work with a retryable durability error. A new sandbox restores
+checkpoints and write-ahead records before serving authenticated session requests. Storage
 restore failures return 503 and corrupt recovery refuses new work. Checkpoint
 write failures warn once per session and allow polls and later turns to continue.
 Unsupported or oversized workspace entries produce a degraded checkpoint with

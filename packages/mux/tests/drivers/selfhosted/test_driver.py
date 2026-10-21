@@ -595,14 +595,17 @@ async def test_mcp_credential_only_appears_in_turn_header_and_never_invocation_j
         await transport.request(
             "POST",
             "/v0/turns",
+            after_seq=0,
             session_id="session",
             body={"session_id": "session"},
             mcp_authorization=credential,
         )
         await transport.request(
-            "GET", "/v0/sessions/session/events?after_seq=0", session_id="session"
+            "GET", "/v0/sessions/session/events?after_seq=0", after_seq=0, session_id="session"
         )
-        await transport.request("POST", "/v0/turns/turn/cancel", session_id="session", body={})
+        await transport.request(
+            "POST", "/v0/turns/turn/cancel", after_seq=0, session_id="session", body={}
+        )
         assert requests[0].headers["X-Daimon-MCP-Authorization"] == credential
         assert all("X-Daimon-MCP-Authorization" not in request.headers for request in requests[1:])
         assert all(credential.encode() not in request.content for request in requests)
@@ -819,10 +822,15 @@ async def test_refreshing_harness_token_and_per_call_mcp_credentials(foundry):
         )
         for credential in ("Bearer caller-one", "Bearer caller-two"):
             await transport.request(
-                "POST", "/v0/turns", session_id="session", body={}, mcp_authorization=credential
+                "POST",
+                "/v0/turns",
+                after_seq=0,
+                session_id="session",
+                body={},
+                mcp_authorization=credential,
             )
         await transport.request(
-            "GET", "/v0/sessions/session/events?after_seq=9", session_id="session"
+            "GET", "/v0/sessions/session/events?after_seq=9", after_seq=0, session_id="session"
         )
     assert [request.headers["authorization"] for request in requests] == [
         "Bearer fresh-1",
@@ -895,7 +903,7 @@ async def test_poll_retries_honor_retry_after_and_keep_cursor(status, monkeypatc
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         transport = DirectTransport(client, base_url="https://harness", token="token")
         await transport.request(
-            "GET", "/v0/sessions/session/events?after_seq=12", session_id="session"
+            "GET", "/v0/sessions/session/events?after_seq=12", after_seq=0, session_id="session"
         )
     assert delays == [0.25]
     assert [str(request.url) for request in requests] == [
@@ -1364,7 +1372,7 @@ async def test_poll_network_error_retries_and_retry_after_is_bounded(monkeypatch
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         transport = DirectTransport(client, base_url="https://harness", token="token")
         await transport.request(
-            "GET", "/v0/sessions/session/events?after_seq=5", session_id="session"
+            "GET", "/v0/sessions/session/events?after_seq=5", after_seq=0, session_id="session"
         )
     assert len(calls) == 2 and delays == [0.1]
     assert module.retry_delay(httpx.Response(429, headers={"Retry-After": "999999"}), 0) == 30
@@ -1396,6 +1404,7 @@ async def test_retry_after_never_exceeds_request_deadline(monkeypatch):
         await transport.request(
             "GET",
             "/v0/sessions/session/events",
+            after_seq=0,
             session_id="session",
             deadline=datetime.now(UTC) + timedelta(seconds=0.5),
         )
@@ -1619,3 +1628,24 @@ async def test_mcp_invalid_or_widening_policy_refuses_before_harness_io(policy):
         with pytest.raises(UnsupportedCapability):
             await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
         assert fake.executions == 0
+
+
+@pytest.mark.parametrize("foundry", [False, True])
+async def test_transport_refuses_an_omitted_recovery_fence_before_http(foundry):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"cancelled": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        transport = (
+            FoundryInvocationsTransport(
+                client, project_endpoint="https://project", agent_name="agent", token="token"
+            )
+            if foundry
+            else DirectTransport(client, base_url="https://harness", token="token")
+        )
+        with pytest.raises(TypeError, match="after_seq"):
+            await transport.request("POST", "/v0/turns/turn/cancel", session_id="session")
+    assert calls == []

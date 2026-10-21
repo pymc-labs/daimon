@@ -1292,3 +1292,7 @@ Event replay may include `replay_after_seq` to read an older range while
 `after_seq` still carries the highest durable client cursor for restore fencing.
 This lets a resumed invocation replay its saved baseline without reusing event
 sequences after sandbox loss.
+
+Self-hosted transport calls require an explicit `after_seq` high-water. Both
+direct and invocation transports retain it with session context and optional
+`replay_after_seq`; cleanup calls must supply the persisted cursor too.

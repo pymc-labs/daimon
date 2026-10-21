@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -21,7 +22,8 @@ from urllib.parse import urlsplit
 import zstandard
 from azure.storage.blob import ContainerClient
 from mux.drivers.selfhosted.transport import sandbox_id
-from mux.drivers.selfhosted.wire import TurnRequest
+from mux.drivers.selfhosted.wire import Event, TurnRequest
+from pydantic import BaseModel, ConfigDict, Field
 
 from .checkpoint_archive import MAX_BYTES, LimitedReader, restore_work
 from .identity import CapturedIdentity
@@ -151,12 +153,138 @@ def _remove_work(path: Path) -> None:
     path.rmdir()
 
 
+class WriteAhead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request: TurnRequest
+    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    high_water: int = Field(ge=0, le=MAX_CURSOR)
+    inventory: list[Event]
+
+
 class Checkpoints:
     def __init__(self, store: CheckpointStore, *, keep: int = 3) -> None:
         if not 1 <= keep <= 100:
             raise ValueError("checkpoint retention must be between 1 and 100")
         self.store, self.keep = store, keep
         self.restored_seq: int | None = None
+
+    def write_ahead(self, journal: Journal, request: TurnRequest) -> bytes:
+        body = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        minimal = request.model_copy(
+            update={
+                "instructions": "",
+                "input": [],
+                "skills": [],
+                "mcp_servers": [],
+                "tool_policy": {},
+            }
+        )
+        inventory = [
+            event
+            for event in journal.events(request.session_id)
+            if event.turn_id == request.turn_id
+            and (
+                event.type in {"model_request_started", "usage"}
+                or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
+            )
+        ]
+        return (
+            WriteAhead(
+                request=minimal,
+                digest=hashlib.sha256(body.encode()).hexdigest(),
+                high_water=journal.latest_seq(request.session_id),
+                inventory=inventory,
+            )
+            .model_dump_json()
+            .encode()
+        )
+
+    def upload_write_ahead(self, session_id: str, turn_id: str, record: bytes) -> None:
+        self.store.upload(
+            f"sessions/{sandbox_id(session_id)}/wal/{identifier(turn_id)}.json", io.BytesIO(record)
+        )
+
+    def restore(self, journal: Journal, session_id: str, after_seq: int = 0) -> Journal:
+        pending = journal.root / "restore.pending"
+        cursor_file = journal.root / "restore.cursor"
+        if journal.turns() and not pending.exists() and not cursor_file.exists():
+            return journal
+        if cursor_file.exists():
+            saved = json.loads(cursor_file.read_bytes())
+            if saved["session_id"] != session_id:
+                raise ValueError("restore cursor belongs to another session")
+            after_seq = max(after_seq, int(saved["after_seq"]))
+            self.restored_seq = int(saved["checkpoint_seq"])
+        prefix = f"sessions/{sandbox_id(identifier(session_id))}/wal/"
+        records: list[WriteAhead] = []
+        for name in self.store.list(prefix):
+            if not name.startswith(prefix) or not name.endswith(".json"):
+                raise ValueError("invalid write-ahead path")
+            output = io.BytesIO()
+            self.store.download(name, output)
+            if output.tell() > 8 * 1024 * 1024:
+                raise ValueError("write-ahead record too large")
+            record = WriteAhead.model_validate_json(output.getvalue())
+            if record.request.session_id != session_id or name != (
+                prefix + identifier(record.request.turn_id) + ".json"
+            ):
+                raise ValueError("foreign write-ahead record")
+            if any(
+                event.session_id != session_id
+                or event.turn_id != record.request.turn_id
+                or event.seq > record.high_water
+                or event.type not in {"model_request_started", "usage", "error"}
+                for event in record.inventory
+            ):
+                raise ValueError("invalid write-ahead inventory")
+            records.append(record)
+        remote_seq = max((record.high_water for record in records), default=0)
+        if records and not self.names(session_id) and not pending.exists():
+            cursor_file = journal.root / "restore.cursor"
+            stage = cursor_file.with_suffix(".next")
+            with stage.open("w") as output_file:
+                json.dump(
+                    {
+                        "session_id": session_id,
+                        "after_seq": after_seq,
+                        "checkpoint_seq": 0,
+                        "remote_seq": remote_seq,
+                    },
+                    output_file,
+                )
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            stage.replace(cursor_file)
+            sync_directory(journal.root)
+            self.restored_seq = 0
+        else:
+            journal = self.restore_checkpoint(journal, session_id, after_seq, remote_seq)
+        for record in sorted(records, key=lambda value: value.high_water):
+            request = record.request
+            existing = journal.find(request.turn_id)
+            if existing is not None and journal.ended(request.turn_id):
+                continue
+            if existing is None:
+                journal.remember_recovery(request, record.digest)
+            Journal.fence_restore(
+                journal.connection(session_id),
+                request,
+                self.restored_seq or 0,
+                after_seq,
+                remote_seq,
+            )
+            known = {
+                str(event.data.get("request_id"))
+                for event in journal.events(session_id)
+                if event.turn_id == request.turn_id and event.type == "model_request_started"
+            }
+            for event in record.inventory:
+                if (
+                    event.type == "model_request_started"
+                    and event.data.get("request_id") not in known
+                ):
+                    journal.append(request, event.type, event.data)
+        return journal
 
     def names(self, session_id: str) -> list[tuple[int, str]]:
         prefix = f"sessions/{sandbox_id(identifier(session_id))}/"
@@ -274,7 +402,9 @@ class Checkpoints:
         finally:
             snapshot.close()
 
-    def restore(self, journal: Journal, session_id: str, after_seq: int = 0) -> Journal:
+    def restore_checkpoint(
+        self, journal: Journal, session_id: str, after_seq: int = 0, remote_seq: int = 0
+    ) -> Journal:
         """Restore before claiming a turn, keeping the same session/seq/request ids."""
         home = journal.root.parent
         pending = journal.root / "restore.pending"
@@ -307,7 +437,13 @@ class Checkpoints:
         cursor_stage = cursor_file.with_suffix(".next")
         with cursor_stage.open("w") as output:
             json.dump(
-                {"session_id": session_id, "after_seq": after_seq, "checkpoint_seq": seq}, output
+                {
+                    "session_id": session_id,
+                    "after_seq": after_seq,
+                    "checkpoint_seq": seq,
+                    "remote_seq": remote_seq,
+                },
+                output,
             )
             output.flush()
             os.fsync(output.fileno())
@@ -376,7 +512,7 @@ class Checkpoints:
                     or db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0] != seq
                 ):
                     raise ValueError("checkpoint journal is inconsistent")
-                Journal.fence_restore(db, request, seq, after_seq)
+                Journal.fence_restore(db, request, seq, after_seq, remote_seq)
             with (stage / "work.tar").open("rb") as source:
                 restore_work(source, stage / "work")
             # A marker makes publication restartable if the process dies between renames.

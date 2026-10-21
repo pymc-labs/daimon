@@ -78,6 +78,7 @@ class Supervisor:
         self.storage_worker = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="harness-storage"
         )
+        self.wal_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="harness-wal")
         self.checkpoint_task: asyncio.Task[None] | None = None
         self.checkpoint_dirty: str | None = None
         self.pending_snapshot: Snapshot | None = None
@@ -102,6 +103,7 @@ class Supervisor:
                 self.journal.configure_single_session()
             except BaseException:
                 self.journal.close()
+                self.wal_worker.shutdown(wait=False)
                 self.storage_worker.shutdown(wait=True)
                 self.worker.shutdown(wait=True)
                 raise
@@ -199,7 +201,7 @@ class Supervisor:
         self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]
     ) -> Snapshot | None:
         self.journal.append(request, kind, data)
-        if self.checkpoints is not None and kind in {"model_request_started", "turn_ended"}:
+        if self.checkpoints is not None and kind == "turn_ended":
             try:
                 return self.checkpoints.capture(self.journal, request.session_id)
             except Exception as exc:
@@ -227,6 +229,7 @@ class Supervisor:
                         request,
                         saved["checkpoint_seq"],
                         max(after_seq, saved["after_seq"]),
+                        saved.get("remote_seq", 0),
                     )
                 self.recover(sandbox_lost=cursor_file.exists())
             except ConflictError:
@@ -294,6 +297,24 @@ class Supervisor:
         cursor_file.unlink(missing_ok=True)
         sync_directory(self.journal.root)
 
+    async def write_ahead(self, request: TurnRequest) -> None:
+        if self.checkpoints is None:
+            return
+        try:
+            record = await self.io(self.checkpoints.write_ahead, self.journal, request)
+            async with asyncio.timeout(15):
+                await asyncio.get_running_loop().run_in_executor(
+                    self.wal_worker,
+                    self.checkpoints.upload_write_ahead,
+                    request.session_id,
+                    request.turn_id,
+                    record,
+                )
+        except Exception:
+            raise HarnessError(
+                "durability_unavailable", "Remote write-ahead is unavailable"
+            ) from None
+
     async def run(self, request: TurnRequest, credentials: dict[str, str]) -> None:
         credentials = self.secrets | credentials
         usage_count = 0
@@ -311,13 +332,16 @@ class Supervisor:
                 kind,
                 cast(dict[str, JsonValue], redact(data, credentials)),
             )
-            if kind in {"model_request_started", "turn_ended"}:
+            if kind == "model_request_started":
+                await self.write_ahead(request)
+            if kind == "turn_ended":
                 self.schedule_checkpoint(request.session_id, snapshot)
             self.changed.set()
 
         outcome = "completed"
         context: TurnContext | None = None
         try:
+            await self.write_ahead(request)
             sandbox, uid = await self.io(self.journal.sandbox, request.session_id)
             context = TurnContext(
                 request,
@@ -391,7 +415,10 @@ class Supervisor:
                     failure = original_failure
                 data: dict[str, JsonValue] = {"outcome": outcome}
                 if outcome == "errored":
-                    data["error"] = failure or {"kind": "harness", "message": "Harness turn failed"}
+                    error = failure or {"kind": "harness", "message": "Harness turn failed"}
+                    if error.get("kind") == "durability_unavailable":
+                        error["retryable"] = True
+                    data["error"] = error
                 try:
                     await emit("turn_ended", data)
                 finally:
@@ -459,6 +486,7 @@ class Supervisor:
         await self.io(self.journal.close)
         if self.checkpoints is not None:
             await self.io(self.checkpoints.close)
+        self.wal_worker.shutdown(wait=False)
         self.storage_worker.shutdown(wait=True)
         self.worker.shutdown(wait=True)
         self.log_redaction.__exit__(None, None, None)

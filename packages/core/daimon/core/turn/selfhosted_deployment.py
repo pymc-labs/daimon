@@ -255,6 +255,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     active_turn: tuple[str, str] | None = None
     session_bindings: dict[str, str] = {}
     receipt_cursors: dict[str, int] = {}
+    transport_high_water: dict[str, int] = {}
     history_floors: dict[tuple[str, str | None], int] = {}
     ended_turns: set[str] = set()
     agent_policy: dict[str, JsonValue] = {}
@@ -391,6 +392,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             path: str,
             *,
             session_id: str,
+            after_seq: int,
             body: Mapping[str, JsonValue] | None = None,
             mcp_authorization: str | None = None,
             deadline: datetime | None = None,
@@ -497,6 +499,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 or request.deadline > datetime.now(UTC)
                 else datetime.now(UTC) + timedelta(seconds=8)
             )
+            after_seq = max(
+                after_seq, await receipt_cursor(session_id), transport_high_water.get(session_id, 0)
+            )
+            transport_high_water[session_id] = after_seq
             parsed = urlsplit(path)
             if method == "GET" and parsed.path.endswith("/events"):
                 query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -509,6 +515,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 method,
                 path,
                 session_id=session_id,
+                after_seq=after_seq,
                 body=body,
                 deadline=min(limit, deadline) if deadline is not None else limit,
                 mcp_authorization=minted.header.get_secret_value()
@@ -674,6 +681,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                                 "POST",
                                 f"/v0/turns/{segment(turn_id)}/cancel",
                                 session_id=session_id,
+                                after_seq=max(
+                                    await receipt_cursor(session_id),
+                                    transport_high_water.get(session_id, 0),
+                                ),
                             )
                         except Exception:
                             logging.getLogger(__name__).warning(
@@ -684,6 +695,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         f"/v0/sessions/{segment(session_id)}/events"
                         f"?after_seq={await receipt_cursor(session_id)}",
                         session_id=session_id,
+                        after_seq=max(
+                            await receipt_cursor(session_id),
+                            transport_high_water.get(session_id, 0),
+                        ),
                     )
         except Exception:
             logging.getLogger(__name__).warning("self-hosted cleanup pending reconciliation")

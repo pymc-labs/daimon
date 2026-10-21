@@ -48,6 +48,7 @@ async def test_pool_routes_every_c3_operation_and_reconstructed_transport(sessio
             await transport.request(
                 method,
                 path,
+                after_seq=0,
                 session_id=session_id,
                 body=body,
                 mcp_authorization="Bearer ephemeral" if path == "/v0/turns" else None,
@@ -87,7 +88,9 @@ async def test_pool_poll_retry_refreshes_token_and_preserves_cursor():
         transport = DirectTransport(
             client, base_url="https://pool.example", token_provider=token, session_pool=True
         )
-        await transport.request("GET", "/v0/sessions/s/events?after_seq=13", session_id="s")
+        await transport.request(
+            "GET", "/v0/sessions/s/events?after_seq=13", after_seq=0, session_id="s"
+        )
     assert [request.headers["Authorization"] for request in calls] == [
         "Bearer token-0",
         "Bearer token-1",
@@ -116,7 +119,7 @@ async def test_pool_rejects_injected_routing_before_any_io(path):
             client, base_url="https://pool.example", token_provider=token, session_pool=True
         )
         with pytest.raises(ValueError):
-            await transport.request("POST", path, session_id="s")
+            await transport.request("POST", path, after_seq=0, session_id="s")
 
 
 @pytest.mark.parametrize(

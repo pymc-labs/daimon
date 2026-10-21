@@ -50,7 +50,9 @@ async def test_pool_routes_two_single_session_harnesses_and_replays_after_recons
                 body = turn("tool", turn_id="tool-" + name, key="tool-" + name) | {
                     "session_id": name
                 }
-                await transport.request("POST", "/v0/turns", session_id=name, body=body)
+                await transport.request(
+                    "POST", "/v0/turns", after_seq=0, session_id=name, body=body
+                )
                 supervisor = apps[sandbox_id(name)].state.supervisor
                 await supervisor.tasks[body["turn_id"]]
                 workspace, _ = supervisor.journal.sandbox(name)
@@ -59,6 +61,7 @@ async def test_pool_routes_two_single_session_harnesses_and_replays_after_recons
                     await transport.request(
                         "POST",
                         "/v0/turns",
+                        after_seq=0,
                         session_id=name,
                         body=turn() | {"session_id": "foreign"},
                     )
@@ -70,10 +73,12 @@ async def test_pool_routes_two_single_session_harnesses_and_replays_after_recons
                     token_provider=token,
                     session_pool=True,
                 )
-                await reconstructed.request("POST", "/v0/turns", session_id=name, body=body)
+                await reconstructed.request(
+                    "POST", "/v0/turns", after_seq=0, session_id=name, body=body
+                )
                 assert models[name].calls == 1
                 events = await reconstructed.request(
-                    "GET", f"/v0/sessions/{name}/events?after_seq=0", session_id=name
+                    "GET", f"/v0/sessions/{name}/events?after_seq=0", after_seq=0, session_id=name
                 )
                 assert events["complete"] is True
                 assert events["events"][-1]["turn_id"] == body["turn_id"]
@@ -84,11 +89,11 @@ async def test_pool_routes_two_single_session_harnesses_and_replays_after_recons
                 "session_id": name,
                 "tool_policy": {"write": "ask"},
             }
-            await transport.request("POST", "/v0/turns", session_id=name, body=body)
+            await transport.request("POST", "/v0/turns", after_seq=0, session_id=name, body=body)
             async with asyncio.timeout(5):
                 while True:
                     result = await transport.request(
-                        "GET", "/v0/sessions/a/events?after_seq=0", session_id=name
+                        "GET", "/v0/sessions/a/events?after_seq=0", after_seq=0, session_id=name
                     )
                     approvals = [
                         event for event in result["events"] if event["type"] == "requires_action"
@@ -99,16 +104,17 @@ async def test_pool_routes_two_single_session_harnesses_and_replays_after_recons
             await transport.request(
                 "POST",
                 "/v0/turns/ask/actions",
+                after_seq=0,
                 session_id=name,
                 body={"action_id": approvals[-1]["data"]["action_id"], "decision": "allow"},
             )
             await supervisor.tasks["ask"]
             models[name].started.clear()
             body = turn("wait", turn_id="cancel", key="cancel") | {"session_id": name}
-            await transport.request("POST", "/v0/turns", session_id=name, body=body)
+            await transport.request("POST", "/v0/turns", after_seq=0, session_id=name, body=body)
             await asyncio.wait_for(models[name].started.wait(), 5)
             assert await transport.request(
-                "POST", "/v0/turns/cancel/cancel", session_id=name, body={}
+                "POST", "/v0/turns/cancel/cancel", after_seq=0, session_id=name, body={}
             ) == {"cancelled": True}
             assert supervisor.journal.events(name)[-1].data["outcome"] == "interrupted"
             assert models["b"].calls == 1

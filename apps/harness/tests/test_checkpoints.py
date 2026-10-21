@@ -32,7 +32,7 @@ class MemoryBlobs:
         return [name for name in self.blobs if name.startswith(prefix)]
 
     def upload(self, name, source):
-        if self.fail:
+        if self.fail and name.endswith(".tar.zst"):
             raise RuntimeError("secret storage credential")
         self.blobs[name] = source.read()
         self.uploads.append(name)
@@ -108,7 +108,7 @@ async def test_restore_after_sandbox_destruction_continues_seq_history_and_idemp
         ).json()
         assert after["events"][0]["seq"] > seq
         assert model.histories[0] == history
-        assert len(blobs.blobs) == 2
+        assert len([name for name in blobs.blobs if name.endswith(".tar.zst")]) == 2
         assert all(name.startswith(f"sessions/{sandbox_id('session-1')}/") for name in blobs.blobs)
         foreign = await client.get("/v0/sessions/foreign/events")
         assert foreign.status_code == 409
@@ -201,7 +201,10 @@ async def test_restore_corruption_refuses_new_work_without_losing_remote_blob(tm
         await supervisor.tasks["turn-1"]
 
         await supervisor.flush_checkpoints()
-    latest = max(blobs.blobs, key=lambda name: int(name.rsplit("/", 1)[1].split(".")[0]))
+    latest = max(
+        (name for name in blobs.blobs if name.endswith(".tar.zst")),
+        key=lambda name: int(name.rsplit("/", 1)[1].split(".")[0]),
+    )
     blobs.blobs[latest] = b"corrupt"
     model = FakeModelAdapter()
     async with harness(tmp_path / "new", blobs, model) as (supervisor, client):
@@ -240,7 +243,7 @@ async def test_transport_supplies_session_context_for_cold_actions_and_cancel():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         transport = DirectTransport(client, base_url="https://harness.example", token="test")
-        await transport.request("POST", "/v0/turns/old/cancel", session_id="session-1")
+        await transport.request("POST", "/v0/turns/old/cancel", after_seq=0, session_id="session-1")
 
 
 async def test_authentication_and_session_binding_precede_any_restore(tmp_path):
@@ -408,7 +411,7 @@ async def test_process_restart_during_restore_does_not_checkpoint_partial_state(
     async with harness(tmp_path / "old", blobs, model) as (supervisor, client):
         await client.post("/v0/turns", json=turn())
         await asyncio.wait_for(model.started.wait(), 5)
-        await supervisor.flush_checkpoints()
+        await supervisor.checkpoint("session-1")
         crash_blobs = MemoryBlobs()
         crash_blobs.blobs = blobs.blobs.copy()
     original = Path.replace
@@ -526,6 +529,7 @@ async def test_real_driver_resumes_beyond_published_cursor_after_sandbox_loss(tm
             await context.emit(
                 "model_request_started", {"request_id": "pending", "model": context.request.model}
             )
+            await active.state.supervisor.checkpoint(context.request.session_id)
             for index in range(7):
                 await context.emit(
                     "agent_message_delta", {"message_id": "streamed", "text": str(index)}
@@ -566,7 +570,11 @@ async def test_real_driver_resumes_beyond_published_cursor_after_sandbox_loss(tm
                 crash_blobs = MemoryBlobs()
                 crash_blobs.blobs = blobs.blobs.copy()
                 assert (
-                    max(int(name.rsplit("/", 1)[1].split(".")[0]) for name in crash_blobs.blobs)
+                    max(
+                        int(name.rsplit("/", 1)[1].split(".")[0])
+                        for name in crash_blobs.blobs
+                        if name.endswith(".tar.zst")
+                    )
                     < cursor
                 )
             active = create_app(
@@ -688,7 +696,14 @@ async def test_fresh_driver_uses_persisted_projection_and_delivers_next_turn_usa
             await driver.events.send(SCOPE, session.ref, [message("first")], key="first")
             await asyncio.gather(*active.state.supervisor.tasks.values())
             await active.state.supervisor.flush_checkpoints()
-            assert max(int(name.rsplit("/", 1)[1].split(".")[0]) for name in blobs.blobs) == 6
+            assert (
+                max(
+                    int(name.rsplit("/", 1)[1].split(".")[0])
+                    for name in blobs.blobs
+                    if name.endswith(".tar.zst")
+                )
+                == 6
+            )
             blobs.fail = True
             await driver.events.send(SCOPE, session.ref, [message("second")], key="second")
             await asyncio.gather(*active.state.supervisor.tasks.values())
@@ -723,7 +738,7 @@ async def test_fresh_driver_uses_persisted_projection_and_delivers_next_turn_usa
             assert received[-1].type == "session.turn_ended"
             assert all(event.sequence > 13 for event in received)
             usage = await fresh.usage.reconcile(SCOPE, resumed.ref)
-            assert usage and all(item.completeness == "measured" for item in usage)
+            assert {item.completeness for item in usage} == {"measured", "unknown"}
             assert any(item.turn_id == received[-1].turn_id for item in usage)
         await fresh.aclose()
 
@@ -747,7 +762,10 @@ async def test_manifest_bytes_and_unsupported_names_remain_restorable(tmp_path):
             (nested / str(index)).symlink_to("absent")
         (sandbox / "work" / "ordinary\\filename").write_text("unsupported")
         await supervisor.checkpoint("session-1")
-        name = max(blobs.blobs, key=lambda n: int(n.rsplit("/", 1)[1].split(".")[0]))
+        name = max(
+            (name for name in blobs.blobs if name.endswith(".tar.zst")),
+            key=lambda n: int(n.rsplit("/", 1)[1].split(".")[0]),
+        )
         with (
             zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blobs.blobs[name])) as source,
             tarfile.open(fileobj=source, mode="r|") as archive,
@@ -807,8 +825,9 @@ async def test_held_checkpoint_upload_does_not_block_poll_cancel_or_next_turn(tm
             self.release = threading.Event()
 
         def upload(self, name, source):
-            self.entered.set()
-            assert self.release.wait(10)
+            if name.endswith(".tar.zst"):
+                self.entered.set()
+                assert self.release.wait(10)
             super().upload(name, source)
 
     blobs = Held()
@@ -910,7 +929,10 @@ async def test_snapshot_failure_does_not_fail_the_turn(tmp_path, monkeypatch):
         await supervisor.tasks["turn-1"]
         await supervisor.flush_checkpoints()
         events = (await client.get("/v0/sessions/session-1/events")).json()["events"]
-        assert events[-1]["data"]["outcome"] == "completed"
+        assert (
+            next(event for event in events if event["type"] == "turn_ended")["data"]["outcome"]
+            == "completed"
+        )
         assert sum(e["type"] == "checkpoint_warning" for e in events) == 1
 
 
@@ -1019,3 +1041,173 @@ async def test_observed_session_without_any_checkpoint_cannot_reuse_sequences(tm
         assert response.status_code == 503
         assert not supervisor.journal.turns()
         assert not supervisor.tasks
+
+
+async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoint(tmp_path):
+    blobs = MemoryBlobs()
+    model = FakeModelAdapter()
+    async with harness(tmp_path / "old", blobs, model) as (supervisor, client):
+        await client.post("/v0/turns", json=turn())
+        await supervisor.tasks["turn-1"]
+        await supervisor.flush_checkpoints()
+        blobs.fail = True  # Full checkpoints fail; small write-ahead records still commit.
+        body = turn("tool", turn_id="paid", key="paid")
+        await client.post("/v0/turns", json=body)
+        await supervisor.tasks["paid"]
+        await supervisor.flush_checkpoints()
+        assert model.calls == 2
+        workspace, _ = supervisor.journal.sandbox("session-1")
+        assert (workspace / "work/result.txt").read_text() == "durable"
+        seq = supervisor.journal.latest_seq("session-1")
+    blobs.fail = False
+    fresh = FakeModelAdapter()
+    async with harness(tmp_path / "new", blobs, fresh) as (supervisor, client):
+        assert (
+            await client.post("/v0/turns", json=body, params={"after_seq": seq})
+        ).status_code == 202
+        assert fresh.calls == 0 and not supervisor.tasks
+        events = supervisor.journal.events("session-1")
+        recovered = [event for event in events if event.turn_id == "paid"]
+        assert recovered[-1].type == "turn_ended"
+        assert recovered[-1].data["outcome"] == "interrupted"
+        assert any(event.data.get("kind") == "usage_unavailable" for event in recovered)
+        workspace, _ = supervisor.journal.sandbox("session-1")
+        assert not (workspace / "work/result.txt").exists()
+        changed = body | {"instructions": "changed"}
+        assert (await client.post("/v0/turns", json=changed)).status_code == 409
+        assert fresh.calls == 0
+
+
+async def test_failed_remote_write_ahead_refuses_paid_work(tmp_path):
+    class FailedWal(MemoryBlobs):
+        def upload(self, name, source):
+            if "/wal/" in name:
+                raise OSError("unavailable")
+            super().upload(name, source)
+
+    model = FakeModelAdapter()
+    async with harness(tmp_path, FailedWal(), model) as (supervisor, client):
+        await client.post("/v0/turns", json=turn("tool"))
+        await supervisor.tasks["turn-1"]
+        assert model.calls == 0
+        terminal = next(
+            event for event in supervisor.journal.events("session-1") if event.type == "turn_ended"
+        )
+        assert terminal.data["outcome"] == "errored"
+        assert terminal.data["error"] == {
+            "kind": "durability_unavailable",
+            "message": "Remote write-ahead is unavailable",
+            "retryable": True,
+        }
+
+
+async def test_cleanup_cancel_transport_carries_the_persisted_high_water(tmp_path):
+    from daimon_harness.journal import Journal
+    from mux.drivers.selfhosted.wire import EventsResponse, TurnRequest
+
+    blobs = MemoryBlobs()
+    journal = Journal(tmp_path / "old")
+    request = TurnRequest.model_validate(turn())
+    journal.claim(request)
+    journal.append(request, "status_running", {})
+    journal.append(request, "model_request_started", {"request_id": "lost", "model": "test"})
+    Checkpoints(blobs).save(journal, "session-1")
+    journal.close()
+    async with harness(tmp_path / "new", blobs) as (_, client):
+        client.params = {}
+        transport = DirectTransport(client, base_url="http://localhost", token="test")
+        await transport.request(
+            "POST", "/v0/turns/turn-1/cancel", session_id="session-1", after_seq=8
+        )
+        response = await transport.request(
+            "GET", "/v0/sessions/session-1/events", session_id="session-1", after_seq=8
+        )
+        events = EventsResponse.model_validate(response).events
+        assert events[0].seq == 9 and events[0].type == "history_gap"
+        assert all(event.seq > 8 for event in events)
+        assert any(event.data.get("kind") == "usage_unavailable" for event in events)
+        assert events[-1].data["outcome"] == "interrupted"
+
+
+async def test_write_ahead_failure_before_second_model_request_stops_that_request(tmp_path):
+    class TwoRequests(FakeModelAdapter):
+        async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
+            for index in range(2):
+                await context.emit(
+                    "model_request_started", {"request_id": str(index), "model": "test"}
+                )
+                self.calls += 1  # Paid I/O happens only after the write-ahead barrier.
+                await context.emit(
+                    "usage",
+                    {
+                        "request_id": str(index),
+                        "model": "test",
+                        "input_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 1,
+                        "reasoning_tokens": 0,
+                    },
+                )
+            return []
+
+    class FailSecondRequest(MemoryBlobs):
+        def upload(self, name, source):
+            raw = source.read()
+            if "/wal/" in name and b'"request_id":"1"' in raw:
+                raise OSError("unavailable")
+            super().upload(name, io.BytesIO(raw))
+
+    model = TwoRequests()
+    async with harness(tmp_path, FailSecondRequest(), model) as (supervisor, client):
+        await client.post("/v0/turns", json=turn())
+        await supervisor.tasks["turn-1"]
+        assert model.calls == 1
+        events = supervisor.journal.events("session-1")
+        assert any(
+            event.data.get("kind") == "usage_unavailable" and event.data.get("request_id") == "1"
+            for event in events
+        )
+        terminal = next(event for event in events if event.type == "turn_ended")
+        assert terminal.data["error"]["kind"] == "durability_unavailable"
+
+
+async def test_remote_inventory_recovery_retries_after_local_publication_crash(
+    tmp_path, monkeypatch
+):
+    from daimon_harness.journal import Journal
+
+    blobs = MemoryBlobs()
+    async with harness(tmp_path / "old", blobs) as (supervisor, client):
+        await client.post("/v0/turns", json=turn())
+        await supervisor.tasks["turn-1"]
+        await supervisor.flush_checkpoints()
+        blobs.fail = True
+        await client.post("/v0/turns", json=turn("tool", turn_id="paid", key="paid"))
+        await supervisor.tasks["paid"]
+        await supervisor.flush_checkpoints()
+    blobs.fail = False
+    original = Journal.remember_recovery
+    interrupted = False
+
+    def crash_after_claim(journal, request, digest):
+        nonlocal interrupted
+        original(journal, request, digest)
+        if not interrupted:
+            interrupted = True
+            raise OSError("crash before inventory publication")
+
+    monkeypatch.setattr(Journal, "remember_recovery", crash_after_claim)
+    home = tmp_path / "new"
+    async with harness(home, blobs) as (_, client):
+        assert (
+            await client.get("/v0/sessions/session-1/events", params={"after_seq": 13})
+        ).status_code == 503
+    async with harness(home, blobs) as (supervisor, client):
+        result = await client.get("/v0/sessions/session-1/events", params={"after_seq": 13})
+        assert result.status_code == 200
+        events = supervisor.journal.events("session-1")
+        assert any(
+            event.turn_id == "paid" and event.data.get("kind") == "usage_unavailable"
+            for event in events
+        )
+        assert supervisor.journal.ended("paid")
