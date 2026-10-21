@@ -696,6 +696,13 @@ committing a claim and registering its executor. Failed recovery is retryable.
   Session-level history gaps may follow a completed turn.
 - **I4:** Every claim has an executor or is repaired on the next authenticated
   request. Failed warning delivery cannot leave an unowned claim.
+- **I5:** No tool side effects after a turn's terminal; no new turn while prior
+  workers live. A finished executor is not proof of cleanup. Retain its context
+  and retry cleanup on authenticated requests; return retryable 503 while cleanup
+  fails. Recovery never ends a turn with a retained context or a live executor.
+
+Failed journal reopen and cursor re-recording return retryable 503. A failed
+reopen is retried lazily on the next authenticated request.
 
 
 The recovery property generator includes remote usage upload before local commit,
@@ -707,7 +714,7 @@ and host-visible completion/admission after warning failures. A separate regress
 boundary for warning delivery. Remote uploads extend a measurement-only oracle;
 they never advance the simulated host's event cursor.
 
-Reproduce the five isolated mutation checks from the repository root:
+Reproduce the six isolated mutation checks from the repository root:
 
 ```sh
 scratch=$(mktemp -d)
@@ -716,14 +723,17 @@ uv run python apps/harness/tests/recovery_mutations.py "$scratch"
 
 The script reverts each fix separately in copied source, using the same Hypothesis
 property (seed 7, including explicit regression traces). Expected pytest exit: 1
-for all five. Restoring startup repair before WAL reconciliation loses measured
+for all six. Restoring startup repair before WAL reconciliation loses measured
 usage; restoring submit-owned warning delivery strands a claim; removing pending
 measured-response persistence loses measured usage; removing terminal WAL records
 emits events after a terminal; disabling the divergence seal makes a mid-process
 commit rollback replace the host's measured outcome with unknown. Mutation 2
 asserts HTTP acceptance, a terminal in the host's poll, and successful admission
 of the following turn, rather than inspecting executor ownership. The original
-source remains untouched.
+source remains untouched. Mutation 6 discards the failed executor’s context,
+treating task completion as recovery permission; it fails with a clear I5
+assertion on the host poll. The generator includes cleanup failure with live
+workers, plus an explicit trace; a separate regression uses real cleanup timeouts.
 
 Cursors and generated events share the driver's `0..2**53` wire range. An
 unseen cursor must leave space for a gap and a 1024-event reservation, or the

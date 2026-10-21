@@ -1,4 +1,4 @@
-"""Run five recovery mutations on isolated source copies (never edit the checkout).
+"""Run six recovery mutations on isolated source copies (never edit the checkout).
 
 Usage: uv run python apps/harness/tests/recovery_mutations.py <empty scratch directory>
 Run from the repository root; each property-test failure is retained in scratch.
@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in range(1, 6):
+for number in range(1, 7):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -56,11 +56,17 @@ for number in range(1, 6):
                 '{"model_request_started", "usage", "turn_ended"}',
                 '{"model_request_started", "usage"}',
             )
-    else:
+    elif number == 5:
         change(
             "journal.py",
             "    def mark_diverged(self) -> None:\n        self.diverged = True",
             "    def mark_diverged(self) -> None:\n        self.diverged = False",
+        )
+    else:
+        change(
+            "service.py",
+            "                # Retain the context until worker cleanup succeeds (I5).",
+            "                self.contexts.pop(request.turn_id, None)",
         )
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:
@@ -85,5 +91,6 @@ for number in range(1, 6):
         3: "measured became unknown",
         4: "event after terminal",
         5: "measured became unknown",
+        6: "I5: poll ended a turn with live workers",
     }
     assert expected[number] in (root / f"mutation-{number}.log").read_text()

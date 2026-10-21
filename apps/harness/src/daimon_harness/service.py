@@ -80,6 +80,7 @@ class Supervisor:
             raise RuntimeError("remote checkpoints require single session mode")
         self.checkpoints = checkpoints
         self.restored = False
+        self.reopen_pending = False
         self.checkpoint_warned = False
         self.storage_worker = StorageWorker("harness-storage")
         self.wal_worker = StorageWorker("harness-wal")
@@ -255,7 +256,32 @@ class Supervisor:
                 self.checkpoint_result(request.session_id, None)
         return None
 
+    async def cleanup_failed_turns(self) -> None:
+        for turn_id, context in list(self.contexts.items()):
+            task = self.tasks.get(turn_id)
+            if task is not None and not task.done():
+                continue
+            try:
+                await context.stop_workers()
+            except Exception:
+                raise HarnessError(
+                    "workers_active", "Tool cleanup incomplete; session sealed"
+                ) from None
+            self.contexts.pop(turn_id, None)
+
+    def reopen_journal(self) -> None:
+        if self.reopen_pending:
+            diverged = self.journal.diverged
+            self.journal = Journal(self.home)
+            self.journal.diverged = diverged
+            self.attach_durability()
+            self.reopen_pending = False
+
     def prepare_session(self, session_id: str, after_seq: int = 0) -> None:
+        try:
+            self.reopen_journal()
+        except (sqlite3.Error, OSError):
+            raise HarnessError("durability_unavailable", "Local journal is unavailable") from None
         if self.journal.diverged:
             self.restored = False
         try:
@@ -289,12 +315,15 @@ class Supervisor:
                 audit_logger.warning(
                     "checkpoint_failed stage=restore reason=%s", type(exc).__name__
                 )
-                diverged = self.journal.diverged
+                self.reopen_pending = True
                 self.journal.close()
-                self.journal = Journal(self.home)
-                self.journal.diverged = diverged
-                self.attach_durability()
-                self.journal.record_cursor(session_id, after_seq)
+                try:
+                    self.reopen_journal()
+                    self.journal.record_cursor(session_id, after_seq)
+                except (sqlite3.Error, OSError):
+                    raise HarnessError(
+                        "durability_unavailable", "Local journal is unavailable"
+                    ) from None
                 if isinstance(exc, HarnessError):
                     raise exc
                 raise HTTPException(status_code=503, detail="Session restore unavailable") from None
@@ -312,6 +341,7 @@ class Supervisor:
         identifier(session_id)
         async with self.submissions:
             try:
+                await self.cleanup_failed_turns()
                 await self.io(self.prepare_session, session_id, after_seq)
             except ConflictError:
                 raise HTTPException(status_code=409, detail="session_bound") from None
@@ -330,6 +360,12 @@ class Supervisor:
         # A claimed turn can have executed tools. Never retry it after a process crash.
         for request in self.journal.turns():
             if not self.journal.ended(request.turn_id):
+                if request.turn_id in self.contexts:
+                    # Task completion is not proof of worker termination (I5).
+                    raise HarnessError("workers_active", "Tool cleanup incomplete; session sealed")
+                task = self.tasks.get(request.turn_id)
+                if task is not None and not task.done():
+                    continue
                 if not any(
                     event.turn_id == request.turn_id
                     and event.type == "error"
@@ -478,6 +514,7 @@ class Supervisor:
                 nonlocal failure
                 if context is not None:
                     await context.stop_workers()
+                    self.contexts.pop(request.turn_id, None)
                 original_failure = failure
                 for request_id in await self.io(self.journal.pending_requests, request):
                     await emit(
@@ -501,7 +538,6 @@ class Supervisor:
                     await emit("turn_ended", data)
                 finally:
                     credentials.clear()
-                    self.contexts.pop(request.turn_id, None)
                     self.changed.set()
 
             finalization = asyncio.create_task(finalize())
@@ -514,13 +550,14 @@ class Supervisor:
                 await finalization
             finally:
                 credentials.clear()
-                self.contexts.pop(request.turn_id, None)
+                # Retain the context until worker cleanup succeeds (I5).
                 self.changed.set()
 
     async def submit(
         self, request: TurnRequest, mcp_authorization: str | None = None, after_seq: int = 0
     ) -> None:
         async with self.submissions:
+            await self.cleanup_failed_turns()
             await self.io(self.prepare_session, request.session_id, after_seq)
             if self.session_mode == "single":
                 await self.io(self.journal.bind_session, request.session_id)

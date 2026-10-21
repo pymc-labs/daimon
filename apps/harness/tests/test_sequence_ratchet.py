@@ -18,7 +18,7 @@ from hypothesis import strategies as st
 from mux.drivers.selfhosted.wire import Event, TurnRequest
 
 from .conftest import turn
-from .test_checkpoints import MemoryBlobs, harness
+from .test_checkpoints import MemoryBlobs, cleanup_failure_case, harness
 
 SESSION = "session-1"
 EVENTS = "/v0/sessions/session-1/events"
@@ -283,6 +283,7 @@ OPERATIONS = st.lists(
                 "warning_reservation_failure",
                 "recover_retry",
                 "local_commit_failure",
+                "cleanup_failure",
             ]
         ),
         st.integers(min_value=0, max_value=3000),
@@ -315,6 +316,7 @@ OPERATIONS = st.lists(
 @example(trace=[("recover_retry", 0, 0)] * 8)
 @example(trace=[("local_commit_failure", 0, 0)] * 8)
 @example(trace=[("local_commit_failure", 0, 1)] * 8)
+@example(trace=[("cleanup_failure", 0, 0)] * 8)
 async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trace):
     with tempfile.TemporaryDirectory(prefix="sequence-reservation-", dir=tmp_path) as scratch:
         root, blobs, oracle = Path(scratch), ReservationBlobs(), HostSeen()
@@ -577,6 +579,13 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                             )
                     supervisor.adapter = ControlledModel()
                     blobs.fail = False
+                elif operation == "cleanup_failure":
+                    for turn_id, task in list(supervisor.tasks.items()):
+                        if not task.done():
+                            await client.post(f"/v0/turns/{turn_id}/cancel")
+                    await settle()
+                    serial += 1
+                    await cleanup_failure_case(supervisor, client, monkeypatch, f"cleanup-{serial}")
                 elif operation == "reservation_failure":
                     blobs.fail_reservations = True
                     # A warm cursor ahead of the block forces a reservation.

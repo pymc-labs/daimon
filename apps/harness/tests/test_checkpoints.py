@@ -1781,3 +1781,135 @@ async def test_divergence_seals_appends_until_remote_merge_succeeds_in_same_proc
         ).status_code == 202
         await supervisor.tasks["next"]
         assert (await client.get("/v0/sessions/session-1/events")).json()["complete"]
+
+
+async def cleanup_failure_case(supervisor, client, monkeypatch, turn_id, *, real_timeout=False):
+    """Codex r10 repro: an abandoned tool ignores cancellation and writes late."""
+    from contextlib import suppress
+
+    from daimon_harness.errors import HarnessError
+
+    release, started = asyncio.Event(), asyncio.Event()
+    side_effects = []
+    workers = []
+    original_stop = TurnContext.stop_workers
+
+    class StuckModel:
+        async def run(self, context, history):
+            await context.emit(
+                "model_request_started", {"request_id": turn_id, "model": "gpt-6-luna"}
+            )
+            await context.emit(
+                "usage",
+                {
+                    "request_id": turn_id,
+                    "model": "gpt-6-luna",
+                    "input_tokens": 1,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "reasoning_tokens": 0,
+                },
+            )
+
+            async def stuck():
+                started.set()
+                while not release.is_set():
+                    with suppress(asyncio.CancelledError):
+                        await release.wait()
+                side_effects.append("late write")
+                return "late write"
+
+            workers.append(asyncio.create_task(context.tool("stuck", "write", {}, stuck)))
+            await started.wait()
+            return history
+
+    async def failed_stop(context):
+        context.stopping = True
+        if any(not worker.done() for worker in context.workers):
+            raise HarnessError("workers_active", "Tool cleanup incomplete; session sealed")
+        await original_stop(context)
+
+    previous_adapter = supervisor.adapter
+    supervisor.adapter = StuckModel()
+    with monkeypatch.context() as patch:
+        if not real_timeout:
+            patch.setattr(TurnContext, "stop_workers", failed_stop)
+        try:
+            response = await client.post("/v0/turns", json=turn(turn_id=turn_id, key=turn_id))
+            assert response.status_code == 202, response.text
+            result = await asyncio.gather(supervisor.tasks[turn_id], return_exceptions=True)
+            assert isinstance(result[0], HarnessError) and result[0].kind == "workers_active"
+            patch.setattr(TurnContext, "stop_workers", failed_stop)
+            assert not workers[0].done()
+            for _ in range(2):
+                response = await client.get("/v0/sessions/session-1/events")
+                assert response.status_code == 503, "I5: poll ended a turn with live workers"
+                assert response.json()["detail"]["retryable"] is True
+                response = await client.post(
+                    "/v0/turns", json=turn(turn_id=turn_id + "-next", key=turn_id + "-next")
+                )
+                assert response.status_code == 503, "I5: admitted a new turn with live workers"
+            assert not side_effects
+        finally:
+            release.set()
+            await asyncio.gather(*workers, return_exceptions=True)
+            supervisor.adapter = previous_adapter
+        response = await client.get("/v0/sessions/session-1/events")
+        assert response.status_code == 200, response.text
+        events = response.json()["events"]
+        terminal = [e for e in events if e["turn_id"] == turn_id and e["type"] == "turn_ended"]
+        assert len(terminal) == 1 and side_effects == ["late write"]
+        assert not any(e["turn_id"] == turn_id and e["seq"] > terminal[0]["seq"] for e in events)
+        response = await client.post(
+            "/v0/turns", json=turn(turn_id=turn_id + "-next", key=turn_id + "-next")
+        )
+        assert response.status_code == 202, response.text
+        await supervisor.tasks[turn_id + "-next"]
+
+
+async def test_cleanup_failure_keeps_session_sealed_until_workers_stop(tmp_path, monkeypatch):
+    async with harness(tmp_path, MemoryBlobs()) as (supervisor, client):
+        await cleanup_failure_case(supervisor, client, monkeypatch, "stuck", real_timeout=True)
+
+
+@pytest.mark.parametrize("failure", ["reopen", "cursor"])
+async def test_failed_restore_reopen_and_cursor_are_retryable(tmp_path, monkeypatch, failure):
+    import sqlite3
+
+    from daimon_harness import service
+    from daimon_harness.journal import Journal
+
+    async with harness(tmp_path, MemoryBlobs()) as (supervisor, client):
+        restore = supervisor.checkpoints.restore
+        record = Journal.record_cursor
+        calls = 0
+
+        def fail_restore(*args):
+            raise OSError("storage unavailable")
+
+        def full(*args, **kwargs):
+            raise sqlite3.OperationalError("disk full")
+
+        def fail_second_cursor(self, *args):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                return full()
+            return record(self, *args)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(supervisor.checkpoints, "restore", fail_restore)
+            if failure == "reopen":
+                patch.setattr(service, "Journal", full)
+            else:
+                patch.setattr(Journal, "record_cursor", fail_second_cursor)
+            for _ in range(2):
+                response = await client.get("/v0/sessions/session-1/events")
+                assert response.status_code == 503, response.text
+                assert response.json()["detail"]["retryable"] is True
+        supervisor.checkpoints.restore = restore
+        response = await client.get("/v0/sessions/session-1/events")
+        assert response.status_code == 200, response.text
+        response = await client.post("/v0/turns", json=turn())
+        assert response.status_code == 202
+        await supervisor.tasks["turn-1"]

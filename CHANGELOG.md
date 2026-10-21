@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep self-hosted sessions sealed until failed tool cleanup succeeds, and retry journal reopen failures on subsequent requests.
+
 - Reconcile remotely committed harness usage after a failed local commit, preserve
   measured WAL outcomes during updates, and reject cursors without sequence headroom.
 
