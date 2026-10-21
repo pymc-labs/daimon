@@ -72,13 +72,13 @@ def normalize(event: wire.Event, session: ResourceRef) -> mux.Event:
     if event.session_id != session.id:
         raise ScopeViolation(session.id, "harness returned a foreign session event")
     item_id = identity(session.id, event.seq)
-    if event.type == "model_request_started":
+    if event.type in {"model_request_started", "checkpoint_warning"}:
         return mux.Event(
             id=item_id,
             session_id=session.id,
             sequence=event.seq,
             turn_id=event.turn_id,
-            type="native.selfhosted.model_request_started",
+            type="native.selfhosted." + event.type,
             observed_at=event.at,
             occurred_at=event.at,
             authority="record",

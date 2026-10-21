@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol, cast
 from urllib.parse import urlsplit
@@ -20,13 +21,29 @@ from urllib.parse import urlsplit
 import zstandard
 from azure.storage.blob import ContainerClient
 from mux.drivers.selfhosted.transport import sandbox_id
+from mux.drivers.selfhosted.wire import TurnRequest
 
 from .checkpoint_archive import MAX_BYTES, LimitedReader, restore_work
 from .identity import CapturedIdentity
 from .isolation import tool_identity, validate_credential_sources
-from .journal import Journal, identifier
+from .journal import MAX_CURSOR, MAX_CURSOR_SLACK, Journal, identifier
 
 MAX_ARCHIVE_BYTES = MAX_BYTES + 64 * 1024 * 1024
+MAX_MANIFEST_BYTES = 128 * 1024
+
+
+@dataclass
+class Snapshot:
+    stage: Path
+    session_id: str
+    seq: int
+    sandbox: Path
+    user: int | None
+    group: int | None
+    groups: list[int] | None
+
+    def close(self) -> None:
+        shutil.rmtree(self.stage)
 
 
 class CheckpointStore(Protocol):
@@ -56,7 +73,14 @@ class AzureCheckpointStore:
         if not (os.environ.get("IDENTITY_ENDPOINT") and os.environ.get("IDENTITY_HEADER")):
             raise RuntimeError("checkpoint managed identity requires a header-protected endpoint")
         self.credential = identity or CapturedIdentity()
-        self.client = ContainerClient(account_url, container, credential=self.credential)
+        self.client = ContainerClient(
+            account_url,
+            container,
+            credential=self.credential,
+            connection_timeout=10,
+            read_timeout=30,
+            retry_total=1,
+        )
 
     def list(self, prefix: str) -> list[str]:
         return [item.name for item in self.client.list_blobs(name_starts_with=prefix)]
@@ -145,23 +169,50 @@ class Checkpoints:
                     result.append((int(seq), name))
         return sorted(result)
 
-    def save(self, journal: Journal, session_id: str) -> dict[str, object]:
-        events = journal.events(session_id)
-        seq = events[-1].seq if events else 0
+    def capture(self, journal: Journal, session_id: str) -> Snapshot:
+        """Only this short SQLite backup step runs on the journal worker."""
+        seq = journal.latest_seq(session_id)
         sandbox, uid = journal.sandbox(session_id)
         user, group, groups = tool_identity(sandbox, uid)
-        with _scratch(journal.root.parent) as stage:
+        root = journal.root / "checkpoints"
+        root.mkdir(mode=0o700, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix="snapshot-", dir=root))
+        snapshot = Snapshot(stage, session_id, seq, sandbox, user, group, groups)
+        try:
             _backup(journal.db, stage / "turns.sqlite3")
             _backup(journal.connection(session_id), stage / "journal.sqlite3")
-            with (stage / "work.tar").open("wb") as output:
+        except BaseException:
+            snapshot.close()
+            raise
+        return snapshot
+
+    def save(self, journal: Journal, session_id: str) -> dict[str, object]:
+        return self.upload(self.capture(journal, session_id))
+
+    def upload(self, snapshot: Snapshot) -> dict[str, object]:
+        """Export, compression, storage and retention never own the journal worker."""
+        stage, session_id, seq = snapshot.stage, snapshot.session_id, snapshot.seq
+        sandbox, user, group, groups = (
+            snapshot.sandbox,
+            snapshot.user,
+            snapshot.group,
+            snapshot.groups,
+        )
+        try:
+            with (
+                (stage / "work.tar").open("wb") as output,
+                (stage / "file.stage").open("w+b") as staged,
+            ):
                 exported = subprocess.run(
                     [
                         sys.executable,
                         "-I",
                         str(Path(__file__).with_name("checkpoint_archive.py")),
                         str(sandbox / "work"),
+                        str(staged.fileno()),
                     ],
                     stdout=output,
+                    pass_fds=(staged.fileno(),),
                     stderr=subprocess.PIPE,
                     check=True,
                     timeout=60,
@@ -170,7 +221,21 @@ class Checkpoints:
                     extra_groups=groups,
                     env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
                 )
+            report = json.loads(exported.stderr)
             files = ("turns.sqlite3", "journal.sqlite3", "work.tar")
+            if (
+                sum((stage / filename).stat().st_size for filename in files)
+                > MAX_ARCHIVE_BYTES - 1024 * 1024
+            ):
+                with tarfile.open(stage / "work.tar", "w"):
+                    pass
+                report.update(
+                    degraded=True,
+                    included_bytes=0,
+                    included_files=0,
+                    skipped_count=int(report["skipped_count"]) + 1,
+                    skipped=[{"path": ".", "reason": "combined_archive_cap"}],
+                )
             digests: dict[str, str] = {}
             total = 0
             for filename in files:
@@ -179,14 +244,19 @@ class Checkpoints:
                     digests[filename] = hashlib.file_digest(source, "sha256").hexdigest()
             if total > MAX_ARCHIVE_BYTES - 1024 * 1024:
                 raise ValueError("checkpoint exceeds archive size limit")
-            report = json.loads(exported.stderr)
             manifest = {
                 "session_id": session_id,
                 "seq": seq,
                 "sha256": digests,
                 "workspace": report,
             }
-            (stage / "manifest.json").write_text(json.dumps(manifest))
+            encoded = json.dumps(manifest).encode("utf-8")
+            while len(encoded) > MAX_MANIFEST_BYTES and report["skipped"]:
+                report["skipped"].pop()
+                encoded = json.dumps(manifest).encode("utf-8")
+            if len(encoded) > MAX_MANIFEST_BYTES:
+                raise ValueError("checkpoint metadata exceeds manifest budget")
+            (stage / "manifest.json").write_bytes(encoded)
             archive = stage / "checkpoint.tar.zst"
             with (
                 archive.open("wb") as output,
@@ -201,8 +271,10 @@ class Checkpoints:
             for _, name in self.names(session_id)[: -self.keep]:
                 self.store.delete(name)
             return report
+        finally:
+            snapshot.close()
 
-    def restore(self, journal: Journal, session_id: str) -> Journal:
+    def restore(self, journal: Journal, session_id: str, after_seq: int = 0) -> Journal:
         """Restore before claiming a turn, keeping the same session/seq/request ids."""
         home = journal.root.parent
         pending = journal.root / "restore.pending"
@@ -223,6 +295,24 @@ class Checkpoints:
             if journal.events(session_id):
                 raise ValueError("restore refuses to overwrite partial local journal state")
         seq, name = checkpoints[-1]
+        cursor_file = journal.root / "restore.cursor"
+        if cursor_file.exists():
+            saved = json.loads(cursor_file.read_bytes())
+            if saved["session_id"] != session_id:
+                raise ValueError("restore cursor belongs to another session")
+            after_seq = max(after_seq, int(saved["after_seq"]))
+        if not 0 <= after_seq <= min(MAX_CURSOR, seq + MAX_CURSOR_SLACK):
+            raise ValueError("restore cursor exceeds permitted range")
+        # Keep the client high-water across a crash during publication/retry.
+        cursor_stage = cursor_file.with_suffix(".next")
+        with cursor_stage.open("w") as output:
+            json.dump(
+                {"session_id": session_id, "after_seq": after_seq, "checkpoint_seq": seq}, output
+            )
+            output.flush()
+            os.fsync(output.fileno())
+        cursor_stage.replace(cursor_file)
+        sync_directory(journal.root)
         with _scratch(home) as stage:
             archive = stage / "checkpoint.tar.zst"
             with archive.open("wb") as target:
@@ -245,7 +335,7 @@ class Checkpoints:
                         or not member.isfile()
                         or member.size < 0
                         or size > MAX_ARCHIVE_BYTES
-                        or (member.name == "manifest.json" and member.size > 128 * 1024)
+                        or (member.name == "manifest.json" and member.size > MAX_MANIFEST_BYTES)
                     ):
                         raise ValueError("invalid checkpoint archive")
                     seen.add(member.name)
@@ -276,12 +366,17 @@ class Checkpoints:
                     "ok",
                 ):
                     raise ValueError("checkpoint contains invalid session state")
+                latest = db.execute(
+                    "SELECT request FROM turns ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+                request = TurnRequest.model_validate_json(latest[0])
             with closing(sqlite3.connect(stage / "journal.sqlite3")) as db:
                 if (
                     db.execute("PRAGMA integrity_check").fetchone() != ("ok",)
                     or db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0] != seq
                 ):
                     raise ValueError("checkpoint journal is inconsistent")
+                Journal.fence_restore(db, request, seq, after_seq)
             with (stage / "work.tar").open("rb") as source:
                 restore_work(source, stage / "work")
             # A marker makes publication restartable if the process dies between renames.

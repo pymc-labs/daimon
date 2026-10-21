@@ -14,6 +14,12 @@ from typing import BinaryIO, cast
 MAX_BYTES = 512 * 1024 * 1024
 MAX_ENTRIES = 50_000
 MAX_DEPTH = 32
+MAX_REPORT_BYTES = 32 * 1024
+
+
+def valid_name(name: str) -> bool:
+    parts = PurePosixPath(name).parts
+    return bool(parts) and not name.startswith("/") and ".." not in parts and "\\" not in name
 
 
 class LimitedReader:
@@ -31,15 +37,19 @@ class LimitedReader:
         return data
 
 
-def export_work(root: Path, output: BinaryIO) -> dict[str, object]:
+def _export_work(root: Path, output: BinaryIO, staged: BinaryIO) -> dict[str, object]:
     size = count = files = skipped_count = 0
     skipped: list[dict[str, str]] = []
 
     def skip(path: str, reason: str) -> None:
         nonlocal skipped_count
         skipped_count += 1
-        if len(skipped) < 100:
-            skipped.append({"path": path[:512], "reason": reason})
+        sample = {"path": path[:512], "reason": reason}
+        if (
+            len(skipped) < 100
+            and len(json.dumps(skipped + [sample]).encode("utf-8")) < MAX_REPORT_BYTES
+        ):
+            skipped.append(sample)
 
     def visit(archive: tarfile.TarFile, directory: int, prefix: str, depth: int) -> None:
         nonlocal size, count, files
@@ -53,6 +63,9 @@ def export_work(root: Path, output: BinaryIO) -> dict[str, object]:
                     skip(prefix, "entry_cap")
                     return
                 name, path = entry.name, prefix + entry.name
+                if not valid_name(path):
+                    skip(path, "unsupported_name")
+                    continue
                 try:
                     info = os.stat(name, dir_fd=directory, follow_symlinks=False)
                     member = tarfile.TarInfo(path)
@@ -77,7 +90,9 @@ def export_work(root: Path, output: BinaryIO) -> dict[str, object]:
                         fd = os.open(
                             name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
                         )
-                        with os.fdopen(fd, "rb") as source, tempfile.TemporaryFile() as staged:
+                        with os.fdopen(fd, "rb") as source:
+                            staged.seek(0)
+                            staged.truncate()
                             opened = os.fstat(source.fileno())
                             if not stat.S_ISREG(opened.st_mode):
                                 skip(path, "changed_type")
@@ -126,6 +141,15 @@ def export_work(root: Path, output: BinaryIO) -> dict[str, object]:
     }
 
 
+def export_work(root: Path, output: BinaryIO, staged: BinaryIO | None = None) -> dict[str, object]:
+    if staged is not None:
+        return _export_work(root, output, staged)
+    # Direct callers own this parent. Production passes a pre-opened descriptor
+    # inside the service-owned snapshot directory on the workspace filesystem.
+    with tempfile.TemporaryFile(dir=root.parent) as scratch:
+        return _export_work(root, output, scratch)
+
+
 def restore_work(source: BinaryIO, target: Path) -> None:
     """Extract only bounded regular files and directories into a private empty dir."""
     size = 0
@@ -136,10 +160,7 @@ def restore_work(source: BinaryIO, target: Path) -> None:
         for member in archive:
             parts = PurePosixPath(member.name).parts
             if (
-                not parts
-                or member.name.startswith("/")
-                or ".." in parts
-                or "\\" in member.name
+                not valid_name(member.name)
                 or member.name in seen
                 or not (member.isfile() or member.isdir())
                 or member.size < 0
@@ -165,5 +186,9 @@ def restore_work(source: BinaryIO, target: Path) -> None:
 
 
 if __name__ == "__main__":
-    report = export_work(Path(sys.argv[1]), sys.stdout.buffer)
+    if len(sys.argv) > 2:
+        with os.fdopen(int(sys.argv[2]), "w+b") as staged:
+            report = export_work(Path(sys.argv[1]), sys.stdout.buffer, staged)
+    else:
+        report = export_work(Path(sys.argv[1]), sys.stdout.buffer)
     sys.stderr.write(json.dumps(report))

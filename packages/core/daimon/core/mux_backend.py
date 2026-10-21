@@ -161,6 +161,38 @@ def turn_backend(request: TurnBackendRequest) -> TurnBackend:
         raise ScopeViolation(request.session_id, "factory returned a foreign profile or session")
     if request.session is not None and session != request.session:
         raise ScopeViolation(request.session_id, "factory replaced the authorized native session")
+    if profile.provider == "selfhosted":
+        from daimon.core.turn.persistence import current_persistence
+        from mux.drivers.selfhosted import SelfHostedDriver
+
+        active = current_persistence.get()
+        if isinstance(bound.backend, SelfHostedDriver):
+            if active is None:
+                raise ScopeViolation(session.id, "self-hosted cursor requires host persistence")
+
+            async def high_water(target: ResourceRef) -> int:
+                active.check_session(request.scope, target)
+                projection = await active.store.projection(target.id)
+                if projection is None:
+                    return 0
+                if projection.cursor.isdecimal():
+                    return int(projection.cursor)
+                # Host-authored notices can own the projection cursor. Their
+                # local commit sequence is not the harness ordering domain.
+                after, highest = -1, 0
+                while events := await active.store.read_events(target.id, after=after):
+                    for event in events:
+                        cursor = event.native.cursor
+                        if (
+                            event.native.provider == "selfhosted"
+                            and cursor is not None
+                            and cursor.isdecimal()
+                        ):
+                            highest = max(highest, int(cursor))
+                    after = events[-1].sequence
+                return highest
+
+            bound.backend.events.high_water = high_water
     return bound
 
 

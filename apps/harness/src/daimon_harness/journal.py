@@ -14,6 +14,9 @@ from pydantic import JsonValue
 
 from .isolation import TOOL_UID_MAX
 
+MAX_CURSOR = 2**53
+MAX_CURSOR_SLACK = 10**9
+
 
 def identifier(value: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,200}", value):
@@ -264,12 +267,38 @@ class Journal:
             .fetchone()[0]
         )
 
-    def advance_seq(self, session_id: str, after_seq: int) -> None:
-        with self.connection(session_id) as db:
+    @staticmethod
+    def fence_restore(
+        db: sqlite3.Connection, request: TurnRequest, checkpoint_seq: int, after_seq: int
+    ) -> None:
+        if not 0 <= after_seq <= min(MAX_CURSOR, checkpoint_seq + MAX_CURSOR_SLACK):
+            raise ValueError("restore cursor exceeds permitted range")
+        with db:
             db.execute(
-                "UPDATE event_sequence SET floor=MAX(floor, ?) WHERE id=1",
-                (max(self.latest_seq(session_id), after_seq) + 1,),
+                "CREATE TABLE IF NOT EXISTS event_sequence "
+                "(id INTEGER PRIMARY KEY CHECK(id=1), floor INTEGER)"
             )
+            db.execute("INSERT OR IGNORE INTO event_sequence VALUES (1, 0)")
+            floor = max(checkpoint_seq, after_seq) + 1
+            db.execute("UPDATE event_sequence SET floor=MAX(floor, ?) WHERE id=1", (floor,))
+            latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+            if after_seq > checkpoint_seq and latest <= after_seq:
+                event = Event(
+                    seq=floor,
+                    session_id=request.session_id,
+                    turn_id=request.turn_id,
+                    at=datetime.now(UTC),
+                    type="history_gap",
+                    data={
+                        "from_seq": checkpoint_seq + 1,
+                        "to_seq": after_seq,
+                        "reason": "sandbox_restored",
+                    },
+                )
+                db.execute(
+                    "INSERT INTO events(seq, body, turn_id, type) VALUES (?, ?, ?, ?)",
+                    (floor, event.model_dump_json(), request.turn_id, event.type),
+                )
 
     def save_history(self, session_id: str, history: list[JsonValue]) -> None:
         with self.connection(session_id) as db:

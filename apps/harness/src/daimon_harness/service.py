@@ -30,7 +30,7 @@ from mux.drivers.selfhosted.wire import (
 from pydantic import JsonValue, ValidationError
 
 from .auth import Authenticator
-from .checkpoints import Checkpoints, configured_checkpoints, sync_directory
+from .checkpoints import Checkpoints, Snapshot, configured_checkpoints, sync_directory
 from .codex_adapter import CodexModelAdapter
 from .credentials import (
     credential_log_redaction,
@@ -48,7 +48,7 @@ from .isolation import (
     validate_credential_sources,
     validate_session_mode,
 )
-from .journal import ConflictError, Journal, identifier
+from .journal import MAX_CURSOR, ConflictError, Journal, identifier
 from .model_adapter import AzureModelAdapter, ModelAdapter
 from .runtime import TurnContext
 
@@ -75,6 +75,12 @@ class Supervisor:
         self.checkpoints = checkpoints
         self.restored = False
         self.checkpoint_warned = False
+        self.storage_worker = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="harness-storage"
+        )
+        self.checkpoint_task: asyncio.Task[None] | None = None
+        self.checkpoint_dirty: str | None = None
+        self.pending_snapshot: Snapshot | None = None
         self.checkpoint_pending: str | None = None
         self.operator_credentials = {
             name: value
@@ -96,6 +102,7 @@ class Supervisor:
                 self.journal.configure_single_session()
             except BaseException:
                 self.journal.close()
+                self.storage_worker.shutdown(wait=True)
                 self.worker.shutdown(wait=True)
                 raise
         self.secrets = process_credentials()
@@ -114,77 +121,114 @@ class Supervisor:
         future = asyncio.get_running_loop().run_in_executor(self.worker, lambda: operation(*args))
         return await asyncio.shield(future)
 
-    def checkpoint(self, session_id: str) -> None:
+    def schedule_checkpoint(self, session_id: str, snapshot: Snapshot | None = None) -> None:
         if self.checkpoints is None:
             return
-        self.checkpoint_pending = session_id
+        self.checkpoint_dirty = session_id
+        if self.pending_snapshot is not None:
+            self.pending_snapshot.close()
+        self.pending_snapshot = snapshot
+        if self.checkpoint_task is None or self.checkpoint_task.done():
+            self.checkpoint_task = asyncio.create_task(self.checkpoint_loop())
+
+    async def checkpoint(self, session_id: str) -> None:
+        self.schedule_checkpoint(session_id)
+        await self.flush_checkpoints()
+
+    async def flush_checkpoints(self) -> None:
+        if self.checkpoint_task is not None:
+            await asyncio.shield(self.checkpoint_task)
+
+    def checkpoint_result(self, session_id: str, report: dict[str, object] | None) -> None:
         marker = self.journal.root / "checkpoint.pending"
-        try:
+        if report is None:
+            self.checkpoint_pending = session_id
             with marker.open("w") as output:
                 output.write(session_id)
                 output.flush()
                 os.fsync(output.fileno())
-            sync_directory(self.journal.root)
-            report = self.checkpoints.save(self.journal, session_id)
+            self.checkpoint_notice(session_id)
+        else:
+            self.checkpoint_pending = None
+            marker.unlink(missing_ok=True)
             if report.get("degraded"):
                 self.checkpoint_notice(session_id)
-            marker.unlink()
-            sync_directory(self.journal.root)
-        except Exception as exc:
-            audit_logger.warning("checkpoint_failed stage=save reason=%s", type(exc).__name__)
-            self.checkpoint_notice(session_id)
-            return
-        self.checkpoint_pending = None
+        sync_directory(self.journal.root)
+
+    async def checkpoint_loop(self) -> None:
+        assert self.checkpoints is not None
+        while self.checkpoint_dirty is not None:
+            session_id, self.checkpoint_dirty = self.checkpoint_dirty, None
+            try:
+                snapshot, self.pending_snapshot = self.pending_snapshot, None
+                if snapshot is None:
+                    snapshot = await self.io(self.checkpoints.capture, self.journal, session_id)
+                future = asyncio.get_running_loop().run_in_executor(
+                    self.storage_worker, self.checkpoints.upload, snapshot
+                )
+                try:
+                    report = await asyncio.wait_for(asyncio.shield(future), timeout=120)
+                except TimeoutError:
+                    audit_logger.warning("checkpoint_failed stage=upload reason=TimeoutError")
+                    await self.io(self.checkpoint_result, session_id, None)
+                    # One bounded in-flight attempt: coalesce newer snapshots while
+                    # the timed-out operation unwinds, never queue work behind it.
+                    await asyncio.shield(future)
+                    continue
+                await self.io(self.checkpoint_result, session_id, report)
+            except Exception as exc:
+                audit_logger.warning("checkpoint_failed stage=save reason=%s", type(exc).__name__)
+                await self.io(self.checkpoint_result, session_id, None)
 
     def checkpoint_notice(self, session_id: str) -> None:
         if not self.checkpoint_warned and not any(
-            event.type == "error" and event.data.get("kind") == "checkpoint_warning"
-            for event in self.journal.events(session_id)
+            event.type == "checkpoint_warning" for event in self.journal.events(session_id)
         ):
             requests = [r for r in self.journal.turns() if r.session_id == session_id]
             if requests:
                 self.journal.append(
                     requests[-1],
-                    "error",
+                    "checkpoint_warning",
                     {
-                        "kind": "checkpoint_warning",
                         "message": "Session state is not fully durable",
-                        "retryable": False,
                     },
                 )
                 self.checkpoint_warned = True
 
     def durable_append(
         self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]
-    ) -> None:
+    ) -> Snapshot | None:
         self.journal.append(request, kind, data)
-        if kind in {"model_request_started", "turn_ended"}:
-            # Attempt inventory persistence before model I/O and terminal
-            # persistence after cleanup; failures warn without sealing the session.
-            self.checkpoint(request.session_id)
+        if self.checkpoints is not None and kind in {"model_request_started", "turn_ended"}:
+            try:
+                return self.checkpoints.capture(self.journal, request.session_id)
+            except Exception as exc:
+                audit_logger.warning(
+                    "checkpoint_failed stage=capture reason=%s", type(exc).__name__
+                )
+                self.checkpoint_result(request.session_id, None)
+        return None
 
     def prepare_session(self, session_id: str, after_seq: int = 0) -> None:
         if self.session_mode == "single":
             self.journal.bind_session(session_id)
         if self.checkpoints is not None and not self.restored:
             try:
-                self.journal = self.checkpoints.restore(self.journal, session_id)
+                self.journal = self.checkpoints.restore(self.journal, session_id, after_seq)
                 self.journal.bind_session(session_id)
-                if self.checkpoints.restored_seq is not None:
-                    old_seq = self.checkpoints.restored_seq
-                    self.journal.advance_seq(session_id, after_seq)
-                    requests = self.journal.turns()
-                    if requests:
-                        self.journal.append(
-                            requests[-1],
-                            "history_gap",
-                            {
-                                "from_seq": old_seq + 1,
-                                "to_seq": max(old_seq, after_seq),
-                                "reason": "sandbox_restored",
-                            },
-                        )
-                self.recover(sandbox_lost=self.checkpoints.restored_seq is not None)
+                cursor_file = self.journal.root / "restore.cursor"
+                if cursor_file.exists():
+                    saved = json.loads(cursor_file.read_bytes())
+                    if saved["session_id"] != session_id:
+                        raise ConflictError("session_bound")
+                    request = self.journal.turns(session_id)[-1]
+                    Journal.fence_restore(
+                        self.journal.connection(session_id),
+                        request,
+                        saved["checkpoint_seq"],
+                        max(after_seq, saved["after_seq"]),
+                    )
+                self.recover(sandbox_lost=cursor_file.exists())
             except ConflictError:
                 raise
             except Exception as exc:
@@ -205,9 +249,13 @@ class Supervisor:
                 raise HTTPException(status_code=409, detail="session_bound") from None
 
     def recover(self, sandbox_lost: bool = False) -> None:
-        if (self.journal.root / "restore.pending").exists():
+        if (self.journal.root / "restore.pending").exists() or (
+            (self.journal.root / "restore.cursor").exists() and not sandbox_lost
+        ):
             # Partial publication must be restored before repairing turn state.
             return
+        cursor_file = self.journal.root / "restore.cursor"
+        sandbox_lost = sandbox_lost or cursor_file.exists()
         # A claimed turn can have executed tools. Never retry it after a process crash.
         for request in self.journal.turns():
             if not self.journal.ended(request.turn_id):
@@ -242,7 +290,9 @@ class Supervisor:
                         },
                     },
                 )
-                self.checkpoint(request.session_id)
+
+        cursor_file.unlink(missing_ok=True)
+        sync_directory(self.journal.root)
 
     async def run(self, request: TurnRequest, credentials: dict[str, str]) -> None:
         credentials = self.secrets | credentials
@@ -255,12 +305,14 @@ class Supervisor:
                 usage_count += 1
             if kind == "error" and data.get("kind") != "checkpoint_warning":
                 failure = {"kind": data["kind"], "message": data["message"]}
-            await self.io(
+            snapshot = await self.io(
                 self.durable_append,
                 request,
                 kind,
                 cast(dict[str, JsonValue], redact(data, credentials)),
             )
+            if kind in {"model_request_started", "turn_ended"}:
+                self.schedule_checkpoint(request.session_id, snapshot)
             self.changed.set()
 
         outcome = "completed"
@@ -403,9 +455,11 @@ class Supervisor:
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
         if isinstance(self.adapter, AzureModelAdapter) and self.adapter.credential is not None:
             await self.adapter.credential.close()
+        await self.flush_checkpoints()
         await self.io(self.journal.close)
         if self.checkpoints is not None:
             await self.io(self.checkpoints.close)
+        self.storage_worker.shutdown(wait=True)
         self.worker.shutdown(wait=True)
         self.log_redaction.__exit__(None, None, None)
         self.secrets.clear()
@@ -513,7 +567,7 @@ def create_app(
         accept: Annotated[str | None, Header()] = None,
         x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
         session_id: Annotated[str | None, Query()] = None,
-        after_seq: int = Query(default=0, ge=0),
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
     ) -> Response:
         if session_id is not None and session_id != request.session_id:
             raise HTTPException(status_code=409, detail="session_mismatch")
@@ -557,7 +611,7 @@ def create_app(
         turn_id: str,
         action: ActionRequest,
         session_id: Annotated[str | None, Query()] = None,
-        after_seq: int = Query(default=0, ge=0),
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
     ) -> dict[str, bool]:
         await restore_for_turn(turn_id, session_id, after_seq)
         context = supervisor.contexts.get(turn_id)
@@ -578,7 +632,7 @@ def create_app(
     async def cancel(
         turn_id: str,
         session_id: Annotated[str | None, Query()] = None,
-        after_seq: int = Query(default=0, ge=0),
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
     ) -> CancelResponse:
         await restore_for_turn(turn_id, session_id, after_seq)
         task = supervisor.tasks.get(turn_id)
@@ -597,7 +651,7 @@ def create_app(
 
     async def events(
         session_id: str,
-        after_seq: int = Query(default=0, ge=0),
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
         context_session_id: Annotated[str | None, Query(alias="session_id")] = None,
     ) -> EventsResponse:
         if context_session_id is not None and context_session_id != session_id:
@@ -624,7 +678,7 @@ def create_app(
         accept: Annotated[str | None, Header()] = None,
         x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
         session_id: Annotated[str | None, Query()] = None,
-        after_seq: int = Query(default=0, ge=0),
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
     ) -> Response:
         route = envelope.c3
         method, path = route.method, route.path
@@ -642,7 +696,7 @@ def create_app(
             if isinstance(raw_cursor, bool) or not isinstance(raw_cursor, (str, int)):
                 raise ValueError("invalid cursor")
             cursor = int(raw_cursor)
-            if cursor < 0:
+            if not 0 <= cursor <= MAX_CURSOR:
                 raise ValueError("negative cursor")
         except ValueError:
             raise HTTPException(status_code=422, detail="Invalid cursor") from None
@@ -680,7 +734,7 @@ def create_app(
                 if isinstance(raw_after, bool) or not isinstance(raw_after, (str, int)):
                     raise ValueError("invalid cursor")
                 after = int(raw_after)
-                if after < 0:
+                if not 0 <= after <= MAX_CURSOR:
                     raise ValueError("negative cursor")
                 return JSONResponse(
                     (await events(match[1], after, context_id)).model_dump(mode="json")

@@ -279,6 +279,10 @@ class ErrorData(TurnError):
     request_id: str | None = None
 
 
+class CheckpointWarningData(ResponseModel):
+    message: str
+
+
 class HistoryGapData(ResponseModel):
     """Recovery boundary; requests carry after_seq alongside session_id in the query."""
 
@@ -289,6 +293,7 @@ class HistoryGapData(ResponseModel):
 
 EventType = Literal[
     "history_gap",
+    "checkpoint_warning",
     "status_running",
     "model_request_started",
     "agent_message_delta",
@@ -301,7 +306,8 @@ EventType = Literal[
     "error",
 ]
 EventData = (
-    HistoryGapData
+    CheckpointWarningData
+    | HistoryGapData
     | StatusRunningData
     | AgentMessageDeltaData
     | AgentMessageData
@@ -315,6 +321,7 @@ EventData = (
 )
 DATA_MODELS: dict[EventType, type[WireModel]] = {
     "history_gap": HistoryGapData,
+    "checkpoint_warning": CheckpointWarningData,
     "status_running": StatusRunningData,
     "agent_message_delta": AgentMessageDeltaData,
     "agent_message": AgentMessageData,

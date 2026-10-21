@@ -277,15 +277,24 @@ and `work/` to `sessions/<sandbox_id>/<seq>.tar.zst`. SQLite's backup API includ
 committed WAL data. Upload failures are logged by stage and exception class and
 mark the session not durable until a later successful snapshot. They never seal
 polls, cancellation or later turns. A `checkpoint_warning` notice is emitted once
-per session. Old snapshots are pruned only after a successful upload.
+per session as a non-terminal native notice. SQLite snapshot capture runs on the
+journal worker; workspace export, upload and retention run separately with one
+in-flight attempt and one coalesced pending snapshot. Polls and new turns do not
+wait for storage. The manifest caps escaped UTF-8 bytes, records a skip count
+and bounded sample, and shares workspace name validation with restore. Combined
+archive limits degrade to journals only. Export staging stays service-owned on
+the session filesystem. Old snapshots are pruned only after a successful upload.
 
 An authenticated first turn, poll, action or cancel restores the latest snapshot
 when local state is empty. An interrupted restore retries before serving.
 Corrupt snapshots and conflicting local workspace state fail closed. Journal
 sequence numbers, history and replay keys continue without re-executing a turn.
-Every request includes `after_seq`, the driver's highest observed sequence.
-Restore places its next event above both the checkpoint and that cursor, emits
-`history_gap` with the missing range and reason `sandbox_restored`, then repairs
+Every request includes `after_seq`, seeded from the host's persisted session
+projection, including after a host process restart.
+Restore durably places its next event above both the checkpoint and that cursor
+before publication. Startup waits for the client cursor before recovery. A real
+missing range emits `history_gap` with reason `sandbox_restored`; a fully covered
+restore emits no gap and keeps continuity wakes usable. Recovery then repairs
 in-flight turns. The driver normalizes this to an authoritative mux history gap
 and reconciles usage. Sequence numbers remain monotonic across lost sandboxes.
 An unfinished restored turn ends as interrupted; every started request without

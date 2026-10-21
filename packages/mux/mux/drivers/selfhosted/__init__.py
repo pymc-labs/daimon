@@ -10,7 +10,7 @@ from mux.contracts.config import ConfigRevision
 from mux.contracts.ports import Agents, Artifacts, Environments, ManagedAgents, Skills
 from mux.contracts.profile import Profile
 from mux.drivers.selfhosted.context import Authorization, BindingLookup, Context
-from mux.drivers.selfhosted.events import SelfHostedEvents, SkillResolver, ToolsResolver
+from mux.drivers.selfhosted.events import HighWater, SelfHostedEvents, SkillResolver, ToolsResolver
 from mux.drivers.selfhosted.models import SelfHostedModels
 from mux.drivers.selfhosted.sessions import SelfHostedSessions
 from mux.drivers.selfhosted.transport import Transport
@@ -37,6 +37,7 @@ class SelfHostedDriver:
         deadline_s: float = 300,
         skill_resolver: SkillResolver | None = None,
         tools_resolver: ToolsResolver | None = None,
+        high_water: HighWater | None = None,
     ) -> None:
         self._profile = LOOP
         self.agents, self.environments = agents, environments
@@ -53,6 +54,7 @@ class SelfHostedDriver:
             deadline_s=deadline_s,
             skill_resolver=skill_resolver,
             tools_resolver=tools_resolver,
+            high_water=high_water,
         )
         self.sessions.events = self.events
         self.usage = SelfHostedUsage(self.events)

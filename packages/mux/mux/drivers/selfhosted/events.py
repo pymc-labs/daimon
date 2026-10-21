@@ -50,6 +50,7 @@ class TurnTools(Protocol):
 
 
 ToolsResolver = Callable[[Scope, AgentSpec], Awaitable[TurnTools]]
+HighWater = Callable[[ResourceRef], Awaitable[int]]
 
 
 def segment(value: str) -> str:
@@ -116,6 +117,7 @@ class SelfHostedEvents:
         deadline_s: float = 300,
         skill_resolver: SkillResolver | None = None,
         tools_resolver: ToolsResolver | None = None,
+        high_water: HighWater | None = None,
     ) -> None:
         self._c, self._sessions = context, sessions
         self._deployment = deployment
@@ -123,6 +125,8 @@ class SelfHostedEvents:
         self.unresolved_turns: dict[ResourceRef, set[str]] = {}
         self._skill_resolver = skill_resolver
         self._tools_resolver = tools_resolver
+        self.high_water = high_water
+        self._high_water: dict[ResourceRef, int] = {}
         if max_tool_calls < 0 or deadline_s <= 0:
             raise ValueError("invalid turn limits")
         self._model, self._max_tool_calls, self._deadline_s = model, max_tool_calls, deadline_s
@@ -171,6 +175,19 @@ class SelfHostedEvents:
         self._normalized.setdefault(ref, {})[raw.seq] = normalized
         return normalized
 
+    async def cursor(self, session: ResourceRef) -> int:
+        persisted = await self.high_water(session) if self.high_water is not None else 0
+        value = max(
+            persisted,
+            self._high_water.get(session, 0),
+            self._stream_cursors.get(session, 0),
+            max(self._history.get(session, {}), default=0),
+        )
+        if not 0 <= value <= 2**53:
+            raise ValueError("invalid session high-water")
+        self._high_water[session] = value
+        return value
+
     async def replay(
         self, scope: Scope, ref: ResourceRef, *, deadline: datetime | None = None
     ) -> tuple[tuple[Event, ...], bool]:
@@ -184,7 +201,7 @@ class SelfHostedEvents:
         ):
             raise ContinuityLost(binding.id, ("environment changed since session creation",))
         self._c.check_environment(environment)
-        after = max(self._history.get(ref, {}), default=0)
+        after = await self.cursor(ref)
         raw = await self._c.transport.request(
             "GET",
             f"/v0/sessions/{segment(ref.id)}/events?after_seq={after}",
@@ -440,7 +457,7 @@ class SelfHostedEvents:
             try:
                 raw = await self._c.transport.request(
                     "POST",
-                    f"/v0/turns?after_seq={max(self._history.get(session, {}), default=0)}",
+                    f"/v0/turns?after_seq={await self.cursor(session)}",
                     session_id=session.id,
                     body=request.model_dump(mode="json"),
                     mcp_authorization=mcp_authorization,
@@ -522,7 +539,7 @@ class SelfHostedEvents:
                     await self._c.transport.request(
                         "POST",
                         f"/v0/turns/{segment(turn_id)}/actions"
-                        f"?after_seq={max(self._history.get(session, {}), default=0)}",
+                        f"?after_seq={await self.cursor(session)}",
                         body=body.model_dump(mode="json", exclude_unset=True),
                         session_id=session.id,
                     )
@@ -563,6 +580,9 @@ class SelfHostedEvents:
     ) -> AsyncIterator[Event]:
         self._c.binding(scope, session)
         cursor = int(after or "0")
+        if not 0 <= cursor <= 2**53:
+            raise ValueError("invalid session cursor")
+        self._high_water[session] = max(self._high_water.get(session, 0), cursor)
         # Each HTTP request is bounded by the transport. An idle reader may
         # wait for a later turn, whose execution and cleanup have their own limits.
         initial, complete = await self.replay(
@@ -670,8 +690,7 @@ class SelfHostedEvents:
         if not ended:
             raw = await self._c.transport.request(
                 "POST",
-                f"/v0/turns/{segment(turn_id)}/cancel"
-                f"?after_seq={max(self._history.get(session, {}), default=0)}",
+                f"/v0/turns/{segment(turn_id)}/cancel?after_seq={await self.cursor(session)}",
                 body={},
                 session_id=session.id,
             )

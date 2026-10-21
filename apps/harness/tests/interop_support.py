@@ -43,7 +43,9 @@ class ResourceStore:
         return self.value
 
 
-async def driver_session(client: httpx.AsyncClient, *, tools=None, mcp_servers=None):
+async def driver_session(
+    client: httpx.AsyncClient, *, tools=None, mcp_servers=None, high_water=None
+):
     agents = ResourceStore(
         Agent(
             ref=resource_ref("agent"),
@@ -73,6 +75,7 @@ async def driver_session(client: httpx.AsyncClient, *, tools=None, mcp_servers=N
         environments=cast(Environments, environments),
         authorization=lambda scope, kind, id_: scope == SCOPE,
         deadline_s=10,
+        high_water=high_water,
     )
     session = await driver.sessions.create(
         SCOPE,
