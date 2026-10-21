@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 from typing import Literal
 
-import pytest
 from daimon.adapters.discord.embed import (
     EmbedEvent,
     EmbedState,
@@ -98,10 +97,10 @@ class TestUpdate:
         result = update(with_draft, EmbedEvent(kind="message", label=""))
         assert result.text_preview == "earlier reasoning", "empty message must not clear the draft"
 
-    def test_message_event_clips_draft_at_300_chars(self) -> None:
+    def test_message_event_clips_draft_at_120_chars(self) -> None:
         result = update(_make_state(), EmbedEvent(kind="message", label="x" * 400))
         assert result.text_preview is not None
-        assert len(result.text_preview) == 301, "300 chars + ellipsis"
+        assert len(result.text_preview) == 121, "120 chars + ellipsis"
         assert result.text_preview.endswith("…")
 
     def test_done_event_transitions_to_done(self) -> None:
@@ -167,14 +166,12 @@ class TestToEmbedData:
         assert data.description == "> Checking \\*the\\* logs"
         assert data.details == "`✔️ Ran a command`\n`🔍 Reading a file`"
 
-    @pytest.mark.usefixtures("status_log_on")
     def test_in_progress_quotes_the_last_three_draft_lines_oldest_first(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
         for line in ("one", "two", "three", "four"):
             state = update(state, EmbedEvent(kind="message", label=line))
         assert to_embed_data(state, now=1.0).description == "> two\n> three\n> four"
 
-    @pytest.mark.usefixtures("status_log_on")
     def test_three_worst_case_escaped_lines_fit_an_embed_description(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
         for _ in range(3):
@@ -183,11 +180,21 @@ class TestToEmbedData:
         description = to_embed_data(state, now=1.0).description
         assert len(description) <= 4096
 
-    def test_by_default_in_progress_shows_only_the_latest_draft_line(self) -> None:
+    def test_the_plan_leads_the_description_above_the_quoted_drafts(self) -> None:
+        state = dataclasses.replace(
+            update(_make_state(phase=TurnPhase.THINKING), EmbedEvent(kind="message", label="one")),
+            plan_lines=("✔️ 2 done", "▶️ Fit *model*", "+1 more"),
+        )
+        assert to_embed_data(state, now=1.0).description == (
+            "✔️ 2 done\n▶️ Fit \\*model\\*\n+1 more\n\n> one"
+        ), "the escaped checklist comes first, then the draft quote"
+
+    def test_a_worst_case_plan_and_draft_log_fit_an_embed_description(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
-        for line in ("one", "two", "three"):
-            state = update(state, EmbedEvent(kind="message", label=line))
-        assert to_embed_data(state, now=1.0).description == "> three"
+        for _ in range(3):
+            state = update(state, EmbedEvent(kind="message", label="*" * 400))
+        state = dataclasses.replace(state, plan_lines=("▫️ " + "*" * 60 + "…",) * 6)
+        assert len(to_embed_data(state, now=1.0).description) <= 4096
 
     def test_tool_line_markdown_stays_in_inline_code(self) -> None:
         state = dataclasses.replace(

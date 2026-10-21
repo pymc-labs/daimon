@@ -133,7 +133,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             notice=notice_text,
         )
 
-    # In progress: one embed, the headline, the tool lines, then the last few draft lines.
+    # In progress: one embed, the headline, the plan, the tool lines, then the last few draft lines.
     elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
     title = format_headline(
         is_working=state.phase is TurnPhase.TOOL_RUNNING,
@@ -141,6 +141,8 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
         bold=lambda word: word,
     )
     sections: list[str] = []
+    if state.plan_lines:
+        sections.append("\n".join(_escape_markdown(line) for line in state.plan_lines))
     if draft_lines := draft_log(state.earlier_drafts, state.text_preview):
         sections.append("\n".join(f"> {_escape_markdown(line)}" for line in draft_lines))
     return EmbedData(

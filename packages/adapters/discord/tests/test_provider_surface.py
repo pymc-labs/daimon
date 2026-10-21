@@ -167,7 +167,7 @@ async def test_default_managed_profile_keeps_neutral_drafts_out_of_legacy_render
 
 @pytest.mark.parametrize("log_on", [True, False])
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
-async def test_a_new_provider_message_joins_the_card_log_only_with_the_log_on(
+async def test_a_new_provider_message_joins_the_card_log_whatever_the_switch(
     provider: Provider, log_on: bool
 ) -> None:
     with status_log_override(log_on):
@@ -176,7 +176,7 @@ async def test_a_new_provider_message_joins_the_card_log_only_with_the_log_on(
         await lifecycle.on_provider_event(preview(provider, "second", item="two"))
         await lifecycle.on_provider_event(preview(provider, " more", item="two", sequence=1))
     assert lifecycle._state.text_preview == "second more"
-    assert lifecycle._state.earlier_drafts == (("first",) if log_on else ())
+    assert lifecycle._state.earlier_drafts == ("first",), "the card logs either way"
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
