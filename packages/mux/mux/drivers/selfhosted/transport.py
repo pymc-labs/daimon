@@ -139,6 +139,14 @@ class DirectTransport:
         replay: bool = False,
         deadline: datetime | None = None,
     ) -> JsonValue:
+        # C3.9a covers the credential carrier hop as well as harness→MCP.
+        # Refuse before refreshing the harness token or invoking the HTTP client.
+        if mcp_authorization is not None and not secure_url(url):
+            raise ProviderError(
+                "permission",
+                retryable=False,
+                native_code="C3.9a_mcp_authorization_requires_https_or_loopback",
+            )
         if mcp_authorization is not None and (
             not mcp_authorization.startswith("Bearer ")
             or not mcp_authorization.removeprefix("Bearer ").strip()

@@ -436,7 +436,12 @@ The MCP client adds this CA to system trust and verifies both certificate chain
 and hostname. Azure OpenAI trust settings are unaffected.
 
 The generic harness C3 transport retains explicit environment and binding
-consent for HTTP. Its hostname classification is literal/name-based and does
+consent for HTTP only when no per-turn MCP authorization is sent. Under C3.9a,
+a non-loopback HTTP harness request carrying MCP authorization is refused before
+credential refresh or network I/O, even with `allow_insecure_http=true`. Ordinary
+Daimon turns include a built-in MCP credential and therefore require HTTPS on
+the harness hop too. Loopback HTTP remains allowed. Hostname classification is
+literal/name-based and does
 not resolve DNS; it cannot establish where a name actually routes. In deployments
 that use this capability, NetworkPolicy must restrict harness ingress to the
 same release's host/controller pods. The remaining controller-to-sandbox HTTP

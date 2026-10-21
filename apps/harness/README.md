@@ -814,3 +814,9 @@ Mutation 8 restores the PID allocation-range scan; the
 cursor rejection; an explicit and randomly generated property operation must
 fail with `empty remote cursor fence rejected`. The production PID-burn image
 probe is enabled in CI's single-session run. Neither image probe calls a model.
+
+The host-to-harness C3 request also carries the per-turn MCP credential. It must
+use HTTPS or loopback HTTP when `X-Daimon-MCP-Authorization` is present. Generic
+`allow_insecure_http` consent cannot override C3.9a; non-loopback HTTP turns with
+MCP credentials are refused by the driver before any I/O. AKS uses HTTPS for
+both hops with the chart CA.

@@ -1330,3 +1330,9 @@ The harness supports a scoped `HARNESS_MCP_CA_BUNDLE` for chart-generated CA
 trust, with certificate and hostname verification enabled. Host and harness
 compare MCP destinations through `mux.mcp_url.canonical_mcp_url`, preserving
 path case and normalizing scheme/host case, default ports and trailing slashes.
+
+C3.9a also protects the host-to-harness credential carrier: a non-loopback HTTP
+request with `mcp_authorization` is refused with a non-retryable permission error
+before token-provider calls or network I/O. `allow_insecure_http` supports only
+turns without MCP credentials. HTTPS and loopback HTTP can carry the transient
+`X-Daimon-MCP-Authorization` header; this applies to both transport implementations.
