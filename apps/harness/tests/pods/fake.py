@@ -49,7 +49,7 @@ class Fake:
                     return response.model_dump(mode="json")
 
                 remote = await context.tool("mcp-smoke", "daimon-mcp/whoami", {}, execute, mcp=True)
-                result["mcp"] = remote
+                result = {"local": result, "mcp": remote}
         await context.emit(
             "usage",
             {

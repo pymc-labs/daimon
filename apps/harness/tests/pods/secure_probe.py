@@ -36,7 +36,7 @@ with httpx.Client(
             "session_id": "secure-smoke",
             "turn_id": mode,
             "idempotency_key": mode,
-            "model": "fake",
+            "model": "gpt-6-luna",
             "instructions": "smoke",
             "input": [{"type": "text", "text": mode}],
             "mcp_servers": [
