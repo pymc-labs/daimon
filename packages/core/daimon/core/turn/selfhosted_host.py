@@ -41,6 +41,7 @@ from mux.drivers.selfhosted.transport import Transport
 from mux.errors import ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
+from mux.state.store import StateStore
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,8 @@ def driver(
     revision: ConfigRevision,
     scope: Scope,
     binding: ProviderBinding | None = None,
+    *,
+    store: StateStore | None = None,
 ) -> SelfHostedDriver:
     def lookup(authorized: Scope, id_: str) -> ProviderBinding | None:
         if authorized != scope:
@@ -95,6 +98,37 @@ def driver(
         return (
             binding if binding is not None and binding.native_refs.get("session") == id_ else None
         )
+
+    async def high_water(target: ResourceRef) -> int:
+        if (
+            binding is None
+            or store is None
+            or target.provider != "selfhosted"
+            or target.kind != "session"
+            or target.id != binding.native_refs.get("session")
+            or target.tenant_id != scope.tenant_id
+            or target.account_id != scope.account_id
+        ):
+            raise ScopeViolation(target.id, "persisted cursor requires the bound session")
+        projection = await store.projection(target.id)
+        if projection is None:
+            return 0
+        if projection.cursor.isdecimal():
+            return int(projection.cursor)
+        # A host notice can own the projection cursor; its local commit sequence
+        # is separate from the harness's native ordering domain.
+        after, highest = -1, 0
+        while events := await store.read_events(target.id, after=after):
+            for event in events:
+                cursor = event.native.cursor
+                if (
+                    event.native.provider == "selfhosted"
+                    and cursor is not None
+                    and cursor.isdecimal()
+                ):
+                    highest = max(highest, int(cursor))
+            after = events[-1].sequence
+        return highest
 
     return SelfHostedDriver(
         cast(Transport, runtime.transport_factory(revision, scope)),
@@ -107,6 +141,7 @@ def driver(
         max_tool_calls=runtime.max_tool_calls,
         deadline_s=runtime.deadline_s,
         tools_resolver=runtime.tools_resolver,
+        high_water=high_water if binding is not None and store is not None else None,
     )
 
 
@@ -123,7 +158,8 @@ def _backend(request: TurnBackendRequest) -> TurnBackend:
             request.session_id, "self-hosted binding differs from admitted revision"
         )
     return TurnBackend(
-        driver(runtime, request.config, request.scope, active.binding), request.session
+        driver(runtime, request.config, request.scope, active.binding, store=active.store),
+        request.session,
     )
 
 
@@ -236,7 +272,7 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         or binding.native_refs.get("plan_digest") != digest
     ):
         raise ContinuityLost(binding.id, ("bound self-hosted configuration changed",))
-    backend = driver(runtime, revision, request.scope, binding)
+    backend = driver(runtime, revision, request.scope, binding, store=store)
     if binding is None:
         # C3 has no session-create side effect: creation only verifies injected
         # resource records and derives a stable identity. The first send creates
@@ -262,7 +298,7 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             legacy_account_id=request.scope.account_id,
         )
         binding = await store.put_binding(binding, expected_generation=0)
-        backend = driver(runtime, revision, request.scope, binding)
+        backend = driver(runtime, revision, request.scope, binding, store=store)
         ref = native.ref
     else:
         ref = ResourceRef(

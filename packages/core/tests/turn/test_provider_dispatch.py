@@ -796,7 +796,6 @@ async def test_selfhosted_factory_injects_persisted_session_cursor(monkeypatch, 
     from mux.contracts.events import Event, NativeProvenance
     from mux.contracts.ports import Agents, Environments
     from mux.contracts.resources import ProjectionSnapshot
-    from mux.drivers.selfhosted import SelfHostedDriver
     from mux.drivers.selfhosted.transport import DirectTransport
 
     ref = SESSION.model_copy(update={"provider": "selfhosted"})
@@ -832,30 +831,25 @@ async def test_selfhosted_factory_injects_persisted_session_cursor(monkeypatch, 
                 ),
             )
         ]
-    persistence = TurnPersistence(store.restart(), binding, SCOPE, operation_key="resumed")
+    from types import SimpleNamespace
+
+    from daimon.core.turn.selfhosted_host import driver
+
     async with httpx.AsyncClient() as http:
-        backend = SelfHostedDriver(
-            DirectTransport(http, base_url="https://harness.example", token="offline"),
+        runtime = SimpleNamespace(
+            transport_factory=lambda revision, scope: DirectTransport(
+                http, base_url="https://harness.example", token="offline"
+            ),
             account_scope_id=ref.account_scope_id,
             agents=cast(Agents, object()),
             environments=cast(Environments, object()),
             authorization=lambda scope, target: True,
+            model="gpt-5",
+            max_tool_calls=100,
+            deadline_s=300,
+            tools_resolver=None,
         )
-        monkeypatch.setitem(
-            mux_backend._TURN_BACKENDS, "selfhosted.loop", lambda request: TurnBackend(backend, ref)
-        )
-        async with ScriptedTransport().client() as client:
-            with persistence.activate():
-                selected = mux_backend.turn_backend(
-                    TurnBackendRequest(
-                        "selfhosted.loop",
-                        client,
-                        SCOPE,
-                        ref.id,
-                        session=ref,
-                    )
-                )
-            assert selected.backend is backend
-            assert await backend.events.cursor(ref) == 13
-            with pytest.raises(ScopeViolation):
-                await backend.events.cursor(ref.model_copy(update={"id": "foreign"}))
+        backend = driver(runtime, REVISION, SCOPE, binding, store=store.restart())
+        assert await backend.events.cursor(ref) == 13
+        with pytest.raises(ScopeViolation):
+            await backend.events.cursor(ref.model_copy(update={"id": "foreign"}))

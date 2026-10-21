@@ -407,7 +407,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             # Check before GET as well as POST. The paid send additionally
             # commits its immutable tariff under the same durable wire turn id.
             require_selfhosted_price(billing, model)
-            if method == "POST" and path == "/v0/turns":
+            if method == "POST" and urlsplit(path).path == "/v0/turns":
                 if body is not None:
                     body = dict(body)
                     original_policy = body.get("tool_policy", {})
@@ -493,7 +493,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             # Cleanup and reconciliation need a small independent budget after the host deadline.
             limit = (
                 request.deadline
-                if (method == "POST" and path == "/v0/turns")
+                if (method == "POST" and urlsplit(path).path == "/v0/turns")
                 or request.deadline > datetime.now(UTC)
                 else datetime.now(UTC) + timedelta(seconds=8)
             )
@@ -508,7 +508,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 body=body,
                 deadline=min(limit, deadline) if deadline is not None else limit,
                 mcp_authorization=minted.header.get_secret_value()
-                if method == "POST" and path == "/v0/turns" and minted is not None
+                if method == "POST" and urlsplit(path).path == "/v0/turns" and minted is not None
                 else None,
             )
             if method == "GET" and "/events?" in path:

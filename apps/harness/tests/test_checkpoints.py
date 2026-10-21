@@ -713,6 +713,8 @@ async def test_fresh_driver_uses_persisted_projection_and_delivers_next_turn_usa
         )
         requests.clear()
         async with active.router.lifespan_context(active):
+            await fresh.events.replay(SCOPE, resumed.ref)
+            assert requests[0].url.params["after_seq"] == "13"
             source = await fresh.events.open_stream(SCOPE, resumed.ref, after="13", previews=True)
             assert requests[0].url.params["after_seq"] == "13"
             await fresh.events.send(SCOPE, resumed.ref, [message("third")], key="third")
