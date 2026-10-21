@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Verify the underlying Azure deployment model before AKS probes or deployment
+  reuse; accept only gpt-5.4-mini and require verified metadata for direct probes.
+
 - Preserve tenant access controls during AKS re-registration. Default the operator
   model to the configured Azure deployment; refuse mismatched or Sol probe models
   before network I/O and verify the exact persisted marker through write/read tools.

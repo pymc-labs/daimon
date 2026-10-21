@@ -1677,5 +1677,8 @@ match the harness token; do not place a `secretKeyRef` object in `host.env`.
 AKS re-registration preserves tenant access controls and adds the selfhosted
 backend to the existing selections. `SELFHOSTED_MODEL` defaults to
 `AOAI_DEPLOYMENT` (`gpt-5.4-mini` by default). The paid C3 probe refuses model
-mismatches and Sol before network I/O, and requires the second turn to read the
+mismatches and Sol before harness I/O. Probe execution and bootstrap reuse query
+Azure deployment metadata and accept only an underlying `gpt-5.4-mini` model;
+direct probe execution requires an explicit verified model input. The probe
+requires the second turn to read the
 exact marker written by the first turn through matching tool calls.

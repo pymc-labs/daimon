@@ -389,7 +389,11 @@ The installer checks MCP `/healthz`. A separate **paid gpt-5.4-mini** C3 preflig
 checks model usage, a write tool and a second turn reading the same file. It
 requires matching write/read call IDs and the exact per-run persistence marker.
 `SELFHOSTED_MODEL` defaults to `AOAI_DEPLOYMENT` (default `gpt-5.4-mini`); the
-probe refuses a different deployment or any Sol model before network I/O:
+probe refuses a different deployment or any Sol model. Before invoking the
+harness, it queries Azure deployment metadata and requires the underlying model
+to be exactly `gpt-5.4-mini`, including for an alias such as `production`.
+Bootstrap applies the same check when reusing a deployment. Direct `live-c3.py`
+execution requires `AOAI_VERIFIED_MODEL=gpt-5.4-mini` from that metadata check:
 
 ```sh
 bash deploy/helm/daimon-selfhost/scripts/aks.sh probe

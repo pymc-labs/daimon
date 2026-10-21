@@ -5,6 +5,9 @@ import os
 import urllib.request
 from uuid import uuid4
 
+if os.environ.get("AOAI_VERIFIED_MODEL") != "gpt-5.4-mini":
+    raise SystemExit("Probe requires AOAI_VERIFIED_MODEL=gpt-5.4-mini from deployment metadata")
+
 deployment = os.environ.get("AOAI_DEPLOYMENT", "gpt-5.4-mini")
 model = os.environ.get("SELFHOSTED_MODEL", deployment)
 if "sol" in model.lower() or "sol" in deployment.lower() or model != deployment:

@@ -10,6 +10,18 @@ chart=deploy/helm/daimon-selfhost
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
 export AOAI_DEPLOYMENT=${AOAI_DEPLOYMENT:-gpt-5.4-mini}
 export SELFHOSTED_MODEL=${SELFHOSTED_MODEL:-$AOAI_DEPLOYMENT}
+verify_aoai_model() {
+  AOAI_VERIFIED_MODEL=$(az cognitiveservices account deployment show -g "$RG" -n "$AOAI" \
+    --deployment-name "$AOAI_DEPLOYMENT" --query properties.model.name -o tsv) || {
+    echo "Existing AOAI account is missing or cannot read deployment $AOAI_DEPLOYMENT; provision it before bootstrap/probe" >&2
+    exit 1
+  }
+  if [[ ${AOAI_VERIFIED_MODEL,,} == *sol* || "$AOAI_VERIFIED_MODEL" != gpt-5.4-mini ]]; then
+    echo 'AOAI deployment must be backed by gpt-5.4-mini; Sol models are refused' >&2
+    exit 1
+  fi
+  export AOAI_VERIFIED_MODEL
+}
 case ${1:-} in
 bootstrap)
   az group create -n "$RG" -l "$LOCATION" -o none
@@ -23,11 +35,7 @@ bootstrap)
     --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
   accounts=$(az cognitiveservices account list -g "$RG" --query '[].name' -o tsv)
   if grep -Fxq -- "$AOAI" <<< "$accounts"; then
-    az cognitiveservices account deployment show -g "$RG" -n "$AOAI" \
-      --deployment-name "$AOAI_DEPLOYMENT" -o none || {
-        echo "Existing AOAI account is missing or cannot read deployment $AOAI_DEPLOYMENT; provision it before bootstrap" >&2
-        exit 1
-      }
+    verify_aoai_model
     echo "Reusing existing AOAI account and deployment $AOAI_DEPLOYMENT"
   else
     az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
@@ -134,7 +142,8 @@ probe)
     echo 'Probe requires the configured AOAI_DEPLOYMENT; Sol models are refused' >&2
     exit 1
   fi
-  kubectl -n daimon exec -i deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
+  verify_aoai_model
+  kubectl -n daimon exec -i deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env AOAI_VERIFIED_MODEL="$AOAI_VERIFIED_MODEL" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
   ;;
 egress-start)
   kubectl -n kube-system create configmap coredns-custom --from-literal=log.override=log \

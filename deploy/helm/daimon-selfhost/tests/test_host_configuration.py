@@ -521,14 +521,19 @@ elif name == 'az' and 'key1' in sys.argv:
             self.assertTrue(any("secret" in c and "runtime" in c for c in calls))
 
     def test_bootstrap_reuses_existing_aoai_and_rejects_missing_deployment(self):
-        for existing, missing, deployment in (
-            (True, False, "gpt-5.4-mini"),
-            (True, False, "custom-deployment"),
-            (True, True, "gpt-5.4-mini"),
-            (False, False, "gpt-5.4-mini"),
+        for existing, missing, deployment, underlying in (
+            (True, False, "gpt-5.4-mini", "gpt-5.4-mini"),
+            (True, False, "custom-deployment", "gpt-5.4-mini"),
+            (True, True, "gpt-5.4-mini", "gpt-5.4-mini"),
+            (False, False, "gpt-5.4-mini", "gpt-5.4-mini"),
+            (True, False, "production", "gpt-6.1-sol"),
+            (True, False, "production", "gpt-6-luna"),
+            (True, False, "production", ""),
         ):
             with (
-                self.subTest(existing=existing, missing=missing, deployment=deployment),
+                self.subTest(
+                    existing=existing, missing=missing, deployment=deployment, underlying=underlying
+                ),
                 tempfile.TemporaryDirectory() as directory,
             ):
                 state = Path(directory)
@@ -544,7 +549,9 @@ if args[:3] == ['cognitiveservices', 'account', 'list']:
     if os.environ['EXISTING'] == 'True':
         print('offline')
 elif args[:4] == ['cognitiveservices', 'account', 'deployment', 'show']:
-    sys.exit(1 if os.environ['MISSING'] == 'True' else 0)
+    if os.environ['MISSING'] == 'True':
+        sys.exit(1)
+    print(os.environ['UNDERLYING_MODEL'])
 elif 'properties.endpoint' in args:
     print('https://localhost')
 elif 'key1' in args:
@@ -567,6 +574,7 @@ elif 'key1' in args:
                     STUB_LOG=str(log),
                     EXISTING=str(existing),
                     MISSING=str(missing),
+                    UNDERLYING_MODEL=underlying,
                 )
                 env.pop("AOAI_DEPLOYMENT", None)
                 if deployment != "gpt-5.4-mini":
@@ -577,8 +585,9 @@ elif 'key1' in args:
                     capture_output=True,
                     text=True,
                 )
-                self.assertEqual(result.returncode, 1 if missing else 0, result.stderr)
-                if not missing:
+                refused = missing or (existing and underlying != "gpt-5.4-mini")
+                self.assertEqual(result.returncode, 1 if refused else 0, result.stderr)
+                if not refused:
                     subprocess.run(
                         ["bash", str(CHART / "scripts/aks.sh"), "install"],
                         env=env,
@@ -600,6 +609,8 @@ elif 'key1' in args:
                         if c[:4] == ["cognitiveservices", "account", "deployment", "show"]
                     )
                     self.assertEqual(show[show.index("--deployment-name") + 1], deployment)
+                    self.assertEqual(show[show.index("--query") + 1], "properties.model.name")
+                    self.assertEqual(show[show.index("-o") + 1], "tsv")
                 else:
                     self.assertEqual(len(aoai_creates), 2)
                     self.assertIn("gpt-5.4-mini", aoai_creates[1])
@@ -645,7 +656,12 @@ class LiveProbeTests(unittest.TestCase):
                 args["content"] = "wrong"
             return io.BytesIO("".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
 
-        values = {"DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY": "offline-placeholder", **(env or {})}
+        values = {
+            "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY": "offline-placeholder",
+            "AOAI_VERIFIED_MODEL": "gpt-5.4-mini",
+            **(env or {}),
+        }
+        values = {key: value for key, value in values.items() if value is not None}
         with (
             patch.dict(os.environ, values, clear=True),
             patch("urllib.request.urlopen", side_effect=response) as network,
@@ -654,7 +670,11 @@ class LiveProbeTests(unittest.TestCase):
             try:
                 runpy.run_path(str(CHART / "scripts/live-c3.py"), run_name="__main__")
             finally:
-                if env and ("sol" in str(env).lower() or env.get("SELFHOSTED_MODEL") == "other"):
+                if env and (
+                    "sol" in str(env).lower()
+                    or env.get("SELFHOSTED_MODEL") == "other"
+                    or values.get("AOAI_VERIFIED_MODEL") != "gpt-5.4-mini"
+                ):
                     network.assert_not_called()
         return requests
 
@@ -666,6 +686,11 @@ class LiveProbeTests(unittest.TestCase):
         ):
             with self.subTest(env=env), self.assertRaises(SystemExit):
                 self.run_probe(env)
+
+    def test_direct_probe_requires_verified_underlying_model_before_http(self):
+        for verified in (None, "", "gpt-6.1-sol", "GPT-6.1-SOL", "gpt-6-luna"):
+            with self.subTest(verified=verified), self.assertRaises(SystemExit):
+                self.run_probe({"AOAI_DEPLOYMENT": "production", "AOAI_VERIFIED_MODEL": verified})
 
     def test_probe_uses_configured_deployment_and_exact_persisted_marker(self):
         for env, model in (
@@ -689,6 +714,9 @@ class LiveProbeTests(unittest.TestCase):
                 '#!/bin/sh\nprintf "%s\\n" "$SELFHOSTED_MODEL" "$AOAI_DEPLOYMENT" > "$AKS_STATE/models"\n'
             )
             kubectl.chmod(0o755)
+            az = root / "az"
+            az.write_text('#!/bin/sh\nprintf "gpt-5.4-mini\\n"\n')
+            az.chmod(0o755)
             env = dict(
                 os.environ,
                 PATH=str(root) + os.pathsep + os.environ["PATH"],
@@ -707,6 +735,56 @@ class LiveProbeTests(unittest.TestCase):
             self.assertEqual(
                 (root / "models").read_text().splitlines(), ["configured-mini", "configured-mini"]
             )
+
+    def test_aks_probe_checks_underlying_model_before_kubectl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            az = root / "az"
+            az.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$AKS_STATE/az-calls"\nprintf "%s\\n" "$UNDERLYING_MODEL"\nexit "${AZ_EXIT:-0}"\n'
+            )
+            az.chmod(0o755)
+            kubectl = root / "kubectl"
+            kubectl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$AKS_STATE/kubectl-call"\n')
+            kubectl.chmod(0o755)
+            for underlying, az_exit in (
+                ("gpt-6.1-sol", "0"),
+                ("gpt-6-luna", "0"),
+                ("", "0"),
+                ("gpt-5.4-mini", "1"),
+                ("gpt-5.4-mini", "0"),
+            ):
+                with self.subTest(underlying=underlying, az_exit=az_exit):
+                    env = dict(
+                        os.environ,
+                        PATH=str(root) + os.pathsep + os.environ["PATH"],
+                        AKS_STATE=directory,
+                        AOAI_DEPLOYMENT="production",
+                        SELFHOSTED_MODEL="production",
+                        AOAI_VERIFIED_MODEL="gpt-5.4-mini",
+                        UNDERLYING_MODEL=underlying,
+                        AZ_EXIT=az_exit,
+                    )
+                    env.update(
+                        {key: "offline" for key in ("RG", "LOCATION", "ACR", "AKS", "AOAI", "TAG")}
+                    )
+                    result = subprocess.run(
+                        ["bash", str(CHART / "scripts/aks.sh"), "probe"],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                    )
+                    allowed = underlying == "gpt-5.4-mini" and az_exit == "0"
+                    self.assertEqual(result.returncode, 0 if allowed else 1, result.stderr)
+                    call = (root / "az-calls").read_text().splitlines()[-1]
+                    self.assertIn(
+                        "--deployment-name production --query properties.model.name -o tsv", call
+                    )
+                    self.assertEqual((root / "kubectl-call").exists(), allowed)
+                    if allowed:
+                        self.assertIn(
+                            "AOAI_VERIFIED_MODEL=gpt-5.4-mini", (root / "kubectl-call").read_text()
+                        )
 
     def test_aks_probe_refuses_before_kubectl(self):
         with tempfile.TemporaryDirectory() as directory:
