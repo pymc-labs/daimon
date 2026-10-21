@@ -2,11 +2,9 @@
 
 Platform-agnostic and free of I/O. Three pieces:
 
-- `resolve_participation`: the scope cascade. Deployment default, then
-  workspace, channel, thread; the most specific explicit value wins, except
-  that `DISABLED` at any tier is final for every tier below it. That is the
-  difference between `OFF` (nobody asked yet, but a thread may be turned on)
-  and `DISABLED` (an admin or operator has said no, and asking does nothing).
+- `resolve_participation`: the scope cascade (`daimon.core.scope_cascade`).
+  Deployment default, then workspace, channel, thread; the most specific
+  explicit value wins, except that `DISABLED` at any tier is final below it.
 - `decide_pre_classifier`: the gates that cost nothing, applied to a snapshot
   the adapter gathered. `Respond` here means "spend a classifier call".
 - The classifier prompt and verdict parser; `decide_post_classifier` maps the
@@ -21,52 +19,27 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 from xml.sax.saxutils import escape, quoteattr
 
-from daimon.core.platform_words import words_for
-from daimon.core.stores.domain import CHAT_PLATFORMS
+from daimon.core.scope_cascade import (
+    CascadeMode,
+    CascadeScope,
+    CascadeTier,
+    ResolvedCascade,
+    resolve_cascade,
+)
+from daimon.core.scope_cascade import (
+    scope_label as scope_label,
+)
+from daimon.core.scope_cascade import (
+    tier_word as tier_word,
+)
 
-
-class ParticipationMode(StrEnum):
-    ON = "on"
-    OFF = "off"
-    DISABLED = "disabled"
-
-
-class ParticipationScope(StrEnum):
-    WORKSPACE = "workspace"
-    CHANNEL = "channel"
-    THREAD = "thread"
-
-
-ParticipationTier = Literal["deployment", "workspace", "channel", "thread"]
-
-
-@dataclass(frozen=True)
-class ResolvedParticipation:
-    mode: ParticipationMode
-    tier: ParticipationTier
-    """The tier whose value is in effect: the one to change to get a different answer."""
-
-
-def resolve_participation(
-    *,
-    deployment: ParticipationMode,
-    workspace: ParticipationMode | None,
-    channel: ParticipationMode | None,
-    thread: ParticipationMode | None,
-) -> ResolvedParticipation:
-    """Walk the cascade broadest first: `DISABLED` stops the walk, else the last set value wins."""
-    effective = ResolvedParticipation(deployment, "deployment")
-    tiers: tuple[tuple[ParticipationMode | None, ParticipationTier], ...] = (
-        (workspace, "workspace"),
-        (channel, "channel"),
-        (thread, "thread"),
-    )
-    for value, tier in tiers:
-        if effective.mode is ParticipationMode.DISABLED:
-            break
-        if value is not None:
-            effective = ResolvedParticipation(value, tier)
-    return effective
+# The cascade is shared with progress plans (`daimon.core.scope_cascade`); these
+# names are what the participation code and its callers have always used.
+ParticipationMode = CascadeMode
+ParticipationScope = CascadeScope
+ParticipationTier = CascadeTier
+ResolvedParticipation = ResolvedCascade
+resolve_participation = resolve_cascade
 
 
 class SkipReason(StrEnum):
@@ -210,24 +183,6 @@ def decide_post_classifier(verdict: ClassifierVerdict) -> ParticipationDecision:
 
 
 # --- Notes returned by the participation tool ---------------------------------
-
-
-def tier_word(tier: str, platform: str | None) -> str:
-    """The tier as this platform's people name it: the workspace tier is a server on
-    Discord and an organisation on Teams, and the deployment tier is Daimon-wide."""
-    if tier == "workspace" and platform in CHAT_PLATFORMS:
-        return words_for(platform).space
-    return "Daimon-wide" if tier == "deployment" else tier
-
-
-def scope_label(
-    scope: ParticipationScope, scope_id: str | None, platform: str | None = None
-) -> str:
-    return (
-        f"the whole {tier_word('workspace', platform)}"
-        if scope is ParticipationScope.WORKSPACE
-        else f"{scope.value} {scope_id}"
-    )
 
 
 def build_participation_explanation(

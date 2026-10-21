@@ -34,8 +34,8 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
+from daimon.core.scope_cascade import resolve_above
 from daimon.core.stores.thread_participation import (
-    ParticipationModes,
     clear_participation_mode,
     get_participation_modes,
     set_participation_mode,
@@ -43,7 +43,6 @@ from daimon.core.stores.thread_participation import (
 from daimon.core.thread_participation import (
     ParticipationMode,
     ParticipationScope,
-    ResolvedParticipation,
     build_participation_explanation,
     build_participation_note,
     resolve_participation,
@@ -142,18 +141,6 @@ def _target_scope(
     return ParticipationScope.WORKSPACE, None
 
 
-def _resolve_above(
-    scope: ParticipationScope, deployment: ParticipationMode, modes: ParticipationModes
-) -> ResolvedParticipation:
-    """Resolve only the tiers wider than `scope` — what a write here has to live under."""
-    return resolve_participation(
-        deployment=deployment,
-        workspace=modes.workspace if scope is not ParticipationScope.WORKSPACE else None,
-        channel=modes.channel if scope is ParticipationScope.THREAD else None,
-        thread=None,
-    )
-
-
 def _scope_result_label(scope: ParticipationScope, scope_id: str | None) -> str:
     return "workspace" if scope is ParticipationScope.WORKSPACE else f"{scope.value}:{scope_id}"
 
@@ -193,7 +180,7 @@ async def _set_thread_participation_impl(
             channel_id=channel_id,
             thread_id=thread_id,
         )
-        above = _resolve_above(scope, deployment, before)
+        above = resolve_above(scope, deployment, before)
         if requested is ParticipationMode.ON and above.mode is ParticipationMode.DISABLED:
             tier = tier_word(above.tier, auth.platform)
             raise ToolError(
