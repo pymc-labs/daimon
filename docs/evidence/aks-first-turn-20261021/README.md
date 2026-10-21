@@ -4,8 +4,8 @@ Two real production-path turns completed at 11:59:42–12:00:06 UTC against
 Azure deployment **gpt-5.4-mini**, the authorized C12.2 stand-in. The first ran
 bash and wrote a file; the second read it in the same session. Four AOAI
 requests produced four measured C3 usage events, four Postgres usage rows and
-four ledger debits. **Host egress remains a gap:** harness curl was blocked,
-but host curl reached Anthropic. This is implementation evidence for rubric C,
+four ledger debits. **The initial host egress gap was closed at 12:19 UTC**, as documented in the
+lockdown follow-up below. The original evidence is retained for comparison. This is implementation evidence for rubric C,
 not an independent rubric score or a Luna-quota claim. MERGE HOLD remains.
 
 ## Identity and deployment
@@ -181,7 +181,9 @@ python3 "$E/verify.py"
 usage tuples, C3 request ordering, exact ledger linkage, token reconciliation,
 same-session tool success and persistence, and the egress gap. It prints PASS.
 
-## Egress evidence and gap
+## Initial egress evidence and gap
+
+This section records the initial gap; the lockdown follow-up below closes it.
 
 CoreDNS logging was enabled before any attempt. The export covers
 **2026-10-21 11:59:35 UTC through export at 12:00:30 UTC**, enclosing both real
@@ -246,11 +248,79 @@ policy and negative probe. No claim of full host isolation is made.
   reruns pinned relevant packages to `uv.lock`, including Anthropic 0.117.0,
   SQLAlchemy 2.0.49, MCP 1.27.0, OpenAI 2.54.0, Typer 0.24.1 and Click 8.3.2.
 - The final host image is `l15-first-turn-5`; its reporting-only refactor preserves
-  the captured NDJSON schema and production turn path. No further paid turn was
-  needed. The harness image is unchanged from the proof.
+  the captured NDJSON schema and production turn path. That refactor required no
+  paid retest; the later authorized lockdown retest used one request. The harness
+  image is unchanged from the proof.
 - The live deployment retains the runtime Secret, explicit flags, TEST tariff,
   four Ready pods, harness PVC file and CoreDNS logging for evaluator inspection.
-- Integration still needs the chart runtime mount and host policy; official
+- Lane 14 must integrate both saved chart patches (runtime mount and host
+  NetworkPolicy). They are already active in the live chart snapshot. Official
   Azure pricing confirmation and Luna quota remain external follow-ups.
 - An independent evaluator must rerun/inspect evidence; this lane awards no
   rubric points. No merge was performed; the PR base is `azure-selfhost`.
+
+
+## Lockdown follow-up — 12:19 UTC
+
+The lead authorized applying the proposed host policy and one short paid
+regression turn. The policy now selects every host component of release `coke`
+(init, MCP, scheduler and the disabled chat adapters). It permits **only cluster
+DNS and same-release Postgres:5432, MCP:8765 and harness:8088 pods**. Other egress
+is denied. The host has no direct AOAI allowance; model traffic goes through
+the harness policy's AOAI /32. All four service pods remain Ready.
+
+The live object is [lockdown/host-policy.yaml](lockdown/host-policy.yaml).
+[host-networkpolicy.patch](host-networkpolicy.patch) adds the Helm template to
+lane 14's chart. It is already installed in the live snapshot and owned by Helm;
+lane 14 source is untouched. Chart `networkPolicy.enabled` controls both policies.
+External integrations such as Teams need separately reviewed endpoint grants;
+none is required by the currently enabled MCP/scheduler hosts.
+
+Exact commands, after the original proof:
+
+```bash
+kubectl apply -f "$E/proposed-host-policy.yaml"
+python3 "$RUN/curl-probe.py"
+# Both results: exit 28, HTTP=000, TCP connection timeout.
+# Add templates/host-networkpolicy.yaml from host-networkpolicy.patch to snapshot.
+# Adopt the policy just created by kubectl into this Helm release:
+kubectl label netpol coke-daimon-host-egress -n daimon app.kubernetes.io/managed-by=Helm
+kubectl annotate netpol coke-daimon-host-egress -n daimon \
+  meta.helm.sh/release-name=coke meta.helm.sh/release-namespace=daimon
+helm upgrade coke /tmp/l14-chart.yL0qlx/daimon-selfhost -n daimon \
+  --reuse-values -f "$E/override.yaml"
+# Fresh window begins 2026-10-21T12:18:59Z, after both intentional curl probes:
+kubectl exec -n daimon deploy/coke-daimon-mcp -- daimon selfhosted turn \
+  --tenant-id 91495665-ea07-561f-b769-d05d875385e2 --thread aks-proof \
+  --message 'Reply only: LOCKDOWN_OK.'
+kubectl logs -n kube-system -l k8s-app=kube-dns \
+  --since-time=2026-10-21T12:18:59Z --tail=-1 --timestamps --prefix
+kubectl logs -n daimon coke-daimon-harness-0 \
+  --since-time=2026-10-21T12:18:59Z --timestamps
+python3 "$E/lockdown/verify.py"
+```
+
+The first Helm adoption attempt correctly refused the kubectl-created policy's
+missing ownership metadata; the explicit label/annotations above resolved that.
+No egress rule was removed while adopting it. The Helm upgrade succeeded.
+
+[Both curl receipts](lockdown/curl-results.json) now show exit **28**, HTTP **000**.
+The one short turn ran at **12:19:04–12:19:06 UTC**, returned **`LOCKDOWN_OK`**,
+and retained the original session. [Fresh CoreDNS logs](lockdown/coredns.log)
+cover 12:18:59–12:19:48 UTC: **44 lines, zero forbidden-domain queries**.
+
+[Provider receipt](lockdown/harness.log), [C3 events](lockdown/c3-events.json)
+and [Postgres rows](lockdown/postgres.json) match for request
+`7d729478-632a-490d-89e2-a59d9a066658`: **2244 input, 0 cached, 7 output**;
+AOAI response `resp_00a13c2755052f6f016ad8adb900f08196a5d421ba4ae4a79e`.
+One measured request produced one usage row and one **$0.001714 TEST debit**.
+Program total is now **five** paid model requests, with no additional probes.
+The [offline verifier](lockdown/verify.py) checks both blocked curls, this single
+request, reply, same session and absence of forbidden DNS. It prints PASS.
+The historical verifier remains a check of the initial pre-lockdown snapshot.
+
+CI follow-up fixed the missing strict-docs navigation entry and retained the
+legacy transport rejection wording without changing accepted endpoints.
+The 99 transport compatibility tests and local strict documentation build pass.
+MkDocs' existing tagged YAML is syntax-checked without constructing Python
+objects; all other YAML retains the standard safe-load hook.

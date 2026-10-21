@@ -1,0 +1,2 @@
+PASS: both curls blocked, one real turn, matching AOAI/C3/Postgres usage, zero forbidden DNS.
+request_id: 7d729478-632a-490d-89e2-a59d9a066658 TEST tariff debit USD: -0.001714
