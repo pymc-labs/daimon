@@ -13,6 +13,13 @@ from mux.drivers.selfhosted.wire import Event, EventType, TurnRequest
 from pydantic import JsonValue
 
 from .isolation import TOOL_UID_MAX
+from .request_storage import (
+    canonical,
+    compact_request,
+    initialize_requests,
+    load_request,
+    store_request,
+)
 
 
 def identifier(value: str) -> str:
@@ -57,6 +64,7 @@ class Journal:
             "(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL)"
         )
         self.db.commit()
+        initialize_requests(self.db)
         # Repair only the terminal-event/global-index crash window, once at startup.
         for turn_id, session_id in self.db.execute(
             "SELECT turn_id, session_id FROM turns WHERE ended=0"
@@ -71,6 +79,7 @@ class Journal:
                 .fetchone()
             ):
                 self.db.execute("UPDATE turns SET ended=1 WHERE turn_id=?", (turn_id,))
+                compact_request(self.db, turn_id)
         self.db.commit()
 
     def session(self, session_id: str) -> Path:
@@ -148,13 +157,13 @@ class Journal:
     def is_replay(self, request: TurnRequest) -> bool:
         identifier(request.session_id)
         identifier(request.turn_id)
-        body = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        body = canonical(request)
         previous = self.db.execute(
-            "SELECT request FROM turns WHERE key=? OR turn_id=?",
+            "SELECT request_digest FROM turns WHERE key=? OR turn_id=?",
             (request.idempotency_key, request.turn_id),
         ).fetchall()
         if previous:
-            if any(row[0] != body for row in previous):
+            if any(row[0] != hashlib.sha256(body.encode()).hexdigest() for row in previous):
                 raise ConflictError("turn id or idempotency key already has a different request")
             return True
         return False
@@ -164,11 +173,12 @@ class Journal:
             return False
         if not self.complete(request.session_id):
             raise ConflictError("session already has an active turn")
-        body = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
         with self.db:
+            body, digest = store_request(self.db, request)
             self.db.execute(
-                "INSERT INTO turns(turn_id, session_id, key, request) VALUES (?, ?, ?, ?)",
-                (request.turn_id, request.session_id, request.idempotency_key, body),
+                "INSERT INTO turns(turn_id, session_id, key, request, request_digest) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (request.turn_id, request.session_id, request.idempotency_key, body, digest),
             )
         return True
 
@@ -179,11 +189,11 @@ class Journal:
             rows = self.db.execute(
                 "SELECT request FROM turns WHERE session_id=?", (session_id,)
             ).fetchall()
-        return [TurnRequest.model_validate_json(row[0]) for row in rows]
+        return [load_request(self.db, row[0]) for row in rows]
 
     def find(self, turn_id: str) -> TurnRequest | None:
         row = self.db.execute("SELECT request FROM turns WHERE turn_id=?", (turn_id,)).fetchone()
-        return TurnRequest.model_validate_json(row[0]) if row else None
+        return load_request(self.db, row[0]) if row else None
 
     def append(self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]) -> Event:
         db = self.connection(request.session_id)
@@ -220,6 +230,10 @@ class Journal:
         if kind == "turn_ended":
             with self.db:
                 self.db.execute("UPDATE turns SET ended=1 WHERE turn_id=?", (request.turn_id,))
+                compact_request(self.db, request.turn_id)
+            # Reclaim a bounded amount of work per terminal; replay tombstones remain.
+            self.db.execute("PRAGMA incremental_vacuum(64)")
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return event
 
     def events(self, session_id: str, after: int = 0) -> list[Event]:

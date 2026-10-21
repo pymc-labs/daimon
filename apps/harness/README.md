@@ -345,3 +345,16 @@ At each synthetic model I/O boundary it checks the durable HTTP log already
 contains exactly one new request start, with one matching usage record per
 completed request. Recovery gates approval emission until the reader closes and
 compares the entire recovered event suffix against the durable journal.
+
+### Journal request retention
+
+The service journals the full request digest for idempotency. Active turns store
+skill bundles once by their canonical SHA-256, with ordered references from each
+turn. When a turn ends, its durable claim keeps identity, model, limits and the
+original digest; prompts, inline files and other execution payloads are removed.
+Identical resends still replay, and changed requests still fail with a conflict.
+Event history and usage identities remain available for reconciliation.
+
+Existing inline request rows migrate on startup. SQLite incremental vacuum and
+WAL checkpoints reclaim obsolete payload pages; terminal claim tombstones remain
+for the lifetime of the session so old idempotency keys cannot execute twice.
