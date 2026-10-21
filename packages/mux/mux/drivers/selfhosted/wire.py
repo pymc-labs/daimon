@@ -279,7 +279,16 @@ class ErrorData(TurnError):
     request_id: str | None = None
 
 
+class HistoryGapData(ResponseModel):
+    """Recovery boundary; requests carry after_seq alongside session_id in the query."""
+
+    from_seq: int = Field(ge=0)
+    to_seq: int = Field(ge=0)
+    reason: Literal["sandbox_restored"]
+
+
 EventType = Literal[
+    "history_gap",
     "status_running",
     "model_request_started",
     "agent_message_delta",
@@ -292,7 +301,8 @@ EventType = Literal[
     "error",
 ]
 EventData = (
-    StatusRunningData
+    HistoryGapData
+    | StatusRunningData
     | AgentMessageDeltaData
     | AgentMessageData
     | ToolUseData
@@ -304,6 +314,7 @@ EventData = (
     | ErrorData
 )
 DATA_MODELS: dict[EventType, type[WireModel]] = {
+    "history_gap": HistoryGapData,
     "status_running": StatusRunningData,
     "agent_message_delta": AgentMessageDeltaData,
     "agent_message": AgentMessageData,

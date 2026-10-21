@@ -74,6 +74,7 @@ class Supervisor:
             raise RuntimeError("remote checkpoints require single session mode")
         self.checkpoints = checkpoints
         self.restored = False
+        self.checkpoint_warned = False
         self.checkpoint_pending: str | None = None
         self.operator_credentials = {
             name: value
@@ -110,16 +111,7 @@ class Supervisor:
 
     async def io(self, operation: Callable[..., T], *args: object) -> T:
         # One worker owns all SQLite operations, including ordered event commits.
-        def guarded() -> T:
-            if self.checkpoint_pending is not None and operation in {
-                self.journal.events,
-                self.journal.ended,
-                self.journal.complete,
-            }:
-                self.checkpoint(self.checkpoint_pending)
-            return operation(*args)
-
-        future = asyncio.get_running_loop().run_in_executor(self.worker, guarded)
+        future = asyncio.get_running_loop().run_in_executor(self.worker, lambda: operation(*args))
         return await asyncio.shield(future)
 
     def checkpoint(self, session_id: str) -> None:
@@ -133,49 +125,86 @@ class Supervisor:
                 output.flush()
                 os.fsync(output.fileno())
             sync_directory(self.journal.root)
-            self.checkpoints.save(self.journal, session_id)
+            report = self.checkpoints.save(self.journal, session_id)
+            if report.get("degraded"):
+                self.checkpoint_notice(session_id)
             marker.unlink()
             sync_directory(self.journal.root)
-        except Exception:
-            raise HTTPException(status_code=503, detail="Session checkpoint unavailable") from None
+        except Exception as exc:
+            audit_logger.warning("checkpoint_failed stage=save reason=%s", type(exc).__name__)
+            self.checkpoint_notice(session_id)
+            return
         self.checkpoint_pending = None
+
+    def checkpoint_notice(self, session_id: str) -> None:
+        if not self.checkpoint_warned and not any(
+            event.type == "error" and event.data.get("kind") == "checkpoint_warning"
+            for event in self.journal.events(session_id)
+        ):
+            requests = [r for r in self.journal.turns() if r.session_id == session_id]
+            if requests:
+                self.journal.append(
+                    requests[-1],
+                    "error",
+                    {
+                        "kind": "checkpoint_warning",
+                        "message": "Session state is not fully durable",
+                        "retryable": False,
+                    },
+                )
+                self.checkpoint_warned = True
 
     def durable_append(
         self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]
     ) -> None:
         self.journal.append(request, kind, data)
         if kind in {"model_request_started", "turn_ended"}:
-            # Request inventory reaches Blob before model I/O; terminal state
-            # reaches Blob before stream delivery or cancellation acknowledgement.
+            # Attempt inventory persistence before model I/O and terminal
+            # persistence after cleanup; failures warn without sealing the session.
             self.checkpoint(request.session_id)
 
-    def prepare_session(self, session_id: str) -> None:
+    def prepare_session(self, session_id: str, after_seq: int = 0) -> None:
         if self.session_mode == "single":
             self.journal.bind_session(session_id)
         if self.checkpoints is not None and not self.restored:
             try:
                 self.journal = self.checkpoints.restore(self.journal, session_id)
                 self.journal.bind_session(session_id)
-                self.recover()
+                if self.checkpoints.restored_seq is not None:
+                    old_seq = self.checkpoints.restored_seq
+                    self.journal.advance_seq(session_id, after_seq)
+                    requests = self.journal.turns()
+                    if requests:
+                        self.journal.append(
+                            requests[-1],
+                            "history_gap",
+                            {
+                                "from_seq": old_seq + 1,
+                                "to_seq": max(old_seq, after_seq),
+                                "reason": "sandbox_restored",
+                            },
+                        )
+                self.recover(sandbox_lost=self.checkpoints.restored_seq is not None)
             except ConflictError:
                 raise
-            except Exception:
+            except Exception as exc:
+                audit_logger.warning(
+                    "checkpoint_failed stage=restore reason=%s", type(exc).__name__
+                )
                 self.journal.close()
                 self.journal = Journal(self.home)
                 raise HTTPException(status_code=503, detail="Session restore unavailable") from None
             self.restored = True
-        if self.checkpoint_pending is not None:
-            self.checkpoint(self.checkpoint_pending)
 
-    async def ensure_session(self, session_id: str) -> None:
+    async def ensure_session(self, session_id: str, after_seq: int = 0) -> None:
         identifier(session_id)
         async with self.submissions:
             try:
-                await self.io(self.prepare_session, session_id)
+                await self.io(self.prepare_session, session_id, after_seq)
             except ConflictError:
                 raise HTTPException(status_code=409, detail="session_bound") from None
 
-    def recover(self) -> None:
+    def recover(self, sandbox_lost: bool = False) -> None:
         if (self.journal.root / "restore.pending").exists():
             # Partial publication must be restored before repairing turn state.
             return
@@ -186,7 +215,7 @@ class Supervisor:
                     request,
                     "error",
                     {
-                        "kind": "process_interrupted",
+                        "kind": "sandbox_lost" if sandbox_lost else "process_interrupted",
                         "message": "Harness restarted during the turn",
                         "retryable": False,
                     },
@@ -202,7 +231,17 @@ class Supervisor:
                             "request_id": request_id,
                         },
                     )
-                self.journal.append(request, "turn_ended", {"outcome": "interrupted"})
+                self.journal.append(
+                    request,
+                    "turn_ended",
+                    {
+                        "outcome": "interrupted",
+                        "error": {
+                            "kind": "sandbox_lost" if sandbox_lost else "process_interrupted",
+                            "message": "Harness restarted during the turn",
+                        },
+                    },
+                )
                 self.checkpoint(request.session_id)
 
     async def run(self, request: TurnRequest, credentials: dict[str, str]) -> None:
@@ -214,7 +253,7 @@ class Supervisor:
             nonlocal usage_count, failure
             if kind == "usage":
                 usage_count += 1
-            if kind == "error":
+            if kind == "error" and data.get("kind") != "checkpoint_warning":
                 failure = {"kind": data["kind"], "message": data["message"]}
             await self.io(
                 self.durable_append,
@@ -316,9 +355,11 @@ class Supervisor:
                     outcome = "interrupted"
             await finalization
 
-    async def submit(self, request: TurnRequest, mcp_authorization: str | None = None) -> None:
+    async def submit(
+        self, request: TurnRequest, mcp_authorization: str | None = None, after_seq: int = 0
+    ) -> None:
         async with self.submissions:
-            await self.io(self.prepare_session, request.session_id)
+            await self.io(self.prepare_session, request.session_id, after_seq)
             if self.session_mode == "single":
                 await self.io(self.journal.bind_session, request.session_id)
             if await self.io(self.journal.is_replay, request):
@@ -430,10 +471,12 @@ def create_app(
         )
     ):
         raise RuntimeError("test mode requires an injected checkpoint store")
-    configured = checkpoints or configured_checkpoints()
-    supervisor = Supervisor(
-        root, selected, session_mode, auth.token, configured
+    configured = checkpoints or configured_checkpoints(
+        selected.identity
+        if isinstance(selected, AzureModelAdapter) and not selected.live_probe
+        else None
     )
+    supervisor = Supervisor(root, selected, session_mode, auth.token, configured)
     if not test_mode:
         prepare_service(root)
         protect_process()
@@ -470,6 +513,7 @@ def create_app(
         accept: Annotated[str | None, Header()] = None,
         x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
         session_id: Annotated[str | None, Query()] = None,
+        after_seq: int = Query(default=0, ge=0),
     ) -> Response:
         if session_id is not None and session_id != request.session_id:
             raise HTTPException(status_code=409, detail="session_mismatch")
@@ -484,7 +528,7 @@ def create_app(
             )
         )
         try:
-            await supervisor.submit(request, x_daimon_mcp_authorization)
+            await supervisor.submit(request, x_daimon_mcp_authorization, after_seq)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid turn configuration") from exc
         except ConflictError as exc:
@@ -497,12 +541,12 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    async def restore_for_turn(turn_id: str, session_id: str | None) -> None:
+    async def restore_for_turn(turn_id: str, session_id: str | None, after_seq: int) -> None:
         if supervisor.checkpoints is not None and session_id is None:
             raise HTTPException(status_code=422, detail="session_id query parameter is required")
         if session_id is not None:
             try:
-                await supervisor.ensure_session(session_id)
+                await supervisor.ensure_session(session_id, after_seq)
             except ValueError:
                 raise HTTPException(status_code=422, detail="Invalid session identifier") from None
             request = await supervisor.io(supervisor.journal.find, turn_id)
@@ -513,8 +557,9 @@ def create_app(
         turn_id: str,
         action: ActionRequest,
         session_id: Annotated[str | None, Query()] = None,
+        after_seq: int = Query(default=0, ge=0),
     ) -> dict[str, bool]:
-        await restore_for_turn(turn_id, session_id)
+        await restore_for_turn(turn_id, session_id, after_seq)
         context = supervisor.contexts.get(turn_id)
         if context is None:
             raise HTTPException(status_code=404, detail="No active turn")
@@ -533,8 +578,9 @@ def create_app(
     async def cancel(
         turn_id: str,
         session_id: Annotated[str | None, Query()] = None,
+        after_seq: int = Query(default=0, ge=0),
     ) -> CancelResponse:
-        await restore_for_turn(turn_id, session_id)
+        await restore_for_turn(turn_id, session_id, after_seq)
         task = supervisor.tasks.get(turn_id)
         if task is None or task.done():
             return CancelResponse(cancelled=False)
@@ -545,8 +591,6 @@ def create_app(
         if not task.cancelling():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        if supervisor.checkpoint_pending is not None:
-            raise HTTPException(status_code=503, detail="Session checkpoint unavailable")
         if not await supervisor.io(supervisor.journal.ended, turn_id):
             raise HTTPException(status_code=503, detail="Tool cleanup incomplete; session sealed")
         return CancelResponse(cancelled=True)
@@ -560,7 +604,7 @@ def create_app(
             raise HTTPException(status_code=409, detail="session_mismatch")
         try:
             identifier(session_id)
-            await supervisor.ensure_session(session_id)
+            await supervisor.ensure_session(session_id, after_seq)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid session identifier") from exc
         if supervisor.session_mode == "single":
@@ -580,6 +624,7 @@ def create_app(
         accept: Annotated[str | None, Header()] = None,
         x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
         session_id: Annotated[str | None, Query()] = None,
+        after_seq: int = Query(default=0, ge=0),
     ) -> Response:
         route = envelope.c3
         method, path = route.method, route.path
@@ -588,10 +633,19 @@ def create_app(
             raise HTTPException(status_code=422, detail="Invalid session context")
         if session_id is not None and context_id != session_id:
             raise HTTPException(status_code=409, detail="session_mismatch")
-        if set(route.query) - {"session_id"} and not (
+        if set(route.query) - {"session_id", "after_seq"} and not (
             method == "GET" and re.fullmatch(r"/v0/sessions/[^/]+/events", path)
         ):
             raise HTTPException(status_code=422, detail="Unexpected query parameters")
+        try:
+            raw_cursor = route.query.get("after_seq", after_seq)
+            if isinstance(raw_cursor, bool) or not isinstance(raw_cursor, (str, int)):
+                raise ValueError("invalid cursor")
+            cursor = int(raw_cursor)
+            if cursor < 0:
+                raise ValueError("negative cursor")
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid cursor") from None
         if method == "GET" and route.body is not None:
             raise HTTPException(status_code=422, detail="GET body must be null")
         try:
@@ -604,6 +658,7 @@ def create_app(
                     accept,
                     x_daimon_mcp_authorization,
                     context_id,
+                    cursor,
                 )
             if method == "POST" and (
                 match := re.fullmatch(r"/v0/turns/([^/]+)/(actions|cancel)", path)
@@ -611,11 +666,13 @@ def create_app(
                 turn_id, operation = match.groups()
                 if operation == "actions":
                     return JSONResponse(
-                        await actions(turn_id, ActionRequest.model_validate(route.body), context_id)
+                        await actions(
+                            turn_id, ActionRequest.model_validate(route.body), context_id, cursor
+                        )
                     )
                 if route.body not in (None, {}):
                     raise HTTPException(status_code=422, detail="Cancel body must be empty")
-                return JSONResponse((await cancel(turn_id, context_id)).model_dump())
+                return JSONResponse((await cancel(turn_id, context_id, cursor)).model_dump())
             if method == "GET" and (match := re.fullmatch(r"/v0/sessions/([^/]+)/events", path)):
                 if set(route.query) - {"after_seq", "session_id"}:
                     raise HTTPException(status_code=422, detail="Unexpected query parameters")

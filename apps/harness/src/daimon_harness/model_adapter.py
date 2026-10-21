@@ -21,7 +21,7 @@ from agents.models.interface import ModelTracing
 from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
-from azure.identity.aio import ManagedIdentityCredential, get_bearer_token_provider
+from azure.identity.aio import get_bearer_token_provider
 from openai import AsyncAzureOpenAI, AsyncOpenAI, BadRequestError
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -34,6 +34,7 @@ from .credentials import (
     remember_log_secret,
 )
 from .errors import HarnessError
+from .identity import AsyncIdentity, CapturedIdentity
 from .isolation import validate_credential_sources
 from .runtime import TurnContext
 
@@ -424,11 +425,8 @@ class AzureModelAdapter:
             os.environ.get("IDENTITY_ENDPOINT") and os.environ.get("IDENTITY_HEADER")
         ):
             raise RuntimeError("managed identity requires a header-protected IDENTITY_ENDPOINT")
-        self.credential = (
-            ManagedIdentityCredential(client_id=os.environ.get("AZURE_CLIENT_ID"))
-            if not self.key
-            else None
-        )
+        self.identity = CapturedIdentity() if not self.key else None
+        self.credential = AsyncIdentity(self.identity) if self.identity is not None else None
         self.endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
         self.api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 

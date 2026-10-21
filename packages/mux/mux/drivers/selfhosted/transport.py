@@ -206,6 +206,8 @@ class DirectTransport:
         query = parse_qsl(parsed.query, keep_blank_values=True)
         if any(key.lower() == "session_id" for key, _ in query):
             raise ValueError("session context is derived from the mux session")
+        if not any(key == "after_seq" for key, _ in query):
+            query.append(("after_seq", "0"))
         query.append(("session_id", session_id))
         path = parsed.path + "?" + urlencode(query)
 >>>>>>> 1d0dbb575 (feat(harness): checkpoint and restore ephemeral session state)
@@ -262,6 +264,8 @@ class FoundryInvocationsTransport(DirectTransport):
         query_params = parse_qsl(parsed.query, keep_blank_values=True)
         if any(key.lower() == "session_id" for key, _ in query_params):
             raise ValueError("session context is derived from the mux session")
+        if not any(key == "after_seq" for key, _ in query_params):
+            query_params.append(("after_seq", "0"))
         query_params.append(("session_id", session_id))
         turn = method == "POST" and parsed.path == "/v0/turns"
         if mcp_authorization is not None and not turn:

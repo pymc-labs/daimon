@@ -1280,4 +1280,7 @@ validate Entra tokens for that audience and allowlist the invoking host principa
 
 Selfhosted C3 transports send the nonsecret `session_id` query parameter on every
 request, including actions/cancel and event polling, so an empty sandbox can
-restore and verify session/turn ownership before handling it.
+restore and verify session/turn ownership before handling it. Every C3 request
+also carries `after_seq`, the highest sequence the driver has seen. After sandbox
+loss, `history_gap` normalizes to an authoritative `session.history_gap`; recovery
+continues above the client cursor and reconciles interrupted-turn usage.

@@ -248,6 +248,7 @@ class SelfHostedEvents:
                 "state": "requires_action" if actions else state,
                 "active_root_turn": active,
                 "required_actions": tuple(actions.values()),
+                "gaps": tuple(event.id for event in events if event.type == "session.history_gap"),
                 "taken_at": datetime.now(UTC),
             }
         )
@@ -439,7 +440,7 @@ class SelfHostedEvents:
             try:
                 raw = await self._c.transport.request(
                     "POST",
-                    "/v0/turns",
+                    f"/v0/turns?after_seq={max(self._history.get(session, {}), default=0)}",
                     session_id=session.id,
                     body=request.model_dump(mode="json"),
                     mcp_authorization=mcp_authorization,
@@ -520,7 +521,8 @@ class SelfHostedEvents:
                 try:
                     await self._c.transport.request(
                         "POST",
-                        f"/v0/turns/{segment(turn_id)}/actions",
+                        f"/v0/turns/{segment(turn_id)}/actions"
+                        f"?after_seq={max(self._history.get(session, {}), default=0)}",
                         body=body.model_dump(mode="json", exclude_unset=True),
                         session_id=session.id,
                     )
@@ -667,7 +669,11 @@ class SelfHostedEvents:
         status = "already_stopped"
         if not ended:
             raw = await self._c.transport.request(
-                "POST", f"/v0/turns/{segment(turn_id)}/cancel", body={}, session_id=session.id
+                "POST",
+                f"/v0/turns/{segment(turn_id)}/cancel"
+                f"?after_seq={max(self._history.get(session, {}), default=0)}",
+                body={},
+                session_id=session.id,
             )
             result = wire.CancelResponse.model_validate(raw)
             status = "requested" if result.cancelled else "outcome_unknown"

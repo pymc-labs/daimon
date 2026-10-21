@@ -317,7 +317,11 @@ before scrubbing the tool environment, and refuses an IMDS fallback.
 The harness checkpoints workspace files, conversation history and request
 inventory before model I/O and after each terminal turn, including cancellation.
 A new sandbox restores before serving authenticated session requests. Storage
-failure returns 503; corrupt recovery refuses new work. See
+restore failures return 503 and corrupt recovery refuses new work. Checkpoint
+write failures warn once per session and allow polls and later turns to continue.
+Unsupported or oversized workspace entries produce a degraded checkpoint with
+a manifest of skipped entries. Recovery uses the client cursor to report a
+history gap and terminate interrupted turns without reusing event sequences. See
 `apps/harness/README.md` for limits, permissions and deployment verification.
 >>>>>>> 1d0dbb575 (feat(harness): checkpoint and restore ephemeral session state)
 

@@ -96,6 +96,14 @@ def normalize(event: wire.Event, session: ResourceRef) -> mux.Event:
     payload: object
     authority: mux.Authority = "record"
     match data:
+        case wire.HistoryGapData():
+            type_, authority = "session.history_gap", "gap"
+            payload = mux.HistoryGapPayload(
+                domain="native_events",
+                after=str(data.from_seq - 1),
+                before=str(data.to_seq + 1),
+                recoverable=False,
+            )
         case wire.StatusRunningData():
             type_, payload = (
                 "session.status_running",

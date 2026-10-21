@@ -397,7 +397,7 @@ async def test_codex_azure_auth_is_captured_and_not_in_child_environment(
                 pass
 
         monkeypatch.setattr(
-            "daimon_harness.model_adapter.ManagedIdentityCredential", lambda **_: Credential()
+            "daimon_harness.identity.ManagedIdentityCredential", lambda **_: Credential()
         )
     else:
         monkeypatch.setenv("AZURE_OPENAI_API_KEY", secret)

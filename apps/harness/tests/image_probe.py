@@ -15,6 +15,78 @@ from daimon_harness.service import create_app
 from mux.drivers.selfhosted.wire import InlineSkill, TurnRequest
 
 
+async def checkpoint_probe(home: Path) -> None:
+    """Exercise publication with the real service caps and tool-owned workspace."""
+    from daimon_harness.checkpoints import Checkpoints
+
+    class Blobs:
+        def __init__(self):
+            self.data = {}
+
+        def list(self, prefix):
+            return [name for name in self.data if name.startswith(prefix)]
+
+        def upload(self, name, source):
+            self.data[name] = source.read()
+
+        def download(self, name, target):
+            target.write(self.data[name])
+
+        def delete(self, name):
+            del self.data[name]
+
+        def close(self):
+            pass
+
+    assert os.geteuid() == 10000
+    status = Path("/proc/self/status").read_text()
+    assert "CapEff:\t00000000000000e1" in status, status
+    blobs = Blobs()
+    checkpoints = Checkpoints(blobs)
+    old = Journal(home / "checkpoint-old")
+    request = TurnRequest(
+        session_id="probe",
+        turn_id="probe",
+        idempotency_key="probe",
+        model="test",
+        instructions="",
+        input=[],
+        mcp_servers=[],
+        skills=[],
+        limits={"max_tool_calls": 1, "deadline_s": 10},
+    )
+    old.bind_session("probe")
+    old.claim(request)
+    sandbox, uid = old.sandbox("probe")
+    context = TurnContext(
+        request, sandbox, discard_event, tool_uid=uid, state_dir=old.session("probe")
+    )
+    await context.bash(
+        "printf persisted > result; printf '#!/bin/sh\\necho executable\\n' > run; chmod 7700 run; python -m venv .venv; mkfifo pipe; touch unreadable; chmod 000 unreadable"
+    )
+    assert "home =" in context.read(".venv/pyvenv.cfg")
+    old.append(request, "turn_ended", {"outcome": "completed"})
+    report = checkpoints.save(old, "probe")
+    assert report["degraded"] is True
+    assert report["skipped_count"] >= 3, report
+    # A normal venv and special entries must not prevent later snapshots.
+    old.append(request, "status_running", {})
+    checkpoints.save(old, "probe")
+    old.close()
+    fresh = Journal(home / "checkpoint-new")
+    restored = checkpoints.restore(fresh, "probe")
+    sandbox, uid = restored.sandbox("probe")
+    context = TurnContext(
+        request, sandbox, discard_event, tool_uid=uid, state_dir=restored.session("probe")
+    )
+    assert await context.bash("cat result; ./run") == "exit_code=0\npersistedexecutable\n"
+    modes = await context.bash("stat -c '%a' run result; test ! -e pipe && echo skipped")
+    assert modes == "exit_code=0\n700\n600\nskipped\n", modes
+    assert restored.events("probe")[-1].type == "status_running"
+    assert (sandbox / "work").stat().st_uid == uid
+    restored.close()
+
+
 async def main() -> None:
     assert os.geteuid() == 0
     home = Path(os.environ.get("HARNESS_PROBE_HOME", "/home/harness"))
@@ -266,6 +338,8 @@ async def main() -> None:
                     if result.returncode != 0:
                         break
                     await asyncio.sleep(0.01)
+    if mode == "single":
+        await checkpoint_probe(home)
     await app.state.supervisor.close()
 
 

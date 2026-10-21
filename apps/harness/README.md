@@ -274,14 +274,20 @@ Before model I/O, each `model_request_started` is committed locally and included
 in a remote checkpoint. After tool workers stop, every terminal turn (including
 cancellation) checkpoints the SQLite journal, history, turn/idempotency inventory
 and `work/` to `sessions/<sandbox_id>/<seq>.tar.zst`. SQLite's backup API includes
-committed WAL data. Each upload completes before terminal state is exposed or
-cancellation succeeds; failed persistence returns 503 and seals new work until
-a retry succeeds. Old snapshots are pruned only after a successful upload.
+committed WAL data. Upload failures are logged by stage and exception class and
+mark the session not durable until a later successful snapshot. They never seal
+polls, cancellation or later turns. A `checkpoint_warning` notice is emitted once
+per session. Old snapshots are pruned only after a successful upload.
 
 An authenticated first turn, poll, action or cancel restores the latest snapshot
 when local state is empty. An interrupted restore retries before serving.
 Corrupt snapshots and conflicting local workspace state fail closed. Journal
 sequence numbers, history and replay keys continue without re-executing a turn.
+Every request includes `after_seq`, the driver's highest observed sequence.
+Restore places its next event above both the checkpoint and that cursor, emits
+`history_gap` with the missing range and reason `sandbox_restored`, then repairs
+in-flight turns. The driver normalizes this to an authoritative mux history gap
+and reconciles usage. Sequence numbers remain monotonic across lost sandboxes.
 An unfinished restored turn ends as interrupted; every started request without
 usage becomes `usage_unavailable`, preserving unknown usage for reconciliation.
 A completed request whose usage missed the latest checkpoint also stays unknown;
@@ -294,9 +300,13 @@ body/path. The driver preserves existing query parameters and sends this context
 through both direct and invocation transports. Older harnesses ignore it.
 
 Workspace snapshots support regular files and directories, up to 512 MiB and
-50,000 entries; links, devices and sockets refuse checkpointing. Extraction
+50,000 entries and depth 32. Unsupported entries (links, FIFOs, sockets,
+devices and unreadable files) are skipped. Limits produce a degraded workspace
+snapshot with journals preserved; the manifest records skipped paths/reasons
+(up to 100 samples, plus the full skip count). Files keep owner execution only
+(0700 for executables, 0600 otherwise); special permission bits are stripped. Extraction
 rejects traversal and links, verifies file digests and SQLite integrity, and
-restores tool ownership separately from service-owned journals. Skills and tmp
+publishes the workspace while still service-owned before handing it to the tool UID. Skills and tmp
 files are regenerated and are not durable workspace state. Use a long timed pool
 cooldown (for example, four hours) to reduce churn; checkpoints provide recovery
 when Azure destroys a sandbox.

@@ -141,6 +141,11 @@ class Journal:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT)"
             )
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS event_sequence "
+                "(id INTEGER PRIMARY KEY CHECK(id=1), floor INTEGER)"
+            )
+            db.execute("INSERT OR IGNORE INTO event_sequence VALUES (1, 0)")
             db.commit()
             self.connections[session_id] = db
         return self.connections[session_id]
@@ -196,7 +201,10 @@ class Journal:
                 ).fetchone()
             ):
                 raise ConflictError("turn already ended; tool events refused")
-            seq = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
+            seq = max(
+                db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0],
+                db.execute("SELECT floor FROM event_sequence WHERE id=1").fetchone()[0],
+            )
             event = Event(
                 seq=seq,
                 session_id=request.session_id,
@@ -248,6 +256,20 @@ class Journal:
     def history(self, session_id: str) -> list[JsonValue]:
         row = self.connection(session_id).execute("SELECT body FROM history WHERE id=1").fetchone()
         return json.loads(row[0]) if row else []
+
+    def latest_seq(self, session_id: str) -> int:
+        return (
+            self.connection(session_id)
+            .execute("SELECT COALESCE(MAX(seq),0) FROM events")
+            .fetchone()[0]
+        )
+
+    def advance_seq(self, session_id: str, after_seq: int) -> None:
+        with self.connection(session_id) as db:
+            db.execute(
+                "UPDATE event_sequence SET floor=MAX(floor, ?) WHERE id=1",
+                (max(self.latest_seq(session_id), after_seq) + 1,),
+            )
 
     def save_history(self, session_id: str, history: list[JsonValue]) -> None:
         with self.connection(session_id) as db:

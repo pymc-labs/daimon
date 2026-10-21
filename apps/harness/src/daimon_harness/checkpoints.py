@@ -18,11 +18,11 @@ from typing import BinaryIO, Protocol, cast
 from urllib.parse import urlsplit
 
 import zstandard
-from azure.identity import ManagedIdentityCredential
 from azure.storage.blob import ContainerClient
 from mux.drivers.selfhosted.transport import sandbox_id
 
 from .checkpoint_archive import MAX_BYTES, LimitedReader, restore_work
+from .identity import CapturedIdentity
 from .isolation import tool_identity, validate_credential_sources
 from .journal import Journal, identifier
 
@@ -38,7 +38,9 @@ class CheckpointStore(Protocol):
 
 
 class AzureCheckpointStore:
-    def __init__(self, account_url: str, container: str) -> None:
+    def __init__(
+        self, account_url: str, container: str, identity: CapturedIdentity | None = None
+    ) -> None:
         parsed = urlsplit(account_url)
         if (
             parsed.scheme != "https"
@@ -53,7 +55,7 @@ class AzureCheckpointStore:
         validate_credential_sources()
         if not (os.environ.get("IDENTITY_ENDPOINT") and os.environ.get("IDENTITY_HEADER")):
             raise RuntimeError("checkpoint managed identity requires a header-protected endpoint")
-        self.credential = ManagedIdentityCredential(client_id=os.environ.get("AZURE_CLIENT_ID"))
+        self.credential = identity or CapturedIdentity()
         self.client = ContainerClient(account_url, container, credential=self.credential)
 
     def list(self, prefix: str) -> list[str]:
@@ -79,7 +81,7 @@ class AzureCheckpointStore:
         self.credential.close()
 
 
-def configured_checkpoints() -> Checkpoints | None:
+def configured_checkpoints(identity: CapturedIdentity | None = None) -> Checkpoints | None:
     account = os.environ.get("HARNESS_CHECKPOINT_ACCOUNT_URL")
     container = os.environ.get("HARNESS_CHECKPOINT_CONTAINER")
     if not account and not container:
@@ -89,7 +91,7 @@ def configured_checkpoints() -> Checkpoints | None:
     keep = int(os.environ.get("HARNESS_CHECKPOINT_KEEP", "3"))
     if not 1 <= keep <= 100:
         raise ValueError("checkpoint retention must be between 1 and 100")
-    return Checkpoints(AzureCheckpointStore(account, container), keep=keep)
+    return Checkpoints(AzureCheckpointStore(account, container, identity), keep=keep)
 
 
 def _backup(source: sqlite3.Connection, target: Path) -> None:
@@ -130,6 +132,7 @@ class Checkpoints:
         if not 1 <= keep <= 100:
             raise ValueError("checkpoint retention must be between 1 and 100")
         self.store, self.keep = store, keep
+        self.restored_seq: int | None = None
 
     def names(self, session_id: str) -> list[tuple[int, str]]:
         prefix = f"sessions/{sandbox_id(identifier(session_id))}/"
@@ -142,7 +145,7 @@ class Checkpoints:
                     result.append((int(seq), name))
         return sorted(result)
 
-    def save(self, journal: Journal, session_id: str) -> None:
+    def save(self, journal: Journal, session_id: str) -> dict[str, object]:
         events = journal.events(session_id)
         seq = events[-1].seq if events else 0
         sandbox, uid = journal.sandbox(session_id)
@@ -151,7 +154,7 @@ class Checkpoints:
             _backup(journal.db, stage / "turns.sqlite3")
             _backup(journal.connection(session_id), stage / "journal.sqlite3")
             with (stage / "work.tar").open("wb") as output:
-                subprocess.run(
+                exported = subprocess.run(
                     [
                         sys.executable,
                         "-I",
@@ -159,7 +162,7 @@ class Checkpoints:
                         str(sandbox / "work"),
                     ],
                     stdout=output,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     check=True,
                     timeout=60,
                     user=user,
@@ -176,7 +179,13 @@ class Checkpoints:
                     digests[filename] = hashlib.file_digest(source, "sha256").hexdigest()
             if total > MAX_ARCHIVE_BYTES - 1024 * 1024:
                 raise ValueError("checkpoint exceeds archive size limit")
-            manifest = {"session_id": session_id, "seq": seq, "sha256": digests}
+            report = json.loads(exported.stderr)
+            manifest = {
+                "session_id": session_id,
+                "seq": seq,
+                "sha256": digests,
+                "workspace": report,
+            }
             (stage / "manifest.json").write_text(json.dumps(manifest))
             archive = stage / "checkpoint.tar.zst"
             with (
@@ -191,6 +200,7 @@ class Checkpoints:
             # Prune only after the new block blob is committed successfully.
             for _, name in self.names(session_id)[: -self.keep]:
                 self.store.delete(name)
+            return report
 
     def restore(self, journal: Journal, session_id: str) -> Journal:
         """Restore before claiming a turn, keeping the same session/seq/request ids."""
@@ -235,7 +245,7 @@ class Checkpoints:
                         or not member.isfile()
                         or member.size < 0
                         or size > MAX_ARCHIVE_BYTES
-                        or (member.name == "manifest.json" and member.size > 4096)
+                        or (member.name == "manifest.json" and member.size > 128 * 1024)
                     ):
                         raise ValueError("invalid checkpoint archive")
                     seen.add(member.name)
@@ -309,12 +319,20 @@ class Checkpoints:
                         os.fsync(source.fileno())
                 else:
                     sync_directory(path)
-                if user is not None:
-                    os.chown(path, user, user)
             incoming.replace(work)
+            if user is not None:
+                for path in [
+                    *sorted(work.rglob("*"), key=lambda p: len(p.parts), reverse=True),
+                    work,
+                ]:
+                    os.chown(path, user, user)
             sync_directory(sandbox)
+            sync_directory(sandbox.parent)
+            sync_directory(journal.root / "sessions")
+            sync_directory(home)
             pending.unlink()
             sync_directory(journal.root)
+            self.restored_seq = seq
             return restored
 
     def close(self) -> None:
