@@ -205,11 +205,14 @@ def to_blocks(
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary}]})
         return blocks
 
-    # Non-terminal: the headline, the tool lines, then the last few draft lines.
+    # Non-terminal: the headline, the plan, the tool lines, then the last few draft lines.
     headline = _headline(state, now, bold=lambda word: f"*{word}*")
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
     ]
+    if state.plan_lines:
+        plan = "\n".join(escape_mrkdwn(line) for line in state.plan_lines)
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": plan}})
     if state.tool_lines:
         tool_lines = "\n".join(
             f"`{escape_mrkdwn(line.replace('`', "'"))}`" for line in state.tool_lines

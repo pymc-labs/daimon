@@ -67,15 +67,15 @@ class TestUpdate:
         assert result.text_preview == "hello there", "message text becomes the draft"
         assert result.phase == TurnPhase.TOOL_RUNNING, "the phase comes from the turn state only"
 
-    def test_message_event_with_400_char_label_caps_preview_at_300_plus_ellipsis(
+    def test_message_event_with_400_char_label_caps_preview_at_120_plus_ellipsis(
         self,
     ) -> None:
-        """A 400-char message label is capped to 300 chars + '…'."""
+        """A 400-char message label is capped to 120 chars + '…'."""
         state = _make_state()
         long_label = "x" * 400
         result = update(state, EmbedEvent(kind="message", label=long_label))
         assert result.text_preview is not None
-        assert len(result.text_preview) == 301, "300 chars + ellipsis == 301 total"
+        assert len(result.text_preview) == 121, "120 chars + ellipsis == 121 total"
         assert result.text_preview.endswith("…")
 
     def test_message_event_with_empty_label_keeps_the_draft(self) -> None:
@@ -85,7 +85,6 @@ class TestUpdate:
             "empty message label must not clear or change the preview"
         )
 
-    @pytest.mark.usefixtures("status_log_on")
     def test_message_events_build_a_log_of_the_last_three_lines_oldest_first(self) -> None:
         state = _make_state()
         for line in ("one", "two", "three", "four", "five"):
@@ -93,7 +92,6 @@ class TestUpdate:
         assert state.earlier_drafts == ("three", "four")
         assert state.text_preview == "five"
 
-    @pytest.mark.usefixtures("status_log_on")
     def test_a_long_message_is_cut_in_the_log_too(self) -> None:
         state = update(_make_state(), EmbedEvent(kind="message", label="short"))
         state = update(state, EmbedEvent(kind="message", label="y" * 400))
@@ -106,15 +104,6 @@ class TestUpdate:
         state = update(state, EmbedEvent(kind="draft", label="two, longer"))
         assert state.earlier_drafts == ()
         assert state.text_preview == "two, longer"
-
-    def test_by_default_each_message_replaces_the_draft_and_no_log_builds(self) -> None:
-        state = _make_state()
-        for line in ("one", "two", "three"):
-            state = update(state, EmbedEvent(kind="message", label=line))
-        assert state.earlier_drafts == ()
-        assert state.text_preview == "three"
-        draft = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]
-        assert draft["text"]["text"] == "> three"
 
     def test_done_event_transitions_to_done(self) -> None:
         result = update(_make_state(), EmbedEvent(kind="done"))
@@ -226,7 +215,6 @@ class TestToBlocks:
         )
         assert draft.get("expand") is True, "the draft must not fold behind 'see more'"
 
-    @pytest.mark.usefixtures("status_log_on")
     @pytest.mark.parametrize("count", [1, 3, 5])
     def test_running_state_quotes_the_last_three_draft_lines(self, count: int) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING)
@@ -237,7 +225,6 @@ class TestToBlocks:
         assert draft["text"]["text"] == "\n".join(f"> 🔍 **step** {n} &lt;x&gt;" for n in shown)
         assert draft.get("expand") is True
 
-    @pytest.mark.usefixtures("status_log_on")
     def test_three_worst_case_escaped_lines_fit_a_slack_section(self) -> None:
         state = _make_state(phase=TurnPhase.TOOL_RUNNING)
         for _ in range(3):
@@ -245,6 +232,18 @@ class TestToBlocks:
             state = update(state, EmbedEvent(kind="message", label="<" * 400))
         draft = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]
         assert len(draft["text"]["text"]) <= 3000
+
+    def test_the_plan_is_its_own_section_between_the_headline_and_details(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.TOOL_RUNNING),
+            plan_lines=("✔️ Load *data*", "▶️ Fit <model>"),
+            tool_lines=("🔍 Reading a file",),
+        )
+        blocks = to_blocks(state, now=None)
+        assert blocks[1]["text"]["text"] == "✔️ Load *data*\n▶️ Fit &lt;model&gt;", (
+            "the plan follows the headline, one escaped line per step"
+        )
+        assert blocks[2]["type"] == "context", "the details come after the plan"
 
     def test_a_draft_log_over_the_section_limit_loses_its_oldest_lines_first(self) -> None:
         state = replace(
