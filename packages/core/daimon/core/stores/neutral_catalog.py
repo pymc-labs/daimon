@@ -67,7 +67,10 @@ class PostgresNeutralCatalog:
         provider: Provider,
         account_scope_id: str,
     ) -> None:
-        if neutral_catalog_profile_for(provider) is None or not account_scope_id.strip():
+        # Selfhosted retains local bundles without advertising native catalog APIs.
+        if (
+            provider != "selfhosted" and neutral_catalog_profile_for(provider) is None
+        ) or not account_scope_id.strip():
             raise ValueError("an alternate provider and a nonblank workspace are required")
         self._sessions = sessions
         self._provider = provider

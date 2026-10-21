@@ -38,7 +38,7 @@ def test_tool_confirmation_displays_exact_tool_input_and_recoverable_identity():
     )
     tool, pause = display_batch(value, session_id="session")
     assert tool.type == "agent.tool_use"
-    assert tool.id == tool_display_id("approval")
+    assert tool.id == tool_display_id("call")
     assert tool.name == "bash"
     assert tool.input == {"command": "echo hi"}
     assert tool.evaluated_permission == "ask"
@@ -92,3 +92,45 @@ def test_mcp_confirmation_preserves_server_and_denied_tool(authority):
     )
     assert verdict.outcome == "deny"
     assert decide_tool_call(ToolSafetyPolicy(enabled=True), call, attended=True).outcome == "ask"
+
+
+@pytest.mark.parametrize("name,executor", [("write", "agent"), ("reports/write", "mcp")])
+def test_approval_execution_and_result_update_one_call_block(name, executor):
+    from daimon.core.turn.reducers import apply
+    from daimon.core.turn.state import ToolUseBlock, TurnState
+
+    approval = event(
+        "session.requires_action",
+        RequiresActionPayload(
+            actions=(
+                RequiredAction(
+                    id="approval-id",
+                    kind="tool_confirmation",
+                    call_id="call-id",
+                    payload={"name": name, "input": {"path": "result.txt"}},
+                ),
+            )
+        ).model_dump(mode="json"),
+    )
+    execution = event(
+        "agent.tool_use",
+        {
+            "call_id": "call-id",
+            "tool_name": name,
+            "input": {"path": "result.txt"},
+            "executor": executor,
+        },
+    )
+    result = event(
+        "agent.tool_result",
+        {"call_id": "call-id", "content": [{"type": "text", "text": "written"}], "is_error": False},
+    )
+    state = TurnState()
+    for value in (approval, execution, result):
+        for display in display_batch(value, session_id="session"):
+            state = apply(state, display)
+    blocks = [block for block in state.content if isinstance(block, ToolUseBlock)]
+    assert len(blocks) == 1
+    assert blocks[0].id == tool_display_id("call-id")
+    assert blocks[0].status == "complete"
+    assert blocks[0].result_content and blocks[0].result_content[0].text == "written"

@@ -3637,7 +3637,9 @@ class NeutralSkillVersion(Base):
 
     __tablename__ = "neutral_skill_versions"
     __table_args__ = (
-        CheckConstraint("provider IN ('openai', 'gemini')", name="ck_neutral_skill_provider"),
+        CheckConstraint(
+            "provider IN ('openai', 'gemini', 'selfhosted')", name="ck_neutral_skill_provider"
+        ),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True

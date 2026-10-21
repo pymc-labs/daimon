@@ -450,6 +450,7 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "proxy_default"),
         (False, False, "proxy_safety"),
         (False, False, "long_history"),
+        (False, False, "retained_skills"),
     ],
 )
 async def test_production_shell_admits_before_http_records_and_revokes(
@@ -479,7 +480,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     from daimon.core.turn.runtimes import build_channel_runtime, ensure_channel_runtime
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant_config
     from mux.contracts.extensions import ExtensionConfig
-    from mux.contracts.ids import ThreadRef
+    from mux.contracts.ids import SkillRef, ThreadRef
     from mux.contracts.resources import MCPConnection, ToolSpec
     from mux.state.lease import Slot
     from pydantic import SecretStr
@@ -504,11 +505,57 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             ),
         )
         await mux_state.put_config_revision(db, REVISION)
+    if scenario == "retained_skills":
+        from daimon.core.skills.ingest import bundle_from_files
+        from daimon.core.stores.channel_skills import add_channel_skill
+        from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+
+        catalog = PostgresNeutralCatalog(
+            request.deps.sessionmaker, provider="selfhosted", account_scope_id=SCOPE.tenant_id
+        )
+        async with request.deps.sessionmaker() as db, db.begin():
+            uploader = await make_account(db, tenant=tenant)
+        for name, owner in (
+            ("retained", SCOPE),
+            ("channel-upload", SCOPE.model_copy(update={"account_id": str(uploader.id)})),
+        ):
+            for version in ("v1", "v2"):
+                bundle = bundle_from_files(
+                    {
+                        "SKILL.md": (
+                            f"---\nname: {name}\ndescription: Retained context.\n---\n{version}"
+                        ).encode(),
+                        "asset.bin": version.encode(),
+                    }
+                )
+                await catalog.put_skill(
+                    owner,
+                    skill_id=name,
+                    version=version,
+                    agent_name="test",
+                    display_title=name,
+                    bundle=bundle,
+                )
+        async with request.deps.sessionmaker() as db, db.begin():
+            await add_channel_skill(
+                db,
+                tenant_id=TENANT,
+                platform=request.platform,
+                channel_id=REVISION.channel.channel_id,
+                skill_id="channel-upload",
+                version="v1",
+                name="channel-upload",
+                owner_agent_name="test",
+                actor_account_id=uploader.id,
+            )
     agent = await SelfHostedAgents(request.deps.sessionmaker).create(
         SCOPE,
         AgentSpec(
             name="test",
             model=ModelRef(provider="selfhosted", id="gpt-5"),
+            skills=(SkillRef(id="retained", version="v1"),)
+            if scenario == "retained_skills"
+            else None,
             tools=(
                 ToolSpec(name="write", kind="builtin", permission="ask"),
                 ToolSpec(name="reports", kind="mcp_toolset", permission="ask"),
@@ -789,6 +836,11 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             )
             assert token.encode() not in call.content
             assert body["model"] == "gpt-5"
+            if scenario == "retained_skills":
+                skills = {skill["name"]: skill for skill in body["skills"]}
+                assert set(skills) == {"retained", "channel-upload"}
+                for skill in skills.values():
+                    assert skill["files"]["asset.bin"] == "v1"
             assert {
                 key: value
                 for key, value in body["tool_policy"].items()
@@ -1218,7 +1270,11 @@ async def test_batched_host_approvals_submit_independent_idempotent_actions(comp
         root_turn_id=wire.events[0]["turn_id"],
     )
     confirmations = [
-        dict(type="user.tool_confirmation", tool_use_id="selfhosted:tool:" + action, result="allow")
+        dict(
+            type="user.tool_confirmation",
+            tool_use_id="selfhosted:tool:call-" + action,
+            result="allow",
+        )
         for action in ("one", "two")
     ]
     from mux.errors import ProviderError
@@ -1307,3 +1363,75 @@ async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(comp
     assert stopped.stopped and stopped.outcome == "interrupted"
     assert len(cancellations) == 1
     assert released == [(stopped.receipt_operation_id, prepared.session_ref)]
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_live_and_replayed_approval_permissions_match(composed, explicit):
+    from daimon.core.turn.reducers import apply
+    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from daimon.core.turn.state import ToolUseBlock, TurnState
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+    from mux.contracts.ids import PageRequest
+
+    request, wire, _, _ = composed
+    prepared = await prepare_selfhosted(request)
+    receipt = await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        (UserMessage(content=(TextPart(text="question"),)),),
+        key="replay-approval",
+    )
+    wire.events[:] = wire.events[:2]
+    wire.events.append(
+        dict(
+            seq=3,
+            session_id=prepared.session_ref.id,
+            turn_id=receipt.turn_id,
+            at=datetime.now(UTC).isoformat(),
+            type="requires_action",
+            data=dict(action_id="approval", call_id="call", name="reports/get_report", input={}),
+        )
+    )
+
+    class Persistence:
+        async def record(self, *args, **kwargs):
+            pass
+
+    async def baseline(session, roots, after):
+        return (), False, 0
+
+    io = SelfHostedTurnIO(
+        prepared.backend,
+        SCOPE,
+        prepared.session_ref,
+        persistence=Persistence(),
+        root_turn_id=receipt.turn_id,
+        explicit_ask=lambda name: explicit,
+        baseline_loader=baseline,
+    )
+    page = await prepared.backend.events.list(SCOPE, prepared.session_ref, page=PageRequest())
+    approval = next(value for value in page.data if value.type == "session.requires_action")
+    live = [frame.native for frame in await io.accept_record(approval)]
+    replayed = await io.replay()
+    live_tools = [value for value in live if value.type == "agent.mcp_tool_use"]
+    replayed_tools = [value for value in replayed if value.type == "agent.mcp_tool_use"]
+    assert len(live_tools) == len(replayed_tools) == 1
+    assert (
+        live_tools[0].evaluated_permission
+        == replayed_tools[0].evaluated_permission
+        == ("ask" if explicit else "allow")
+    )
+    assert live_tools[0].id == replayed_tools[0].id == "selfhosted:tool:call"
+    states = []
+    for displays in (live, replayed):
+        state = TurnState()
+        for display in displays:
+            state = apply(state, display)
+        states.append(state)
+    blocks = [
+        [block for block in state.content if isinstance(block, ToolUseBlock)] for state in states
+    ]
+    assert blocks[0] == blocks[1]
+    assert len(blocks[0]) == 1
+    assert blocks[0][0].evaluated_permission == ("ask" if explicit else "allow")
