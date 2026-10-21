@@ -208,6 +208,33 @@ concurrent polling requirements cannot be met by Foundry. Preserve the direct
 C3 endpoints and the same image; verify persistence and cancellation in that
 environment before using it for a tenant.
 
+## Azure Container Apps session-pool routing
+
+For `HARNESS_SESSION_MODE=single`, configure the environment's native
+`HarnessConfig` with `session_pool: true`, `transport: "direct"`,
+`harness_url` set to the existing pool's `properties.poolManagementEndpoint`,
+`auth_mode: "entra"` and `auth_ref: "https://dynamicsessions.io"`.
+The host obtains tokens for `https://dynamicsessions.io/.default`; grant its
+identity Azure ContainerApps Session Executor scoped to that pool. Bind that
+audience to the exact pool endpoint origin and permitted tenants in
+`DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`.
+
+The direct transport appends `identifier=sh-<session hash>` to every unchanged
+C3 path, including submit, actions, cancel and event polling. Other query
+parameters and replay bodies are preserved. Reconstructing the driver derives
+the same identifier. The transport resolves the credential for each attempt;
+pool tokens and per-turn MCP credentials are never persisted in native state.
+Ordinary direct routing remains the default.
+
+These paths and the fixed token audience follow the
+[ACA session-pool routing documentation](https://learn.microsoft.com/en-us/azure/container-apps/sessions-usage).
+Pool authorization does not replace harness caller authentication. Verify live
+that `Authorization` and `X-Daimon-*` reach the container before enabling
+admission. If forwarding fails, keep admission disabled until the verified
+per-session authentication alternative is implemented. Each sandbox is ephemeral:
+use a long timed cooldown, and checkpoint/restore durable state before relying
+on workspace persistence after sandbox destruction.
+
 ## Tests
 
 ```sh

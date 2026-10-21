@@ -292,6 +292,18 @@ repository root with `docker build -f apps/report-host/Dockerfile .`.
 
 ### Self-hosted agent harness
 
+For an Azure Container Apps dynamic-session pool, use the pool's published
+management endpoint as `harness_url` and set the environment's native
+configuration to `session_pool: true`, `transport: "direct"`,
+`auth_mode: "entra"`, `auth_ref: "https://dynamicsessions.io"`.
+The host's identity needs Azure ContainerApps Session Executor on the pool;
+its operator harness-auth binding must allow that audience, the exact pool
+endpoint origin and the tenant. Every C3 request carries the deterministic
+session identifier, including event polling, approvals and cancellation.
+Keep admission disabled until live header forwarding and durable state recovery
+have been verified. See `apps/harness/README.md` for routing and authentication
+details.
+
 The standalone harness image runs the OpenAI Agents SDK against Azure OpenAI.
 Build it from the repository root with
 `docker build -f apps/harness/Dockerfile -t daimon-harness .`. Its dependencies

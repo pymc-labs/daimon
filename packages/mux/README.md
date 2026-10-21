@@ -5,6 +5,13 @@ Postgres-backed resource ports are available in
 capability checks. `daimon selfhosted init` initializes matching named records
 and prints their IDs without provider credentials. Both the host and driver use `HarnessConfig`
 from `mux.drivers.selfhosted.config` for `selfhosted.environment` version 1.
+
+`HarnessConfig.session_pool` opts direct transport into ACA dynamic-session
+routing. It requires HTTPS and Entra audience `https://dynamicsessions.io`;
+the host binds that audience to the exact pool origin before acquiring tokens.
+`DirectTransport(session_pool=True)` adds the deterministic sandbox identifier
+to every C3 call while preserving polling cursors and request bodies. Ordinary
+direct and Foundry invocation transports retain their existing defaults.
 Its transport fields are `harness_url`, `auth_mode`, `auth_ref`, optional
 `packages_note`, and `transport` (default `direct`). `foundry_invocations`
 requires `agent_name` and `project_endpoint`. Resource `account_scope_id` is

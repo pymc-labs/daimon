@@ -22,6 +22,7 @@ _PRIVATE_V4 = tuple(
 _PRIVATE_V6 = ipaddress.ip_network("fc00::/7")
 _ENV = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MCP_CREDENTIAL_ENV = re.compile(r"HARNESS_MCP_CRED_[A-Za-z0-9_]+")
+SESSION_POOL_AUDIENCE = "https://dynamicsessions.io"
 _CREDENTIAL = re.compile(
     r"(?i)\bBearer\s+\S+|\b(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|"
     r"github_pat_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"
@@ -133,6 +134,8 @@ class HarnessConfig(BaseModel):
     project_endpoint: str | None = None
     allow_insecure_http: bool = False
     """Explicit permission for direct HTTP inside a private cluster, such as ACA fallback."""
+    session_pool: bool = False
+    """Route direct C3 calls through an ACA dynamic-session pool management endpoint."""
 
     @model_validator(mode="after")
     def validate_routing(self) -> HarnessConfig:
@@ -143,6 +146,15 @@ class HarnessConfig(BaseModel):
                 raise ValueError("bearer_env auth_ref must be an environment variable name")
         else:
             _url(self.auth_ref, audience=True)
+        if self.session_pool and (
+            self.transport != "direct"
+            or self.auth_mode != "entra"
+            or self.auth_ref != SESSION_POOL_AUDIENCE
+            or urlsplit(self.harness_url).scheme != "https"
+        ):
+            raise ValueError(
+                "session pools require direct HTTPS and Entra audience https://dynamicsessions.io"
+            )
         if self.transport == "foundry_invocations":
             if not self.agent_name or not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}", self.agent_name

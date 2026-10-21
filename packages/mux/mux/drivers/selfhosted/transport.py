@@ -105,14 +105,18 @@ class DirectTransport:
         base_url: str,
         token: str | None = None,
         token_provider: TokenProvider | None = None,
+        session_pool: bool = False,
     ) -> None:
         if (token is None) == (token_provider is None) or (token is not None and not token.strip()):
             raise ValueError("exactly one harness token or token provider is required")
         url = httpx.URL(base_url)
         if not secure_url(base_url) or not url.host or url.userinfo or url.query or url.fragment:
             raise ValueError("harness URL must use HTTPS except on loopback")
+        if session_pool and (url.scheme != "https" or token_provider is None):
+            raise ValueError("session pools require HTTPS and a refreshing Entra token provider")
         self._client, self._base_url = client, base_url.rstrip("/")
         self._token, self._token_provider = token, token_provider
+        self._session_pool = session_pool
 
     async def _request(
         self,
@@ -192,9 +196,18 @@ class DirectTransport:
         mcp_authorization: str | None = None,
         deadline: datetime | None = None,
     ) -> JsonValue:
-        turn = method == "POST" and urlsplit(path).path == "/v0/turns"
+        parsed = urlsplit(path)
+        if parsed.scheme or parsed.netloc or parsed.fragment or not parsed.path.startswith("/v0/"):
+            raise ValueError("direct transport requires an absolute C3 path")
+        turn = method == "POST" and parsed.path == "/v0/turns"
         if mcp_authorization is not None and not turn:
             raise ValueError("MCP authorization is only valid for turn submission")
+        if self._session_pool:
+            query = parse_qsl(parsed.query, keep_blank_values=True)
+            if any(key.lower() == "identifier" for key, _ in query):
+                raise ValueError("session pool identifier is derived from the mux session")
+            query.append(("identifier", sandbox_id(session_id)))
+            path = parsed.path + "?" + urlencode(query)
         return await self._request(
             method,
             self._base_url + path,
