@@ -23,7 +23,7 @@ COPY apps/harness/src/daimon_harness /opt/venv/lib/python3.12/site-packages/daim
 COPY apps/harness/tests/pods/fake.py /opt/l16-smoke.py
 DOCKER
 docker build --build-arg "BASE=$base" -f "$scratch/Dockerfile" -t "$image" .
-chart_head=ca82432b60fcb5e2587d770ac2f0da7e59df51d0
+chart_head=e9f7b0414baa7fd9e96284b447bd80f74bdd622b
 if ! git cat-file -e "$chart_head"; then git fetch origin "$chart_head"; fi
 git archive "$chart_head" deploy/helm/daimon-selfhost | tar -x -C "$scratch"
 patch -p1 -d "$scratch" < deploy/helm/patches/per-conversation.patch
@@ -33,11 +33,11 @@ kind load docker-image "$image" --name "$cluster"
 kubectl create namespace daimon-pods
 kubectl create secret generic daimon-harness -n daimon-pods --from-literal=HARNESS_TOKEN=offline-l16
 helm template smoke "$scratch/deploy/helm/daimon-selfhost" -n daimon-pods \
-  --set harness.mode=perConversation --set harness.perConversation.allowInsecureHTTP=true --set images.harness.repository=daimon-harness \
+  --set harness.mode=perConversation --set images.harness.repository=daimon-harness \
   --set "images.harness.tag=pods-smoke-$$" --set images.harness.pullPolicy=Never \
-  --set harness.storage=1Gi --set services.enabled=false --set init.enabled=false \
+  --set harness.storage=20Gi --set services.enabled=false --set init.enabled=false \
   --set postgres.bundled=false | uv run python apps/harness/tests/pods/render.py --kind > "$scratch/rendered.yaml"
-kubectl apply -n daimon-pods -f "$scratch/rendered.yaml"
+kubectl apply -f "$scratch/rendered.yaml"
 kubectl rollout status -n daimon-pods deployment/smoke-daimon-harness --timeout=180s
 kubectl port-forward -n daimon-pods service/smoke-daimon-harness 18088:8088 > "$scratch/forward.log" 2>&1 &
 forward_pid=$!
@@ -52,23 +52,9 @@ for _ in range(100):
 else:
     raise RuntimeError("port forward not ready")
 PYREADY
-uv run python "$repo/apps/harness/tests/pods/probe.py" --output "$scratch/receipt.json"
-kill "$forward_pid"; wait "$forward_pid" || true
-forward_pid=
-kubectl rollout restart -n daimon-pods deployment/smoke-daimon-harness
-kubectl rollout status -n daimon-pods deployment/smoke-daimon-harness --timeout=180s
-kubectl port-forward -n daimon-pods service/smoke-daimon-harness 18088:8088 >> "$scratch/forward.log" 2>&1 &
-forward_pid=$!
-uv run python - <<'PYREADY'
-import socket,time
-for _ in range(100):
-    try:
-        socket.create_connection(("127.0.0.1",18088),.2).close()
-        break
-    except OSError:
-        time.sleep(.1)
-else:
-    raise RuntimeError("port forward not ready")
-PYREADY
-uv run python "$repo/apps/harness/tests/pods/lifecycle.py" --url http://127.0.0.1:18088 --output "$scratch/receipt.json"
-echo "Evidence: $scratch/receipt.json (kindnet does not enforce NetworkPolicy)"
+kubectl get secret -n daimon-pods smoke-daimon-mcp-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > "$scratch/ca.crt"
+export HARNESS_PROBE_TOKEN=offline-l16
+uv run python "$repo/apps/harness/tests/pods/secure_probe.py" --ca "$scratch/ca.crt" --output "$scratch/receipt.json"
+kubectl delete pods -n smoke-sandboxes -l daimon-controller=smoke-daimon-harness --wait=true
+uv run python "$repo/apps/harness/tests/pods/secure_probe.py" --resume --ca "$scratch/ca.crt" --output "$scratch/resume.json"
+echo "Evidence: $scratch (kindnet does not enforce NetworkPolicy)"

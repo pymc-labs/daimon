@@ -64,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add an AKS Helm baseline with persistent multi-session harness, host services,
   bundled or external PostgreSQL, private networking policy, ingress and local kind smoke checks.
+- Add an opt-in Kubernetes harness controller with one sandbox pod per conversation and controller-PVC checkpoint storage.
+- Add an opt-in Kubernetes harness controller with one sandbox pod per conversation, verified TLS on all credential hops, scoped sandbox capabilities, namespace isolation, bounded admission and retained PVC checkpoints.
 
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 

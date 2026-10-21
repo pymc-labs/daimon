@@ -1,15 +1,57 @@
+diff --git a/deploy/helm/daimon-selfhost/templates/_helpers.tpl b/deploy/helm/daimon-selfhost/templates/_helpers.tpl
+index da5ecde..bd06ca4 100644
+--- a/deploy/helm/daimon-selfhost/templates/_helpers.tpl
++++ b/deploy/helm/daimon-selfhost/templates/_helpers.tpl
+@@ -23,7 +23,11 @@ volumes:
+ {{- default (printf "%s-mcp-tls" (include "d.name" .)) .Values.mcpTLS.existingSecret -}}
+ {{- end -}}
+ {{- define "d.mcpURL" -}}
++{{- if eq .Values.harness.mode "perConversation" -}}
++{{- printf "https://%s-mcp.%s.svc:%v/mcp" (include "d.name" .) .Release.Namespace .Values.services.mcp.port -}}
++{{- else -}}
+ {{- printf "https://%s-mcp:%v/mcp" (include "d.name" .) .Values.services.mcp.port -}}
+ {{- end -}}
++{{- end -}}
+
+ {{- define "d.priority" -}}{{ printf "%s-%s" (include "d.name" .) .Release.Namespace | trunc 240 | trimSuffix "-" }}{{- end -}}
 diff --git a/deploy/helm/daimon-selfhost/templates/controller.yaml b/deploy/helm/daimon-selfhost/templates/controller.yaml
 new file mode 100644
-index 0000000..c83801b
+index 0000000..0e066e3
 --- /dev/null
 +++ b/deploy/helm/daimon-selfhost/templates/controller.yaml
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,234 @@
 +{{- if and .Values.harness.enabled (eq .Values.harness.mode "perConversation") }}
-+{{- if or .Values.harness.miProxy.enabled .Values.keyVaultCSI.enabled }}{{ fail "perConversation uses k8s Secrets; MI proxy and Key Vault are not supported" }}{{ end }}
-+{{- if not .Values.harness.perConversation.allowInsecureHTTP }}{{ fail "perConversation requires explicit allowInsecureHTTP consent until F76 TLS lands" }}{{ end }}
-+{{- $ca := .Values.harness.perConversation.mcpCASecret }}
-+{{- if and .Values.services.enabled .Values.services.mcp.enabled (not $ca) }}{{ fail "perConversation HTTPS MCP requires mcpCASecret from the chart CA (C3.9a)" }}{{ end }}
++{{- if or .Values.harness.miProxy.enabled .Values.keyVaultCSI.enabled }}{{ fail "perConversation supports explicit sandbox Secrets only" }}{{ end }}
++{{- if not .Values.networkPolicy.enabled }}{{ fail "perConversation requires NetworkPolicy" }}{{ end }}
 +{{- $name := printf "%s-harness" (include "d.name" .) }}
++{{- $ns := default (printf "%s-sandboxes" .Release.Name) .Values.harness.perConversation.sandboxNamespace }}
++{{- if eq $ns .Release.Namespace }}{{ fail "sandbox namespace must differ from release namespace" }}{{ end }}
++{{- $signerName := printf "%s-sandbox-ca" $name }}
++{{- $previous := lookup "v1" "Secret" .Release.Namespace $signerName }}
++{{- $ca := genCA $signerName 3650 }}
++{{- $client := genSignedCert (printf "%s-controller" $name) nil nil 365 $ca }}
++{{- $data := dict "ca.crt" ($ca.Cert | b64enc) "ca.key" ($ca.Key | b64enc) "client.crt" ($client.Cert | b64enc) "client.key" ($client.Key | b64enc) }}
++{{- if $previous }}{{- $data = $previous.data }}{{ end }}
++apiVersion: v1
++kind: Namespace
++metadata:
++  name: {{ $ns }}
++  labels:
++    pod-security.kubernetes.io/enforce: baseline
++    pod-security.kubernetes.io/enforce-version: latest
++---
++apiVersion: v1
++kind: Secret
++metadata: {name: {{ $signerName }}}
++type: Opaque
++data: {{ $data | toJson }}
++---
++apiVersion: v1
++kind: ConfigMap
++metadata: {name: {{ $signerName }}, namespace: {{ $ns }}}
++data:
++  ca.crt: {{ index $data "ca.crt" | b64dec | quote }}
++---
 +apiVersion: v1
 +kind: ServiceAccount
 +metadata: {name: {{ $name }}-controller}
@@ -17,29 +59,39 @@ index 0000000..c83801b
 +---
 +apiVersion: v1
 +kind: ServiceAccount
-+metadata: {name: {{ $name }}-sandbox}
++metadata: {name: {{ $name }}-sandbox, namespace: {{ $ns }}}
 +automountServiceAccountToken: false
 +---
 +apiVersion: rbac.authorization.k8s.io/v1
 +kind: Role
-+metadata: {name: {{ $name }}-controller}
++metadata: {name: {{ $name }}-controller, namespace: {{ $ns }}}
 +rules:
 +  - apiGroups: [""]
 +    resources: [pods]
-+    verbs: [create, delete, get, list, watch, patch]
++    verbs: [create, delete, get, list, patch]
 +---
 +apiVersion: rbac.authorization.k8s.io/v1
 +kind: RoleBinding
-+metadata: {name: {{ $name }}-controller}
-+subjects: [{kind: ServiceAccount, name: {{ $name }}-controller}]
++metadata: {name: {{ $name }}-controller, namespace: {{ $ns }}}
++subjects: [{kind: ServiceAccount, name: {{ $name }}-controller, namespace: {{ .Release.Namespace }}}]
 +roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-controller}
++---
++apiVersion: scheduling.k8s.io/v1
++kind: PriorityClass
++metadata: {name: {{ include "d.priority" . }}-sandbox}
++value: -1000
++globalDefault: false
++preemptionPolicy: Never
++description: "Sandbox work yields to release services."
 +---
 +apiVersion: v1
 +kind: Service
 +metadata: {name: {{ $name }}}
 +spec:
 +  selector: {app: {{ $name }}}
-+  ports: [{port: 8088, targetPort: 8088}]
++  ports:
++    - {name: c3, port: 8088, targetPort: 8088}
++    - {name: checkpoints, port: 8089, targetPort: 8089}
 +---
 +apiVersion: v1
 +kind: PersistentVolumeClaim
@@ -57,37 +109,43 @@ index 0000000..c83801b
 +data:
 +  pod.json: |
 +    {{- $env := list
++      (dict "name" "HARNESS_ROLE" "value" "sandbox")
++      (dict "name" "HARNESS_ROTATION_REVISION" "value" .Values.harness.perConversation.rotationRevision)
++      (dict "name" "HARNESS_POD_UID" "valueFrom" (dict "fieldRef" (dict "fieldPath" "metadata.uid")))
 +      (dict "name" "HARNESS_SESSION_MODE" "value" "single")
 +      (dict "name" "HARNESS_AUTH_MODE" "value" "bearer")
 +      (dict "name" "AZURE_OPENAI_ENDPOINT" "value" .Values.azureOpenAI.endpoint)
 +      (dict "name" "AZURE_OPENAI_API_VERSION" "value" .Values.azureOpenAI.apiVersion)
-+      (dict "name" "HARNESS_CHECKPOINT_CONTROLLER_URL" "value" (printf "http://%s:8088" $name)) }}
-+    {{- if $ca }}
-+    {{- $env = append $env (dict "name" "HARNESS_MCP_CA_BUNDLE" "value" "/etc/daimon/mcp-ca/ca.crt") }}
-+    {{- end }}
-+    {{- if .Values.azureOpenAI.apiKeySecretRef.name }}
-+    {{- $env = append $env (dict "name" "AZURE_OPENAI_API_KEY" "valueFrom" (dict "secretKeyRef" .Values.azureOpenAI.apiKeySecretRef)) }}
-+    {{- end }}
++      (dict "name" "HARNESS_CHECKPOINT_CONTROLLER_URL" "value" (printf "https://%s.%s.svc:8089" $name .Release.Namespace))
++      (dict "name" "HARNESS_CONTROLLER_CA" "value" "/etc/daimon/mcp-ca/ca.crt")
++      (dict "name" "HARNESS_SANDBOX_CA" "value" "/etc/daimon/sandbox-ca/ca.crt")
++      (dict "name" "HARNESS_MCP_CA_BUNDLE" "value" "/etc/daimon/mcp-ca/ca.crt")
++      (dict "name" "HARNESS_DAIMON_MCP_URL" "value" (include "d.mcpURL" .)) }}
++    {{- $modelSecret := dict }}
++    {{- if .Values.harness.perConversation.sandboxSecret }}{{ $modelSecret = lookup "v1" "Secret" $ns .Values.harness.perConversation.sandboxSecret }}{{ end }}
++    {{- $trustSecret := lookup "v1" "Secret" .Release.Namespace (include "d.mcpTLSSecret" .) }}
++    {{- $env = append $env (dict "name" "HARNESS_SECRET_REVISION" "value" (printf "%s%s%s" (toJson $modelSecret.data) (toJson $trustSecret.data) (toJson $data) | sha256sum)) }}
 +    {{- range $k, $v := .Values.harness.env }}
++    {{- if or (eq $k "HARNESS_TOKEN") (eq $k "HARNESS_CHECKPOINT_TOKEN") }}{{ fail "sandbox capabilities cannot be configured in pod env" }}{{ end }}
 +    {{- $env = append $env (dict "name" $k "value" (toString $v)) }}
 +    {{- end }}
 +    {{- $container := dict "name" "harness" "image" (include "d.image" (dict "root" . "image" .Values.images.harness))
 +      "command" (list "/usr/bin/tini" "--" "sh" "-ec") "args" (list "chmod 600 /dev/termination-log; exec python -m daimon_harness")
-+      "imagePullPolicy" .Values.images.harness.pullPolicy
-+      "env" $env "envFrom" (list (dict "secretRef" (dict "name" .Values.secrets.harness)))
++      "imagePullPolicy" .Values.images.harness.pullPolicy "env" $env
 +      "securityContext" (dict "runAsUser" 0 "capabilities" (dict "drop" (list "ALL") "add" (list "DAC_OVERRIDE" "FOWNER" "CHOWN" "KILL" "SETGID" "SETUID")) "seccompProfile" (dict "type" "RuntimeDefault"))
 +      "resources" .Values.harness.perConversation.sandboxResources
-+      "readinessProbe" (dict "httpGet" (dict "path" "/readiness" "port" 8088))
-+      "volumeMounts" (list (dict "name" "home" "mountPath" "/home/harness")) }}
-+    {{- $volumes := list (dict "name" "home" "emptyDir" (dict)) }}
-+    {{- if $ca }}
-+    {{- $volumes = append $volumes (dict "name" "mcp-ca" "secret" (dict "secretName" $ca "defaultMode" 288 "items" (list (dict "key" "ca.crt" "path" "ca.crt")))) }}
-+    {{- $_ := set $container "volumeMounts" (append (get $container "volumeMounts") (dict "name" "mcp-ca" "mountPath" "/etc/daimon/mcp-ca" "readOnly" true)) }}
++      "readinessProbe" (dict "tcpSocket" (dict "port" 8088))
++      "volumeMounts" (list (dict "name" "home" "mountPath" "/home/harness") (dict "name" "mcp-ca" "mountPath" "/etc/daimon/mcp-ca" "readOnly" true) (dict "name" "sandbox-ca" "mountPath" "/etc/daimon/sandbox-ca" "readOnly" true)) }}
++    {{- if .Values.harness.perConversation.sandboxSecret }}
++    {{- $_ := set $container "envFrom" (list (dict "secretRef" (dict "name" .Values.harness.perConversation.sandboxSecret))) }}
 +    {{- end }}
++    {{- $volumes := list (dict "name" "home" "emptyDir" (dict))
++      (dict "name" "mcp-ca" "configMap" (dict "name" (printf "%s-public-ca" $name) "defaultMode" 288))
++      (dict "name" "sandbox-ca" "configMap" (dict "name" $signerName "defaultMode" 288)) }}
 +    {{ dict "spec" (dict "securityContext" (dict "fsGroup" 10000) "serviceAccountName" (printf "%s-sandbox" $name) "automountServiceAccountToken" false
++       "priorityClassName" (printf "%s-sandbox" (include "d.priority" .))
 +       "restartPolicy" "Never" "terminationGracePeriodSeconds" 90
-+       "imagePullSecrets" .Values.imagePullSecrets "containers" (list $container)
-+       "volumes" $volumes) | toJson }}
++       "imagePullSecrets" .Values.imagePullSecrets "containers" (list $container) "volumes" $volumes) | toJson }}
 +---
 +apiVersion: apps/v1
 +kind: Deployment
@@ -101,8 +159,10 @@ index 0000000..c83801b
 +      labels: {app: {{ $name }}}
 +      annotations:
 +        checksum/template: {{ toJson .Values | sha256sum }}
++        checksum/credentials: {{ printf "%s%s" (toJson (lookup "v1" "Secret" .Release.Namespace .Values.secrets.harness)) (toJson $data) | sha256sum }}
 +    spec:
 +      serviceAccountName: {{ $name }}-controller
++      priorityClassName: {{ include "d.priority" . }}-harness
 +      imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
 +      securityContext: {runAsUser: 10000, runAsGroup: 10000, fsGroup: 10000, seccompProfile: {type: RuntimeDefault}}
 +      containers:
@@ -110,41 +170,80 @@ index 0000000..c83801b
 +          image: {{ include "d.image" (dict "root" . "image" .Values.images.harness) | quote }}
 +          imagePullPolicy: {{ .Values.images.harness.pullPolicy }}
 +          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-+          envFrom: [{secretRef: {name: {{ .Values.secrets.harness }}}}]
 +          env:
++            - name: HARNESS_TOKEN
++              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.harness }}, key: HARNESS_TOKEN}}
 +            - {name: HARNESS_ROLE, value: controller}
-+            - {name: HARNESS_CONTROLLER_ALLOW_INSECURE_HTTP, value: "1"}
-+            - {name: HARNESS_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
++            - {name: HARNESS_TLS_CERT, value: /tls/tls.crt}
++            - {name: HARNESS_TLS_KEY, value: /tls/tls.key}
++            - {name: HARNESS_SANDBOX_CA, value: /signer/ca.crt}
++            - {name: HARNESS_SANDBOX_CA_KEY, value: /signer/ca.key}
++            - {name: HARNESS_CONTROLLER_CLIENT_CERT, value: /signer/client.crt}
++            - {name: HARNESS_CONTROLLER_CLIENT_KEY, value: /signer/client.key}
++            - {name: HARNESS_NAMESPACE, value: {{ $ns }}}
 +            - {name: HARNESS_CONTROLLER_NAME, value: {{ $name }}}
 +            - {name: HARNESS_POD_TEMPLATE, value: /templates/pod.json}
 +            - {name: HARNESS_WARM_POOL, value: {{ .Values.harness.perConversation.warmPool | quote }}}
-+          ports: [{containerPort: 8088}]
-+          readinessProbe: {httpGet: {path: /readiness, port: 8088}}
++            - {name: HARNESS_MAX_SANDBOXES, value: {{ .Values.harness.perConversation.maxSandboxes | quote }}}
++            - {name: HARNESS_CHECKPOINT_RETENTION_SECONDS, value: {{ .Values.harness.perConversation.retentionSeconds | int64 | quote }}}
++            - {name: HARNESS_MIN_FREE_BYTES, value: {{ .Values.harness.perConversation.minFreeBytes | int64 | quote }}}
++            - {name: HARNESS_MIN_FREE_FRACTION, value: {{ .Values.harness.perConversation.minFreeFraction | quote }}}
++          ports: [{containerPort: 8088}, {containerPort: 8089}]
++          readinessProbe: {httpGet: {scheme: HTTPS, path: /readiness, port: 8088}}
 +          resources: {{ .Values.harness.perConversation.controllerResources | toJson }}
 +          volumeMounts:
 +            - {name: checkpoints, mountPath: /checkpoints}
 +            - {name: template, mountPath: /templates, readOnly: true}
++            - {name: tls, mountPath: /tls, readOnly: true}
++            - {name: signer, mountPath: /signer, readOnly: true}
 +      volumes:
 +        - {name: checkpoints, persistentVolumeClaim: {claimName: {{ $name }}-checkpoints}}
 +        - {name: template, configMap: {name: {{ $name }}-template}}
++        - {name: tls, secret: {secretName: {{ include "d.mcpTLSSecret" . }}, defaultMode: 288}}
++        - {name: signer, secret: {secretName: {{ $signerName }}, defaultMode: 288}}
 +---
 +apiVersion: networking.k8s.io/v1
 +kind: NetworkPolicy
-+metadata: {name: {{ $name }}-sandbox}
++metadata: {name: {{ $name }}-controller}
 +spec:
-+  podSelector: {matchLabels: {daimon-controller: {{ $name }}}}
++  podSelector: {matchLabels: {app: {{ $name }}}}
++  policyTypes: [Ingress]
++  ingress:
++    - from:
++        - podSelector:
++            matchExpressions:
++              - key: app
++                operator: In
++                values: [{{ include "d.name" . }}-init, {{ include "d.name" . }}-mcp, {{ include "d.name" . }}-teams, {{ include "d.name" . }}-scheduler, {{ include "d.name" . }}-discord, {{ include "d.name" . }}-slack]
++      ports: [{protocol: TCP, port: 8088}]
++    - from:
++        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $ns }}}}
++          podSelector: {matchLabels: {daimon-controller: {{ $name }}}}
++      ports: [{protocol: TCP, port: 8089}]
++---
++apiVersion: networking.k8s.io/v1
++kind: NetworkPolicy
++metadata: {name: {{ $name }}-sandbox, namespace: {{ $ns }}}
++spec:
++  podSelector: {}
 +  policyTypes: [Ingress, Egress]
 +  ingress:
-+    - from: [{podSelector: {matchLabels: {app: {{ $name }}}}}]
++    - from:
++        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Release.Namespace }}}}
++          podSelector: {matchLabels: {app: {{ $name }}}}
 +      ports: [{protocol: TCP, port: 8088}]
 +  egress:
 +    - to:
 +        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
 +          podSelector: {matchLabels: {k8s-app: kube-dns}}
 +      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
-+    - to: [{podSelector: {matchLabels: {app: {{ $name }}}}}]
-+      ports: [{protocol: TCP, port: 8088}]
-+    - to: [{podSelector: {matchLabels: {app: {{ include "d.name" . }}-mcp}}}]
++    - to:
++        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Release.Namespace }}}}
++          podSelector: {matchLabels: {app: {{ $name }}}}
++      ports: [{protocol: TCP, port: 8089}]
++    - to:
++        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Release.Namespace }}}}
++          podSelector: {matchLabels: {app: {{ include "d.name" . }}-mcp}}
 +      ports: [{protocol: TCP, port: {{ .Values.services.mcp.port }}}]
 +    {{- if .Values.networkPolicy.azureOpenAICidrs }}
 +    - to:
@@ -156,7 +255,7 @@ index 0000000..c83801b
 +    {{- end }}
 +{{- end }}
 diff --git a/deploy/helm/daimon-selfhost/templates/harness.yaml b/deploy/helm/daimon-selfhost/templates/harness.yaml
-index e032650..f71c794 100644
+index 819a69b..2aa6af4 100644
 --- a/deploy/helm/daimon-selfhost/templates/harness.yaml
 +++ b/deploy/helm/daimon-selfhost/templates/harness.yaml
 @@ -1,4 +1,4 @@
@@ -165,6 +264,38 @@ index e032650..f71c794 100644
  {{- if ne .Values.harness.sessions.mode "multi" }}{{ fail "Only multi is implemented; pod-per-session needs the F72 router" }}{{ end }}
  apiVersion: v1
  kind: ServiceAccount
+diff --git a/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml b/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml
+index 1815a4b..1852799 100644
+--- a/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml
++++ b/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml
+@@ -24,4 +24,27 @@ metadata:
+   name: {{ $name }}
+ type: kubernetes.io/tls
+ data: {{ $data | toJson }}
++{{- if and .Values.harness.enabled (eq .Values.harness.mode "perConversation") }}
++---
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: {{ include "d.name" . }}-harness-public-ca
++  namespace: {{ default (printf "%s-sandboxes" .Release.Name) .Values.harness.perConversation.sandboxNamespace }}
++data:
++  ca.crt: {{ index $data "ca.crt" | b64dec | quote }}
++{{- end }}
++{{- end }}
++
++{{- if and .Values.mcpTLS.existingSecret .Values.harness.enabled (eq .Values.harness.mode "perConversation") }}
++{{- $external := lookup "v1" "Secret" .Release.Namespace .Values.mcpTLS.existingSecret }}
++{{- if not $external }}{{ fail "perConversation requires existingSecret to be available for public CA projection" }}{{ end }}
++---
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: {{ include "d.name" . }}-harness-public-ca
++  namespace: {{ default (printf "%s-sandboxes" .Release.Name) .Values.harness.perConversation.sandboxNamespace }}
++data:
++  ca.crt: {{ required "existingSecret requires ca.crt" (index $external.data "ca.crt") | b64dec | quote }}
+ {{- end }}
 diff --git a/deploy/helm/daimon-selfhost/templates/networkpolicy.yaml b/deploy/helm/daimon-selfhost/templates/networkpolicy.yaml
 index 9bca977..936597e 100644
 --- a/deploy/helm/daimon-selfhost/templates/networkpolicy.yaml
@@ -176,25 +307,30 @@ index 9bca977..936597e 100644
  kind: NetworkPolicy
  metadata: {name: {{ include "d.name" . }}-harness}
 diff --git a/deploy/helm/daimon-selfhost/values.yaml b/deploy/helm/daimon-selfhost/values.yaml
-index 05cd33a..a68f670 100644
+index 7420479..9fcaf67 100644
 --- a/deploy/helm/daimon-selfhost/values.yaml
 +++ b/deploy/helm/daimon-selfhost/values.yaml
-@@ -33,6 +33,19 @@ host:
+@@ -39,6 +39,24 @@ host:
      requests: {cpu: 50m, memory: 256Mi}
      limits: {memory: 1536Mi}
  harness:
 +  mode: shared
 +  perConversation:
-+    # Accepted risk F76: C3 HTTP only within the controller/sandbox policy boundary.
-+    allowInsecureHTTP: false
-+    # Required for bundled HTTPS MCP; CA Secret must contain only/public ca.crt.
-+    mcpCASecret: ""
++    sandboxNamespace: ""
++    # Explicit credential revision must change for an in-place Secret rotation.
++    rotationRevision: "1"
 +    warmPool: 1
++    maxSandboxes: 1
++    retentionSeconds: 2592000
++    minFreeBytes: 1073741824
++    minFreeFraction: "0.1"
++    # Existing Secret in sandbox namespace; ONLY selected model/operator keys.
++    sandboxSecret: ""
 +    controllerResources:
-+      requests: {cpu: 50m, memory: 128Mi}
++      requests: {cpu: 25m, memory: 128Mi}
 +      limits: {cpu: 500m, memory: 384Mi}
 +    sandboxResources:
-+      requests: {cpu: 100m, memory: 256Mi}
++      requests: {cpu: 50m, memory: 256Mi}
 +      limits: {cpu: 750m, memory: 768Mi}
    enabled: true
    # F72: router and pod-per-session are future work. Only multi is implemented.

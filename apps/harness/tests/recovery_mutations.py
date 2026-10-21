@@ -1,4 +1,4 @@
-"""Run nine recovery mutations on isolated source copies (never edit the checkout).
+"""Run recovery and store durability mutations on isolated source copies (never edit the checkout).
 
 Usage: uv run python apps/harness/tests/recovery_mutations.py <empty scratch directory>
 Run from the repository root; each property-test failure is retained in scratch.
@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in [int(value) for value in sys.argv[2:]] or range(1, 11):
+for number in [int(value) for value in sys.argv[2:]] or range(1, 14):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -122,6 +122,22 @@ for number in [int(value) for value in sys.argv[2:]] or range(1, 11):
             "for pid in present_pids():",
             'for pid in range(2, int(Path("/proc/sys/kernel/ns_last_pid").read_text()) + 1):',
         )
+    elif number in {11, 12, 13}:
+        before, after = {
+            11: (
+                "                os.fsync(output.fileno())",
+                "                pass  # mutation: no file fsync",
+            ),
+            12: (
+                "            os.replace(temporary, target)",
+                "            pass  # mutation: no atomic publication",
+            ),
+            13: (
+                "            sync_directory(target.parent)",
+                "            pass  # mutation: no directory fsync",
+            ),
+        }[number]
+        change("pvc_store.py", before, after)
     elif number == 10:
         change(
             "checkpoints.py",
@@ -149,10 +165,13 @@ for number in [int(value) for value in sys.argv[2:]] or range(1, 11):
                 (
                     "apps/harness/tests/test_kill_uid.py::test_sparse_four_million_pid_namespace_and_wrap"
                     if number == 8
+                    else "apps/harness/tests/test_controller.py::test_pvc_atomic_commit_order_and_missing_delete"
+                    if number in {11, 12, 13}
                     else "apps/harness/tests/test_sequence_ratchet.py::test_sequence_ratchet_random_interleavings"
                 ),
                 "-xq",
                 "--hypothesis-seed=7",
+                "--basetemp=" + str(root / f"pytest-{number}"),
             ],
             env=env,
             stdout=output,
@@ -170,5 +189,8 @@ for number in [int(value) for value in sys.argv[2:]] or range(1, 11):
         8: "AssertionError: cleanup scanned the PID allocation range",
         9: "AssertionError: empty remote cursor fence rejected",
         10: "host-seen sequence reused",
+        11: "AssertionError",
+        12: "AssertionError",
+        13: "AssertionError",
     }
     assert expected[number] in (root / f"mutation-{number}.log").read_text()

@@ -31,10 +31,14 @@ class MemoryBlobs:
 
     @blobs.setter
     def blobs(self, values):
-        if os.environ.get("HARNESS_RECOVERY_STORE") == "pvc":
-            from .pvc_recovery import DiskObjects
+        if os.environ.get("HARNESS_RECOVERY_STORE") in {"pvc", "http"}:
+            from .pvc_recovery import DiskObjects, HTTPObjects
 
-            self._blobs = DiskObjects()
+            self._blobs = (
+                HTTPObjects()
+                if os.environ.get("HARNESS_RECOVERY_STORE") == "http"
+                else DiskObjects()
+            )
             self._blobs.update(values)
         else:
             self._blobs = values

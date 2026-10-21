@@ -9,10 +9,14 @@ from __future__ import annotations
 import asyncio
 import copy
 import fcntl
+import hashlib
 import hmac
+import io
 import json
 import os
 import secrets
+import shutil
+import ssl
 import time
 from collections import defaultdict
 from collections.abc import Callable, Generator
@@ -25,6 +29,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from mux.drivers.selfhosted.transport import sandbox_id
 from starlette.background import BackgroundTask
+from starlette.middleware.base import RequestResponseEndpoint
 
 from .auth import Authenticator
 from .checkpoints import MAX_ARCHIVE_BYTES
@@ -34,6 +39,7 @@ from .pvc_store import PVCStore
 OWNER = "daimon-controller"
 SESSION = "daimon-session"
 TOUCHED = "daimon-last-active"
+TEMPLATE = "daimon-template"
 
 
 class PodAPI(Protocol):
@@ -122,14 +128,6 @@ class Kubernetes:
             response.raise_for_status()
 
 
-def capability(pod: dict[str, Any]) -> str:
-    return next(
-        env["value"]
-        for env in pod["spec"]["containers"][0]["env"]
-        if env["name"] == "HARNESS_CHECKPOINT_TOKEN"
-    )
-
-
 def ready(pod: dict[str, Any]) -> bool:
     return bool(pod.get("status", {}).get("podIP")) and any(
         c["type"] == "Ready" and c["status"] == "True"
@@ -153,117 +151,189 @@ class Controller:
         *,
         warm: int = 1,
         idle: float = 900,
+        maximum: int = 1,
         clock: Callable[[], float] = time.time,
     ):
-        if not 0 <= warm <= 2:
-            raise ValueError("warm pool must contain 0–2 pods")
+        if not 0 <= warm <= 2 or maximum < 1 or warm > maximum:
+            raise ValueError("invalid sandbox capacity/warm pool")
         self.kube, self.template, self.owner = kube, template, owner
-        self.warm, self.idle, self.clock = warm, idle, clock
-        self.lock = asyncio.Lock()
+        self.warm, self.idle, self.maximum, self.clock = warm, idle, maximum, clock
+        self.version = hashlib.sha256(json.dumps(template, sort_keys=True).encode()).hexdigest()[
+            :32
+        ]
+        self.locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.allocating = False
         self.active: dict[str, int] = defaultdict(int)
+        self.inventory: list[dict[str, Any]] = []
+        self.client: httpx.AsyncClient | None = None
+        self.seed = secrets.token_bytes(32)
+        self.capabilities: dict[str, dict[str, Any]] = {}
+        self.bootstrapped: set[str] = set()
+
+    def credential(self, pod: dict[str, Any], purpose: str) -> str:
+        return hmac.new(
+            self.seed, (purpose + pod["metadata"]["uid"]).encode(), "sha256"
+        ).hexdigest()
 
     async def pods(self) -> list[dict[str, Any]]:
-        return await self.kube.list(self.owner)
+        self.inventory = await self.kube.list(self.owner)
+        self.capabilities = {
+            self.credential(p, "checkpoint"): p
+            for p in self.inventory
+            if p["metadata"]["labels"][SESSION] != "warm"
+            and not p["metadata"].get("deletionTimestamp")
+        }
+        return self.inventory
 
     async def make(self, name: str, session: str = "warm") -> None:
         pod = copy.deepcopy(self.template)
         pod.update(apiVersion="v1", kind="Pod")
         pod["metadata"] = {
             "name": name,
-            "labels": {OWNER: self.owner, SESSION: session},
+            "labels": {OWNER: self.owner, SESSION: session, TEMPLATE: self.version},
             "annotations": {TOUCHED: str(self.clock())},
         }
-        pod["spec"]["containers"][0].setdefault("env", []).append(
-            {"name": "HARNESS_CHECKPOINT_TOKEN", "value": secrets.token_urlsafe(32)}
-        )
         await self.kube.create(pod)
 
+    async def bootstrap(self, pod: dict[str, Any]) -> None:
+        uid = pod["metadata"]["uid"]
+        if uid in self.bootstrapped or self.client is None:
+            return
+        response = await self.client.post(
+            self.url(pod) + "/internal/bootstrap",
+            json={
+                "c3": self.credential(pod, "c3"),
+                "checkpoint": self.credential(pod, "checkpoint"),
+            },
+        )
+        response.raise_for_status()
+        self.bootstrapped.add(uid)
+
+    @staticmethod
+    def url(pod: dict[str, Any]) -> str:
+        return f"https://{pod['status']['podIP']}:8088"
+
     async def maintain(self) -> None:
-        async with self.lock:
-            pods = await self.pods()
-            for pod in pods:
-                name = pod["metadata"]["name"]
-                touched = float(pod["metadata"].get("annotations", {}).get(TOUCHED, self.clock()))
-                if dead(pod):
+        pods = await self.pods()
+        for pod in pods:
+            meta = pod["metadata"]
+            if meta.get("deletionTimestamp"):
+                continue
+            warm = meta["labels"][SESSION] == "warm"
+            stale = meta["labels"].get(TEMPLATE) != self.version
+            if dead(pod) or (warm and stale):
+                await self.kube.delete(pod)
+                continue
+            if not warm and not self.active[meta["name"]]:
+                async with self.locks[meta["labels"][SESSION]]:
+                    if self.active[meta["name"]]:
+                        continue
+                    touched = float(meta.get("annotations", {}).get(TOUCHED, self.clock()))
+                    if self.clock() - touched < self.idle:
+                        continue
+                    if self.client is not None:
+                        try:
+                            await self.bootstrap(pod)
+                            response = await self.client.get(
+                                self.url(pod) + "/internal/activity",
+                                headers={"Authorization": "Bearer " + self.credential(pod, "c3")},
+                            )
+                            response.raise_for_status()
+                            activity = response.json()
+                            if (
+                                activity["active"]
+                                or self.clock() - activity["last_activity"] < self.idle
+                            ):
+                                continue
+                        except httpx.HTTPError:
+                            # Unknown activity is not permission to kill paid work.
+                            continue
                     await self.kube.delete(pod)
-                    continue
-                if (
-                    pod["metadata"]["labels"][SESSION] != "warm"
-                    and not self.active[name]
-                    and self.clock() - touched >= self.idle
-                ):
-                    await self.kube.delete(pod)
+        if self.allocating:
+            return
+        self.allocating = True
+        try:
             pods = await self.pods()
-            warm = [p for p in pods if p["metadata"]["labels"][SESSION] == "warm"]
-            for _ in range(max(0, self.warm - len(warm))):
+            warm = sum(p["metadata"]["labels"][SESSION] == "warm" for p in pods)
+            for _ in range(min(max(0, self.warm - warm), self.maximum - len(pods))):
                 await self.make(self.owner + "-warm-" + secrets.token_hex(5))
+        finally:
+            self.allocating = False
 
     async def acquire(self, session: str) -> dict[str, Any]:
         key = sandbox_id(session)
-        async with self.lock:
+        async with self.locks[key]:
             pods = await self.pods()
             found = next((p for p in pods if p["metadata"]["labels"][SESSION] == key), None)
             if found is None:
-                found = next(
-                    (
-                        p
-                        for p in pods
-                        if p["metadata"]["labels"][SESSION] == "warm"
-                        and ready(p)
-                        and not p["metadata"].get("deletionTimestamp")
-                    ),
-                    None,
-                )
-                if found is not None:
-                    await self.kube.patch(
-                        found,
-                        {"labels": {SESSION: key}, "annotations": {TOUCHED: str(self.clock())}},
+                # Reserve allocation synchronously; unrelated routes never await a global lock.
+                if self.allocating:
+                    raise HTTPException(
+                        503, "sandbox allocation busy; retry", headers={"Retry-After": "2"}
                     )
+                self.allocating = True
+                try:
+                    pods = await self.pods()
                     found = next(
-                        p
-                        for p in await self.pods()
-                        if p["metadata"]["name"] == found["metadata"]["name"]
-                    )
-                else:
-                    await self.make(self.owner + "-" + key, key)
-                    found = next(
-                        p for p in await self.pods() if p["metadata"]["labels"][SESSION] == key
-                    )
-            if found["metadata"].get("deletionTimestamp"):
-                raise HTTPException(503, "sandbox is terminating; retry")
-            await self.kube.patch(found, {"annotations": {TOUCHED: str(self.clock())}})
-            self.active[found["metadata"]["name"]] += 1
-        try:
-            async with asyncio.timeout(180):
-                while True:
-                    candidates = await self.pods()
-                    current = next(
-                        (p for p in candidates if p["metadata"]["uid"] == found["metadata"]["uid"]),
+                        (
+                            p
+                            for p in pods
+                            if p["metadata"]["labels"][SESSION] == "warm"
+                            and p["metadata"]["labels"].get(TEMPLATE) == self.version
+                            and ready(p)
+                            and not p["metadata"].get("deletionTimestamp")
+                        ),
                         None,
                     )
-                    if current is None or dead(current):
-                        if current is not None:
-                            await self.kube.delete(current)
-                        raise HTTPException(503, "sandbox lost; retry to restore")
-                    if ready(current):
-                        return current
-                    await asyncio.sleep(0.2)
-        except BaseException as exc:
-            await self.release(found)
-            if isinstance(exc, TimeoutError):
-                raise HTTPException(503, "sandbox startup timed out; retry") from None
-            raise
+                    if found is not None:
+                        await self.kube.patch(
+                            found,
+                            {"labels": {SESSION: key}, "annotations": {TOUCHED: str(self.clock())}},
+                        )
+                    else:
+                        if len(pods) >= self.maximum:
+                            raise HTTPException(
+                                503, "sandbox capacity busy; retry", headers={"Retry-After": "15"}
+                            )
+                        await self.make(self.owner + "-" + key, key)
+                    found = next(
+                        (p for p in await self.pods() if p["metadata"]["labels"][SESSION] == key),
+                        None,
+                    )
+                    if found is None:
+                        raise HTTPException(503, "sandbox name conflict; retry")
+                finally:
+                    self.allocating = False
+            if found["metadata"].get("deletionTimestamp"):
+                raise HTTPException(503, "sandbox is terminating; retry")
+            self.active[found["metadata"]["name"]] += 1
+            try:
+                async with asyncio.timeout(180):
+                    while True:
+                        current = next(
+                            (
+                                p
+                                for p in await self.pods()
+                                if p["metadata"]["uid"] == found["metadata"]["uid"]
+                            ),
+                            None,
+                        )
+                        if current is None or dead(current):
+                            if current is not None:
+                                await self.kube.delete(current)
+                            raise HTTPException(503, "sandbox lost; retry to restore")
+                        if ready(current):
+                            await self.bootstrap(current)
+                            return current
+                        await asyncio.sleep(0.2)
+            except BaseException as exc:
+                self.active[found["metadata"]["name"]] -= 1
+                if isinstance(exc, TimeoutError):
+                    raise HTTPException(503, "sandbox startup timed out; retry") from None
+                raise
 
     async def release(self, pod: dict[str, Any]) -> None:
-        async with self.lock:
-            name = pod["metadata"]["name"]
-            self.active[name] = max(0, self.active[name] - 1)
-            current = next(
-                (p for p in await self.pods() if p["metadata"]["uid"] == pod["metadata"]["uid"]),
-                None,
-            )
-            if current and not current["metadata"].get("deletionTimestamp"):
-                await self.kube.patch(current, {"annotations": {TOUCHED: str(self.clock())}})
+        self.active[pod["metadata"]["name"]] = max(0, self.active[pod["metadata"]["name"]] - 1)
 
 
 def create_app(
@@ -274,35 +344,76 @@ def create_app(
     http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     auth = Authenticator(token)
+    production = controller is None
     if controller is None:
-        if os.environ.get("HARNESS_CONTROLLER_ALLOW_INSECURE_HTTP") != "1":
-            raise ValueError(
-                "controller HTTP sandbox hop requires explicit allow_insecure_http consent (F76)"
-            )
         controller = Controller(
             Kubernetes(os.environ["HARNESS_NAMESPACE"]),
             json.loads(Path(os.environ["HARNESS_POD_TEMPLATE"]).read_text()),
             os.environ["HARNESS_CONTROLLER_NAME"],
             warm=int(os.environ.get("HARNESS_WARM_POOL", "1")),
+            maximum=int(os.environ.get("HARNESS_MAX_SANDBOXES", "1")),
         )
     ctl = controller
     store = PVCStore(root or Path("/checkpoints"))
+    context = ssl.create_default_context(cafile=os.environ.get("HARNESS_SANDBOX_CA"))
+    if os.environ.get("HARNESS_CONTROLLER_CLIENT_CERT"):
+        context.load_cert_chain(
+            os.environ["HARNESS_CONTROLLER_CLIENT_CERT"],
+            os.environ["HARNESS_CONTROLLER_CLIENT_KEY"],
+        )
     client = http_client or httpx.AsyncClient(
-        timeout=httpx.Timeout(180, read=None), trust_env=False
+        verify=context, timeout=httpx.Timeout(180, read=None), trust_env=False
     )
+    ctl.client = client if production else None
+    maintenance_task: asyncio.Task[None] | None = None
+    retention = float(os.environ.get("HARNESS_CHECKPOINT_RETENTION_SECONDS", str(30 * 86400)))
+    buckets: dict[str, tuple[float, int]] = {}
+
+    def space_ok() -> bool:
+        disk = shutil.disk_usage(store.root)
+        return disk.free >= max(
+            int(os.environ.get("HARNESS_MIN_FREE_BYTES", str(1024**3))),
+            disk.total * float(os.environ.get("HARNESS_MIN_FREE_FRACTION", "0.1")),
+        )
+
+    def collect() -> None:
+        sessions = store.root / "sessions"
+        if not sessions.exists():
+            return
+        bound = {p["metadata"]["labels"][SESSION] for p in ctl.inventory}
+        for directory in sessions.iterdir():
+            if directory.is_dir() and directory.name not in bound:
+                newest = max(
+                    (p.stat().st_mtime for p in directory.rglob("*") if p.is_file()),
+                    default=directory.stat().st_mtime,
+                )
+                if time.time() - newest > retention:
+                    shutil.rmtree(directory)
+        from .checkpoints import sync_directory
+
+        sync_directory(sessions)
 
     async def maintenance() -> None:
         while True:
             with suppress(httpx.HTTPError):
                 await ctl.maintain()
+            await asyncio.to_thread(collect)
             await asyncio.sleep(10)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        nonlocal maintenance_task
         with (store.root / ".controller.lock").open("a") as lease:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            seed = store.root / ".capability-key"
+            if not seed.exists():
+                store.upload(".capability-key", io.BytesIO(secrets.token_bytes(32)))
+            ctl.seed = seed.read_bytes()
+            if len(ctl.seed) != 32:
+                raise RuntimeError("invalid persistent capability key")
             await ctl.pods()  # Rebuild from API before becoming ready.
             task = asyncio.create_task(maintenance())
+            maintenance_task = task
             try:
                 yield
             finally:
@@ -312,7 +423,7 @@ def create_app(
                 if isinstance(ctl.kube, Kubernetes):
                     await ctl.kube.client.aclose()
 
-    app = FastAPI(lifespan=lifespan)
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
     async def upstream_unavailable(request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(
@@ -320,18 +431,89 @@ def create_app(
         )
 
     app.add_exception_handler(httpx.HTTPError, upstream_unavailable)
+    app.add_exception_handler(OSError, upstream_unavailable)
 
     @app.get("/readiness")
     async def readiness():
+        if (maintenance_task is not None and maintenance_task.done()) or not space_ok():
+            raise HTTPException(503, "maintenance or checkpoint storage unavailable")
         return {"ok": True}
+
+    @app.middleware("http")
+    async def separate_ports(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        port = request.scope.get("server", (None, 0))[1]
+        internal = request.url.path.startswith("/internal/")
+        if (port == 8089 and not internal) or (port == 8088 and internal):
+            return Response(status_code=404)
+        return await call_next(request)
+
+    @app.post("/internal/certificate")
+    async def certificate(request: Request):
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 16384:
+                raise HTTPException(413)
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            raise HTTPException(422, "invalid certificate request") from None
+        uid = body.get("uid", "")
+        pod = next(
+            (
+                p
+                for p in ctl.inventory
+                if p["metadata"]["uid"] == uid
+                and p.get("status", {}).get("podIP")
+                == (request.client.host if request.client else "")
+                and not p["metadata"].get("deletionTimestamp")
+            ),
+            None,
+        )
+        if pod is None:
+            raise HTTPException(403)
+        now = time.monotonic()
+        bucket = "certificate-" + uid
+        stamp, count = buckets.get(bucket, (now, 0))
+        if now - stamp >= 60:
+            stamp, count = now, 0
+        if count >= 10:
+            raise HTTPException(429, "certificate rate limit", headers={"Retry-After": "60"})
+        buckets[bucket] = (stamp, count + 1)
+        from .pod_tls import issue
+
+        async with ctl.locks["certificate-" + uid]:
+            csr = body["csr"].encode()
+            pin = store.root / ".certificates" / uid
+            if pin.exists() and pin.read_bytes() != csr:
+                raise HTTPException(403, "pod public key already pinned")
+            try:
+                cert = issue(
+                    csr,
+                    pod["status"]["podIP"],
+                    Path(os.environ["HARNESS_SANDBOX_CA"]),
+                    Path(os.environ["HARNESS_SANDBOX_CA_KEY"]),
+                )
+            except ValueError:
+                raise HTTPException(422, "invalid certificate request") from None
+            if not pin.exists():
+                store.upload(".certificates/" + uid, io.BytesIO(csr))
+            return Response(cert, media_type="application/x-pem-file")
 
     @app.api_route("/internal/checkpoints", methods=["GET"])
     @app.api_route("/internal/checkpoints/{name:path}", methods=["GET", "PUT", "DELETE"])
     async def objects(request: Request, name: str = ""):
         value = request.headers.get("authorization", "").removeprefix("Bearer ")
-        pod = next((p for p in await ctl.pods() if hmac.compare_digest(capability(p), value)), None)
-        if pod is None or pod["metadata"]["labels"][SESSION] == "warm":
+        pod = ctl.capabilities.get(value)
+        if pod is None:
             raise HTTPException(403)
+        now = time.monotonic()
+        stamp, count = buckets.get(value, (now, 0))
+        if now - stamp >= 1:
+            stamp, count = now, 0
+        if count >= 100:
+            raise HTTPException(429, "checkpoint rate limit", headers={"Retry-After": "1"})
+        buckets[value] = (stamp, count + 1)
         key = name or request.query_params.get("prefix", "")
         if not key.startswith("sessions/" + pod["metadata"]["labels"][SESSION] + "/"):
             raise HTTPException(403)
@@ -359,6 +541,28 @@ def create_app(
             await asyncio.to_thread(store.delete, name)
         return Response(status_code=204)
 
+    @app.delete("/v0/sessions/{session}")
+    async def delete_session(session: str, request: Request):
+        await auth.verify(request.headers.get("authorization"))
+        try:
+            identifier(session)
+        except ValueError:
+            raise HTTPException(422, "invalid session_id") from None
+        key = sandbox_id(session)
+        async with ctl.locks[key]:
+            pods = [p for p in await ctl.pods() if p["metadata"]["labels"][SESSION] == key]
+            for pod in pods:
+                await ctl.kube.delete(pod)
+            if pods:
+                raise HTTPException(503, "session deleting; retry after sandbox terminates")
+            directory = store.root / "sessions" / key
+            if directory.exists():
+                await asyncio.to_thread(shutil.rmtree, directory)
+                from .checkpoints import sync_directory
+
+                await asyncio.to_thread(sync_directory, directory.parent)
+        return Response(status_code=204)
+
     @app.api_route("/v0/{path:path}", methods=["GET", "POST"])
     async def proxy(request: Request, path: str):
         await auth.verify(request.headers.get("authorization"))
@@ -368,10 +572,6 @@ def create_app(
                 "protocol": "daimon-harness/0",
                 "version": os.environ.get("HARNESS_VERSION", "controller"),
             }
-        # C3.9a permits an explicit plaintext C3 bearer hop, but does not
-        # grant a plaintext exception for the per-turn MCP credential carrier.
-        if request.headers.get("x-daimon-mcp-authorization"):
-            raise HTTPException(503, "per-turn MCP credentials require sandbox TLS (C3.9a/F76)")
         body = await request.body()
         session = request.query_params.get("session_id")
         if path == "turns" and request.method == "POST":
@@ -395,6 +595,10 @@ def create_app(
             identifier(session)
         except ValueError:
             raise HTTPException(422, "invalid session_id") from None
+        if not space_ok():
+            raise HTTPException(
+                503, "checkpoint disk near full; retry", headers={"Retry-After": "30"}
+            )
         pod = await ctl.acquire(session)
         closed = False
 
@@ -413,7 +617,8 @@ def create_app(
                 if k.lower()
                 in {"authorization", "accept", "content-type", "x-daimon-mcp-authorization"}
             }
-            url = f"http://{pod['status']['podIP']}:8088/v0/{path}"
+            headers["authorization"] = "Bearer " + ctl.credential(pod, "c3")
+            url = ctl.url(pod) + f"/v0/{path}"
             outgoing = client.build_request(
                 request.method,
                 url,
@@ -444,5 +649,5 @@ def create_app(
             await close()
             raise
 
-    app.state.handlers = (readiness, objects, proxy)
+    app.state.handlers = (readiness, objects, proxy, separate_ports, certificate, delete_session)
     return app

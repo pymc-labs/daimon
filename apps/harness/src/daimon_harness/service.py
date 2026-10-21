@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
@@ -30,6 +33,7 @@ from mux.drivers.selfhosted.wire import (
     URLSkill,
 )
 from pydantic import JsonValue, ValidationError
+from starlette.middleware.base import RequestResponseEndpoint
 from starlette.requests import Request
 
 from .auth import Authenticator
@@ -119,7 +123,7 @@ class Supervisor:
         if token:
             self.secrets["HARNESS_TOKEN"] = token
         self.log_redaction = credential_log_redaction(self.secrets)
-        self.log_redaction.__enter__()
+        self.log_secrets = self.log_redaction.__enter__()
         self.home = home
         self.adapter = adapter
         self.tasks: dict[str, asyncio.Task[None]] = {}
@@ -710,7 +714,8 @@ def create_app(
         raise RuntimeError("production requires separate service and tool UIDs")
     if not test_mode:
         validate_credential_files(home=root)
-    auth = Authenticator(token)
+    pod_mode = os.environ.get("HARNESS_ROLE") == "sandbox"
+    auth = Authenticator(token or (secrets.token_urlsafe(32) if pod_mode else None))
     session_mode = validate_session_mode()
     loop = os.environ.get("HARNESS_LOOP", "agents_sdk")
     if loop not in {"agents_sdk", "codex"}:
@@ -734,10 +739,14 @@ def create_app(
         )
     ):
         raise RuntimeError("test mode requires an injected checkpoint store")
-    configured = checkpoints or configured_checkpoints(
-        selected.identity
-        if isinstance(selected, AzureModelAdapter) and not selected.live_probe
-        else None
+    configured = checkpoints or (
+        None
+        if pod_mode
+        else configured_checkpoints(
+            selected.identity
+            if isinstance(selected, AzureModelAdapter) and not selected.live_probe
+            else None
+        )
     )
     supervisor = Supervisor(root, selected, session_mode, auth.token, configured)
     if not test_mode:
@@ -767,6 +776,51 @@ def create_app(
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     secured = [Depends(authenticate)]
     app.state.supervisor = supervisor
+
+    bootstrapped = False
+    last_activity = time.time()
+
+    @app.middleware("http")
+    async def activity(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        nonlocal last_activity
+        response = await call_next(request)
+        if request.url.path.startswith("/v0/") and response.status_code < 400:
+            last_activity = time.time()
+        return response
+
+    if pod_mode:
+        # TLS requires a controller client certificate before HTTP is accepted.
+        @app.post("/internal/bootstrap")
+        async def bootstrap(request: Request):
+            nonlocal bootstrapped
+            body = await request.json()
+            if bootstrapped:
+                if not hmac.compare_digest(auth.token, body["c3"]):
+                    raise HTTPException(409, "already bootstrapped")
+                return {"ok": True}
+            from .pvc_store import ControllerStore
+
+            supervisor.checkpoints = Checkpoints(
+                ControllerStore(os.environ["HARNESS_CHECKPOINT_CONTROLLER_URL"], body["checkpoint"])
+            )
+            supervisor.attach_durability()
+            auth.token = body["c3"]
+            supervisor.secrets["HARNESS_TOKEN"] = body["c3"]
+            supervisor.secrets["HARNESS_CHECKPOINT_TOKEN"] = body["checkpoint"]
+            supervisor.log_secrets.update(supervisor.secrets)
+            bootstrapped = True
+            return {"ok": True}
+
+        app.state.bootstrap_handler = bootstrap
+
+        @app.get("/internal/activity", dependencies=secured)
+        async def pod_activity():
+            return {
+                "active": any(not task.done() for task in supervisor.tasks.values()),
+                "last_activity": last_activity,
+            }
+
+        app.state.pod_activity_handler = pod_activity
 
     async def health() -> HealthResponse:
         return HealthResponse(version=os.environ.get("HARNESS_VERSION", "development"))
@@ -992,4 +1046,5 @@ def create_app(
     )
     app.add_api_route("/invocations", invoke, methods=["POST"], dependencies=secured)
     app.add_api_route("/readiness", readiness, methods=["GET"])
+    app.state.activity_handler = activity
     return app

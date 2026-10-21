@@ -33,4 +33,6 @@ for doc in yaml.safe_load_all(sys.stdin):
                 }
             ]
         doc["data"]["pod.json"] = json.dumps(pod)
+    if doc["kind"] not in {"Namespace", "PriorityClass"}:
+        doc["metadata"].setdefault("namespace", "daimon-pods")
     print(yaml.safe_dump(doc), end="---\n")

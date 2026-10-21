@@ -1,3 +1,6 @@
+Historical pre-redesign measurements (head 2240b887); superseded security behavior
+and final default-capacity validation are recorded in STATUS-l16.md.
+
 Validated 2026-10-21 on kind 1.35 and the existing AKS 1.36 cluster, in a
 separate `daimon-pods` namespace. Kind cluster `daimon-l16-20261021` was deleted
 by exact name. The existing `daimon` namespace was not modified.
@@ -5,7 +8,7 @@ by exact name. The existing `daimon` namespace was not modified.
 First authenticated C3 event poll for a new session, five samples each;
 empirical p95 is the largest of these small samples, not a production SLO:
 
-| Environment | Warm p50 / p95 | Miss p50 / p95 | Resume after pod deletion | Resume after idle reap |
+| Environment | Warm p50 / p95 | Miss p50 / p95 | Cold resume after pod deletion | Warm-pool hit after idle reap |
 | --- | --- | --- | --- | --- |
 | kind | 0.175 / 0.473 s | 14.172 / 15.454 s | 16.184 s | 0.451 s |
 | AKS | 0.599 / 0.644 s | 13.121 / 13.273 s | 14.084 s | 1.531 s |

@@ -2,7 +2,7 @@
 
 import asyncio
 
-import uvicorn
+from daimon_harness.__main__ import main
 from daimon_harness.service import create_app
 
 
@@ -45,4 +45,4 @@ class Fake:
         return history
 
 
-uvicorn.run(create_app(adapter=Fake()), host="0.0.0.0", port=8088)
+main(factory=lambda: create_app(adapter=Fake()))

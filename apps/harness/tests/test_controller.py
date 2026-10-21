@@ -41,7 +41,9 @@ class Kube:
 
 
 def controller(kube, **kw):
-    return Controller(kube, {"spec": {"containers": [{"env": []}]}}, "test", **kw)
+    return Controller(
+        kube, {"spec": {"containers": [{"env": []}]}}, "test", maximum=kw.pop("maximum", 2), **kw
+    )
 
 
 async def test_single_flight_warm_rebuild_and_reap():
@@ -82,9 +84,7 @@ async def test_routing_auth_scope_and_restart(tmp_path):
         assert response.status_code == 409
         assert (await client.post("/v0/turns/t/cancel", headers=headers)).status_code == 422
         pod = await ctl.acquire("a")
-        from daimon_harness.controller import capability
-
-        cap = {"Authorization": "Bearer " + capability(pod)}
+        cap = {"Authorization": "Bearer " + ctl.credential(pod, "checkpoint")}
         prefix = "sessions/" + pod["metadata"]["labels"][SESSION] + "/"
         assert (
             await client.put(
@@ -160,8 +160,11 @@ async def test_proxy_preserves_c3_body_query_headers_and_sse(tmp_path):
                 "X-Daimon-MCP-Authorization": "Bearer turn-only",
             },
         )
-        assert blocked.status_code == 503
-        assert len(seen) == 1
+        assert blocked.status_code == 202
+        assert len(seen) == 2
+        assert seen[1].url.scheme == "https"
+        assert seen[1].headers["x-daimon-mcp-authorization"] == "Bearer turn-only"
+        assert seen[1].headers["authorization"] != "Bearer caller"
         assert not any(ctl.active.values())
         response = await client.post(
             "/v0/turns/t/cancel?session_id=a&after_seq=9000",
@@ -210,7 +213,7 @@ async def test_status_version_conflict_retries_but_foreign_binding_refuses():
 def test_controller_checkpoint_configuration_captures_and_scrubs(monkeypatch):
     from daimon_harness.checkpoints import configured_checkpoints
 
-    monkeypatch.setenv("HARNESS_CHECKPOINT_CONTROLLER_URL", "http://controller:8088")
+    monkeypatch.setenv("HARNESS_CHECKPOINT_CONTROLLER_URL", "https://controller:8089")
     monkeypatch.setenv("HARNESS_CHECKPOINT_TOKEN", "pod-capability")
     monkeypatch.setenv("HARNESS_CHECKPOINT_KEEP", "2")
     configured = configured_checkpoints()
@@ -222,7 +225,192 @@ def test_controller_checkpoint_configuration_captures_and_scrubs(monkeypatch):
         configured_checkpoints()
 
 
-def test_http_controller_requires_explicit_consent(monkeypatch):
-    monkeypatch.delenv("HARNESS_CONTROLLER_ALLOW_INSECURE_HTTP", raising=False)
-    with pytest.raises(ValueError, match="allow_insecure_http"):
-        create_app(token="caller")
+def test_http_controller_store_refuses_plaintext():
+    from daimon_harness.pvc_store import ControllerStore
+
+    with pytest.raises(ValueError, match="HTTPS"):
+        ControllerStore("http://controller:8089", "secret")
+
+
+async def test_capacity_stale_template_termination_and_host_bearer_isolation(tmp_path):
+    from daimon_harness.controller import TEMPLATE
+    from fastapi import HTTPException
+
+    kube = Kube()
+    ctl = controller(kube, maximum=1)
+    await ctl.maintain()
+    warm = next(iter(kube.items.values()))
+    warm["metadata"]["labels"][TEMPLATE] = "old-template"
+    await ctl.maintain()
+    assert kube.created == 2
+    pod = await ctl.acquire("a")
+    with pytest.raises(HTTPException, match="503"):
+        await ctl.acquire("b")
+    assert len(kube.items) == 1
+    assert "HARNESS_CHECKPOINT_TOKEN" not in str(pod["spec"])
+    assert "HARNESS_TOKEN" not in str(pod["spec"])
+    await ctl.release(pod)
+    kube.items[pod["metadata"]["name"]]["metadata"]["deletionTimestamp"] = "now"
+    with pytest.raises(HTTPException, match="terminating"):
+        await ctl.acquire("a")
+
+
+async def test_unauthenticated_checkpoint_flood_never_calls_kubernetes(tmp_path):
+    kube = Kube()
+    ctl = controller(kube)
+    app = create_app(controller=ctl, root=tmp_path, token="host")
+
+    async def forbidden(owner):
+        raise AssertionError("unauthenticated request reached Kubernetes")
+
+    kube.list = forbidden
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://test"
+    ) as client:
+        for _ in range(50):
+            response = await client.get(
+                "/internal/checkpoints", headers={"Authorization": "Bearer forged"}
+            )
+            assert response.status_code == 403
+        assert (
+            await client.post("/v0/turns", headers={"Authorization": "Bearer forged"})
+        ).status_code == 401
+
+
+async def test_foreign_name_conflict_returns_retryable_busy():
+    from fastapi import HTTPException
+
+    kube = Kube()
+    ctl = controller(kube)
+
+    async def conflict(pod):
+        return None  # API create 409; unrelated pod is absent from owner inventory.
+
+    kube.create = conflict
+    with pytest.raises(HTTPException) as exc:
+        await ctl.acquire("a")
+    assert exc.value.status_code == 503
+    assert "conflict" in exc.value.detail
+
+
+def test_pvc_atomic_commit_order_and_missing_delete(tmp_path, monkeypatch):
+    import os
+
+    import daimon_harness.pvc_store as module
+
+    store = PVCStore(tmp_path)
+    calls = []
+    fsync, replace, directory_sync = os.fsync, os.replace, module.sync_directory
+
+    def sync(fd):
+        calls.append("fsync")
+        return fsync(fd)
+
+    def rename(source, target):
+        calls.append("rename")
+        return replace(source, target)
+
+    def sync_dir(path):
+        calls.append("directory")
+        return directory_sync(path)
+
+    monkeypatch.setattr(os, "fsync", sync)
+    monkeypatch.setattr(os, "replace", rename)
+    monkeypatch.setattr(module, "sync_directory", sync_dir)
+    store.upload("object", io.BytesIO(b"durable"))
+    assert calls == ["fsync", "rename", "directory", "fsync"]
+    store.delete("missing/parent/object")
+
+
+async def test_maintenance_crash_and_full_disk_fail_readiness(tmp_path, monkeypatch):
+    from collections import namedtuple
+
+    import daimon_harness.controller as module
+
+    ctl = controller(Kube())
+
+    async def broken():
+        raise RuntimeError("maintenance stopped")
+
+    ctl.maintain = broken
+    app = create_app(controller=ctl, root=tmp_path, token="host")
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://test"
+        ) as client:
+            assert (await client.get("/readiness")).status_code == 503
+    ctl = controller(Kube())
+    app = create_app(controller=ctl, root=tmp_path / "full", token="host")
+    usage = namedtuple("usage", ["total", "used", "free"])
+    monkeypatch.setattr(module.shutil, "disk_usage", lambda path: usage(100, 100, 0))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://test"
+    ) as client:
+        assert (await client.get("/readiness")).status_code == 503
+        r = await client.post(
+            "/v0/turns", json={"session_id": "a"}, headers={"Authorization": "Bearer host"}
+        )
+        assert r.status_code == 503 and "disk" in r.text
+        assert ctl.kube.created == 0
+
+
+async def test_retention_collects_only_unbound_sessions(tmp_path, monkeypatch):
+    import os
+    import time
+
+    monkeypatch.setenv("HARNESS_CHECKPOINT_RETENTION_SECONDS", "1")
+    ctl = controller(Kube(), warm=0)
+    pod = await ctl.acquire("retained")
+    app = create_app(controller=ctl, root=tmp_path, token="host")
+    store = PVCStore(tmp_path)
+    bound = pod["metadata"]["labels"][SESSION]
+    for key in ["expired", bound]:
+        store.upload("sessions/" + key + "/wal/t", io.BytesIO(b"wal"))
+        os.utime(store.path("sessions/" + key + "/wal/t"), (time.time() - 100, time.time() - 100))
+    async with app.router.lifespan_context(app):
+        for _ in range(100):
+            if not (tmp_path / "sessions/expired").exists():
+                break
+            await asyncio.sleep(0.01)
+        assert not (tmp_path / "sessions/expired").exists()
+        assert (tmp_path / "sessions" / bound).exists()
+
+
+async def test_certificate_bootstrap_pins_first_key_and_never_queries_api(tmp_path, monkeypatch):
+    import daimon_harness.pod_tls as tls
+
+    kube = Kube()
+    ctl = controller(kube, warm=0)
+    pod = await ctl.acquire("a")
+    app = create_app(controller=ctl, root=tmp_path, token="host")
+    signed = []
+
+    def issue(csr, ip, ca, key):
+        signed.append((csr, ip))
+        return b"certificate"
+
+    async def forbidden(owner):
+        raise AssertionError("certificate endpoint queried Kubernetes")
+
+    monkeypatch.setenv("HARNESS_SANDBOX_CA", "/public-ca")
+    monkeypatch.setenv("HARNESS_SANDBOX_CA_KEY", "/private-ca")
+    monkeypatch.setattr(tls, "issue", issue)
+    kube.list = forbidden
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://test:8089"
+    ) as client:
+        path = "/internal/certificate"
+        uid = pod["metadata"]["uid"]
+        assert (await client.post(path, json={"uid": "foreign", "csr": "first"})).status_code == 403
+        assert not signed
+        assert (await client.post(path, json={"uid": uid, "csr": "first"})).status_code == 200
+        assert (await client.post(path, json={"uid": uid, "csr": "replacement"})).status_code == 403
+        assert len(signed) == 1
+        assert (
+            await client.get("/v0/healthz", headers={"Authorization": "Bearer host"})
+        ).status_code == 404
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://test:8088"
+    ) as client:
+        assert (await client.post(path, json={"uid": uid, "csr": "first"})).status_code == 404
