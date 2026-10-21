@@ -1,4 +1,5 @@
 {{- if .Values.harness.enabled }}
+{{- if not .Values.networkPolicy.enabled }}{{ fail "HTTP harness requires same-release ingress NetworkPolicy (C3.9a/F76)" }}{{ end }}
 {{- if ne .Values.harness.sessions.mode "multi" }}{{ fail "Only multi is implemented; pod-per-session needs the F72 router" }}{{ end }}
 apiVersion: v1
 kind: ServiceAccount
@@ -44,6 +45,21 @@ spec:
       imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
       priorityClassName: {{ include "d.name" . }}-harness
       terminationGracePeriodSeconds: 90
+      initContainers:
+        - name: prepare-mcp-ca
+          image: {{ include "d.image" (dict "root" . "image" .Values.images.harness) | quote }}
+          imagePullPolicy: {{ .Values.images.harness.pullPolicy }}
+          command: [sh, -ec, "install -o 10000 -g 10000 -m 0400 /source/ca.crt /target/ca.crt"]
+          securityContext:
+            runAsUser: 0
+            capabilities: {drop: [ALL], add: [CHOWN, FOWNER]}
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+          volumeMounts:
+            - {name: mcp-ca-source, mountPath: /source, readOnly: true}
+            - {name: mcp-ca, mountPath: /target}
       containers:
         - name: harness
           image: {{ include "d.image" (dict "root" . "image" .Values.images.harness) | quote }}
@@ -73,7 +89,12 @@ spec:
               valueFrom:
                 secretKeyRef: {name: {{ .Values.harness.miProxy.headerSecret }}, key: IDENTITY_HEADER}
             {{- end }}
-            {{- range $key, $value := .Values.harness.env }}
+            {{- $harnessEnv := deepCopy .Values.harness.env }}
+            {{- $_ := set $harnessEnv "HARNESS_MCP_CA_BUNDLE" "/etc/daimon/mcp-ca/ca.crt" }}
+            {{- if not (hasKey $harnessEnv "HARNESS_DAIMON_MCP_URL") }}
+            {{- $_ := set $harnessEnv "HARNESS_DAIMON_MCP_URL" (include "d.mcpURL" .) }}
+            {{- end }}
+            {{- range $key, $value := $harnessEnv }}
             - {name: {{ $key }}, value: {{ $value | quote }}}
             {{- end }}
           ports: [{containerPort: 8088}]
@@ -83,6 +104,7 @@ spec:
           resources: {{ .Values.harness.resources | toJson }}
           volumeMounts:
             - {name: home, mountPath: /home/harness}
+            - {name: mcp-ca, mountPath: /etc/daimon/mcp-ca, readOnly: true}
             {{- if .Values.keyVaultCSI.enabled }}
             - {name: secrets-store, mountPath: /mnt/secrets-store, readOnly: true}
             {{- end }}
@@ -104,7 +126,20 @@ spec:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 128Mi}
         {{- end }}
-      {{- include "d.csiVolume" . | nindent 6 }}
+      volumes:
+        - {name: mcp-ca, emptyDir: {medium: Memory}}
+        - name: mcp-ca-source
+          secret:
+            secretName: {{ include "d.mcpTLSSecret" . }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- if .Values.keyVaultCSI.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ required "keyVaultCSI.secretProviderClass required" .Values.keyVaultCSI.secretProviderClass }}
+        {{- end }}
   volumeClaimTemplates:
     - metadata: {name: home}
       spec:

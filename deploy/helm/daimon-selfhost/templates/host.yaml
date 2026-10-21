@@ -27,6 +27,9 @@ spec:
       restartPolicy: Never
       {{- end }}
       terminationGracePeriodSeconds: 90
+      {{- if eq $name "mcp" }}
+      securityContext: {fsGroup: 1000}
+      {{- end }}
       automountServiceAccountToken: false
       imagePullSecrets: {{ $.Values.imagePullSecrets | toJson }}
       initContainers:
@@ -84,7 +87,7 @@ spec:
           {{- if $init }}
           command: [sh, -ec, "alembic upgrade head && daimon defaults apply"]
           {{- else if eq $name "mcp" }}
-          command: [uvicorn, "daimon.adapters.mcp.server:create_mcp_app", --factory, --host, 0.0.0.0, --port, {{ $svc.port | quote }}]
+          command: [uvicorn, "daimon.adapters.mcp.server:create_mcp_app", --factory, --host, 0.0.0.0, --port, {{ $svc.port | quote }}, --ssl-keyfile, /etc/daimon/mcp-tls/tls.key, --ssl-certfile, /etc/daimon/mcp-tls/tls.crt]
           {{- else if eq $name "scheduler" }}
           command: [daimon-scheduler]
           {{- else }}
@@ -105,20 +108,23 @@ spec:
           {{- if $svc.port }}
           ports: [{containerPort: {{ $svc.port }}}]
           startupProbe:
-            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
+            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}, scheme: {{ ternary "HTTPS" "HTTP" (eq $name "mcp") }}}
             periodSeconds: 5
             failureThreshold: 60
           livenessProbe:
-            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
+            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}, scheme: {{ ternary "HTTPS" "HTTP" (eq $name "mcp") }}}
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
           readinessProbe:
-            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
+            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}, scheme: {{ ternary "HTTPS" "HTTP" (eq $name "mcp") }}}
             initialDelaySeconds: 5
           {{- end }}
-          {{- if or $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
+          {{- if or (eq $name "mcp") $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
           volumeMounts:
+            {{- if eq $name "mcp" }}
+            - {name: mcp-tls, mountPath: /etc/daimon/mcp-tls, readOnly: true}
+            {{- end }}
             {{- if $.Values.host.runtimeSecret }}
             - {name: runtime, mountPath: /etc/daimon-runtime, readOnly: true}
             {{- end }}
@@ -126,8 +132,14 @@ spec:
             - {name: secrets-store, mountPath: /mnt/secrets-store, readOnly: true}
             {{- end }}
           {{- end }}
-      {{- if or $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
+      {{- if or (eq $name "mcp") $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
       volumes:
+        {{- if eq $name "mcp" }}
+        - name: mcp-tls
+          secret:
+            secretName: {{ include "d.mcpTLSSecret" $ }}
+            defaultMode: 0440
+        {{- end }}
         {{- if $.Values.host.runtimeSecret }}
         - name: runtime
           secret:

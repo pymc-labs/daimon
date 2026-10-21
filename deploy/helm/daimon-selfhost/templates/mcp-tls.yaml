@@ -1,0 +1,25 @@
+{{- if not .Values.mcpTLS.existingSecret }}
+{{- $name := include "d.mcpTLSSecret" . }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+{{- $data := dict }}
+{{- if $existing }}
+{{- range $key := list "ca.crt" "tls.crt" "tls.key" }}
+{{- $_ := set $data $key (required (printf "Existing MCP TLS Secret lacks %s" $key) (index $existing.data $key)) }}
+{{- end }}
+{{- else }}
+{{- $host := printf "%s-mcp" (include "d.name" .) }}
+{{- $nsHost := printf "%s.%s" $host .Release.Namespace }}
+{{- $fqdn := printf "%s.svc.%s" $nsHost .Values.mcpTLS.clusterDomain }}
+{{- $ca := genCA (printf "%s-ca" $host) 3650 }}
+{{- $cert := genSignedCert $fqdn nil (list $host $nsHost (printf "%s.svc" $nsHost) $fqdn) (int .Values.mcpTLS.validityDays) $ca }}
+{{- $_ := set $data "ca.crt" ($ca.Cert | b64enc) }}
+{{- $_ := set $data "tls.crt" ($cert.Cert | b64enc) }}
+{{- $_ := set $data "tls.key" ($cert.Key | b64enc) }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+type: kubernetes.io/tls
+data: {{ $data | toJson }}
+{{- end }}

@@ -1661,3 +1661,9 @@ The AKS chart recipe includes metered CLI tenant/runtime registration (requires 
 in-cluster HTTP support), host startup/liveness probes, 90-second host shutdown,
 and Postgres/harness priorities. D2s_v6 is a minimum test node; D4s_v6 is recommended
 for production. The harness drops SYS_ADMIN from its bounding set after setup.
+
+MCP in the AKS chart uses HTTPS with a chart-generated CA and a matching Service
+certificate. The harness trusts the read-only `HARNESS_MCP_CA_BUNDLE`; optional
+operator/cert-manager Secrets support managed certificates. HTTP consent applies
+only to the host-to-harness bearer hop, with same-release ingress isolation.
+Explicit TEST tariffs also require the selfhosted `ALLOW_TEST_TARIFFS` opt-in.

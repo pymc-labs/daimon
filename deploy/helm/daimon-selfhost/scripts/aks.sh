@@ -82,7 +82,7 @@ PY
   kubectl -n daimon rollout status statefulset/coke-daimon-harness --timeout=300s
   kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
   kubectl -n daimon exec deployment/coke-daimon-mcp -- python -c \
-    'import urllib.request; assert urllib.request.urlopen("http://localhost:8765/healthz").status == 200; print("MCP healthy")'
+    'import ssl,urllib.request; ctx=ssl.create_default_context(cafile="/etc/daimon/mcp-tls/ca.crt"); assert urllib.request.urlopen("https://coke-daimon-mcp:8765/healthz", context=ctx).status == 200; print("MCP HTTPS healthy")'
   ;;
 register)
   bash "$chart/scripts/register.sh"

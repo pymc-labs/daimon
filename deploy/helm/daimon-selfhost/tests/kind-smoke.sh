@@ -79,7 +79,9 @@ kubectl -n daimon logs job/smoke-daimon-init-1 | tail -5
 kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
 kubectl -n daimon get pods
 kubectl -n daimon exec deployment/smoke-daimon-mcp -- python -c \
-  'import urllib.request; print(urllib.request.urlopen("http://localhost:8765/healthz").read().decode())'
+  'import ssl,urllib.request; ctx=ssl.create_default_context(cafile="/etc/daimon/mcp-tls/ca.crt"); print(urllib.request.urlopen("https://smoke-daimon-mcp:8765/healthz", context=ctx).read().decode())'
+kubectl -n daimon exec -i smoke-daimon-harness-0 -- python - < "$chart/tests/probe-mcp-tls.py"
+kubectl -n daimon get secret smoke-daimon-mcp-tls -o jsonpath='{.data.ca\.crt}' | sha256sum > "$scratch/ca-before"
 pod_scratch=$(kubectl -n daimon exec deployment/smoke-daimon-mcp -- mktemp -d)
 kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- python - before "$pod_scratch/evidence.json" < "$chart/tests/probe.py"
 kubectl -n daimon logs smoke-daimon-harness-0 --tail=5
@@ -99,8 +101,11 @@ from pathlib import Path
 Path(sys.argv[2]).write_text(json.dumps(yaml.safe_load(Path(sys.argv[1]).read_text())))
 PYLOCAL
 AKS_STATE="$scratch" RELEASE=smoke SELFHOSTED_MODEL=gpt-6-luna \
-  SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}' \
+  ALLOW_TEST_TARIFFS=true SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}' \
   POST_RENDERER="$scratch/postrender" bash "$chart/scripts/register.sh"
+kubectl -n daimon get secret smoke-daimon-mcp-tls -o jsonpath='{.data.ca\.crt}' | sha256sum > "$scratch/ca-after"
+cmp "$scratch/ca-before" "$scratch/ca-after"
+kubectl -n daimon exec -i smoke-daimon-harness-0 -- python - < "$chart/tests/probe-mcp-tls.py"
 tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$scratch/registration.json")
 for message in write read; do
   kubectl -n daimon exec deploy/smoke-daimon-mcp -- daimon selfhosted turn \

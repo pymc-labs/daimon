@@ -1,6 +1,8 @@
 """Rendered regressions for the live AKS runtime grant and host egress boundary."""
 
+import base64
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -202,9 +204,140 @@ class HostConfigurationTests(unittest.TestCase):
                 "fixture.azurecr.io/postgres:18-alpine",
             )
 
-    def test_policy_switch_disables_both_policies(self):
+    def test_mcp_tls_ca_mount_is_scoped_and_service_readable(self):
+        resources = render(
+            "keyVaultCSI.enabled=true",
+            "keyVaultCSI.secretProviderClass=fixture",
+            "harness.env.HARNESS_MCP_CA_BUNDLE=/ignored",
+        )
+        mcp = next(r for r in hosts(resources) if r["metadata"]["name"].endswith("-mcp"))
+        pod = mcp["spec"]["template"]["spec"]
+        container = pod["containers"][0]
+        self.assertIn("--ssl-keyfile", container["command"])
+        self.assertIn("--ssl-certfile", container["command"])
+        for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+            self.assertEqual(container[probe]["httpGet"]["scheme"], "HTTPS")
+        self.assertEqual(pod["securityContext"]["fsGroup"], 1000)
+        tls = next(v["secret"] for v in pod["volumes"] if v["name"] == "mcp-tls")
+        self.assertEqual(tls["defaultMode"], 0o440)
+        harness = next(
+            r
+            for r in resources
+            if r["kind"] == "StatefulSet" and r["metadata"]["name"].endswith("-harness")
+        )
+        pod = harness["spec"]["template"]["spec"]
+        container = pod["containers"][0]
+        env = {e["name"]: e.get("value") for e in container["env"]}
+        self.assertEqual(env["HARNESS_MCP_CA_BUNDLE"], "/etc/daimon/mcp-ca/ca.crt")
+        self.assertEqual(env["HARNESS_DAIMON_MCP_URL"], "https://coke-daimon-mcp:8765/mcp")
+        volumes = {v["name"]: v for v in pod["volumes"]}
+        self.assertEqual(
+            volumes["mcp-ca-source"]["secret"]["items"], [{"key": "ca.crt", "path": "ca.crt"}]
+        )
+        self.assertIn("secrets-store", volumes)
+        mounts = {v["name"]: v for v in container["volumeMounts"]}
+        self.assertTrue(mounts["mcp-ca"]["readOnly"])
+        self.assertEqual(mounts["mcp-ca"]["mountPath"], "/etc/daimon/mcp-ca")
+        self.assertNotIn("mcp-ca-source", mounts)
+        self.assertIn("-o 10000 -g 10000 -m 0400", pod["initContainers"][0]["command"][2])
+
+    def test_generated_certificate_chain_and_service_sans(self):
+        resources = render()
+        secret = next(r for r in resources if r["kind"] == "Secret")
+        self.assertEqual(secret["type"], "kubernetes.io/tls")
+        self.assertEqual(set(secret["data"]), {"ca.crt", "tls.crt", "tls.key"})
+        with tempfile.TemporaryDirectory() as directory:
+            for key in ("ca.crt", "tls.crt"):
+                Path(directory, key).write_bytes(base64.b64decode(secret["data"][key]))
+            for host in (
+                "coke-daimon-mcp",
+                "coke-daimon-mcp.default",
+                "coke-daimon-mcp.default.svc",
+                "coke-daimon-mcp.default.svc.cluster.local",
+            ):
+                result = subprocess.run(
+                    [
+                        "openssl",
+                        "verify",
+                        "-CAfile",
+                        directory + "/ca.crt",
+                        "-verify_hostname",
+                        host,
+                        directory + "/tls.crt",
+                    ],
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, "Service SAN/chain verification failed")
+            result = subprocess.run(
+                [
+                    "openssl",
+                    "verify",
+                    "-CAfile",
+                    directory + "/ca.crt",
+                    "-verify_hostname",
+                    "unrelated.invalid",
+                    directory + "/tls.crt",
+                ],
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0, "Wrong hostname accepted")
+            # An unrelated chart-generated CA cannot authenticate this leaf.
+            other = next(r for r in render() if r["kind"] == "Secret")
+            Path(directory, "other.crt").write_bytes(base64.b64decode(other["data"]["ca.crt"]))
+            result = subprocess.run(
+                ["openssl", "verify", "-CAfile", directory + "/other.crt", directory + "/tls.crt"],
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0, "Untrusted CA accepted")
+
+    def test_operator_tls_secret_and_separate_ingress_protocols(self):
+        resources = render("mcpTLS.existingSecret=operator-cert", "ingress.enabled=true")
+        self.assertFalse(any(r["kind"] == "Secret" for r in resources))
+        ingresses = {r["metadata"]["name"]: r for r in resources if r["kind"] == "Ingress"}
+        annotations = ingresses["coke-daimon-mcp"]["metadata"]["annotations"]
+        self.assertEqual(annotations["nginx.ingress.kubernetes.io/backend-protocol"], "HTTPS")
+        self.assertEqual(annotations["nginx.ingress.kubernetes.io/proxy-ssl-verify"], "on")
+        self.assertEqual(
+            annotations["nginx.ingress.kubernetes.io/proxy-ssl-secret"], "default/operator-cert"
+        )
+        self.assertNotIn(
+            "nginx.ingress.kubernetes.io/backend-protocol",
+            ingresses["coke-daimon-teams"]["metadata"]["annotations"],
+        )
+
+    def test_harness_http_ingress_is_release_and_namespace_scoped(self):
+        policy = next(
+            r
+            for r in render()
+            if r["kind"] == "NetworkPolicy" and r["metadata"]["name"].endswith("-harness")
+        )["spec"]
+        self.assertIn("Ingress", policy["policyTypes"])
+        self.assertEqual(
+            policy["ingress"],
+            [
+                dict(
+                    ports=[dict(protocol="TCP", port=8088)],
+                    **{
+                        "from": [
+                            dict(podSelector=dict(matchLabels={"app": "coke-daimon-" + name}))
+                            for name in ("mcp", "teams", "scheduler", "discord", "slack")
+                        ]
+                    },
+                )
+            ],
+        )
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            render("networkPolicy.enabled=false")
+        self.assertIn(
+            "HTTP harness requires same-release ingress NetworkPolicy", error.exception.stderr
+        )
+
+    def test_policy_switch_requires_harness_disabled(self):
         self.assertFalse(
-            any(r["kind"] == "NetworkPolicy" for r in render("networkPolicy.enabled=false"))
+            any(
+                r["kind"] == "NetworkPolicy"
+                for r in render("networkPolicy.enabled=false", "harness.enabled=false")
+            )
         )
 
 

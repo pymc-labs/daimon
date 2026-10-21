@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `daimon selfhosted turn` for billed operator turns with persistent threads, enforce selfhosted admission before provider access, and require explicit consent for harness HTTP. MCP credentials require TLS or loopback, with a scoped CA bundle for in-cluster TLS. Reject normalized TEST tariff names at startup unless explicitly enabled, and keep diagnostic logging failures from interrupting metering.
 ### Fixed
 
+- Serve in-cluster MCP over verified TLS with a chart-generated CA, scoped harness trust and protected host-to-harness HTTP ingress.
+
 - Harden AKS harness startup, prioritize persistent services, and make the selfhosted chart recipe provision metered CLI turns with restart-persistence regressions.
 
 - Mount an optional selfhosted runtime grant Secret alongside CSI volumes, raise

@@ -23,6 +23,7 @@ export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 bash deploy/helm/daimon-selfhost/scripts/aks.sh install
 export SELFHOSTED_MODEL=gpt-6-luna
+export ALLOW_TEST_TARIFFS=true
 export SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
 bash deploy/helm/daimon-selfhost/scripts/aks.sh register
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
@@ -35,17 +36,16 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 
 Builds/mirrors precede overlay-network AKS and Luna deployment. Install waits for
 PG/migrations/pods; registration funds a tenant and sets channel/runtime/billing.
-Rates above are explicit **TEST rates**, not Azure prices; replace for production.
+Rates above are explicit **TEST rates** with opt-in; replace and disable for production.
 Keep `AKS_STATE` private. Egress proof checks DNS and blocked curls in both pods.
 
 **Security:** data/workspaces stay in the tenant cluster; inference uses Azure
-OpenAI's approved US/EU Data Zone. Pilot keys use Kubernetes Secrets; production
+OpenAI's approved US/EU Data Zone. MCP uses chart-CA TLS; pilot keys use Secrets. Production
 needs the reviewed MI proxy. Shared kernel/node: trusted users only; no per-session
 VM isolation, HA, automatic DB backup or PITR. Minimal requests: 250m / 1408 MiB;
 observed D2 allocatable: 1900m / 5.66 GiB. Memory limits overcommit; bound concurrency.
 
-**Cost:** $100–170/month pilot planning allowance, plus tokens/builds/egress;
-unverified: confirm region/contract prices. AKS also creates a billable node RG.
+**Cost:** $100–170/month unverified pilot allowance plus tokens/builds/egress; confirm actual prices. AKS creates a billable node RG.
 
 **Reset/remove:** destroys DB/ledger/workspaces. Teardown retains billable ACR/AOAI;
 reinstall reuses them, targeting <30 minutes to a real reply (not measured here).

@@ -35,15 +35,17 @@ values['host'].setdefault('env', {}).update({
         tenants=[registration['tenant_id']], allow_insecure_http=True)]),
     'DAIMON_TURN__PATH':'mux', 'DAIMON_TURN__CHANNEL_BACKENDS':'true',
     'DAIMON_SELFHOSTED__ADMISSION_ENABLED':'true',
-    'DAIMON_MCP__PUBLIC_URL':f'http://{release}-daimon-mcp:8765/mcp',
-    'DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS':json.dumps([f'{release}-daimon-mcp']),
+    'DAIMON_MCP__PUBLIC_URL':f'https://{release}-daimon-mcp:8765/mcp',
     'DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS':json.dumps({model:next(iter(catalogue))}),
     'DAIMON_BILLING__SELFHOSTED__MODELS':json.dumps(catalogue),
+    'DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS':os.environ.get('ALLOW_TEST_TARIFFS', 'false'),
 })
 values.setdefault('harness', {}).setdefault('env', {}).update({
-    'HARNESS_ALLOW_INSECURE_DAIMON_MCP':'true',
-    'HARNESS_DAIMON_MCP_URL':f'http://{release}-daimon-mcp:8765/mcp',
+    'HARNESS_DAIMON_MCP_URL':f'https://{release}-daimon-mcp:8765/mcp',
 })
+# Remove obsolete grants when re-registering an older installation.
+values['host']['env'].pop('DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS', None)
+values['harness']['env'].pop('HARNESS_ALLOW_INSECURE_DAIMON_MCP', None)
 (p/'aks-values.json').write_text(json.dumps(values, indent=2)+'\n')
 PY
 kubectl create secret generic daimon-runtime -n daimon \

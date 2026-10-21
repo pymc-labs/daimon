@@ -25,6 +25,12 @@ services:
   scheduler: {enabled: true, port: 8082, healthPath: /healthz, env: {}}
   discord: {enabled: false, port: 8081, healthPath: /healthz, env: {}}
   slack: {enabled: false, port: 0, healthPath: "", env: {}}
+mcpTLS:
+  # Empty: generate a CA and leaf with Helm, retaining the Secret on upgrades.
+  # Optional cert-manager/operator Secret: ca.crt, tls.crt, tls.key, matching SANs.
+  existingSecret: ""
+  validityDays: 365
+  clusterDomain: cluster.local
 host:
   # Existing Secret with a credential-free provider grant file at key runtime.json.
   runtimeSecret: ""
@@ -68,6 +74,7 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
+  mcpAnnotations: {}
   teamsHost: teams.example.invalid
   mcpHost: mcp.example.invalid
   tls: []

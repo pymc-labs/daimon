@@ -19,3 +19,9 @@ volumes:
         secretProviderClass: {{ required "keyVaultCSI.secretProviderClass required" .Values.keyVaultCSI.secretProviderClass }}
 {{- end }}
 {{- end -}}
+{{- define "d.mcpTLSSecret" -}}
+{{- default (printf "%s-mcp-tls" (include "d.name" .)) .Values.mcpTLS.existingSecret -}}
+{{- end -}}
+{{- define "d.mcpURL" -}}
+{{- printf "https://%s-mcp:%v/mcp" (include "d.name" .) .Values.services.mcp.port -}}
+{{- end -}}

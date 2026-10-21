@@ -4,7 +4,7 @@ This chart deploys the Compose host processes (init, MCP, Teams, scheduler,
 optional Discord/Slack), one persistent multi-session harness and bundled
 PostgreSQL 18. Set `postgres.bundled=false` and `postgres.host` to the Flexible Server hostname
 for an external PostgreSQL database.
-All Services are ClusterIP. One optional Ingress routes separate MCP and Teams
+All Services are ClusterIP. Optional Ingress resources route separate MCP and Teams
 hostnames, including Teams `/api/messages`, `/api/graph/notifications` and `/api/graph/lifecycle`; it never publishes the harness or PG.
 
 The chart is a self-hosting baseline on `azure-selfhost`, under the merge hold.
@@ -141,15 +141,48 @@ NetworkPolicy applies to the entire pod, including the proxy. Node-local traffic
 CNI routing and node compromise need separate platform controls. Validate actual
 IMDS denial under the AKS policy engine before production admission.
 
-The MCP process currently serves HTTP. The C3 credential rules **require HTTPS
-for a credential-bearing MCP URL**, even inside Kubernetes. Set
-`HARNESS_DAIMON_MCP_URL` to the approved public HTTPS MCP URL, and provide an
-operator-managed TLS reverse proxy for in-cluster harness access. Its DNS/routing
-and NetworkPolicy destination must be explicitly configured. The default policy
-allows only the plain MCP Service; it does **not** make credential-bearing MCP
-calls to that HTTP Service legal. This TLS/routing integration is a production
-gap, not grounds to weaken the harness's URL checks. The local C3 test exercises
-built-in tools, not authenticated MCP tool calls.
+The MCP Service serves **HTTPS on port 8765**, directly through Uvicorn. Helm
+creates a private CA with `genCA` and a leaf with `genSignedCert`; the leaf SANs
+cover `<release>-daimon-mcp`, its namespace-qualified name, `.svc` and
+`.svc.<mcpTLS.clusterDomain>` (default `cluster.local`). The recipe uses
+`https://coke-daimon-mcp:8765/mcp` consistently on host and harness. MCP bearer
+credentials have no in-cluster plaintext exception (C3.9a).
+
+The generated `<release>-daimon-mcp-tls` Secret contains `ca.crt`, `tls.crt` and
+`tls.key`; the CA private key is discarded after signing. Online Helm upgrades
+reuse the Secret via `lookup`, preserving trust rather than minting a new CA.
+Offline `helm template` creates fresh certificates and must not be piped over an
+existing release. Leaf validity defaults to 365 days (`mcpTLS.validityDays`); the
+CA lasts 3650 days. Monitor expiry. For deliberate rotation, prepare a new Secret,
+set `mcpTLS.existingSecret`, upgrade, then restart MCP and harness and recheck TLS;
+retain the old Secret until both clients and server have rolled. Changing Secret
+contents alone does not reload Uvicorn or the copied harness CA.
+
+An optional cert-manager/operator-managed `mcpTLS.existingSecret` must supply the
+same three keys and SANs; no cert-manager installation is required by default.
+MCP mounts its private key read-only, mode 0440 with pod fsGroup 1000, matching the
+host image's service UID. The harness receives **only the CA certificate**. An
+init container copies it into an in-memory volume as UID/GID 10000, mode 0400;
+the service mounts that volume read-only at `/etc/daimon/mcp-ca`. This preserves
+the production file-isolation checks and prevents tool UIDs from reading mounted
+files. `HARNESS_MCP_CA_BUNDLE=/etc/daimon/mcp-ca/ca.crt` is set by the chart and
+cannot be overridden by `harness.env`. Every future sandbox container must mount
+the same bundle and env. Lane 15's #1276 MCP client loads it alongside system
+roots, retaining certificate/hostname verification; Azure OpenAI trust is unchanged.
+
+MCP and Teams have separate optional Ingress resources so their backend protocols
+can differ. The MCP Ingress configures ingress-nginx HTTPS upstream with CA and
+hostname verification using the TLS Secret; Teams retains HTTP upstream. Other
+controllers need their equivalent verified HTTPS settings in
+`ingress.mcpAnnotations`; never disable verification. Public ingress certificates
+are separate operator-managed `ingress.tls` Secrets.
+
+Host-to-harness C3 HTTP retains exact tenant/origin `allow_insecure_http` consent
+**and** ingress limited to same-release host pods in this namespace on port 8088.
+The chart refuses `networkPolicy.enabled=false` while its HTTP harness is enabled.
+This bearer hop is accepted risk **F76**, pending TLS; it does not authorize HTTP
+MCP credentials. Verify enforcement with the deployed CNI; kindnet does not enforce
+these policies.
 
 ## Secrets
 
@@ -456,15 +489,15 @@ control-plane tier has no SLA and does not make node resources free. Sources:
 ## Register and run a real selfhosted turn
 
 **Dependency: build the host and harness with PR #1276's reviewed head (or a
-branch containing it).** Private in-cluster HTTP requires its explicit origin and
-MCP-consent propagation. Before it lands on `azure-selfhost`, use an integration
+branch containing its C3.9a update).** The host HTTP bearer requires its exact
+origin consent; verified MCP TLS requires its `HARNESS_MCP_CA_BUNDLE` interface. Before it lands on `azure-selfhost`, use an integration
 checkout containing both PRs for `bootstrap`; chart-only #1273 images are insufficient.
 These commands use release `coke`, CLI caller `operator`, channel
 `selfhosted-operator`, and persistent CLI thread `aks-proof`.
 
 The following is an explicit **TEST tariff**, not a quote of Azure's prices.
 For production, replace the accounting name/rates/date with your verified contract
-rates. Infrastructure is explicitly zero here and funded separately. Registration
+rates and set `ALLOW_TEST_TARIFFS=false`. Infrastructure is explicitly zero here and funded separately. Registration
 creates a tenant with $2 signup credit and the default scoped agent/environment,
 an access policy permitting selfhosted (the schema also requires Anthropic), and the selfhosted channel configuration revision.
 It runs `daimon selfhosted init --allow-insecure-http`, then writes the resulting
@@ -473,6 +506,7 @@ It makes no model calls. Retain these exports for reinstall:
 
 ```sh
 export SELFHOSTED_MODEL=gpt-6-luna
+export ALLOW_TEST_TARIFFS=true
 export SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
 bash deploy/helm/daimon-selfhost/scripts/aks.sh register
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
@@ -486,13 +520,14 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 `register` is implemented in [`scripts/register.sh`](scripts/register.sh) and
 [`scripts/provision.py`](scripts/provision.py), the lane-15 production setup flow.
 It sets `DAIMON_TURN__PATH=mux`, channel backends and selfhosted admission on;
-sets billing `DEPLOYMENTS` and `MODELS`; and binds the host Secret's
+sets billing `DEPLOYMENTS`, `MODELS` and explicit `ALLOW_TEST_TARIFFS`; and binds the host Secret's
 `DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` to the exact
 `http://coke-daimon-harness:8088` origin and created tenant with
 `allow_insecure_http=true`. The same Secret token is used by the harness.
-It explicitly allows credential-bearing MCP only at the internal
-`http://coke-daimon-mcp:8765/mcp` URL on both host and harness boundaries.
-This consent is only appropriate inside the operator's trusted cluster network.
+It configures credential-bearing MCP at the internal
+`https://coke-daimon-mcp:8765/mcp` URL on host and harness, with the chart CA.
+Only the host-to-harness bearer retains HTTP consent, protected by the same-release
+ingress NetworkPolicy (F76). No MCP credential HTTP grants are installed.
 
 `host.runtimeSecret=daimon-runtime` mounts only `runtime.json` read-only at
 `/etc/daimon-runtime/runtime.json` and sets `DAIMON_TURN__PROVIDER_RUNTIME_FILE`.
@@ -542,7 +577,8 @@ one is deployed with no main-container restarts, and verifies all serving pods
 Ready, MCP health, authenticated C3 health, unauthorized rejection, two sessions,
 tool writes, fake usage, event polling, idempotency and replay after pod replacement.
 It saves the original events in the MCP pod, compares GET replay before any POST,
-checks execution counts, and uses new turns to read the previously written file. It verifies the multi-mode
+checks execution counts, and uses new turns to read the previously written file. It checks MCP HTTPS with the chart CA as service UID 10000, rejects system-only
+trust, and checks that Helm upgrade retains the CA. It verifies the multi-mode
 proc/scratch checks, service UID 10000, SYS_ADMIN bounding-set removal and unprivileged tool UID.
 The fixture uses `HARNESS_TEST_MODE=1` because this lab's container runtime injects
 readable synthetic DMI identity files into kind pods; that is a deliberate
