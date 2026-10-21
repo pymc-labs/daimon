@@ -29,7 +29,7 @@ app = create_app(home=Path(os.environ["PROBE_HOME"]))
 assert app.state.supervisor.adapter.key == secrets[0]
 assert app.state.supervisor.operator_credentials["HARNESS_MCP_CRED_TEST"] == secrets[2]
 assert not any(name in os.environ for name in ("AZURE_OPENAI_API_KEY", "HARNESS_TOKEN", "HARNESS_MCP_CRED_TEST"))
-request = TurnRequest(session_id="s", turn_id="t", idempotency_key="k", model="m", instructions="", input=[], mcp_servers=[], skills=[], limits={"max_tool_calls": 1, "deadline_s": 5})
+request = TurnRequest(session_id="s", turn_id="t", idempotency_key="k", model="gpt-6-luna", instructions="", input=[], mcp_servers=[], skills=[], limits={"max_tool_calls": 1, "deadline_s": 5})
 context = TurnContext(request, Path(os.environ["PROBE_HOME"]), discard_event)
 command = "env; cat /proc/%d/environ 2>/dev/null; cat /proc/%d/cmdline 2>/dev/null; dd if=/proc/%d/mem of=/dev/null bs=1 count=1 2>/dev/null || echo memory-protected; echo writable > allowed.txt" % (os.getpid(), os.getpid(), os.getpid())
 request.skills = [InlineSkill(name="analysis", files={"SKILL.md": "readable-skill"})]

@@ -1,7 +1,8 @@
 # Daimon harness
 
 A standalone `daimon-harness/0` service. It runs the OpenAI Agents SDK locally
-against an Azure OpenAI deployment through `ModelAdapter`; it never imports the
+against an Azure OpenAI deployment through `ModelAdapter`, with an opt-in
+Codex app-server loop; it never imports the
 Daimon host. Tracing to OpenAI is disabled and API retries are disabled so one
 model request has one usage observation.
 
@@ -38,6 +39,9 @@ mode platform checks only with its mandatory fake adapter and no credentials.
 
 | Variable | Purpose |
 | --- | --- |
+| `HARNESS_LOOP` | `agents_sdk` (default) or experimental `codex` |
+| `HARNESS_LIVE_PROBE` | Unset by default; `openai` is an explicit Luna-only paid probe override, never a production provider default |
+| `HARNESS_CODEX_BINARY` | Codex executable path; defaults to `codex` on PATH, version 0.162.1 required |
 | `HARNESS_SESSION_MODE` | `single` (default, persistent session binding) or `multi` (verified proc/tmp/UID isolation required) |
 | `HARNESS_AUTH_MODE` | `bearer` (default) or `entra`; `foundry_gateway` refuses startup |
 | `HARNESS_TOKEN` | Local/direct HTTP bearer secret; no default |
@@ -358,3 +362,112 @@ At each synthetic model I/O boundary it checks the durable HTTP log already
 contains exactly one new request start, with one matching usage record per
 completed request. Recovery gates approval emission until the reader closes and
 compares the entire recovered event suffix against the durable journal.
+
+## Codex loop spike
+
+`HARNESS_LOOP=agents_sdk` is the default. `HARNESS_LOOP=codex` selects the
+open-source Codex app-server loop; invalid values refuse startup. The image
+includes the linux/amd64 Codex 0.162.1 binary from the upstream release, verified
+by the SHA-256 in the Dockerfile. Local runs need the same version on PATH, or
+an absolute `HARNESS_CODEX_BINARY` path. Initialization checks the version.
+The upstream Apache-2.0 LICENSE and NOTICE are in `licenses/` and the image's
+`/usr/local/share/licenses/codex/` directory.
+
+The Codex provider uses the Responses wire API through an authenticated
+loopback relay. The relay sends requests to
+`$AZURE_OPENAI_ENDPOINT/openai/responses?api-version=$AZURE_OPENAI_API_VERSION`,
+sets the request's Azure deployment, disables storage and redirects, and
+acquires authentication from the harness's captured API key or managed identity.
+Azure, harness and MCP credentials never enter Codex config or environment.
+Only a fresh relay capability appears in a service-owned 0600 file under a
+private 0700 temporary directory. The listener binds 127.0.0.1 and compares the
+capability in constant time; unauthenticated requests cannot start model I/O.
+The directory is removed after controller cleanup.
+
+A private minimal model catalog selects direct function tools and full Responses,
+independent of Codex's bundled deployment metadata. Plugins, marketplace/tool
+suggestions, host skill discovery and code mode are disabled.
+
+Codex receives `harness_*` dynamic tools. Their implementations are the same
+harness bash/read/write/edit and streamable HTTP MCP handlers used by the
+Agents SDK loop. They enforce `auto`/`ask`/`deny`, exact MCP `server/tool` keys,
+`server/*`, tool limits, host-supplied results, credential origin bindings,
+redaction and tool UID isolation. Denied tools are omitted from model requests;
+local rejection handlers refuse hallucinated denied calls. Native Codex
+shell/exec/patch/environment execution is disabled and filtered at the relay;
+any native call or native approval request fails closed. Codex's read-only
+sandbox is additional protection; the harness UID boundary remains authoritative.
+No MCP credential or upstream MCP server is configured in Codex itself.
+
+For each upstream HTTP request, the relay awaits the wrapper's durable
+`model_request_started` callback before acquiring a token or contacting Azure.
+It records measured provider usage before releasing tool calls to Codex.
+Function-call stream events are held until successful completion, so incomplete
+responses never execute tools. Missing usage produces `usage_unavailable` and
+an errored turn; no token totals are inferred from Codex notifications. Text
+deltas stream through app-server with a turn-qualified message ID shared by
+the final snapshot. Cancellation sends `turn/interrupt`, bounds controller
+shutdown, reaps it, cancels relay handlers, and uses the existing wrapper's
+protected tool cleanup and journal finalization.
+
+The harness journal/history remains canonical. Each turn starts an ephemeral
+controller and prepends saved Responses items at the relay, preserving tool
+calls/results and reasoning without trusting Codex's local rollouts. There is
+no native thread resume/export or cross-backend history migration guarantee.
+The Agents SDK context-overflow retry is not yet implemented for this backend.
+Remote WAL/checkpoint guarantees depend on the wrapper implementation; this
+adapter does not add a separate durability mechanism.
+
+Offline validation (all model fixtures use `gpt-6-luna`):
+
+```sh
+HARNESS_LOOP=codex uv run pytest apps/harness
+HARNESS_LOOP=agents_sdk uv run pytest apps/harness
+# Root subprocess only; drops the service to UID 10000 and tools to UID 10001.
+sudo python apps/harness/tests/codex_relay_probe.py
+```
+
+Tests that exercise codex-rs itself skip when the binary is absent; install the
+pinned binary to make those checks meaningful. The general harness/driver tests
+continue to inject their existing fake adapter. Codex-specific tests additionally
+run the real binary against synthetic Responses SSE and a local HTTPS MCP
+server: tool loops, approvals, denial, supplied results, durable request starts,
+streaming message identity, cancellation, recovery, idempotent resend, history,
+API-key/managed-identity capture and MCP credential redaction. The standalone
+UID probe verifies that a real tool process cannot read the relay capability or
+controller memory/environment and gets HTTP 401 when calling the relay.
+No test needs an Azure resource or real model key. The optional live SDK test
+uses `AZURE_OPENAI_DEPLOYMENT=gpt-6-luna` only and refuses every other value.
+
+Production enablement remains subject to normal review and live Azure protocol
+validation; leave the default on `agents_sdk` meanwhile. A full harness image
+was not built locally during this spike.
+
+### Paid Luna probes
+
+`HARNESS_LIVE_PROBE=openai` is an explicit test-only override for either loop.
+It captures `OPENAI_API_KEY` at startup and uses only
+`https://api.openai.com/v1/responses`. Every probe turn must select `gpt-6-luna`;
+other models are refused before I/O. An OpenAI key alone never selects this
+provider. Leave this variable unset for Azure deployments.
+
+`tests/live_luna_probe.py` runs the real authenticated harness HTTP service,
+local MCP, service UID 10000 and tool UID 10001. It audits the actual provider
+usage alongside C3 inventory and saves sanitized events without headers or
+keys. Run it only in an isolated root subprocess with a Python installation
+and the pinned Codex binary accessible after the UID drop:
+
+```sh
+set -a
+source ~/.config/daimon-nc/openai.env
+set +a
+HARNESS_LIVE_PROBE=openai sudo --preserve-env=OPENAI_API_KEY,HARNESS_LIVE_PROBE \
+  /opt/venv/bin/python apps/harness/tests/live_luna_probe.py \
+  --binary /usr/local/bin/codex --output apps/harness/tests/live
+```
+
+The build-host probe scopes credential-file scanning to its private scratch
+root to avoid traversing unrelated Docker overlays. It retains real UID
+separation, environment scrubbing and non-dumpability. This does not validate
+the production image's mount layout; run the existing image probes in CI.
+The comparison and measured results are in `CODEX-SPIKE.md`.

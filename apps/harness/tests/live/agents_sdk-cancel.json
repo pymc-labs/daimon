@@ -1,0 +1,70 @@
+{
+  "backend": "agents_sdk",
+  "scenario": "cancel",
+  "model": "gpt-6-luna",
+  "service_uid": 10000,
+  "outcome": "interrupted",
+  "delta_count": 0,
+  "cancel_trigger": "model_request_started",
+  "errors": [],
+  "usage_checks": [
+    {
+      "request_id": "f41801b3-e484-4496-ab30-65b50e549401",
+      "exactly_one_outcome": true,
+      "started_before_network_and_observation": true,
+      "provider_counts_match": false
+    }
+  ],
+  "api_observations": [
+    {
+      "turn_id": "agents_sdk-cancel",
+      "request_id": "f41801b3-e484-4496-ab30-65b50e549401",
+      "started_seq_before_network": 64,
+      "stream": false
+    }
+  ],
+  "events": [
+    {
+      "seq": 63,
+      "session_id": "luna-live",
+      "turn_id": "agents_sdk-cancel",
+      "at": "2026-10-21T06:02:31.488925Z",
+      "type": "status_running",
+      "data": {}
+    },
+    {
+      "seq": 64,
+      "session_id": "luna-live",
+      "turn_id": "agents_sdk-cancel",
+      "at": "2026-10-21T06:02:31.504063Z",
+      "type": "model_request_started",
+      "data": {
+        "request_id": "f41801b3-e484-4496-ab30-65b50e549401",
+        "model": "gpt-6-luna"
+      }
+    },
+    {
+      "seq": 65,
+      "session_id": "luna-live",
+      "turn_id": "agents_sdk-cancel",
+      "at": "2026-10-21T06:02:31.834602Z",
+      "type": "error",
+      "data": {
+        "kind": "usage_unavailable",
+        "message": "Model request ended without usage",
+        "retryable": false,
+        "request_id": "f41801b3-e484-4496-ab30-65b50e549401"
+      }
+    },
+    {
+      "seq": 66,
+      "session_id": "luna-live",
+      "turn_id": "agents_sdk-cancel",
+      "at": "2026-10-21T06:02:32.115017Z",
+      "type": "turn_ended",
+      "data": {
+        "outcome": "interrupted"
+      }
+    }
+  ]
+}

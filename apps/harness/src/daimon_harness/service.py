@@ -31,6 +31,7 @@ from mux.drivers.selfhosted.wire import (
 from pydantic import JsonValue, ValidationError
 
 from .auth import Authenticator
+from .codex_adapter import CodexModelAdapter
 from .credentials import (
     credential_log_redaction,
     load_bindings,
@@ -301,6 +302,7 @@ def create_app(
                 in {
                     "HARNESS_TOKEN",
                     "AZURE_OPENAI_API_KEY",
+                    "OPENAI_API_KEY",
                     "AZURE_CLIENT_SECRET",
                     "AZURE_CLIENT_CERTIFICATE_PATH",
                     "IDENTITY_HEADER",
@@ -318,7 +320,11 @@ def create_app(
         validate_credential_files(home=root)
     auth = Authenticator(token)
     session_mode = validate_session_mode()
-    supervisor = Supervisor(root, adapter or AzureModelAdapter(), session_mode, auth.token)
+    loop = os.environ.get("HARNESS_LOOP", "agents_sdk")
+    if loop not in {"agents_sdk", "codex"}:
+        raise RuntimeError("HARNESS_LOOP must be agents_sdk or codex")
+    selected = adapter or (CodexModelAdapter() if loop == "codex" else AzureModelAdapter())
+    supervisor = Supervisor(root, selected, session_mode, auth.token)
     if not test_mode:
         prepare_service(root)
         protect_process()

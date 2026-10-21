@@ -22,7 +22,7 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
 from azure.identity.aio import ManagedIdentityCredential, get_bearer_token_provider
-from openai import AsyncAzureOpenAI, BadRequestError
+from openai import AsyncAzureOpenAI, AsyncOpenAI, BadRequestError
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import JsonValue, TypeAdapter
@@ -59,7 +59,7 @@ class ModelAdapter(Protocol):
 
 
 class MeteredResponsesModel(OpenAIResponsesModel):
-    def __init__(self, context: TurnContext, client: AsyncAzureOpenAI) -> None:
+    def __init__(self, context: TurnContext, client: AsyncOpenAI) -> None:
         super().__init__(model=context.request.model, openai_client=client)
         self.context = context
         self.response_error: HarnessError | None = None
@@ -269,7 +269,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
         return name
 
 
-def builtin_tools(context: TurnContext) -> list[Tool]:
+def builtin_tools(context: TurnContext, *, include_denied: bool = False) -> list[Tool]:
     schemas = {
         "bash": {"command": {"type": "string"}},
         "read": {"path": {"type": "string"}},
@@ -278,7 +278,7 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
     }
     tools: list[Tool] = []
     for name, properties in schemas.items():
-        if context.permission(name) == "deny":
+        if not include_denied and context.permission(name) == "deny":
             continue
 
         def make_tool(tool_name: str, fields: dict[str, dict[str, str]]) -> FunctionTool:
@@ -318,10 +318,100 @@ def builtin_tools(context: TurnContext) -> list[Tool]:
     return tools
 
 
+async def context_tools(
+    context: TurnContext,
+    stack: AsyncExitStack,
+    *,
+    include_denied: bool = False,
+    policy_names: dict[str, str] | None = None,
+) -> list[Tool]:
+    """Share the harness executors and MCP credential boundary between loops."""
+    tools = builtin_tools(context, include_denied=include_denied)
+    if policy_names is not None:
+        policy_names.update(
+            {tool.name: tool.name for tool in tools if isinstance(tool, FunctionTool)}
+        )
+    for config in context.request.mcp_servers:
+        headers = mcp_headers(config, context.credentials, context.credential_bindings)
+        server = await stack.enter_async_context(
+            MCPServerStreamableHttp(
+                name=config.name,
+                params={
+                    "url": config.url,
+                    "headers": headers,
+                    "httpx_client_factory": bound_mcp_http_client,
+                },
+                cache_tools_list=True,
+            )
+        )
+        for remote in await server.list_tools():
+            if not include_denied and context.permission(f"{config.name}/{remote.name}") == "deny":
+                continue
+
+            def make_remote(
+                connection: MCPServerStreamableHttp,
+                name: str,
+                description: str,
+                schema: dict[str, object],
+            ) -> FunctionTool:
+                async def invoke(ctx: ToolContext[TurnContext], arguments: str) -> str:
+                    args = cast(dict[str, JsonValue], JSON.validate_json(arguments))
+
+                    async def execute() -> JsonValue:
+                        result = await connection.call_tool(name, args)
+                        if result.isError:
+                            raise ValueError("MCP tool returned an error")
+                        return JSON.validate_python(result.model_dump(mode="json"))
+
+                    return json.dumps(
+                        await context.tool(
+                            ctx.tool_call_id,
+                            f"{connection.name}/{name}",
+                            args,
+                            execute,
+                            mcp=True,
+                        )
+                    )
+
+                return FunctionTool(
+                    name=f"{connection.name}__{name}",
+                    description=description,
+                    params_json_schema=schema,
+                    on_invoke_tool=invoke,
+                    strict_json_schema=False,
+                )
+
+            if policy_names is not None:
+                alias = f"{config.name}__{remote.name}"
+                if alias in policy_names:
+                    raise HarnessError("ambiguous_tool_name", "MCP function aliases collide")
+                policy_names[alias] = f"{config.name}/{remote.name}"
+            tools.append(
+                make_remote(
+                    server,
+                    remote.name,
+                    remote.description or "MCP tool",
+                    remote.inputSchema,
+                )
+            )
+    return tools
+
+
 class AzureModelAdapter:
     def __init__(self) -> None:
         validate_credential_sources()
         self.log_credentials = process_credentials()
+        self.live_probe = os.environ.get("HARNESS_LIVE_PROBE", "")
+        if self.live_probe not in {"", "openai"}:
+            raise RuntimeError("HARNESS_LIVE_PROBE must be empty or openai")
+        if self.live_probe:
+            self.key = os.environ.get("OPENAI_API_KEY")
+            if not self.key:
+                raise RuntimeError("OpenAI live probe requires an explicitly supplied API key")
+            self.credential = None
+            self.endpoint = "https://api.openai.com/v1"
+            self.api_version = ""
+            return
         self.key = os.environ.get("AZURE_OPENAI_API_KEY")
         if not self.key and not (
             os.environ.get("IDENTITY_ENDPOINT") and os.environ.get("IDENTITY_HEADER")
@@ -335,7 +425,12 @@ class AzureModelAdapter:
         self.endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
         self.api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")
 
+    def validate_probe_model(self, context: TurnContext) -> None:
+        if self.live_probe and context.request.model != "gpt-6-luna":
+            raise HarnessError("probe_model_refused", "Live probes require gpt-6-luna")
+
     async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
+        self.validate_probe_model(context)
         with credential_log_redaction(
             self.log_credentials | context.credentials
         ) as log_credentials:
@@ -362,8 +457,10 @@ class AzureModelAdapter:
 
                 token_provider = azure_bearer_token
 
-            client = await stack.enter_async_context(
-                AsyncAzureOpenAI(
+            model_client = (
+                AsyncOpenAI(api_key=key, base_url=self.endpoint, max_retries=0)
+                if self.live_probe
+                else AsyncAzureOpenAI(
                     azure_endpoint=self.endpoint,
                     api_version=self.api_version,
                     api_key=key,
@@ -371,65 +468,8 @@ class AzureModelAdapter:
                     max_retries=0,
                 )
             )
-            tools = builtin_tools(context)
-            for config in context.request.mcp_servers:
-                headers = mcp_headers(config, context.credentials, context.credential_bindings)
-                server = await stack.enter_async_context(
-                    MCPServerStreamableHttp(
-                        name=config.name,
-                        params={
-                            "url": config.url,
-                            "headers": headers,
-                            "httpx_client_factory": bound_mcp_http_client,
-                        },
-                        cache_tools_list=True,
-                    )
-                )
-                for remote in await server.list_tools():
-                    if context.permission(f"{config.name}/{remote.name}") == "deny":
-                        continue
-
-                    def make_remote(
-                        connection: MCPServerStreamableHttp,
-                        name: str,
-                        description: str,
-                        schema: dict[str, object],
-                    ) -> FunctionTool:
-                        async def invoke(ctx: ToolContext[TurnContext], arguments: str) -> str:
-                            args = cast(dict[str, JsonValue], JSON.validate_json(arguments))
-
-                            async def execute() -> JsonValue:
-                                result = await connection.call_tool(name, args)
-                                if result.isError:
-                                    raise ValueError("MCP tool returned an error")
-                                return JSON.validate_python(result.model_dump(mode="json"))
-
-                            return json.dumps(
-                                await context.tool(
-                                    ctx.tool_call_id,
-                                    f"{connection.name}/{name}",
-                                    args,
-                                    execute,
-                                    mcp=True,
-                                )
-                            )
-
-                        return FunctionTool(
-                            name=f"{connection.name}__{name}",
-                            description=description,
-                            params_json_schema=schema,
-                            on_invoke_tool=invoke,
-                            strict_json_schema=False,
-                        )
-
-                    tools.append(
-                        make_remote(
-                            server,
-                            remote.name,
-                            remote.description or "MCP tool",
-                            remote.inputSchema,
-                        )
-                    )
+            client = await stack.enter_async_context(model_client)
+            tools = await context_tools(context, stack)
             parts: list[dict[str, JsonValue]] = []
             for part in context.request.input:
                 if part.type == "text":

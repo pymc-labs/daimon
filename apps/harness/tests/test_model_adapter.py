@@ -717,3 +717,39 @@ async def test_sdk_cancel_joins_tool_workers_before_terminal_and_session_reuse(
     finally:
         release.set()
         await supervisor.close()
+
+
+async def test_live_probe_refuses_any_non_luna_deployment(tmp_path, monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "disallowed-deployment")
+    with pytest.raises(pytest.fail.Exception, match="gpt-6-luna"):
+        await test_live_azure_responses(tmp_path)
+
+
+@pytest.mark.parametrize("adapter_name", ["agents_sdk", "codex"])
+async def test_explicit_openai_probe_gate_refuses_other_models(tmp_path, monkeypatch, adapter_name):
+    from daimon_harness.codex_adapter import CodexModelAdapter
+    from daimon_harness.errors import HarnessError
+
+    monkeypatch.setenv("HARNESS_LIVE_PROBE", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-probe-key")
+    adapter = CodexModelAdapter() if adapter_name == "codex" else AzureModelAdapter()
+    assert adapter.endpoint == "https://api.openai.com/v1"
+    body = turn()
+    body["model"] = "disallowed-deployment"
+
+    async def never_emit(kind, data):
+        raise AssertionError("model guard must precede I/O")
+
+    context = TurnContext(TurnRequest.model_validate(body), tmp_path, never_emit)
+    with pytest.raises(HarnessError, match="gpt-6-luna"):
+        await adapter.run(context, [])
+
+
+def test_openai_key_does_not_select_probe_provider(monkeypatch):
+    monkeypatch.delenv("HARNESS_LIVE_PROBE", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("IDENTITY_ENDPOINT", raising=False)
+    monkeypatch.delenv("IDENTITY_HEADER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-key-unused-in-production")
+    with pytest.raises(RuntimeError, match="managed identity"):
+        AzureModelAdapter()

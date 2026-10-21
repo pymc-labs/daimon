@@ -1,0 +1,165 @@
+{
+  "backend": "codex",
+  "scenario": "plain",
+  "model": "gpt-6-luna",
+  "service_uid": 10000,
+  "outcome": "completed",
+  "delta_count": 5,
+  "cancel_trigger": null,
+  "errors": [],
+  "usage_checks": [
+    {
+      "request_id": "6226bcf8-da39-4335-b406-88b70b1cdb89",
+      "exactly_one_outcome": true,
+      "started_before_network_and_observation": true,
+      "provider_counts_match": true
+    }
+  ],
+  "api_observations": [
+    {
+      "turn_id": "codex-plain",
+      "request_id": "6226bcf8-da39-4335-b406-88b70b1cdb89",
+      "started_seq_before_network": 2,
+      "stream": true,
+      "http_status": 200,
+      "response_id": "resp_0853e19e02b2afa9016ad8551aa1e487d19e93ee0669932871",
+      "provider_model": "gpt-6-luna",
+      "raw_usage": {
+        "input_tokens": 1366,
+        "input_tokens_details": {
+          "cache_write_tokens": 1363,
+          "cached_tokens": 0
+        },
+        "output_tokens": 9,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 1375
+      },
+      "output_items": [
+        {
+          "type": "message",
+          "name": null,
+          "namespace": null
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "seq": 1,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:58.174328Z",
+      "type": "status_running",
+      "data": {}
+    },
+    {
+      "seq": 2,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:58.407279Z",
+      "type": "model_request_started",
+      "data": {
+        "request_id": "6226bcf8-da39-4335-b406-88b70b1cdb89",
+        "model": "gpt-6-luna"
+      }
+    },
+    {
+      "seq": 3,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:59.614341Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-plain:msg_0853e19e02b2afa9016ad8551b869c87d1bbb71837fdd874a6",
+        "text": "L"
+      }
+    },
+    {
+      "seq": 4,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:59.654593Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-plain:msg_0853e19e02b2afa9016ad8551b869c87d1bbb71837fdd874a6",
+        "text": "una"
+      }
+    },
+    {
+      "seq": 5,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:59.656284Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-plain:msg_0853e19e02b2afa9016ad8551b869c87d1bbb71837fdd874a6",
+        "text": " streaming"
+      }
+    },
+    {
+      "seq": 6,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:59.657889Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-plain:msg_0853e19e02b2afa9016ad8551b869c87d1bbb71837fdd874a6",
+        "text": " works"
+      }
+    },
+    {
+      "seq": 7,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:59.659324Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-plain:msg_0853e19e02b2afa9016ad8551b869c87d1bbb71837fdd874a6",
+        "text": "."
+      }
+    },
+    {
+      "seq": 8,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:59.698571Z",
+      "type": "agent_message",
+      "data": {
+        "message_id": "codex-plain:msg_0853e19e02b2afa9016ad8551b869c87d1bbb71837fdd874a6",
+        "parts": [
+          {
+            "type": "text",
+            "text": "Luna streaming works."
+          }
+        ]
+      }
+    },
+    {
+      "seq": 9,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:00:59.740339Z",
+      "type": "usage",
+      "data": {
+        "request_id": "6226bcf8-da39-4335-b406-88b70b1cdb89",
+        "model": "gpt-6-luna",
+        "input_tokens": 1366,
+        "output_tokens": 9,
+        "cached_input_tokens": 0,
+        "reasoning_tokens": 0
+      }
+    },
+    {
+      "seq": 10,
+      "session_id": "luna-live",
+      "turn_id": "codex-plain",
+      "at": "2026-10-21T06:01:00.038616Z",
+      "type": "turn_ended",
+      "data": {
+        "outcome": "completed"
+      }
+    }
+  ]
+}

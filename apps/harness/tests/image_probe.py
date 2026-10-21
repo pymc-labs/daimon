@@ -68,7 +68,7 @@ async def main() -> None:
             session_id=name,
             turn_id=name,
             idempotency_key=name,
-            model="test",
+            model="gpt-6-luna",
             instructions="",
             input=[],
             mcp_servers=[],

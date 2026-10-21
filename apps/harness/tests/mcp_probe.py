@@ -24,13 +24,17 @@ from .conftest import turn
 
 
 async def mcp_turn_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, interop: bool = False
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, interop: bool = False, codex: bool = False
 ) -> None:
     from sse_starlette.sse import AppStatus
 
     # sse-starlette retains a process-wide shutdown flag after a previous uvicorn
     # fixture stops. Each fixture owns a new server lifetime on the session loop.
     monkeypatch.setattr(AppStatus, "should_exit", False)
+    # The library watcher can retain an earlier fixture's uvicorn instance.
+    # Each client is closed explicitly; do not let its stale shutdown flag
+    # terminate this fixture's otherwise live MCP stream.
+    monkeypatch.setattr(AppStatus, "enable_automatic_graceful_drain", False)
     secret = "Bearer synthetic-operator-mcp-secret"
     monkeypatch.setenv("HARNESS_MCP_CRED_SAMPLE", secret)
     journal = Journal(tmp_path)
@@ -119,8 +123,9 @@ async def mcp_turn_probe(
             request_ids_at_io.append(request_id)
         body = json.loads(request.content)
         if calls == 1:
-            assert "sample__echo" in [tool["name"] for tool in body["tools"]]
-            assert "sample__forbidden" not in [tool["name"] for tool in body["tools"]]
+            prefix = "harness_" if codex else ""
+            assert prefix + "sample__echo" in [tool["name"] for tool in body["tools"]]
+            assert prefix + "sample__forbidden" not in [tool["name"] for tool in body["tools"]]
             output = [
                 {
                     "type": "function_call",
@@ -156,6 +161,13 @@ async def mcp_turn_probe(
                     "content": [{"type": "output_text", "text": "done", "annotations": []}],
                 }
             ]
+        if codex:
+            from .test_codex_adapter import sse_response
+
+            for item in output:
+                if item["type"] == "function_call":
+                    item["name"] = "harness_" + item["name"]
+            return sse_response(output, number=calls)
         return httpx.Response(
             200,
             json={
@@ -239,7 +251,12 @@ async def mcp_turn_probe(
             # the driver can configure a credential-free public MCP connection here.
             # Startup captures the same operator binding used by direct SDK coverage.
             request.mcp_servers[0].headers_env = {}
-            sdk = AzureModelAdapter()
+            if codex:
+                from .test_codex_adapter import OfflineCodex
+
+                sdk = OfflineCodex(respond)
+            else:
+                sdk = AzureModelAdapter()
             monkeypatch.delenv("AZURE_OPENAI_API_KEY")
             monkeypatch.delenv("HARNESS_MCP_CRED_SAMPLE")
 
@@ -328,7 +345,12 @@ async def mcp_turn_probe(
                 finally:
                     await driver.aclose()
         else:
-            history = await AzureModelAdapter().run(context, [])
+            if codex:
+                from .test_codex_adapter import OfflineCodex
+
+                history = await OfflineCodex(respond).run(context, [])
+            else:
+                history = await AzureModelAdapter().run(context, [])
             journal.save_history(request.session_id, history)
     finally:
         server.should_exit = True
