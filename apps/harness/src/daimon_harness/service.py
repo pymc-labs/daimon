@@ -447,10 +447,19 @@ class Supervisor:
                     elif not owner.cancelled():
                         owner.exception()
                 await context.join_verifiers()
-                if (owner is None or owner.done()) and result.exception() is None:
-                    # Normal owner finalization owns durability errors; session
-                    # preparation must remain able to reconcile a diverged WAL.
+                if (owner is None or owner.done()) and (
+                    result.exception() is None
+                    or context.request.session_id not in self.sealed_sessions
+                ):
+                    # Once the owner and verifiers finish, an unsealed turn no
+                    # longer needs a UID lease, even if its first cleanup failed.
+                    # Let prepare_session reconcile remote WAL before recover:
+                    # recover alone refuses divergence and would hold this lease
+                    # forever, hiding measured usage behind workers_active.
+                    self.contexts.pop(turn_id, None)
                     self.cleanup_failures.pop(turn_id, None)
+                    if self.session_mode == "single":
+                        self.refresh_unhealthy()
                     self.changed.set()
                     return
                 # Retain the lease and retry journal finalization too. A failed

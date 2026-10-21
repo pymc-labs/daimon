@@ -1715,8 +1715,9 @@ async def test_conflicting_measured_wal_update_preserves_original_blob(tmp_path)
 
 
 @pytest.mark.parametrize("lost_ack", [False, True])
+@pytest.mark.parametrize("cleanup_timeout", [False, True])
 async def test_divergence_seals_appends_until_remote_merge_succeeds_in_same_process(
-    tmp_path, lost_ack
+    tmp_path, monkeypatch, lost_ack, cleanup_timeout
 ):
     from daimon_harness.errors import HarnessError
     from mux.drivers.selfhosted.wire import TurnRequest
@@ -1757,6 +1758,27 @@ async def test_divergence_seals_appends_until_remote_merge_succeeds_in_same_proc
             )
             return history
 
+    from daimon_harness import service
+
+    cleanup_entered, retry_cleanup = asyncio.Event(), asyncio.Event()
+    original_stop = TurnContext.stop_workers
+    attempts = 0
+
+    async def transient_timeout(context):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            cleanup_entered.set()
+            # Exercise the coordinator's actual bounded cleanup timeout.
+            await asyncio.Event().wait()
+        await retry_cleanup.wait()
+        await original_stop(context)
+
+    if cleanup_timeout:
+        monkeypatch.setattr(service, "CLEANUP_TIMEOUT", 0.05)
+        monkeypatch.setattr(service, "CLEANUP_RETRY_DELAY", 0.01)
+        monkeypatch.setattr(TurnContext, "stop_workers", transient_timeout)
+
     blobs = Storage()
     async with harness(tmp_path, blobs, Model()) as (supervisor, client):
         request = TurnRequest.model_validate(turn())
@@ -1768,15 +1790,29 @@ async def test_divergence_seals_appends_until_remote_merge_succeeds_in_same_proc
             await supervisor.io(supervisor.journal.append, request, "status_running", {})
         with pytest.raises(HarnessError, match="diverged"):
             await supervisor.io(supervisor.recover)
+        if cleanup_timeout:
+            await asyncio.wait_for(cleanup_entered.wait(), 2)
+            assert supervisor.cleanup_failures["turn-1"] == 1
+            cleanup = supervisor.cleanups["turn-1"]
         await supervisor.io(free_local_space, supervisor.journal)
         blobs.lose_ack, blobs.offline = False, True
+        if cleanup_timeout:
+            retry_cleanup.set()
+            await asyncio.wait_for(asyncio.shield(cleanup), 2)
+            await asyncio.sleep(0)  # Retire completed lease bookkeeping.
+            assert not supervisor.contexts
+            assert not supervisor.cleanups
+            assert not supervisor.cleanup_results
+            assert attempts == 2
         assert (await client.get("/v0/sessions/session-1/events")).status_code == 503
         with pytest.raises(HarnessError, match="diverged"):
             await supervisor.io(supervisor.checkpoints.write_ahead, supervisor.journal, request)
         assert blobs.blobs == remote_before
         blobs.offline = False
-        response = await client.get("/v0/sessions/session-1/events")
+        async with asyncio.timeout(2):
+            response = await client.get("/v0/sessions/session-1/events")
         assert response.status_code == 200 and response.json()["complete"]
+        assert not supervisor.journal.diverged
         events = response.json()["events"]
         usage = [e for e in events if e["type"] == "usage"]
         assert len(usage) == 1
@@ -1789,6 +1825,7 @@ async def test_divergence_seals_appends_until_remote_merge_succeeds_in_same_proc
             await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
         ).status_code == 202
         await supervisor.tasks["next"]
+        assert await supervisor.io(supervisor.journal.terminal_outcome, "next") == "completed"
         assert (await client.get("/v0/sessions/session-1/events")).json()["complete"]
 
 

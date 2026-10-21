@@ -852,7 +852,7 @@ process-wide failure. Each must fail its regression. Cached-image probes run
 20 paired bash cleanups with zero failures and a multi-mode isolation regression
 under production service/tool identities. No model is called.
 
-### Cleanup and seal state machine (round 3 fixes)
+### Cleanup and seal state machine (round 4 fixes)
 
 Each claimed turn owns one cleanup coordinator. The session's tool UID remains
 leased to that turn until the owner and every cleanup operation have finished,
@@ -900,6 +900,11 @@ States and transitions:
   tracebacks), coordinator/session/verification records, and failed owner tasks
   only after both owner and coordinator finish and the context is released. A
   stalled owner retains its records until it exits or its process is replaced.
+  For an unsealed turn, release the cleanup lease after the owner and verifiers
+  finish even if an earlier cleanup timed out. Session preparation can then
+  reconcile a diverged local journal from remote WAL before repairing the turn;
+  it preserves measured usage and returns the existing storage error if storage
+  remains unavailable, rather than an obsolete `workers_active` lease error.
 
 Timers derive from the legal tail: a remote WAL operation is bounded at 15 s,
 maximum bash cleanup is 17 s, supervisor worker cleanup is 10 s, and each

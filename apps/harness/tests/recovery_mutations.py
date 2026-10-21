@@ -70,7 +70,7 @@ for number in range(1, 16):
         )
         change(
             "service.py",
-            "        for turn_id, cleanup in self.cleanups.items():",
+            "        for turn_id, cleanup in list(self.cleanups.items()):",
             "        for turn_id, cleanup in []:",
         )
     elif number in {7, 14}:
@@ -163,8 +163,8 @@ for number in range(1, 16):
     elif number == 15:
         change(
             "service.py",
-            'if self.session_mode == "single":\n                        self.unhealthy = True',
-            "if True:\n                        self.unhealthy = True",
+            'if self.session_mode == "single":\n            self.unhealthy = True',
+            "if True:\n            self.unhealthy = True",
         )
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:
@@ -186,6 +186,8 @@ for number in range(1, 16):
                 ),
                 "-xq",
                 "--hypothesis-seed=7",
+                "--basetemp",
+                str(root / f"mutation-{number}" / "pytest"),
             ],
             env=env,
             stdout=output,
