@@ -1444,3 +1444,16 @@ Replay records late receipts from earlier turns under their original turn
 admission key, including on a later invocation of the same session. A journaled
 model start without measured usage remains an unknown pending observation until
 its measured revision arrives; elapsed host deadlines do not discard it.
+
+### Codex loop compaction metering
+
+With `HARNESS_LOOP=codex`, internal checkpoint compaction requests are metered
+model requests. Ordinary requests and compaction requests each have their own
+budget of `min(max_tool_calls + 2, 128)` per turn. Compaction does not consume
+ordinary continuation slots, so the worst-case request allowance is twice the
+ordinary cap, bounded at 256 total requests per turn.
+
+Every provider request, including compaction, journals `model_request_started`
+before model I/O and exactly one closing outcome under the same request ID:
+measured `usage` or unknown `usage_unavailable`. Compaction usage follows the
+same accounting and reconciliation rules as ordinary requests.
