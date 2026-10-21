@@ -2,11 +2,18 @@
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 TOKEN = "Bearer synthetic-forwarding-check"
-mcp = FastMCP("authenticated-smoke", stateless_http=True)
+mcp = FastMCP(
+    "authenticated-smoke",
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=["smoke-daimon-mcp.daimon-pods.svc:8765"]
+    ),
+)
 
 
 @mcp.tool()
