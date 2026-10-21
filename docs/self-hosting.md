@@ -1712,3 +1712,26 @@ The local wait defaults to 7200 seconds with 15-second polls, configurable throu
 `ACR_BUILD_WAIT_SECONDS` and `ACR_BUILD_POLL_SECONDS`. When `TAG` is unset,
 bootstrap generates a unique git-SHA/timestamp tag, saves it after success in
 `AKS_STATE/image-tag`, and later commands reuse it. Explicit operator tags win.
+
+AKS bootstrap imports Postgres by the reviewed index digest
+`sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873`
+through `deploy/helm/daimon-selfhost/scripts/import-postgres.py`. It tries
+`public.ecr.aws/docker/library/postgres` before `docker.io/library/postgres`,
+alternating sources across a shared 15-minute budget (configurable with
+`POSTGRES_IMPORT_BUDGET_SECONDS`). Each CLI call is capped at 180 seconds via
+`POSTGRES_IMPORT_ATTEMPT_SECONDS`, bounded by remaining total time. A timeout
+kills the local CLI and its process group, reaps the CLI, and retries the next
+source while the budget remains. The helpers require Linux/WSL process groups.
+Exponential backoff starts at 5 seconds,
+adds ±20% jitter and is capped at 60 seconds and the remaining budget. Each
+failed attempt emits its source, attempt number and a sanitized one-line error. The helper checks the index digest and fetches the referenced
+Linux/amd64 manifest from ACR; a partial index is repaired with `--force`.
+Complete pinned images skip import. An existing wrong tag is repaired from the
+pin with `--force`; a post-import digest mismatch is refused. Budget exhaustion
+stops before AKS creation. Only verified success saves `AKS_STATE/postgres-digest`.
+Azure CLI must support `az acr manifest show`. Both public registries are sources
+for ACR during import; pod network policies do not gain public-registry egress.
+No additional credentials are required. Optional `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN` must be set together; only Docker Hub imports receive them,
+and diagnostics redact them. They are never stored in Helm values. The README
+documents the repair command and optional repository, budget and delay settings.

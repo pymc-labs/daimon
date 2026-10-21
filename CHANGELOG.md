@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Cap each Postgres import CLI call at 180 seconds within the total retry budget;
+  kill stalled CLI process groups and retry the next source instead of exhausting
+  all remaining time on a single call.
+
+- Give AKS Postgres imports a configurable 15-minute shared retry budget with
+  alternating sources, capped jittered backoff and sanitized per-attempt errors.
+  Support optional Docker Hub credentials and repair existing tags from the pinned digest.
+
+- Import the pinned AKS Postgres image from ECR Public with Docker Hub fallback,
+  bounded transient retries, and Linux/amd64 child-manifest verification. Repair
+  partial imports, skip complete images, and refuse mismatched digests before AKS creation.
+
 - Require the queued ACR run's authoritative `Succeeded` status before image
   checks or AKS provisioning, with bounded polling and unique default build tags
   retained in operator state for later install/reinstall commands.

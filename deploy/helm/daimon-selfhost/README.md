@@ -329,7 +329,7 @@ az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
 # The helper below includes run polling, both image checks and tag persistence.
 export TAG=${TAG:-$(cat "$AKS_STATE/image-tag")}
 bash deploy/helm/daimon-selfhost/scripts/build-images.sh
-az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
+python3 deploy/helm/daimon-selfhost/scripts/import-postgres.py
 az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
   --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
   --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
@@ -352,10 +352,47 @@ fi
 
 **Mandatory Postgres image step:** `images.registry` prefixes **all three**
 images, including PostgreSQL and its new readiness init containers. The
-`az acr import` above must complete before Helm: without it, AKS attempts
-`<acr>.azurecr.io/postgres:18-alpine` and enters ImagePullBackOff. To repair an
-existing registry, run that same import command; host/harness builds do not
-create the Postgres repository. The helper verifies the imported image exists.
+[`scripts/import-postgres.py`](scripts/import-postgres.py) must complete before
+AKS creation: without it, AKS attempts `<acr>.azurecr.io/postgres:18-alpine` and
+enters ImagePullBackOff. The importer copies the reviewed index
+`sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873`
+from `public.ecr.aws/docker/library/postgres` first, then `docker.io/library/postgres`
+as fallback, alternating between the two until success or the shared time budget
+expires. Both sources use the exact digest, rather than a moving upstream tag.
+`POSTGRES_IMPORT_BUDGET_SECONDS` defaults to 900 (15 minutes), including import
+commands, verification and sleeps. Each CLI call is also capped at
+`POSTGRES_IMPORT_ATTEMPT_SECONDS` (default 180 seconds), never exceeding the
+remaining total budget. A stalled attempt is retryable: the helper kills its
+local CLI process group, reaps the CLI, and moves to the next source while time
+remains. Run these helpers on Linux or WSL for POSIX process-group cleanup.
+Retries use exponential backoff starting at
+5 seconds, jittered by ±20% and capped at 60 seconds and the remaining budget.
+Public mirrors can also rate-limit; the budget accommodates several minutes of
+429/5xx failures. Each failed attempt reports its source, attempt number and a
+one-line sanitized error excerpt.
+
+Optionally set both `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` in the protected
+operator environment. They are passed as `--username`/`--password` only for
+Docker Hub imports and are redacted from diagnostics; neither enters Helm values.
+Set both or neither. Anonymous imports remain the default.
+
+A tag resolving alone is insufficient: the helper verifies the pinned index,
+its Linux/amd64 descriptor and the actual referenced child manifest in ACR.
+An incomplete import or an existing tag pointing at another digest is repaired
+with `--force` from the pinned source. A digest mismatch after import is refused.
+Already-complete pinned images skip import. Budget exhaustion stops before AKS creation;
+only verified success writes `AKS_STATE/postgres-digest`. To repair a partial
+registry, rerun this same helper with `ACR` and `AKS_STATE` set. Host/harness builds
+do not create the Postgres repository. Azure CLI must support `az acr manifest show`.
+ACR needs access to both public sources during import; these are build-time
+sources, not additional pod egress allowances. No new credentials are needed.
+
+For an isolated import check, set `POSTGRES_IMPORT_REPOSITORY` to a throwaway
+repository name when running the helper directly. Bootstrap always imports into
+`postgres` so Helm uses the verified image.
+`POSTGRES_IMPORT_RETRY_SECONDS` optionally sets the initial retry delay (0–60,
+default 5); subsequent delays double up to the cap. The total budget is
+configurable from greater than zero up to 86400 seconds.
 
 ACR builds the current checkout remotely. It contains no `.env` or credentials;
 review `.dockerignore` before building. No registry password is generated;
