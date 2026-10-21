@@ -20,7 +20,7 @@ Paid OpenAI Responses probes were subsequently authorized by C12.1 and completed
 as described below. No Azure resource was used. The checksum-verified Codex
 image stage was built locally; full-image validation runs in CI.
 
-Offline validation passed with both `HARNESS_LOOP` values: 228 harness tests
+Offline validation passed with both `HARNESS_LOOP` values: 229 harness tests
 passed, 4 skipped (platform/data/live gates). Strict pyright, repository Ruff
 and all 14 import-boundary contracts passed. Additional regression coverage keeps
 original MCP server/tool policy identities and refuses ambiguous function aliases. The standalone UID probe passed
@@ -217,7 +217,8 @@ normal review remain enablement gates.
 Codex 0.162.1 local checkpoint compaction stays enabled. The first controller
 request appends its copy of C3 input after the injected preamble. The relay
 records that user item's ID, reconstructs authoritative C3 input verbatim, and
-excludes preamble user/system/developer items. The stable ID remains in Codex's
+excludes preamble user/system/developer items. An initial request may already carry the ID-less compaction prompt; anchor
+selection uses the last ID-bearing user item in that case. The stable ID remains in Codex's
 replacement history. User items after it are controller continuations: the
 ID-less trailing compaction prompt and the ID-bearing replacement summary.
 They are forwarded with private-path scrubbing, without classifying their text

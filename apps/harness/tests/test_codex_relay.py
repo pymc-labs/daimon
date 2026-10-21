@@ -15,7 +15,7 @@ from .conftest import turn
 from .test_codex_adapter import assistant, sse_response, write_call
 
 
-async def exercise(tmp_path, respond, emit=None):
+async def exercise(tmp_path, respond, emit=None, incoming=None):
     events = []
 
     async def record(kind, data):
@@ -42,7 +42,7 @@ async def exercise(tmp_path, respond, emit=None):
                 headers={"Authorization": "Bearer " + relay.capability},
                 json={
                     "model": "gpt-6-luna",
-                    "input": [],
+                    "input": incoming or [],
                     "tools": [{"name": "exec_command"}],
                     "store": True,
                     "previous_response_id": "untrusted",
@@ -516,3 +516,31 @@ async def test_controller_injections_and_private_paths_are_removed(tmp_path):
         ) == [
             {"type": "function_call_output", "output": "[private controller]/config.toml"},
         ]
+
+
+async def test_initial_request_can_already_be_compaction(tmp_path):
+    prompt = {"type": "message", "role": "user", "content": "Arbitrary checkpoint instruction"}
+
+    def respond(request):
+        users = [
+            item for item in json.loads(request.content)["input"] if item.get("role") == "user"
+        ]
+        assert users == [
+            {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            prompt,
+        ]
+        return sse_response([assistant()])
+
+    relay, events, response = await exercise(
+        tmp_path,
+        respond,
+        incoming=[
+            {"type": "message", "role": "user", "id": "preamble", "content": "injected"},
+            {"type": "message", "role": "user", "id": "original", "content": "hello"},
+            prompt,
+        ],
+    )
+    assert response.status_code == 200
+    assert relay.controller_user_id == "original"
+    assert relay.compaction_requests == 1 and relay.model_requests == 0
+    assert [kind for kind, _ in events] == ["model_request_started", "usage"]

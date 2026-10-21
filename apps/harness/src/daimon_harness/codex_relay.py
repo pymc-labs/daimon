@@ -180,10 +180,12 @@ class ResponsesRelay:
         source = cast(dict[str, JsonValue], await request.json())
         incoming = cast(list[JsonValue], source.get("input", []))
         users = [item for item in incoming if isinstance(item, dict) and item.get("role") == "user"]
-        if self.model_requests == 0 and self.controller_user_id is None and users:
+        identified_users = [item for item in users if isinstance(item.get("id"), str)]
+        if self.controller_user_id is None and identified_users:
             # First request: the pinned controller appends the C3 copy after its
-            # preamble. Its stable item ID survives local context replacement.
-            self.controller_user_id = str(users[-1]["id"])
+            # preamble (and may already append an ID-less compaction prompt).
+            # The C3 copy's stable ID survives local context replacement.
+            self.controller_user_id = str(identified_users[-1]["id"])
         if self.controller_user_id is not None and not any(
             item.get("id") == self.controller_user_id for item in users
         ):
