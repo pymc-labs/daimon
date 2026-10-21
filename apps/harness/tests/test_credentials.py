@@ -516,7 +516,7 @@ async def test_sdk_debug_logs_keep_header_filters_and_hide_all_secrets(
     assert "[redacted]" in caplog.text
 
 
-def test_private_daimon_http_requires_both_explicit_flag_and_exact_url(monkeypatch):
+def test_private_daimon_http_is_refused_even_with_legacy_consents(monkeypatch):
     from daimon_harness.credentials import validate_server
     from mux.drivers.selfhosted.wire import MCPServer
 
@@ -531,6 +531,54 @@ def test_private_daimon_http_requires_both_explicit_flag_and_exact_url(monkeypat
     with pytest.raises(ValueError, match="HTTPS"):
         validate_server(server)
     monkeypatch.setenv("HARNESS_ALLOW_INSECURE_DAIMON_MCP", "true")
-    validate_server(server)
+    with pytest.raises(ValueError, match="HTTPS"):
+        validate_server(server)
     with pytest.raises(ValueError):
         validate_server(server.model_copy(update={"url": "http://other:8765/mcp"}))
+
+
+@pytest.mark.parametrize(
+    "expected,url",
+    [
+        ("https://MCP.example:443/mcp/", "https://mcp.example/mcp"),
+        ("HTTPS://MCP.EXAMPLE/mcp///", "https://mcp.example:443/mcp/"),
+        ("http://LOCALHOST:80/mcp/", "http://localhost/mcp"),
+        ("https://mcp.example/mcp", "HTTPS://MCP.EXAMPLE:443/mcp/"),
+    ],
+)
+def test_mcp_authorization_uses_shared_url_normalization(monkeypatch, expected, url):
+    from mux.drivers.selfhosted.wire import MCPServer
+    from mux.mcp_url import canonical_mcp_url
+
+    monkeypatch.setenv("HARNESS_DAIMON_MCP_URL", expected)
+    server = MCPServer(name="daimon-mcp", url=url, headers_env={"Authorization": VIRTUAL_ENV})
+    assert canonical_mcp_url(url) == canonical_mcp_url(expected)
+    assert mcp_headers(server, {VIRTUAL_ENV: "Bearer synthetic"}) == {
+        "Authorization": "Bearer synthetic"
+    }
+    with pytest.raises(ValueError):
+        mcp_headers(
+            server.model_copy(update={"url": url.replace("/mcp", "/other")}),
+            {VIRTUAL_ENV: "Bearer synthetic"},
+        )
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "metadata.google.internal",
+        "metadata",
+        "169.254.169.254",
+        "[fd00:ec2::254]",
+        "[::ffff:169.254.169.254]",
+        "[::169.254.169.254]",
+    ],
+)
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_metadata_mcp_is_always_refused(monkeypatch, host, scheme):
+    from daimon_harness.credentials import validate_server
+    from mux.drivers.selfhosted.wire import MCPServer
+
+    monkeypatch.setenv("HARNESS_DAIMON_MCP_URL", f"{scheme}://{host}/mcp")
+    with pytest.raises(ValueError, match="metadata"):
+        validate_server(MCPServer(name="daimon-mcp", url=f"{scheme}://{host}/mcp"))

@@ -1316,11 +1316,16 @@ Selfhosted production profile defaults to `gpt-6.1-sol`. All harness tests,
 interop and live test deployments use `gpt-6-luna`; production defaults are
 asserted as strings only and are never sent to a model in tests.
 
-Private-cluster HTTP requires explicit consent. `DirectTransport` accepts
-`allow_insecure_http=True` only for private destinations validated by
-`HarnessConfig`; HTTPS remains the default. MCP requests carry
-`MCPServer.allow_insecure_http` only when true, preserving compatibility with
-older strict harness request models for ordinary HTTPS turns. Credential-bearing
-HTTP additionally requires an exact operator host grant in the host and the
-harness's independent exact-URL consent. Restrict these grants to trusted
-in-cluster services.
+The harness C3 transport accepts `allow_insecure_http=True` only for literal or
+name patterns classified as in-cluster by `HarnessConfig`; no DNS resolution
+verifies the destination. The operator must restrict harness ingress to the
+same release's host/controller pods with NetworkPolicy (accepted risk F76).
+HTTPS remains the default, and metadata endpoints are refused.
+
+MCP credentials require HTTPS or loopback. The legacy wire field
+`MCPServer.allow_insecure_http` never authorizes credential transport; false is
+omitted using a model serializer compatible with the declared Pydantic floor.
+The harness supports a scoped `HARNESS_MCP_CA_BUNDLE` for chart-generated CA
+trust, with certificate and hostname verification enabled. Host and harness
+compare MCP destinations through `mux.mcp_url.canonical_mcp_url`, preserving
+path case and normalizing scheme/host case, default ports and trailing slashes.

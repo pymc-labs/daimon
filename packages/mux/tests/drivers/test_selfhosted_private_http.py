@@ -17,7 +17,16 @@ async def test_private_http_needs_explicit_opt_in(url):
 
 @pytest.mark.parametrize(
     "url",
-    ["http://public.example.com:8088", "http://169.254.169.254", "http://user:pass@harness:8088"],
+    [
+        "http://public.example.com:8088",
+        "http://169.254.169.254",
+        "http://user:pass@harness:8088",
+        "http://metadata.google.internal",
+        "http://metadata",
+        "http://[fd00:ec2::254]",
+        "http://[::ffff:169.254.169.254]",
+        "http://[::169.254.169.254]",
+    ],
 )
 async def test_http_opt_in_does_not_allow_external_or_metadata_or_credentials(url):
     async with httpx.AsyncClient() as client:

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Add `daimon selfhosted turn` for billed operator turns with persistent threads, enforce selfhosted admission before provider access, and require explicit private HTTP consent. Reject TEST tariffs at startup unless explicitly enabled.
+- Add `daimon selfhosted turn` for billed operator turns with persistent threads, enforce selfhosted admission before provider access, and require explicit consent for harness HTTP. MCP credentials require TLS or loopback, with a scoped CA bundle for in-cluster TLS. Reject normalized TEST tariff names at startup unless explicitly enabled, and keep diagnostic logging failures from interrupting metering.
 
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 

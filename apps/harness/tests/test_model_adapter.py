@@ -36,8 +36,12 @@ async def test_managed_identity_without_api_key_uses_real_async_transport():
             await adapter.credential.close()
 
 
+@pytest.mark.parametrize("closed_stdout", [False, True])
 async def test_sdk_tool_loop_meters_each_request(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    closed_stdout: bool,
 ) -> None:
     requests: list[dict[str, object]] = []
 
@@ -131,16 +135,25 @@ async def test_sdk_tool_loop_meters_each_request(
         events.append((kind, data))
 
     context = TurnContext(request, tmp_path, emit)
-    history = await AzureModelAdapter().run(context, [])
+    import io
+    import sys
+
+    with monkeypatch.context() as stdout_patch:
+        if closed_stdout:
+            sink = io.StringIO()
+            sink.close()
+            stdout_patch.setattr(sys, "stdout", sink)
+        history = await AzureModelAdapter().run(context, [])
     assert (tmp_path / "work/from-sdk.txt").read_text() == "sdk"
     assert len(requests) == 2
-    receipts = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert [receipt["response_id"] for receipt in receipts] == ["resp_1", "resp_2"]
-    assert all(receipt["event"] == "harness.azure_usage" for receipt in receipts)
-    assert all(receipt["usage"]["input_tokens"] == 12 for receipt in receipts)
-    assert all(receipt["usage"]["output_tokens"] == 8 for receipt in receipts)
-    assert "encrypted-reasoning" not in json.dumps(receipts)
-    assert "output" not in receipts[0] and "input" not in receipts[0]
+    if not closed_stdout:
+        receipts = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert [receipt["response_id"] for receipt in receipts] == ["resp_1", "resp_2"]
+        assert all(receipt["event"] == "harness.azure_usage" for receipt in receipts)
+        assert all(receipt["usage"]["input_tokens"] == 12 for receipt in receipts)
+        assert all(receipt["usage"]["output_tokens"] == 8 for receipt in receipts)
+        assert "encrypted-reasoning" not in json.dumps(receipts)
+        assert "output" not in receipts[0] and "input" not in receipts[0]
     usages = [data for kind, data in events if kind == "usage"]
     starts = [data for kind, data in events if kind == "model_request_started"]
     assert [data["request_id"] for data in starts] == [data["request_id"] for data in usages]

@@ -1303,10 +1303,9 @@ class SelfHostedSettings(BaseModel):
         default=(),
         description=(
             "Operator-authorized exact hostnames or IP literals for HTTP MCP connections. "
-            "Also opts the built-in Daimon MCP into credential-bearing in-cluster HTTP; "
-            "only private destinations qualify and the harness must independently authorize "
-            "its exact URL. Empty by default. "
-            "Loopback remains allowed; other credential-bearing connections still require HTTPS."
+            "For credential-free connections only. These are literal/name-based grants "
+            "without DNS resolution. Credential-bearing MCP requires HTTPS or loopback; "
+            "no host grant authorizes credentials over non-loopback HTTP."
         ),
     )
 
@@ -1500,7 +1499,8 @@ class SelfhostedBillingSettings(BaseModel):
     allow_test_tariffs: bool = Field(
         default=False,
         description=(
-            "Allow selfhosted model or deployment identities ending in -TEST. "
+            "Allow selfhosted model or deployment TEST identities (case-insensitive; "
+            "suffix -test, _test or space-test, or bare test). "
             "For explicit test installations only; startup refuses these tariffs by default "
             "and logs a warning when enabled."
         ),
@@ -1557,7 +1557,10 @@ class SelfhostedBillingSettings(BaseModel):
             if deployment in self.models and deployment != model:
                 raise ValueError("deployment alias cannot shadow another model")
         test_names = sorted(
-            name for name in {*self.models, *self.deployments} if name.endswith("-TEST")
+            name
+            for name in {*self.models, *self.deployments}
+            if name.strip().casefold() == "test"
+            or name.strip().casefold().endswith(("-test", "_test", " test"))
         )
         if test_names and not self.allow_test_tariffs:
             raise ValueError(

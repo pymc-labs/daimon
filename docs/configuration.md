@@ -1011,11 +1011,10 @@ credential bindings; leave false for shared installations.
 
 `tuple[str, ...]` · optional · default unset
 
-Operator-authorized exact hostnames or IP literals for HTTP MCP connections. Also opts
-the built-in Daimon MCP into credential-bearing in-cluster HTTP; only private
-destinations qualify and the harness must independently authorize its exact URL. Empty
-by default. Loopback remains allowed; other credential-bearing connections still require
-HTTPS.
+Operator-authorized exact hostnames or IP literals for HTTP MCP connections. For
+credential-free connections only. These are literal/name-based grants without DNS
+resolution. Credential-bearing MCP requires HTTPS or loopback; no host grant authorizes
+credentials over non-loopback HTTP.
 
 ### `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`
 
@@ -1173,9 +1172,9 @@ through.
 
 `bool` · optional · default `False`
 
-Allow selfhosted model or deployment identities ending in -TEST. For explicit test
-installations only; startup refuses these tariffs by default and logs a warning when
-enabled.
+Allow selfhosted model or deployment TEST identities (case-insensitive; suffix -test,
+_test or space-test, or bare test). For explicit test installations only; startup
+refuses these tariffs by default and logs a warning when enabled.
 
 ### `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S`
 

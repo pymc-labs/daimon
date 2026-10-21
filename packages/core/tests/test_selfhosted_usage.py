@@ -744,15 +744,30 @@ async def test_bad_row_is_flagged_without_hiding_other_pending_rows(sessions):
 
 
 @pytest.mark.parametrize("test_model,test_deployment", [(True, False), (False, True), (True, True)])
-def test_test_tariffs_require_explicit_startup_consent(monkeypatch, test_model, test_deployment):
+@pytest.mark.parametrize(
+    "test_identity",
+    [
+        "gpt-6-luna-test",
+        "gpt-6-luna-Test",
+        "gpt-6-luna-TEST",
+        "gpt-6-luna_TEST",
+        "gpt-6-luna test",
+        " TEST ",
+        "gpt-6-luna-TEST ",
+        "gpt-6-luna-TEST\t",
+    ],
+)
+def test_test_tariffs_require_explicit_startup_consent(
+    monkeypatch, test_model, test_deployment, test_identity
+):
     from daimon.core.config import load_settings
     from structlog.testing import capture_logs
 
     monkeypatch.setenv(
         "DAIMON_DATABASE__URL", "postgresql+asyncpg://localhost/daimon_test_nc_tariffs"
     )
-    model = "gpt-6-luna-TEST" if test_model else "gpt-6-luna"
-    deployment = "luna-TEST" if test_deployment else "luna"
+    model = test_identity if test_model else "gpt-6-luna"
+    deployment = test_identity if test_deployment else "luna"
     import json
 
     monkeypatch.setenv(

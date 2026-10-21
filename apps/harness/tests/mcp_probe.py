@@ -85,18 +85,7 @@ async def mcp_turn_probe(
         )
     )
 
-    def local_tls_client(headers=None, timeout=None, auth=None):
-        import ssl
-
-        return httpx.AsyncClient(
-            headers=headers,
-            timeout=timeout,
-            auth=auth,
-            verify=ssl.create_default_context(cafile=str(certificate)),
-            follow_redirects=False,
-        )
-
-    monkeypatch.setattr(model_adapter, "bound_mcp_http_client", local_tls_client)
+    monkeypatch.setenv("HARNESS_MCP_CA_BUNDLE", str(certificate))
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     calls = 0
     http_harness_client: httpx.AsyncClient | None = None
@@ -241,6 +230,17 @@ async def mcp_turn_probe(
                 if serving.done():
                     await serving
                 await asyncio.sleep(0.01)
+        if not interop and not codex:
+            # Real TLS: untrusted roots and wrong SANs fail before MCP auth;
+            # the real SDK loop below succeeds only with the mounted bundle.
+            with monkeypatch.context() as untrusted:
+                untrusted.delenv("HARNESS_MCP_CA_BUNDLE")
+                async with model_adapter.bound_mcp_http_client() as client:
+                    with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
+                        await client.get(f"https://127.0.0.1:{port}/mcp")
+            async with model_adapter.bound_mcp_http_client() as client:
+                with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
+                    await client.get(f"https://localhost:{port}/mcp")
         if interop:
             from mux.contracts.actions import UserToolConfirmation
 

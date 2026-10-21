@@ -60,7 +60,18 @@ class MCPServer(WireModel):
     name: str
     url: str
     headers_env: dict[str, str] = Field(default_factory=dict)
-    allow_insecure_http: bool = Field(default=False, exclude_if=lambda value: not value)
+    # Retained for wire readers from the earlier opt-in experiment. This never
+    # authorizes credential-bearing HTTP; credentials require TLS or loopback.
+    allow_insecure_http: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialize_http_consent(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, JsonValue]:
+        data = cast(dict[str, JsonValue], handler(self))
+        if not self.allow_insecure_http:
+            data.pop("allow_insecure_http", None)
+        return data
 
 
 SKILL_MAX_BYTES = 8 * 1024 * 1024

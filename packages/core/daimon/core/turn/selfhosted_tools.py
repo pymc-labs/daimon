@@ -79,7 +79,10 @@ class _SkillHolder:
     skills: Sequence[MaSkill]
 
 
-def _mcp_url(url: str, *, credential: bool = False, allowed_http_hosts: Sequence[str] = ()) -> str:
+def _mcp_url(url: str, *, credential: bool = False) -> str:
+    from mux.drivers.selfhosted.config import reject_metadata_url
+
+    reject_metadata_url(url)
     parsed = urlsplit(url)
     if (
         parsed.scheme not in ("http", "https")
@@ -95,19 +98,8 @@ def _mcp_url(url: str, *, credential: bool = False, allowed_http_hosts: Sequence
     loopback = parsed.hostname.lower() == "localhost"
     with suppress(ValueError):
         loopback |= ipaddress.ip_address(parsed.hostname).is_loopback
-    if (
-        credential
-        and parsed.scheme != "https"
-        and not loopback
-        and parsed.hostname.lower() not in allowed_http_hosts
-    ):
+    if credential and parsed.scheme != "https" and not loopback:
         raise ValueError("Credential-bearing MCP connections require HTTPS or loopback")
-    if credential and parsed.scheme == "http" and not loopback:
-        from mux.drivers.selfhosted.config import HarnessConfig
-
-        # The grant is explicit and must also classify as a private destination
-        # under the same URL rules used for the cluster harness endpoint.
-        HarnessConfig(harness_url=url, auth_ref="mcp", allow_insecure_http=True)
     return canonical_mcp_url(url)
 
 
@@ -117,6 +109,9 @@ def _check_http_destination(url: str, *, allowed_hosts: Sequence[str]) -> None:
     The harness network boundary must also prevent DNS rebinding and redirects
     into private networks. An operator exception authorizes an exact hostname.
     """
+    from mux.drivers.selfhosted.config import reject_metadata_url
+
+    reject_metadata_url(url)
     parsed = urlsplit(url)
     if parsed.scheme != "http":
         return
@@ -218,18 +213,12 @@ def build_turn_tools(
     the shared ownership, mount and count rules. Archive corruption/digest/cap
     failures refuse the turn rather than quietly changing requested content.
     """
-    daimon_mcp_url = _mcp_url(
-        daimon_mcp_url, credential=True, allowed_http_hosts=mcp_allowed_http_hosts
-    )
+    daimon_mcp_url = _mcp_url(daimon_mcp_url, credential=True)
     servers = [
         MCPServer(
             name=DAIMON_MCP_SERVER,
             url=daimon_mcp_url,
             headers_env={"Authorization": DAIMON_MCP_AUTH_ENV},
-            allow_insecure_http=(
-                urlsplit(daimon_mcp_url).scheme == "http"
-                and urlsplit(daimon_mcp_url).hostname in mcp_allowed_http_hosts
-            ),
         )
     ]
     bindings = {binding.name: binding for binding in mcp_credential_bindings}

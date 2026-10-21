@@ -757,22 +757,12 @@ def test_channel_skills_are_explicitly_custom_even_with_builtin_ids(name: str) -
 @pytest.mark.parametrize(
     "host",
     [
-        "169.254.169.254",
-        "169.254.170.2",
         "10.1.2.3",
         "172.16.0.1",
         "192.168.0.1",
-        "100.100.100.200",
         "0.0.0.0",
-        "[fe80::1]",
         "[fd00::1]",
-        "[::ffff:169.254.169.254]",
-        "2852039166",
-        "0xa9fea9fe",
-        "0251.0376.0251.0376",
         "10.1",
-        "metadata.google.internal",
-        "metadata",
         "mcp.internal",
         "mcp.svc.cluster.local",
         "mcp.local",
@@ -786,6 +776,31 @@ def test_credential_free_private_http_requires_operator_exception(host: str) -> 
     assert build(servers=(server,), allowed_http_hosts=(allowed,)).mcp_servers[1].name == "private"
     with pytest.raises(ValueError, match="allowed host"):
         build(servers=(server,), allowed_http_hosts=("different.example",))
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "169.254.169.254",
+        "169.254.170.2",
+        "100.100.100.200",
+        "[fe80::1]",
+        "[::ffff:169.254.169.254]",
+        "2852039166",
+        "0xa9fea9fe",
+        "0251.0376.0251.0376",
+        "metadata.google.internal",
+        "metadata",
+        "[fd00:ec2::254]",
+        "[::169.254.169.254]",
+    ],
+)
+@pytest.mark.parametrize("grant", [False, True])
+def test_metadata_mcp_is_refused_even_with_operator_exception(host, grant):
+    server = MCPConnection(name="metadata", url=f"http://{host}/mcp")
+    allowed = (host.strip("[]"),) if grant else ()
+    with pytest.raises(ValueError, match="metadata"):
+        build(servers=(server,), allowed_http_hosts=allowed)
 
 
 async def test_channel_member_loads_only_persisted_exact_channel_grants(

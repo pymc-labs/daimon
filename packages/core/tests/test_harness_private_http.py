@@ -1,8 +1,10 @@
 """Private HTTP requires explicit exact destination grants at each boundary."""
 
+from uuid import uuid4
+
 import pytest
 from daimon.core.config import HarnessAuthBinding, McpCredentialBinding
-from daimon.core.turn.selfhosted_tools import _mcp_url
+from daimon.core.turn.selfhosted_tools import _mcp_url, build_turn_tools
 
 
 def test_harness_http_is_opt_in():
@@ -22,15 +24,18 @@ def test_harness_http_is_opt_in():
         )
 
 
-def test_mcp_http_requires_exact_host():
-    with pytest.raises(ValueError):
-        _mcp_url("http://mcp:8765/mcp", credential=True)
-    assert (
-        _mcp_url("http://mcp:8765/mcp", credential=True, allowed_http_hosts=("mcp",))
-        == "http://mcp:8765/mcp"
-    )
-    with pytest.raises(ValueError):
-        _mcp_url("http://mcp.evil:8765/mcp", credential=True, allowed_http_hosts=("mcp",))
+@pytest.mark.parametrize("host", ["mcp", "mcp.daimon.svc.cluster.local", "10.0.0.5"])
+def test_mcp_credentials_require_tls_even_with_exact_grant(host):
+    with pytest.raises(ValueError, match="HTTPS"):
+        build_turn_tools(
+            daimon_mcp_url=f"http://{host}:8765/mcp",
+            tenant_id=uuid4(),
+            platform="cli",
+            channel_id="test",
+            agent_names=(),
+            skill_bundles={},
+            mcp_allowed_http_hosts=(host,),
+        )
 
 
 @pytest.mark.parametrize("port,normalized", [(443, ":443"), (80, ""), (8088, ":8088")])
@@ -78,4 +83,38 @@ def test_chart_secret_name_is_not_a_bearer_reference():
 @pytest.mark.parametrize("host", ["public.example.com", "169.254.169.254", "8.8.8.8"])
 def test_http_credential_grant_cannot_authorize_external_or_metadata_hosts(host):
     with pytest.raises(ValueError):
-        _mcp_url(f"http://{host}:8765/mcp", credential=True, allowed_http_hosts=(host,))
+        build_turn_tools(
+            daimon_mcp_url=f"http://{host}:8765/mcp",
+            tenant_id=uuid4(),
+            platform="cli",
+            channel_id="test",
+            agent_names=(),
+            skill_bundles={},
+            mcp_allowed_http_hosts=(host,),
+        )
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "metadata.google.internal",
+        "metadata",
+        "metadata.azure.internal",
+        "instance-data",
+        "instance-data.ec2.internal",
+        "169.254.169.254",
+        "[fd00:ec2::254]",
+        "[::ffff:169.254.169.254]",
+        "[::169.254.169.254]",
+        "0xa9fea9fe",
+    ],
+)
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_metadata_mcp_destinations_refused_even_without_credentials(host, scheme):
+    from daimon.core.turn.selfhosted_tools import _check_http_destination
+
+    url = f"{scheme}://{host}/mcp"
+    with pytest.raises(ValueError, match="metadata"):
+        _mcp_url(url)
+    with pytest.raises(ValueError, match="metadata"):
+        _check_http_destination(url, allowed_hosts=(host,))

@@ -419,13 +419,21 @@ its database credentials must remain restricted to operators.
 For private Kubernetes HTTP, `init --allow-insecure-http` must be paired with
 `allow_insecure_http: true` on the exact harness auth binding. Select an
 operator variable named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*` through `auth_ref`.
-Authenticated HTTP to the built-in Daimon MCP additionally requires its exact
-hostname in `DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`, and on the harness both
-`HARNESS_ALLOW_INSECURE_DAIMON_MCP=true` and the exact
-`HARNESS_DAIMON_MCP_URL`. The host carries explicit HTTP consent on that MCP
-wire record; other credential-bearing MCP servers still require HTTPS.
-These opt-ins send bearer credentials over the private cluster network; use
-TLS when that network is outside the installation's trust boundary.
+MCP credentials always require HTTPS, except loopback. Host grants and legacy
+`HARNESS_ALLOW_INSECURE_DAIMON_MCP` flags never authorize credential-bearing
+HTTP. For in-cluster MCP HTTPS, mount the chart-generated CA bundle read-only
+in harness/sandbox containers at `/etc/daimon/mcp-ca/ca.crt` and set
+`HARNESS_MCP_CA_BUNDLE=/etc/daimon/mcp-ca/ca.crt`. Configure
+`HARNESS_DAIMON_MCP_URL` and `DAIMON_MCP__PUBLIC_URL` with the same HTTPS
+Service URL, and include that hostname in the server certificate's SANs.
+The MCP client adds this CA to system trust and verifies both certificate chain
+and hostname. Azure OpenAI trust settings are unaffected.
+
+The harness C3 bearer hop may still use HTTP with explicit environment and
+binding consent. Its hostname classification is literal/name-based and does
+not resolve DNS; it cannot establish where a name actually routes. A
+NetworkPolicy must restrict harness ingress to host/controller pods of the same
+release. This accepted risk is tracked as F76. Prefer TLS when available.
 
 The Agents SDK adapter emits `harness.azure_usage` receipts with only the
 provider response ID, model and raw usage object. Request/response content and
@@ -1620,9 +1628,13 @@ only that helper receives the exemption group. Multi-session harness mode requir
 Harness bearer references use operator variables named
 `DAIMON_SELFHOSTED__HARNESS_TOKEN_*`, selected through the environment's
 `auth_ref` and an exact origin/tenant binding. Chart Secret key names do not
-change this rule. Private HTTP credentials require explicit grants: set
-`allow_insecure_http` on the harness environment and its auth binding. For the
-built-in MCP JWT, list only trusted in-cluster hosts in
-`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`; the harness independently requires
-its exact URL grant and HTTP consent. Listing a host authorizes credentials over
-plaintext HTTP, so restrict network access to those cluster services.
+change this rule. Existing installations using a different bearer reference
+must map the Secret to a dedicated variable and update the environment's
+`auth_ref`, binding, and runtime revision pins before rolling the new image.
+Historical TEST tariffs also require the explicit billing opt-in described in
+[billing](billing.md); use verified tariffs for production.
+
+`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS` authorizes credential-free MCP
+connections only. Hostname classification is literal/name-based, without DNS
+resolution. No grant permits credentials over non-loopback HTTP. Known cloud
+metadata names and addresses are refused regardless of grants or scheme.

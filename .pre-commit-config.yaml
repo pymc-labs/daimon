@@ -21,13 +21,6 @@ repos:
         exclude: (^|/)__snapshots__/.*\.ambr$
       - id: end-of-file-fixer
       - id: check-yaml
-        exclude: ^mkdocs\.yml$
-      # MkDocs deliberately uses !!python/name; compose checks its syntax
-      # without constructing tagged Python objects.
-      - id: check-yaml
-        name: check MkDocs YAML tags
-        files: ^mkdocs\.yml$
-        args: [--unsafe]
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files

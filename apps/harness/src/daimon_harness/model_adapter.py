@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from typing import Literal, Protocol, cast, overload
 from uuid import uuid4
 
@@ -47,7 +48,11 @@ def bound_mcp_http_client(
     auth: httpx.Auth | None = None,
 ) -> httpx.AsyncClient:
     # Redirects must never forward operator headers to an unbound origin.
+    tls = ssl.create_default_context()
+    if bundle := os.environ.get("HARNESS_MCP_CA_BUNDLE"):
+        tls.load_verify_locations(cafile=bundle)
     return httpx.AsyncClient(
+        verify=tls,
         headers=headers,
         timeout=timeout or httpx.Timeout(30, read=300),
         auth=auth,
@@ -64,6 +69,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
         super().__init__(model=context.request.model, openai_client=client)
         self.context = context
         self.response_error: HarnessError | None = None
+        self.provider_receipt: dict[str, JsonValue] | None = None
 
     @overload
     async def _fetch_response(
@@ -121,18 +127,14 @@ class MeteredResponsesModel(OpenAIResponsesModel):
             prompt,
         )
         if isinstance(response, Response):
-            # Provider-edge receipt excludes prompts, outputs and credentials.
-            print(
-                json.dumps(
-                    {
-                        "event": "harness.azure_usage",
-                        "response_id": response.id,
-                        "model": response.model,
-                        "usage": response.usage.model_dump(mode="json") if response.usage else None,
-                    }
-                ),
-                flush=True,
-            )
+            # Capture safe provider facts now; print only after metering commits.
+            with suppress(Exception):
+                self.provider_receipt = {
+                    "event": "harness.azure_usage",
+                    "response_id": response.id,
+                    "model": response.model,
+                    "usage": response.usage.model_dump(mode="json") if response.usage else None,
+                }
         # The SDK's ModelResponse conversion drops status and provider errors.
         if isinstance(response, Response) and response.status != "completed":
             status = response.status or "unknown"
@@ -170,6 +172,7 @@ class MeteredResponsesModel(OpenAIResponsesModel):
             ),
         )
         self.response_error = None
+        self.provider_receipt = None
         request_id = str(uuid4())
         await self.context.emit(
             "model_request_started", {"request_id": request_id, "model": self.context.request.model}
@@ -228,6 +231,11 @@ class MeteredResponsesModel(OpenAIResponsesModel):
                 "reasoning_tokens": usage.output_tokens_details.reasoning_tokens,
             },
         )
+        # Diagnostics are best effort and must never erase known paid usage.
+        # The durable usage event is already committed by context.emit above.
+        if self.provider_receipt is not None:
+            with suppress(Exception):
+                print(json.dumps(self.provider_receipt), flush=True)
         for item in list(response.output):
             if item.type == "function_call":
                 name = self.policy_name(item.name)
