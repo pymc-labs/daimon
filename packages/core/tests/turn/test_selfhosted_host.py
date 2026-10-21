@@ -439,6 +439,9 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "entra"),
         (False, False, "entra_refresh"),
         (False, False, "entra_attack"),
+        (False, False, "entra_pool"),
+        (False, False, "entra_pool_unbound"),
+        (False, False, "entra_pool_origin"),
         (False, False, "ask_accept"),
         (False, False, "ask_deny"),
         (False, False, "ask_disabled"),
@@ -521,6 +524,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         ),
         key="production-agent",
     )
+    pool = scenario.startswith("entra_pool")
     environment = await SelfHostedEnvironments(request.deps.sessionmaker).create(
         SCOPE,
         EnvironmentSpec(
@@ -530,17 +534,26 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 namespace="selfhosted.environment",
                 version=1,
                 value={
-                    "harness_url": "https://attacker.example"
-                    if scenario in ("attack", "origin", "entra_attack")
-                    else "https://harness",
+                    "session_pool": pool,
+                    "harness_url": "https://pool.example"
+                    if pool
+                    else (
+                        "https://attacker.example"
+                        if scenario in ("attack", "origin", "entra_attack")
+                        else "https://harness"
+                    ),
                     "auth_mode": "entra" if scenario.startswith("entra") else "bearer_env",
-                    "auth_ref": "DAIMON_MCP__JWT_SECRET"
-                    if scenario == "attack"
-                    else "https://management.azure.com"
-                    if scenario == "entra_attack"
-                    else "https://harness"
-                    if scenario.startswith("entra")
-                    else "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
+                    "auth_ref": "https://dynamicsessions.io"
+                    if pool
+                    else (
+                        "DAIMON_MCP__JWT_SECRET"
+                        if scenario == "attack"
+                        else "https://management.azure.com"
+                        if scenario == "entra_attack"
+                        else "https://harness"
+                        if scenario.startswith("entra")
+                        else "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST"
+                    ),
                 },
             ),
         ),
@@ -590,13 +603,19 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     monkeypatch.setenv(
         "DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS",
         json.dumps(
-            [
+            []
+            if scenario == "entra_pool_unbound"
+            else [
                 {
                     "auth_mode": "entra" if scenario.startswith("entra") else "bearer_env",
-                    "name": "https://harness"
+                    "name": "https://dynamicsessions.io"
+                    if pool
+                    else "https://harness"
                     if scenario.startswith("entra")
                     else "DAIMON_SELFHOSTED__HARNESS_TOKEN_TEST",
-                    "origin": "https://harness",
+                    "origin": "https://pool.example"
+                    if pool and scenario != "entra_pool_origin"
+                    else "https://harness",
                     "tenants": [str(TENANT)],
                 }
             ]
@@ -718,6 +737,17 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     async def http(self, method, url, **kwargs):
         call = httpx.Request(method, url, json=kwargs.get("json"), headers=kwargs["headers"])
         requests.append(call)
+        if pool:
+            from mux.drivers.selfhosted.transport import sandbox_id
+
+            if method == "POST" and call.url.path == "/v0/turns":
+                routed_session = json.loads(call.content)["session_id"]
+            elif call.url.path.startswith("/v0/sessions/"):
+                routed_session = call.url.path.split("/")[3]
+            else:
+                routed_session = wire.events[0]["session_id"]
+            assert call.url.params["identifier"] == sandbox_id(routed_session)
+            assert call.url.host == "pool.example"
         clients.append(self)
         if call.url.path.endswith("/actions"):
             body = json.loads(call.content)
@@ -871,7 +901,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         request,
         deps=replace(request.deps, turn_runtimes={}, turn_runtime_factory=build_channel_runtime),
     )
-    if scenario in ("attack", "origin", "entra_attack"):
+    if scenario in ("attack", "origin", "entra_attack", "entra_pool_unbound", "entra_pool_origin"):
         from daimon.core.turn.errors import AdmissionDenied
 
         with pytest.raises(AdmissionDenied):
@@ -965,6 +995,8 @@ async def test_production_shell_admits_before_http_records_and_revokes(
 
         assert outcome.state.termination is TerminationReason.INTERRUPTED
     if scenario.startswith("entra"):
+        if pool:
+            assert token_calls == [("https://dynamicsessions.io/.default",)]
         assert len(credentials) == 1
         assert len(token_calls) == (2 if scenario == "entra_refresh" else 1)
         assert len({id(client) for client in clients}) == 1

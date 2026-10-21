@@ -474,7 +474,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     )
                 else:
                     transport_impl = DirectTransport(
-                        client, base_url=config.harness_url, token_provider=token_provider
+                        client,
+                        base_url=config.harness_url,
+                        token_provider=token_provider,
+                        session_pool=config.session_pool,
                     )
             # Cleanup and reconciliation need a small independent budget after the host deadline.
             limit = (

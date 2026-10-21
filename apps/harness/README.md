@@ -228,6 +228,10 @@ Ordinary direct routing remains the default.
 
 These paths and the fixed token audience follow the
 [ACA session-pool routing documentation](https://learn.microsoft.com/en-us/azure/container-apps/sessions-usage).
+The host requires `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS` to bind audience
+`https://dynamicsessions.io` to the exact pool endpoint origin and tenant. An
+unbound audience or different origin is refused before acquiring a token.
+
 Pool authorization does not replace harness caller authentication. Verify live
 that `Authorization` and `X-Daimon-*` reach the container before enabling
 admission. If forwarding fails, keep admission disabled until the verified
