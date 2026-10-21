@@ -158,20 +158,9 @@ class ResponsesRelay:
                 continue
             if item.get("role") in {"system", "developer"}:
                 continue
-            content = item.get("content", "")
-            texts = (
-                [content]
-                if isinstance(content, str)
-                else [part.get("text", "") for part in content if isinstance(part, dict)]
-                if isinstance(content, list)
-                else []
-            )
-            if item.get("role") == "user" and any(
-                text.lstrip().startswith(marker)
-                for text in texts
-                if isinstance(text, str)
-                for marker in ("<skills_instructions>", "<skill>", "<environment_context>")
-            ):
+            # Ephemeral controllers mix injections with a copy of C3 input.
+            # All authoritative user messages are reconstructed below.
+            if item.get("role") == "user":
                 continue
             result.append(self.clean_paths(item))
         return result
@@ -183,7 +172,20 @@ class ResponsesRelay:
         self.model_requests += 1
         source = cast(dict[str, JsonValue], await request.json())
         incoming = cast(list[JsonValue], source.get("input", []))
-        items = self.clean_input(self.history + incoming)
+        parts: list[JsonValue] = []
+        for part in self.context.request.input:
+            if part.type == "text":
+                parts.append({"type": "input_text", "text": part.text})
+            else:
+                parts.append(
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{part.media_type};base64,{part.data_b64}",
+                        "detail": "auto",
+                    }
+                )
+        # Harness history and C3 input must survive verbatim, regardless of text.
+        items = self.history + [{"role": "user", "content": parts}] + self.clean_input(incoming)
         # Only these Responses fields cross the provider boundary. Never forward
         # Codex metadata, cache identifiers, storage, background or tier options.
         body: dict[str, JsonValue] = {
@@ -211,7 +213,6 @@ class ResponsesRelay:
             body["reasoning"] = {
                 key: value for key, value in reasoning.items() if key in {"effort", "summary"}
             }
-        body = cast(dict[str, JsonValue], self.clean_paths(body))
         retained = items
         self.context.model_input = retained
         request_id = str(uuid4())

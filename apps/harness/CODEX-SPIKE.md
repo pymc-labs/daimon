@@ -20,7 +20,7 @@ Paid OpenAI Responses probes were subsequently authorized by C12.1 and completed
 as described below. No Azure resource was used. The checksum-verified Codex
 image stage was built locally; full-image validation runs in CI.
 
-Offline validation passed with both `HARNESS_LOOP` values: 222 harness tests
+Offline validation passed with both `HARNESS_LOOP` values: 227 harness tests
 passed, 4 skipped (platform/data/live gates). Strict pyright, repository Ruff
 and all 14 import-boundary contracts passed. Additional regression coverage keeps
 original MCP server/tool policy identities and refuses ambiguous function aliases. The standalone UID probe passed
@@ -134,7 +134,8 @@ default until the listed review, live and durability gates pass.
 
 ## Live Luna probes
 
-Refreshed after round-1 fixes on 2026-10-21, 08:07–08:09 UTC.
+Codex refreshed after round-2 fixes on 2026-10-21, 08:50–08:51 UTC.
+Agents SDK comparison retained from 08:07–08:09 UTC on the same date.
 
 Both loops passed seven scenarios through the real authenticated harness HTTP
 API against the paid OpenAI Responses endpoint, with real service/tool UID
@@ -149,10 +150,10 @@ in the service, scrubbed from the environment, and absent from tool execution.
 | Scenarios passing | 7/7 | 7/7 |
 | Requests | 13 | 13 |
 | Measured / unknown | 12 / 1 cancelled | 12 / 1 cancelled |
-| Measured input tokens | 6,236 | 6,247 |
+| Measured input tokens | 6,269 | 6,247 |
 | Cached input tokens (subset) | 0 | 0 |
-| Measured output tokens | 242 | 269 |
-| Reasoning tokens (subset) | 0 | 28 |
+| Measured output tokens | 262 | 269 |
+| Reasoning tokens (subset) | 22 | 28 |
 | Plain output deltas | 5 | 1 after response completion |
 | Sequential MCP calls | 3 requests, 2 tool calls | 3 requests, 2 tool calls |
 
@@ -180,8 +181,16 @@ and code mode, and kills residual controller process-group members. The original
 round-1 claim did not cover bundled system skills: those remained advertised.
 Round-1 fixes explicitly disable `[skills.bundled]` and skill instructions,
 remove controller skill/environment injections and private paths at the relay,
-and test `$imagegen`/`$skill-installer` against the real binary. Harness-supplied
-C3 skills remain supported. Denied calls now count against `max_tool_calls`,
+and test `$imagegen`/`$skill-installer` against the real binary. Round-2 fixes
+reconstruct the user message directly from C3 input, preserve durable history
+verbatim, and discard controller-origin user/developer items by provenance.
+Real-binary tests preserve all three marker prefixes across prior history and
+a tool continuation, while controller injections remain absent. Private path
+scrubbing applies only to controller continuations. Harness-supplied C3 skills
+remain supported. Cancel/deadline during shutdown forces controller reap and
+propagates interruption; regression tests verify the cancel HTTP receipt and
+terminal outcome. Both loop suites also pass with inherited probe variables
+and a synthetic API key; individual probe tests opt in explicitly. Denied calls now count against `max_tool_calls`,
 and model requests are capped at `min(max_tool_calls + 2, 128)`. Relay request
 fields are allowlisted and usage outcomes are idempotent by request id; shielded
 shutdown finishes all handlers before the terminal event. Cancellation

@@ -469,7 +469,17 @@ class CodexModelAdapter(AzureModelAdapter):
                             await connection.stop()
 
                         finalization = asyncio.create_task(cleanup())
+                        interrupted = False
                         while not finalization.done():
-                            with suppress(asyncio.CancelledError):
+                            try:
                                 await asyncio.shield(finalization)
+                            except asyncio.CancelledError:
+                                interrupted = True
+                                # Skip graceful reap waits after cancel/deadline,
+                                # while still joining cleanup before returning.
+                                if connection is not None:
+                                    with suppress(ProcessLookupError):
+                                        os.killpg(connection.process.pid, signal.SIGKILL)
                         await finalization
+                        if interrupted:
+                            raise asyncio.CancelledError

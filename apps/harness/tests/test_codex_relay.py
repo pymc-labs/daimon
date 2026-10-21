@@ -514,6 +514,5 @@ async def test_controller_injections_and_private_paths_are_removed(tmp_path):
                 {"type": "function_call_output", "output": scratch + "/config.toml"},
             ]
         ) == [
-            {"role": "user", "content": "Explain the <skill> tag"},
             {"type": "function_call_output", "output": "[private controller]/config.toml"},
         ]

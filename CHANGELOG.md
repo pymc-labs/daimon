@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the existing tool approval and isolation boundary; keep the Agents SDK default.
   Bound denied calls and model continuations, disable bundled controller skills,
   and enforce one usage outcome before turn end. OpenAI live probes require
-  explicit probe mode and refuse Azure configuration.
+  explicit probe mode and refuse Azure configuration. Preserve marker-prefixed
+  user input and honor cancellation or deadlines during controller shutdown.
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
 

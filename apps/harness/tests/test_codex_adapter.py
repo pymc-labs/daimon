@@ -535,3 +535,91 @@ async def test_real_codex_has_no_bundled_skills_or_private_prompt(
 
     await OfflineCodex(respond).run(context, [])
     assert captured
+
+
+@pytest.mark.parametrize("prefix", ["<skills_instructions>", "<skill>", "<environment_context>"])
+async def test_real_codex_preserves_authoritative_user_input(tmp_path, codex_binary, prefix):
+    from daimon_harness.service import Supervisor
+
+    text = prefix + " Explain invoice 917.42 and $imagegen $skill-installer verbatim."
+    prior = {"role": "user", "content": prefix + " Earlier preference: metric units."}
+    bodies = []
+
+    def respond(http):
+        body = json.loads(http.content)
+        bodies.append(body)
+        users = [item for item in body["input"] if item.get("role") == "user"]
+        assert users == [prior, {"role": "user", "content": [{"type": "input_text", "text": text}]}]
+        # No controller-origin environment or skill catalog reaches the provider.
+        assert str(tmp_path) not in json.dumps(body)
+        assert "skills/.system" not in json.dumps(body)
+        return sse_response([write_call()] if len(bodies) == 1 else [assistant()])
+
+    supervisor = Supervisor(tmp_path, OfflineCodex(respond))
+    request = TurnRequest.model_validate({**turn(text)})
+    supervisor.journal.save_history(request.session_id, [prior])
+    try:
+        await supervisor.submit(request)
+        await asyncio.wait_for(supervisor.tasks[request.turn_id], 15)
+        events = supervisor.journal.events(request.session_id)
+        assert events[-1].data == {"outcome": "completed"}
+        history = supervisor.journal.history(request.session_id)
+        users = [item for item in history if item.get("role") == "user"]
+        assert users == [prior, {"role": "user", "content": [{"type": "input_text", "text": text}]}]
+        assert len(bodies) == 2
+    finally:
+        await supervisor.close()
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "deadline"])
+async def test_interrupt_during_controller_shutdown(tmp_path, monkeypatch, codex_binary, interrupt):
+    from daimon_harness.codex_adapter import CodexConnection
+    from daimon_harness.service import create_app
+
+    stopping = asyncio.Event()
+    processes = []
+    original = CodexConnection.stop
+
+    async def slow_shutdown(self):
+        processes.append(self.process)
+        stopping.set()
+        # Model a controller that ignores graceful EOF until forcibly reaped.
+        await self.process.wait()
+        await original(self)
+
+    monkeypatch.setattr(CodexConnection, "stop", slow_shutdown)
+    request = TurnRequest.model_validate(
+        {
+            **turn(),
+            "limits": {"max_tool_calls": 3, "deadline_s": 2 if interrupt == "deadline" else 30},
+        }
+    )
+    app = create_app(
+        home=tmp_path,
+        token="test-token",
+        adapter=OfflineCodex(lambda _: sse_response([assistant()])),
+    )
+    supervisor = app.state.supervisor
+    try:
+        await supervisor.submit(request)
+        await asyncio.wait_for(stopping.wait(), 5)
+        started = asyncio.get_running_loop().time()
+        if interrupt == "cancel":
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    f"/v0/turns/{request.turn_id}/cancel",
+                    headers={"Authorization": "Bearer test-token"},
+                )
+                assert response.json() == {"cancelled": True}
+        await asyncio.wait_for(supervisor.tasks[request.turn_id], 3)
+        assert asyncio.get_running_loop().time() - started < (1 if interrupt == "cancel" else 3)
+        events = supervisor.journal.events(request.session_id)
+        assert events[-1].type == "turn_ended"
+        assert events[-1].data["outcome"] == "interrupted"
+        assert sum(e.type == "usage" for e in events) == 1
+        assert sum(e.type == "turn_ended" for e in events) == 1
+        assert all(p.returncode is not None for p in processes)
+    finally:
+        await supervisor.close()

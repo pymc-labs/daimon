@@ -127,3 +127,10 @@ def turn(mode: str = "hello", *, turn_id: str = "turn-1", key: str = "key-1") ->
 @pytest.fixture(autouse=True)
 def fake_harness_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HARNESS_TEST_MODE", "1")
+
+
+@pytest.fixture(autouse=True)
+def clear_live_probe_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Probe tests opt in explicitly after this fixture runs.
+    for name in ("HARNESS_LIVE_PROBE", "HARNESS_RUNTIME_MODE", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)

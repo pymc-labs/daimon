@@ -9,13 +9,13 @@
   "errors": [],
   "usage_checks": [
     {
-      "request_id": "5aac27cf-d631-4cc1-8c57-e69e805c034c",
+      "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
     },
     {
-      "request_id": "4f04bbae-6974-4ccf-9d33-5af72cef826a",
+      "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
@@ -24,11 +24,11 @@
   "api_observations": [
     {
       "turn_id": "codex-mcp_auto",
-      "request_id": "5aac27cf-d631-4cc1-8c57-e69e805c034c",
+      "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
       "started_seq_before_network": 12,
       "stream": true,
       "http_status": 200,
-      "response_id": "resp_0267155a1437a1c6016ad872d63cb887d1a57c0d947c0d828f",
+      "response_id": "resp_08018a0a981859b9016ad87ce7840087d1ac307c8e56f0dd6a",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 217,
@@ -52,11 +52,11 @@
     },
     {
       "turn_id": "codex-mcp_auto",
-      "request_id": "4f04bbae-6974-4ccf-9d33-5af72cef826a",
+      "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
       "started_seq_before_network": 16,
       "stream": true,
       "http_status": 200,
-      "response_id": "resp_0267155a1437a1c6016ad872d7c11c87d1b89f369b8afe3db1",
+      "response_id": "resp_08018a0a981859b9016ad87ce911e487d1abf76e5fed367768",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 312,
@@ -84,7 +84,7 @@
       "seq": 11,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:49.396139Z",
+      "at": "2026-10-21T08:50:47.184044Z",
       "type": "status_running",
       "data": {}
     },
@@ -92,10 +92,10 @@
       "seq": 12,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:49.951704Z",
+      "at": "2026-10-21T08:50:47.338050Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "5aac27cf-d631-4cc1-8c57-e69e805c034c",
+        "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
         "model": "gpt-6-luna"
       }
     },
@@ -103,10 +103,10 @@
       "seq": 13,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:51.455639Z",
+      "at": "2026-10-21T08:50:48.869187Z",
       "type": "usage",
       "data": {
-        "request_id": "5aac27cf-d631-4cc1-8c57-e69e805c034c",
+        "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
         "model": "gpt-6-luna",
         "input_tokens": 217,
         "output_tokens": 25,
@@ -118,10 +118,10 @@
       "seq": 14,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:51.474300Z",
+      "at": "2026-10-21T08:50:48.878447Z",
       "type": "tool_use",
       "data": {
-        "call_id": "call_EljJexo1oL5AZLkwoftWE9EB",
+        "call_id": "call_4vb5hLJin47Z5NkQAgWd7v1f",
         "name": "probe/echo",
         "input": {
           "text": "luna-mcp_auto"
@@ -133,10 +133,10 @@
       "seq": 15,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:51.503630Z",
+      "at": "2026-10-21T08:50:48.893552Z",
       "type": "tool_result",
       "data": {
-        "call_id": "call_EljJexo1oL5AZLkwoftWE9EB",
+        "call_id": "call_4vb5hLJin47Z5NkQAgWd7v1f",
         "output": {
           "meta": null,
           "content": [
@@ -159,10 +159,10 @@
       "seq": 16,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:51.538945Z",
+      "at": "2026-10-21T08:50:48.908216Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "4f04bbae-6974-4ccf-9d33-5af72cef826a",
+        "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
         "model": "gpt-6-luna"
       }
     },
@@ -170,10 +170,10 @@
       "seq": 17,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:52.900572Z",
+      "at": "2026-10-21T08:50:49.975424Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_0267155a1437a1c6016ad872d8d19087d19b86e317790e41fc",
+        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
         "text": "echo"
       }
     },
@@ -181,10 +181,10 @@
       "seq": 18,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:52.903207Z",
+      "at": "2026-10-21T08:50:49.980253Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_0267155a1437a1c6016ad872d8d19087d19b86e317790e41fc",
+        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
         "text": ":l"
       }
     },
@@ -192,10 +192,10 @@
       "seq": 19,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:52.927225Z",
+      "at": "2026-10-21T08:50:50.016028Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_0267155a1437a1c6016ad872d8d19087d19b86e317790e41fc",
+        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
         "text": "una"
       }
     },
@@ -203,10 +203,10 @@
       "seq": 20,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:52.931072Z",
+      "at": "2026-10-21T08:50:50.019147Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_0267155a1437a1c6016ad872d8d19087d19b86e317790e41fc",
+        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
         "text": "-m"
       }
     },
@@ -214,10 +214,10 @@
       "seq": 21,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:52.937118Z",
+      "at": "2026-10-21T08:50:50.020807Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_0267155a1437a1c6016ad872d8d19087d19b86e317790e41fc",
+        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
         "text": "cp"
       }
     },
@@ -225,10 +225,10 @@
       "seq": 22,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:52.939010Z",
+      "at": "2026-10-21T08:50:50.022362Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_0267155a1437a1c6016ad872d8d19087d19b86e317790e41fc",
+        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
         "text": "_auto"
       }
     },
@@ -236,10 +236,10 @@
       "seq": 23,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:53.054233Z",
+      "at": "2026-10-21T08:50:50.152171Z",
       "type": "agent_message",
       "data": {
-        "message_id": "codex-mcp_auto:msg_0267155a1437a1c6016ad872d8d19087d19b86e317790e41fc",
+        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
         "parts": [
           {
             "type": "text",
@@ -252,10 +252,10 @@
       "seq": 24,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:53.073786Z",
+      "at": "2026-10-21T08:50:50.160753Z",
       "type": "usage",
       "data": {
-        "request_id": "4f04bbae-6974-4ccf-9d33-5af72cef826a",
+        "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
         "model": "gpt-6-luna",
         "input_tokens": 312,
         "output_tokens": 10,
@@ -267,7 +267,7 @@
       "seq": 25,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:07:53.369369Z",
+      "at": "2026-10-21T08:50:50.459438Z",
       "type": "turn_ended",
       "data": {
         "outcome": "completed"

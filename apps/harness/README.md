@@ -445,13 +445,16 @@ Production enablement remains subject to normal review and live Azure protocol
 validation; leave the default on `agents_sdk` meanwhile. The image CI job builds the checksum-verified release stage.
 
 Codex bundled skills and skill instruction injection are disabled explicitly.
-The relay removes controller-authored skill/environment messages and private
-controller paths before provider I/O and durable history. Harness-provided
-skills remain available through C3. Denied calls count toward `max_tool_calls`;
+The relay reconstructs user messages from authoritative C3 input and preserves
+durable history verbatim. It discards controller-origin user/developer messages
+and removes private paths from controller continuations before provider I/O.
+Marker-prefixed user text remains intact. Harness-provided skills remain
+available through C3. Denied calls count toward `max_tool_calls`;
 the relay also caps model requests per turn at `min(max_tool_calls + 2, 128)`.
 Only the harness-owned Responses request fields and reasoning effort/summary
 cross the provider boundary. Shutdown joins usage commits before turn end,
-including when cancellation and the deadline overlap.
+including when cancellation and the deadline overlap. Cancellation or deadline
+expiry during controller shutdown forces a prompt reap and ends interrupted.
 
 ### Paid Luna probes
 

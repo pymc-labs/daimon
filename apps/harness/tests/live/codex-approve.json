@@ -9,13 +9,13 @@
   "errors": [],
   "usage_checks": [
     {
-      "request_id": "b11be769-fca3-486c-bcb7-1de167fd8e42",
+      "request_id": "9397f572-0ad1-403a-b546-717f1fd1c47d",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
     },
     {
-      "request_id": "899c84a9-ec52-4d47-84ca-8dce3f5a868b",
+      "request_id": "9a34bb90-7f0c-49cc-aa47-bed635e64559",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
@@ -24,11 +24,11 @@
   "api_observations": [
     {
       "turn_id": "codex-approve",
-      "request_id": "b11be769-fca3-486c-bcb7-1de167fd8e42",
+      "request_id": "9397f572-0ad1-403a-b546-717f1fd1c47d",
       "started_seq_before_network": 27,
       "stream": true,
       "http_status": 200,
-      "response_id": "resp_0267155a1437a1c6016ad872d9bfe887d1a2d1e56ada876947",
+      "response_id": "resp_08018a0a981859b9016ad87ceae1ac87d187648880a74649ff",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 359,
@@ -52,11 +52,11 @@
     },
     {
       "turn_id": "codex-approve",
-      "request_id": "899c84a9-ec52-4d47-84ca-8dce3f5a868b",
+      "request_id": "9a34bb90-7f0c-49cc-aa47-bed635e64559",
       "started_seq_before_network": 32,
       "stream": true,
       "http_status": 200,
-      "response_id": "resp_0267155a1437a1c6016ad872db22ec87d18d00f3a713cadc63",
+      "response_id": "resp_08018a0a981859b9016ad87cecbac087d18a73a0fd7f05742b",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 451,
@@ -84,7 +84,7 @@
       "seq": 26,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:53.428970Z",
+      "at": "2026-10-21T08:50:50.543601Z",
       "type": "status_running",
       "data": {}
     },
@@ -92,10 +92,10 @@
       "seq": 27,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:53.590907Z",
+      "at": "2026-10-21T08:50:50.700428Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "b11be769-fca3-486c-bcb7-1de167fd8e42",
+        "request_id": "9397f572-0ad1-403a-b546-717f1fd1c47d",
         "model": "gpt-6-luna"
       }
     },
@@ -103,10 +103,10 @@
       "seq": 28,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:54.873947Z",
+      "at": "2026-10-21T08:50:52.536283Z",
       "type": "usage",
       "data": {
-        "request_id": "b11be769-fca3-486c-bcb7-1de167fd8e42",
+        "request_id": "9397f572-0ad1-403a-b546-717f1fd1c47d",
         "model": "gpt-6-luna",
         "input_tokens": 359,
         "output_tokens": 24,
@@ -118,10 +118,10 @@
       "seq": 29,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:54.894730Z",
+      "at": "2026-10-21T08:50:52.542713Z",
       "type": "tool_use",
       "data": {
-        "call_id": "call_9M450aBibGSJGNJW3Of5I00p",
+        "call_id": "call_PSqepZ7O7vmmNRFnxgYKOGSq",
         "name": "probe/echo",
         "input": {
           "text": "luna-approve"
@@ -133,12 +133,12 @@
       "seq": 30,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:54.913948Z",
+      "at": "2026-10-21T08:50:52.544472Z",
       "type": "requires_action",
       "data": {
-        "action_id": "7b0b8add-cee4-495d-bff2-fbb49a81817f",
+        "action_id": "f890bfb9-c5c7-4a11-b327-32b4d4e9531b",
         "kind": "tool_confirmation",
-        "call_id": "call_9M450aBibGSJGNJW3Of5I00p",
+        "call_id": "call_PSqepZ7O7vmmNRFnxgYKOGSq",
         "name": "probe/echo",
         "input": {
           "text": "luna-approve"
@@ -149,10 +149,10 @@
       "seq": 31,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:54.946391Z",
+      "at": "2026-10-21T08:50:52.557436Z",
       "type": "tool_result",
       "data": {
-        "call_id": "call_9M450aBibGSJGNJW3Of5I00p",
+        "call_id": "call_PSqepZ7O7vmmNRFnxgYKOGSq",
         "output": {
           "meta": null,
           "content": [
@@ -175,10 +175,10 @@
       "seq": 32,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:54.979305Z",
+      "at": "2026-10-21T08:50:52.581421Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "899c84a9-ec52-4d47-84ca-8dce3f5a868b",
+        "request_id": "9a34bb90-7f0c-49cc-aa47-bed635e64559",
         "model": "gpt-6-luna"
       }
     },
@@ -186,10 +186,10 @@
       "seq": 33,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.066282Z",
+      "at": "2026-10-21T08:50:53.677299Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-approve:msg_0267155a1437a1c6016ad872dbfac087d18e2989035167ac9c",
+        "message_id": "codex-approve:msg_08018a0a981859b9016ad87ced83e487d18ee4cd78c132bfb6",
         "text": "echo"
       }
     },
@@ -197,10 +197,10 @@
       "seq": 34,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.078306Z",
+      "at": "2026-10-21T08:50:53.694037Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-approve:msg_0267155a1437a1c6016ad872dbfac087d18e2989035167ac9c",
+        "message_id": "codex-approve:msg_08018a0a981859b9016ad87ced83e487d18ee4cd78c132bfb6",
         "text": ":l"
       }
     },
@@ -208,10 +208,10 @@
       "seq": 35,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.100030Z",
+      "at": "2026-10-21T08:50:53.703353Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-approve:msg_0267155a1437a1c6016ad872dbfac087d18e2989035167ac9c",
+        "message_id": "codex-approve:msg_08018a0a981859b9016ad87ced83e487d18ee4cd78c132bfb6",
         "text": "una"
       }
     },
@@ -219,10 +219,10 @@
       "seq": 36,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.106354Z",
+      "at": "2026-10-21T08:50:53.732818Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-approve:msg_0267155a1437a1c6016ad872dbfac087d18e2989035167ac9c",
+        "message_id": "codex-approve:msg_08018a0a981859b9016ad87ced83e487d18ee4cd78c132bfb6",
         "text": "-"
       }
     },
@@ -230,10 +230,10 @@
       "seq": 37,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.120878Z",
+      "at": "2026-10-21T08:50:53.771422Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-approve:msg_0267155a1437a1c6016ad872dbfac087d18e2989035167ac9c",
+        "message_id": "codex-approve:msg_08018a0a981859b9016ad87ced83e487d18ee4cd78c132bfb6",
         "text": "approve"
       }
     },
@@ -241,10 +241,10 @@
       "seq": 38,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.201518Z",
+      "at": "2026-10-21T08:50:53.895363Z",
       "type": "agent_message",
       "data": {
-        "message_id": "codex-approve:msg_0267155a1437a1c6016ad872dbfac087d18e2989035167ac9c",
+        "message_id": "codex-approve:msg_08018a0a981859b9016ad87ced83e487d18ee4cd78c132bfb6",
         "parts": [
           {
             "type": "text",
@@ -257,10 +257,10 @@
       "seq": 39,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.243813Z",
+      "at": "2026-10-21T08:50:53.913472Z",
       "type": "usage",
       "data": {
-        "request_id": "899c84a9-ec52-4d47-84ca-8dce3f5a868b",
+        "request_id": "9a34bb90-7f0c-49cc-aa47-bed635e64559",
         "model": "gpt-6-luna",
         "input_tokens": 451,
         "output_tokens": 9,
@@ -272,7 +272,7 @@
       "seq": 40,
       "session_id": "luna-live",
       "turn_id": "codex-approve",
-      "at": "2026-10-21T08:07:56.561150Z",
+      "at": "2026-10-21T08:50:54.204499Z",
       "type": "turn_ended",
       "data": {
         "outcome": "completed"
