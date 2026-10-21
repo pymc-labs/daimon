@@ -31,7 +31,11 @@ async def test_pool_routes_every_c3_operation_and_reconstructed_transport(sessio
             ("POST", "/v0/turns", {"idempotency_key": "once"}),
             ("POST", "/v0/turns/turn/actions", {"decision": "allow"}),
             ("POST", "/v0/turns/turn/cancel", {}),
-            ("GET", "/v0/sessions/session/events?after_seq=7&extra=a&extra=b&empty=", None),
+            (
+                "GET",
+                "/v0/sessions/session/events?after_seq=7&replay_after_seq=3&extra=a&extra=b&empty=",
+                None,
+            ),
             ("POST", "/v0/turns", {"idempotency_key": "once"}),
         ]:
             # Rebuilding the transport cannot lose the session mapping.
@@ -51,9 +55,11 @@ async def test_pool_routes_every_c3_operation_and_reconstructed_transport(sessio
     assert len(tokens) == len(requests) == 5
     assert requests[3].url.params.multi_items() == [
         ("after_seq", "7"),
+        ("replay_after_seq", "3"),
         ("extra", "a"),
         ("extra", "b"),
         ("empty", ""),
+        ("session_id", session_id),
         ("identifier", sandbox_id(session_id)),
     ]
     assert requests[0].content == requests[-1].content

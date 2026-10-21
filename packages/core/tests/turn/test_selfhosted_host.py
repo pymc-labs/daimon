@@ -828,6 +828,10 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 routed_session = wire.events[0]["session_id"]
             assert call.url.params["identifier"] == sandbox_id(routed_session)
             assert call.url.host == "pool.example"
+            assert call.url.params["session_id"] == routed_session
+            assert int(call.url.params["after_seq"]) >= 0
+            if "replay_after_seq" in call.url.params:
+                assert int(call.url.params["replay_after_seq"]) <= int(call.url.params["after_seq"])
         clients.append(self)
         if call.url.path.endswith("/actions"):
             body = json.loads(call.content)
@@ -1150,6 +1154,13 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         assert len(credentials) == 1
         assert len(token_calls) == (2 if scenario == "entra_refresh" else 1)
         assert len({id(client) for client in clients}) == 1
+    if pool:
+        await prepared.backend.events._c.transport.request(
+            "GET",
+            f"/v0/sessions/{prepared.session_ref.id}/events?replay_after_seq=0&after_seq=0",
+            session_id=prepared.session_ref.id,
+        )
+        assert any("replay_after_seq" in call.url.params for call in requests)
     observations = await prepared.backend.usage.reconcile(SCOPE, prepared.session_ref)
     assert len(observations) == 1
     await prepared._record(observation=observations[0])

@@ -497,9 +497,9 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 or request.deadline > datetime.now(UTC)
                 else datetime.now(UTC) + timedelta(seconds=8)
             )
-            if method == "GET" and "/events?after_seq=" in path:
-                parsed = urlsplit(path)
-                query = dict(parse_qsl(parsed.query))
+            parsed = urlsplit(path)
+            if method == "GET" and parsed.path.endswith("/events"):
+                query = dict(parse_qsl(parsed.query, keep_blank_values=True))
                 floor = await history_floor(session_id)
                 query["after_seq"] = str(max(int(query["after_seq"]), floor))
                 if "replay_after_seq" in query:

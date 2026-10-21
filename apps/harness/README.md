@@ -212,7 +212,6 @@ concurrent polling requirements cannot be met by Foundry. Preserve the direct
 C3 endpoints and the same image; verify persistence and cancellation in that
 environment before using it for a tenant.
 
-<<<<<<< HEAD
 ## Azure Container Apps session-pool routing
 
 For `HARNESS_SESSION_MODE=single`, configure the environment's native
@@ -250,7 +249,6 @@ admission. If forwarding fails, keep admission disabled until the verified
 per-session authentication alternative is implemented. Each sandbox is ephemeral:
 use a long timed cooldown, and checkpoint/restore durable state before relying
 on workspace persistence after sandbox destruction.
-=======
 ## Durable checkpoints for ephemeral sandboxes
 
 Configure the harness with `HARNESS_CHECKPOINT_ACCOUNT_URL` (an HTTPS Azure
@@ -326,7 +324,6 @@ and [download](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blo
 APIs. The harness also runs without checkpoint configuration for local persistent
 volumes; ephemeral production pools must configure and verify recovery before
 admission is enabled.
->>>>>>> 1d0dbb575 (feat(harness): checkpoint and restore ephemeral session state)
 
 ## Tests
 
