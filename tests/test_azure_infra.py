@@ -530,6 +530,10 @@ def test_azd_model_name_uses_env_with_sol_default():
     "model,deployment,valid",
     [
         ("gpt-6.1-sol", "gpt-6-luna", False),
+        ("gpt-6.1-sol", "GPT-6-Luna", False),
+        ("gpt-6-luna", "GPT-6.1-SOL", False),
+        ("GPT-6.1-SOL", "gpt-6-luna", False),
+        ("gpt-6-luna", "GPT-6-Luna", True),
         ("gpt-6-luna", "gpt-6.1-sol", False),
         ("another-model", "gpt-6-luna", False),
         ("gpt-6-luna", "gpt-6-luna", True),
@@ -566,3 +570,58 @@ def test_model_alias_guard_offline(templates, tmp_path, model, deployment, valid
         )
         assert "isValidModelDeploymentName(" in validator["output"]["value"]
         assert "fail('modelDeploymentName is a reserved model name" in validator["output"]["value"]
+
+
+@pytest.mark.parametrize("entrypoint", ["main.bicep", "azd/main.bicep"])
+@pytest.mark.parametrize(
+    "model,deployment,error",
+    [
+        ("gpt-6.1-sol", "gpt-6-luna", "reserved model name and must equal modelName"),
+        ("gpt-6.1-sol", "GPT-6-Luna", "reserved model name and must equal modelName"),
+        ("gpt-6-luna", "GPT-6.1-SOL", "reserved model name and must equal modelName"),
+        ("gpt-6-luna", "custom-smoke-alias", None),
+        ("unknown-model", "custom-smoke-alias", "No default version for modelName"),
+    ],
+)
+def test_model_guards_fire_in_deployment_snapshots(
+    templates, tmp_path, entrypoint, model, deployment, error
+):
+    # The local deployment engine evaluates fail(), unlike build-params. All
+    # identities/passwords are synthetic; snapshot performs no Azure deployment.
+    source = tmp_path / "guard.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure" / entrypoint, tmp_path)
+    source.write_text(
+        f"using '{relative}'\n"
+        "param location = 'eastus2'\n"
+        "param postgresAdministratorPassword = 'SnapshotOnlyPassword123'\n"
+        f"param modelName = '{model}'\n"
+        f"param modelDeploymentName = '{deployment}'\n"
+        + ("param environmentName = 'offline'\n" if entrypoint.startswith("azd/") else "")
+    )
+    result = subprocess.run(
+        [
+            "bicep",
+            "snapshot",
+            str(source),
+            "--mode",
+            "overwrite",
+            "--tenant-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--subscription-id",
+            "00000000-0000-0000-0000-000000000002",
+            "--location",
+            "eastus2",
+        ]
+        + ([] if entrypoint.startswith("azd/") else ["--resource-group", "rg-offline-test"]),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    diagnostics = result.stdout + result.stderr
+    if error is None:
+        assert result.returncode == 0, diagnostics
+    else:
+        assert result.returncode != 0, (
+            "Invalid model configuration unexpectedly deployed in snapshot"
+        )
+        assert error in diagnostics

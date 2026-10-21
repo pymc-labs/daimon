@@ -10,8 +10,10 @@ The repository includes Bicep templates in `deploy/azure/` and a root `azure.yam
 for Azure Developer CLI. They provision a Container Apps environment, Discord,
 Teams, MCP and scheduler apps, a manual migration/seeding job, Burstable
 PostgreSQL, RBAC Key Vault, a private Blob container, ACR, Log Analytics and an
-optional Azure OpenAI model deployment with a Foundry project. The services
-array selects which adapters run; MCP receives the selected platform settings.
+optional Azure OpenAI model deployment with a Foundry project. Known model names
+used as deployment aliases must match their underlying model regardless of
+letter case. The services array selects which adapters run; MCP receives the
+selected platform settings.
 Service secrets use Key Vault references through managed identity.
 
 Deployment is staged: foundation, image publication and successful init, then

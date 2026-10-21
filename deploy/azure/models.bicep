@@ -15,7 +15,7 @@ func defaultModelVersion(modelName string) string =>
 // Known model ids are reserved aliases: they must identify their own model.
 @export()
 func isValidModelDeploymentName(modelName string, deploymentName string) bool =>
-  empty(knownModelVersion(deploymentName)) || deploymentName == modelName
+  empty(knownModelVersion(toLower(deploymentName))) || toLower(deploymentName) == toLower(modelName)
 
 @export()
 func validateModelDeploymentName(modelName string, deploymentName string) string =>
