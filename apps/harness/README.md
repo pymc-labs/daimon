@@ -273,16 +273,18 @@ Before any model I/O, the service writes a compact turn claim to
 journaled `model_request_started` before that request reaches the model. The
 record contains the original request digest, a credential-free recovery identity,
 request inventory and event high-water; prompts and skill bundles are omitted.
-If write-ahead storage fails, the turn ends with retryable
-`durability_unavailable` before paid work. These small writes use a separate
+Write-ahead or sequence-reservation failure returns retryable
+`durability_unavailable` before crossing the failed paid-work barrier. If no
+reserved sequence is available, the service returns HTTP 503 rather than
+allocating an unreserved terminal event. These small writes use a separate
 worker from asynchronous workspace uploads. Restore loads remote claims newer
 than the checkpoint; a known idempotency key replays an interrupted outcome and
 never repeats tools or model calls. Measured usage in the remote inventory is
 replayed with its original request ID, model and token counts. Only started
 requests with no usage record become `usage_unavailable` for reconciliation.
 
-Each `model_request_started` commits its remote write-ahead before replay exposes it. After tool workers stop, every terminal turn (including
-cancellation) checkpoints the SQLite journal, history, turn/idempotency inventory
+Each `model_request_started` commits its remote write-ahead before replay exposes
+it. After tool workers stop, every terminal turn (including cancellation) checkpoints the SQLite journal, history, turn/idempotency inventory
 and `work/` to `sessions/<sandbox_id>/<seq>.tar.zst`. SQLite's backup API includes
 committed WAL data. Upload failures are logged by stage and exception class and
 mark the session not durable until a later successful snapshot. They never seal
@@ -292,7 +294,8 @@ pending marker retains late upload failures after the completed turn's reader
 closes, including across a local process restart. SQLite snapshot capture runs on the
 journal worker; workspace export, upload and retention run separately with one
 in-flight attempt and one coalesced pending snapshot. Polls and new turns do not
-wait for storage. The manifest caps escaped UTF-8 bytes, records a skip count
+wait for workspace uploads; sequence and inventory commits remain correctness
+barriers. The manifest caps escaped UTF-8 bytes, records a skip count
 and bounded sample, and shares workspace name validation with restore. Combined
 archive limits degrade to journals only. Export staging stays service-owned on
 the session filesystem. Old snapshots are pruned only after a successful upload.
@@ -303,10 +306,10 @@ Corrupt snapshots and conflicting local workspace state fail closed. Journal
 sequence numbers, history and replay keys continue without re-executing a turn.
 Every request includes `after_seq`, seeded from the host's persisted session
 projection, including after a host process restart.
-Restore durably places its next event above both the checkpoint and that cursor
-before publication. Startup waits for the client cursor before recovery. A real
-missing range emits `history_gap` with reason `sandbox_restored`; a fully covered
-restore emits no gap and keeps continuity wakes usable. Recovery then repairs
+Restore durably places its next event above the checkpoint, remote reserved
+high-water and client cursor before publication. An abandoned reservation emits
+`history_gap` with reason `sandbox_restored`, including when the checkpoint covers
+the client's cursor. Sequence safety never depends on a fresh client cursor. Recovery then repairs
 in-flight turns. The driver normalizes this to an authoritative mux history gap
 and reconciles usage. Sequence numbers remain monotonic across lost sandboxes.
 An unfinished restored turn ends as interrupted; every started request without
@@ -612,13 +615,13 @@ and checkpoints; restore carries it into the replacement journal before repair.
 `replay_after_seq` selects only the read range and never changes the ratchet.
 Remote WAL inventory is imported with its original event sequence and identity.
 
-`tests/test_sequence_ratchet.py` runs 100 Hypothesis traces, each with 12–40
-operations across polls, turns, approvals, cancels, checkpoints, sandbox restore,
-local process crashes and concurrent request batches. It checks immutable
-sequence assignments, terminal-or-gap coverage for three clients and unique
-usage identity. Clients retain their observed high-water when restoring, as
-required by C4.8; a separate regression covers a stale poll restoring before a
-later request supplies the newer cursor. No cloud or live model is used.
+`tests/test_sequence_ratchet.py` runs 100 Hypothesis traces, each with 8–24
+random operations plus first-turn and final recovery checks. Its oracle records
+only HTTP events the host actually saw; request cursors remain independent.
+Stale-first restore, cold cleanup cancel, first-turn loss without a checkpoint,
+failed reservation writes, approvals, turns, cancels and concurrent requests
+check immutable sequence/body identity, terminal-or-gap coverage and one usage
+outcome per observed request. No cloud or live model is used.
 
 ### Remote sequence reservations
 
