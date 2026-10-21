@@ -5,6 +5,7 @@ on:
       - deploy/helm/**
       - .github/workflows/helm.yml
       - tests/check-install-kit.sh
+      - tests/render-install-kit.py
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,6 +29,8 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           install -m755 linux-amd64/helm "$HOME/.local/bin/helm"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install PDF verification tools
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - name: Check one-page install kit commands against recipe
         run: bash tests/check-install-kit.sh
       - name: Lint and render chart variants

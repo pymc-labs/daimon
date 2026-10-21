@@ -14,10 +14,12 @@ if len(lines) > 60:
     sys.exit(f"Install kit exceeds 60 lines: {len(lines)}")
 
 
-def commands(document):
+def commands(document, strict=False):
     result = []
     for language, block in re.findall(r"^```([^\n]*)\n(.*?)^```\s*$", document, re.M | re.S):
         if language not in {"sh", "bash", "shell"}:
+            if strict:
+                sys.exit("Kit fences must be tagged sh, bash or shell")
             continue
         pending = []
         for line in block.splitlines():
@@ -32,7 +34,11 @@ def commands(document):
     return result
 
 
-extracted, documented = commands(kit), commands(recipe)
+extracted, documented = commands(kit, strict=True), commands(recipe)
+# Inline executable examples must match recipe examples too; identifiers are prose.
+inline = lambda doc: re.findall(r"(?<!`)`([^`\n]+)`(?!`)", re.sub(r"^```.*?^```", "", doc, flags=re.M | re.S))
+extracted += [s for s in inline(kit) if re.match(r"^(az|bash|kubectl|helm|git|export|rm|time|python3?|curl)\s", s)]
+documented += inline(recipe)
 if not extracted:
     sys.exit("Install kit has no shell commands")
 missing = [command for command in extracted if command not in documented]
@@ -40,3 +46,4 @@ if missing:
     sys.exit("Install kit commands missing verbatim from recipe:\n" + "\n".join(missing))
 print(f"PASS: {len(extracted)} commands match recipe verbatim; {len(lines)}/60 Markdown lines")
 PY
+python3 "$repo/tests/render-install-kit.py" --check
