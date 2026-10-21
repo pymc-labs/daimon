@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Preserve tenant access controls during AKS re-registration. Default the operator
+  model to the configured Azure deployment; refuse mismatched or Sol probe models
+  before network I/O and verify the exact persisted marker through write/read tools.
+
 - Refuse MCP authorization on non-loopback HTTP harness requests before credential refresh or network I/O (C3.9a), even with HTTP consent.
 
 - Add `daimon selfhosted turn` for billed operator turns with persistent threads, enforce selfhosted admission before provider access, and require explicit consent for harness HTTP. MCP credentials require TLS or loopback, with a scoped CA bundle for in-cluster TLS. Reject normalized TEST tariff names at startup unless explicitly enabled, and keep diagnostic logging failures from interrupting metering.

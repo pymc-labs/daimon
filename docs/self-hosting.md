@@ -1673,3 +1673,9 @@ trusted hosts use a combined root bundle, while sandbox MCP trust stays scoped.
 The chart loads host credentials through `envFrom`: the `daimon-host` Secret must
 contain the `DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` key itself. Its value must
 match the harness token; do not place a `secretKeyRef` object in `host.env`.
+
+AKS re-registration preserves tenant access controls and adds the selfhosted
+backend to the existing selections. `SELFHOSTED_MODEL` defaults to
+`AOAI_DEPLOYMENT` (`gpt-5.4-mini` by default). The paid C3 probe refuses model
+mismatches and Sol before network I/O, and requires the second turn to read the
+exact marker written by the first turn through matching tool calls.

@@ -386,7 +386,10 @@ Anthropic URL is deliberately loopback port 9, so startup reconciliation cannot
 contact Anthropic even when another provider's defaults are present.
 
 The installer checks MCP `/healthz`. A separate **paid gpt-5.4-mini** C3 preflight
-checks model usage, a write tool and a second turn reading the same file:
+checks model usage, a write tool and a second turn reading the same file. It
+requires matching write/read call IDs and the exact per-run persistence marker.
+`SELFHOSTED_MODEL` defaults to `AOAI_DEPLOYMENT` (default `gpt-5.4-mini`); the
+probe refuses a different deployment or any Sol model before network I/O:
 
 ```sh
 bash deploy/helm/daimon-selfhost/scripts/aks.sh probe
@@ -398,6 +401,9 @@ grant in the following section, then use the authorized CLI/Teams entry point.
 Those agent/tenant/channel/billing inputs are deployment-specific. Preserve the
 provider request IDs, harness events and ledger evidence; do not substitute the
 direct preflight for that application test.
+
+Re-registration preserves existing invoker restrictions, channel/category rules,
+agent pins and enabled backends, adding only the selfhosted backend selection.
 
 ### 3. Egress evidence for the entire turn window
 

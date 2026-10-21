@@ -9,6 +9,7 @@ chart=deploy/helm/daimon-selfhost
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
 export AOAI_DEPLOYMENT=${AOAI_DEPLOYMENT:-gpt-5.4-mini}
+export SELFHOSTED_MODEL=${SELFHOSTED_MODEL:-$AOAI_DEPLOYMENT}
 case ${1:-} in
 bootstrap)
   az group create -n "$RG" -l "$LOCATION" -o none
@@ -129,7 +130,11 @@ turn)
     --tenant-id "$tenant" --thread aks-proof --message "${MESSAGE:?export MESSAGE}"
   ;;
 probe)
-  kubectl -n daimon exec -i deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env SELFHOSTED_MODEL="${SELFHOSTED_MODEL:-$AOAI_DEPLOYMENT}" python - < "$chart/scripts/live-c3.py"
+  if [[ ${SELFHOSTED_MODEL,,} == *sol* || ${AOAI_DEPLOYMENT,,} == *sol* || "$SELFHOSTED_MODEL" != "$AOAI_DEPLOYMENT" ]]; then
+    echo 'Probe requires the configured AOAI_DEPLOYMENT; Sol models are refused' >&2
+    exit 1
+  fi
+  kubectl -n daimon exec -i deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
   ;;
 egress-start)
   kubectl -n kube-system create configmap coredns-custom --from-literal=log.override=log \

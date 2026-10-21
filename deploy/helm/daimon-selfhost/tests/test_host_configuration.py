@@ -1,12 +1,16 @@
 """Rendered regressions for the live AKS runtime grant and host egress boundary."""
 
 import base64
+import contextlib
+import io
 import json
 import os
+import runpy
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -467,6 +471,7 @@ class HostConfigurationTests(unittest.TestCase):
             stub.write_text("""#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
+from unittest.mock import patch
 name = Path(sys.argv[0]).name
 with open(os.environ['STUB_LOG'], 'a') as output:
     output.write(json.dumps([name, *sys.argv[1:]]) + '\\n')
@@ -531,6 +536,7 @@ elif name == 'az' and 'key1' in sys.argv:
                 stub.write_text("""#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
+from unittest.mock import patch
 args = sys.argv[1:]
 with open(os.environ['STUB_LOG'], 'a') as output:
     output.write(json.dumps(args) + '\\n')
@@ -599,6 +605,135 @@ elif 'key1' in args:
                     self.assertIn("gpt-5.4-mini", aoai_creates[1])
                 if missing:
                     self.assertIn("missing or cannot read deployment", result.stderr)
+
+
+class LiveProbeTests(unittest.TestCase):
+    def run_probe(self, env=None, invalid=None):
+        requests = []
+        marker = None
+
+        def response(req, **kwargs):
+            nonlocal marker
+            body = json.loads(req.data)
+            requests.append(body)
+            turn = len(requests)
+            if turn == 1:
+                marker = body["input"][0]["text"].split("containing exactly ")[1].split(",")[0]
+            name = "write" if turn == 1 else "read"
+            args = {"path": "daimon-aks-proof"}
+            if turn == 1:
+                args["content"] = marker
+            result = marker if turn == 2 else "written"
+            if turn == 2 and invalid == "unrelated":
+                name, args, result = "bash", {"command": "true"}, "file-does-not-exist"
+            if turn == 2 and invalid == "wrong-marker":
+                result = "daimon-aks-proof-stale"
+            call = "call-" + str(turn)
+            events = [
+                {"type": "model_request_started", "data": {"request_id": str(turn)}},
+                {"type": "tool_use", "data": {"call_id": call, "name": name, "input": args}},
+                {
+                    "type": "tool_result",
+                    "data": {"call_id": call, "output": result, "is_error": False},
+                },
+                {"type": "usage", "data": {"request_id": str(turn)}},
+                {"type": "turn_ended", "data": {"outcome": "completed"}},
+            ]
+            if turn == 2 and invalid == "wrong-call":
+                events[2]["data"]["call_id"] = "unrelated-call"
+            if turn == 1 and invalid == "wrong-write":
+                args["content"] = "wrong"
+            return io.BytesIO("".join("data: " + json.dumps(e) + "\n\n" for e in events).encode())
+
+        values = {"DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY": "offline-placeholder", **(env or {})}
+        with (
+            patch.dict(os.environ, values, clear=True),
+            patch("urllib.request.urlopen", side_effect=response) as network,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            try:
+                runpy.run_path(str(CHART / "scripts/live-c3.py"), run_name="__main__")
+            finally:
+                if env and ("sol" in str(env).lower() or env.get("SELFHOSTED_MODEL") == "other"):
+                    network.assert_not_called()
+        return requests
+
+    def test_probe_refuses_unconfigured_and_sol_models_before_network(self):
+        for env in (
+            {"SELFHOSTED_MODEL": "gpt-6.1-sol"},
+            {"SELFHOSTED_MODEL": "other"},
+            {"SELFHOSTED_MODEL": "custom-SOL", "AOAI_DEPLOYMENT": "custom-SOL"},
+        ):
+            with self.subTest(env=env), self.assertRaises(SystemExit):
+                self.run_probe(env)
+
+    def test_probe_uses_configured_deployment_and_exact_persisted_marker(self):
+        for env, model in (
+            ({}, "gpt-5.4-mini"),
+            ({"AOAI_DEPLOYMENT": "mini-deployment"}, "mini-deployment"),
+        ):
+            requests = self.run_probe(env)
+            self.assertEqual([r["model"] for r in requests], [model, model])
+            self.assertEqual(requests[0]["session_id"], requests[1]["session_id"])
+
+    def test_probe_rejects_unrelated_success_and_inexact_persistence(self):
+        for invalid in ("unrelated", "wrong-marker", "wrong-call", "wrong-write"):
+            with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+                self.run_probe(invalid=invalid)
+
+    def test_aks_defaults_selfhosted_model_to_aoai_deployment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kubectl = root / "kubectl"
+            kubectl.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$SELFHOSTED_MODEL" "$AOAI_DEPLOYMENT" > "$AKS_STATE/models"\n'
+            )
+            kubectl.chmod(0o755)
+            env = dict(
+                os.environ,
+                PATH=str(root) + os.pathsep + os.environ["PATH"],
+                AKS_STATE=directory,
+                AOAI_DEPLOYMENT="configured-mini",
+            )
+            env.pop("SELFHOSTED_MODEL", None)
+            env.update({key: "offline" for key in ("RG", "LOCATION", "ACR", "AKS", "AOAI", "TAG")})
+            subprocess.run(
+                ["bash", str(CHART / "scripts/aks.sh"), "probe"],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                (root / "models").read_text().splitlines(), ["configured-mini", "configured-mini"]
+            )
+
+    def test_aks_probe_refuses_before_kubectl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kubectl = root / "kubectl"
+            kubectl.write_text('#!/bin/sh\ntouch "$AKS_STATE/network-called"\nexit 90\n')
+            kubectl.chmod(0o755)
+            for model, deployment in (("other", "gpt-5.4-mini"), ("gpt-6.1-sol", "gpt-6.1-sol")):
+                env = dict(
+                    os.environ,
+                    PATH=str(root) + os.pathsep + os.environ["PATH"],
+                    AKS_STATE=directory,
+                    SELFHOSTED_MODEL=model,
+                    AOAI_DEPLOYMENT=deployment,
+                )
+                env.update(
+                    {key: "offline" for key in ("RG", "LOCATION", "ACR", "AKS", "AOAI", "TAG")}
+                )
+                result = subprocess.run(
+                    ["bash", str(CHART / "scripts/aks.sh"), "probe"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Sol models are refused", result.stderr)
+                self.assertFalse((root / "network-called").exists())
 
 
 if __name__ == "__main__":
