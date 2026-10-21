@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in range(1, 10):
+for number in [int(value) for value in sys.argv[2:]] or range(1, 11):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -122,6 +122,12 @@ for number in range(1, 10):
             "for pid in present_pids():",
             'for pid in range(2, int(Path("/proc/sys/kernel/ns_last_pid").read_text()) + 1):',
         )
+    elif number == 10:
+        change(
+            "checkpoints.py",
+            "            self.reservation_high_water(session_id),",
+            "            0,",
+        )
     else:
         change(
             "checkpoints.py",
@@ -163,5 +169,6 @@ for number in range(1, 10):
         6: "I5: poll ended a turn with live workers",
         8: "AssertionError: cleanup scanned the PID allocation range",
         9: "AssertionError: empty remote cursor fence rejected",
+        10: "host-seen sequence reused",
     }
     assert expected[number] in (root / f"mutation-{number}.log").read_text()

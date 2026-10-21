@@ -692,6 +692,7 @@ def create_app(
                 name
                 in {
                     "HARNESS_TOKEN",
+                    "HARNESS_CHECKPOINT_TOKEN",
                     "AZURE_OPENAI_API_KEY",
                     "OPENAI_API_KEY",
                     "AZURE_CLIENT_SECRET",

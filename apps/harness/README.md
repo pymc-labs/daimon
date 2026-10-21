@@ -820,3 +820,137 @@ use HTTPS or loopback HTTP when `X-Daimon-MCP-Authorization` is present. Generic
 `allow_insecure_http` consent cannot override C3.9a; non-loopback HTTP turns with
 MCP credentials are refused by the driver before any I/O. AKS uses HTTPS for
 both hops with the chart CA.
+
+## Kubernetes pod per conversation (F72)
+
+Set `harness.mode: perConversation` in the lane-14 Helm chart. The overlay in
+`deploy/helm/patches/per-conversation.patch` applies to PR #1273 head
+`ca82432b60fcb5e2587d770ac2f0da7e59df51d0`; the chart is deliberately not
+vendored into this branch. `shared` remains the existing multi-session deployment.
+The host uses the controller Service as its one `harness_url`, direct transport,
+`session_pool: false`, and its existing bearer credential. No driver change is
+required: C4.7 already supplies session context on actions and cancellation.
+
+The controller authenticates before creating a pod or accessing state. It forwards
+C3 bodies, cursor/replay queries and SSE/JSON status. Per-turn MCP credential
+forwarding is refused until the sandbox TLS hop exists (C3.9a/F76). Each sandbox runs the ordinary harness in `single` mode, with an emptyDir
+HOME, its own resource limits, RuntimeDefault seccomp, a tokenless dedicated
+ServiceAccount and no SYS_ADMIN capability or hidepid remount. Single mode uses
+the pod boundary for process/session separation; it retains the separate service
+and tool UIDs. Root startup still needs CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETUID
+and SETGID, then drops the service to UID 10000. The startup command protects the
+Kubernetes termination-log mount before credential-file validation.
+
+The default warm pool is one pod (configurable 0–2). A ready pod is bound using a
+resourceVersion-checked label patch, never rebound to another session. Cold pods
+use a deterministic name. One controller process holds the PVC flock; Deployment
+strategy Recreate prevents overlapping rollouts. Its serialized allocation/reap
+lock and Kubernetes create/patch preconditions prevent concurrent first calls
+from creating duplicate sandboxes. Every route rebuilds from namespaced pod
+labels rather than depending on an in-memory map. Session labels contain only
+the C3 sandbox hash. Last activity is persisted in annotations at request start
+and stream completion. A 10-second reconciliation loop deletes bound pods after
+900 seconds without activity, retaining active HTTP streams. Completed/failed
+pods are deleted so the next call can restore. Kubernetes deletion must complete
+before another process can use the same binding. Pods are not deployment-owned;
+they survive a controller restart and are found again through labels.
+
+### In-cluster durability decision
+
+Use one controller PVC, not one Azure Disk per conversation. The existing
+`Checkpoints` code is unchanged above `CheckpointStore`: SQLite snapshots,
+archive validation, WAL inventory merging, failed-paid-work barriers, reservation
+blocks and RECOVERY ORDER still enforce I1–I5. `ControllerStore` replaces Blob
+transport with authenticated internal HTTP. The controller stores opaque objects
+with a private temporary file, file fsync, atomic rename and directory fsync
+before acknowledging. Directory creation and deletion are also fsynced. A failed
+upload leaves the prior object intact. Disk errors propagate to the existing
+retryable durability barrier; workspace upload failures remain best effort.
+
+Each sandbox has a random checkpoint capability captured into service memory
+and scrubbed before tool execution. The controller recovers capabilities from
+its own labelled pod specifications and allows only the bound session's object
+prefix. The sandbox ServiceAccount cannot read the Kubernetes API. Neither the
+shared host bearer nor another pod's capability grants checkpoint access.
+NetworkPolicy permits sandbox ingress only from the controller. Sandbox egress
+allows DNS, explicit AOAI /32 addresses, Daimon MCP, and the controller checkpoint
+port (the required additional durability destination); IMDS has no allowance.
+The minimal mode uses k8s Secrets for AOAI, no Blob/Key Vault/workload identity.
+Managed identity requires the reviewed header-protected broker described in
+VM-VARIANT G1; a sandbox must never acquire tokens from IMDS.
+
+This avoids Azure Disk attachment growth with conversation count and keeps
+workspace/WAL in one recovery domain. The controller is a single writer and
+availability bottleneck; this is deliberately not an HA design. An unavailable
+controller/PVC fails WAL writes before paid work. PVC loss is data loss; operators
+must back up that PVC and set the appropriate StorageClass encryption/retention
+policy. Only last completed workspace checkpoints survive a hard sandbox loss;
+remote WAL and reservations preserve billing and sequence identities in between.
+No cluster-wide RBAC or per-session PVC provisioning is needed.
+
+### RBAC for acme IT
+
+The controller gets one Role in its own namespace, bound only to its dedicated
+ServiceAccount, for the core `pods` resource:
+
+| Verb | Reason |
+| --- | --- |
+| create | Start empty warm pods and deterministic cold session pods. |
+| delete | Reap idle/failed sandboxes using UID deletion preconditions. |
+| get | Permit inspection of an individual sandbox during operations. |
+| list | Rebuild routing/capability inventory and discover readiness after restart. |
+| watch | Permit namespaced pod lifecycle observation (currently uses bounded polling). |
+| patch | Atomically claim a warm pod and persist last-activity annotations. |
+
+There are no Secret, PVC, Service, exec, node or cluster-scoped permissions.
+Helm/operator credentials create the fixed Service, PVC, template ConfigMap and
+NetworkPolicy. Namespace isolation matters: pod create permission can reference
+Secrets and ServiceAccounts in that namespace. Install into a dedicated namespace
+containing only this release's intended credentials. The sandbox account has no
+RoleBinding and `automountServiceAccountToken: false`.
+
+Defaults for the small shared AKS node are controller 50m/128Mi requests,
+500m/384Mi limits; sandbox 100m/256Mi requests, 750m/768Mi limits, one warm pod.
+Heavy PyMC workloads need explicit larger limits and node capacity. OOM of one
+sandbox must not be interpreted as a completed turn: the next authenticated call
+restores its WAL inventory and reports interruption, while other sessions continue.
+
+Run the existing recovery generator and mutations against real filesystem writes:
+
+```sh
+HARNESS_RECOVERY_STORE=pvc uv run pytest apps/harness/tests/test_sequence_ratchet.py apps/harness/tests/test_checkpoints.py
+scratch=$(mktemp -d)
+HARNESS_RECOVERY_STORE=pvc uv run python apps/harness/tests/recovery_mutations.py "$scratch"
+```
+
+The fault injector's object mapping uses `PVCStore` for every write/read/list/delete;
+its remote forks copy durable objects, preserving the existing crash traces and
+host oracle. Controller API tests separately check capability scoping and atomic
+replacement. Kind's default kindnet does not enforce NetworkPolicy; use the AKS
+negative probes to establish enforcement.
+
+Mutation 10 deliberately ignores remote sequence reservations; the same property
+must fail with `host-seen sequence reused`. Individual mutations can be selected
+by appending their numbers after the scratch path (for example `7 8 9 10`).
+
+C3.9a requires HTTPS for Daimon MCP credentials. Set
+`harness.perConversation.mcpCASecret` to the chart-generated CA Secret name;
+only its `ca.crt` key is mounted read-only at `/etc/daimon/mcp-ca/ca.crt`.
+Sandboxes set `HARNESS_MCP_CA_BUNDLE` to that path. The volume is service-group
+readable (0440, group 10000) and unreadable by tool UIDs, so it also satisfies
+the external-mount credential guard. `HARNESS_DAIMON_MCP_URL` must use the
+HTTPS Service hostname covered by the certificate. The TLS MCP client support
+is supplied by PR #1276/C3.9a; this overlay does not duplicate that client.
+Bundled MCP mode refuses rendering without the CA Secret name.
+
+C3 HTTP is the explicit accepted risk F76: set
+`harness.perConversation.allowInsecureHTTP: true` (the default refuses startup).
+The controller also requires `HARNESS_CONTROLLER_ALLOW_INSECURE_HTTP=1` outside
+Helm. The host retains its existing `allow_insecure_http` consent. Sandbox
+NetworkPolicy admits port 8088 only from the same-release controller. The
+checkpoint capability and contents also cross this private HTTP boundary;
+F76 TLS should cover the controller checkpoint endpoint as well as C3.
+Per-turn MCP credentials in C3 headers are refused with 503 until sandbox TLS
+is implemented or the lead explicitly resolves that carrier's contract. The
+sandbox-to-MCP connection itself requires verified HTTPS. This is an integration
+gate for the host-minted `daimon-mcp` token path, not a plaintext fallback.

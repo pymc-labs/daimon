@@ -1735,3 +1735,8 @@ No additional credentials are required. Optional `DOCKERHUB_USERNAME` and
 `DOCKERHUB_TOKEN` must be set together; only Docker Hub imports receive them,
 and diagnostics redact them. They are never stored in Helm values. The README
 documents the repair command and optional repository, budget and delay settings.
+
+The self-host branch also provides an opt-in Kubernetes harness controller that
+routes each conversation to its own pod. The deployment overlay, resource
+defaults, namespaced RBAC and PVC checkpoint requirements are documented in
+`apps/harness/README.md` under “Kubernetes pod per conversation”.
