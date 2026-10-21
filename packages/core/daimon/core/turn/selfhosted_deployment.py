@@ -303,6 +303,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         )
         from daimon.core.channel_skills import platform_skill_refs
         from daimon.core.stores.channel_skills import list_channel_skills
+        from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
         from daimon.core.turn.selfhosted_tools import (
             build_turn_tools,
             load_turn_skill_bundles,
@@ -342,7 +343,16 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             and (row.owner_agent_name is None or row.owner_agent_name in names)
         )
         bundles = await load_turn_skill_bundles(
-            request.deps.defaults_root / "skills", refs, scope=scope
+            request.deps.defaults_root / "skills",
+            refs,
+            scope=scope,
+            catalog=PostgresNeutralCatalog(
+                request.deps.sessionmaker, provider="selfhosted", account_scope_id=scope.tenant_id
+            ),
+            platform=request.platform,
+            channel_id=revision.channel.channel_id,
+            agent_names=names,
+            channel_skills=channel_rows,
         )
         prepared_tools = await asyncio.to_thread(
             build_turn_tools,

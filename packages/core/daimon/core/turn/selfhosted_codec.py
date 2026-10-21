@@ -68,6 +68,12 @@ def _action_input(action: RequiredAction) -> dict[str, JsonValue]:
     return {"value": value}
 
 
+def confirmation_display_id(action: RequiredAction) -> str:
+    if not action.call_id:
+        raise UnsupportedCapability(("host_confirmation_call_identity",), PROFILE)
+    return tool_display_id(action.call_id)
+
+
 def display_event(event: Event, *, session_id: str) -> DisplayEvent | None:
     """Decode authoritative root display work without inspecting SDK/native JSON.
 
@@ -178,7 +184,7 @@ def display_event(event: Event, *, session_id: str) -> DisplayEvent | None:
                 "processed_at": timestamp,
                 "stop_reason": {
                     "type": "requires_action",
-                    "event_ids": [tool_display_id(action.id) for action in payload.actions],
+                    "event_ids": [confirmation_display_id(action) for action in payload.actions],
                 },
             }
         )
@@ -213,7 +219,7 @@ def display_batch(event: Event, *, session_id: str) -> tuple[DisplayEvent, ...]:
         requests.append(
             event_class.model_validate(
                 {
-                    "id": tool_display_id(action.id),
+                    "id": confirmation_display_id(action),
                     "type": "agent.mcp_tool_use" if separator else "agent.tool_use",
                     **({"mcp_server_name": server} if separator else {}),
                     "processed_at": event.occurred_at or event.observed_at,

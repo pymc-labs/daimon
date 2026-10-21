@@ -26,12 +26,13 @@ from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
 from daimon.core.turn.persistence import UncertainSend
-from daimon.core.turn.selfhosted_codec import PROFILE, PROFILES, display_batch
+from daimon.core.turn.selfhosted_codec import PROFILE, PROFILES, DisplayEvent, display_batch
 from daimon.core.turn.selfhosted_state import journal_source
 from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation
 from mux.contracts.events import (
     Event,
     ImagePart,
+    RequiresActionPayload,
     StatusRunningPayload,
     TextPart,
     TurnEndedPayload,
@@ -233,6 +234,7 @@ class SelfHostedTurnIO:
         self._prior_roots: set[str] | None = None
         self._history_cursor = history_cursor
         self._explicit_ask = explicit_ask
+        self._action_ids: dict[str, str] = {}
         self._after = 0
         self._input_started = root_turn_id is not None
         self._buffered: list[Event] = []
@@ -306,6 +308,30 @@ class SelfHostedTurnIO:
             if event.turn_id not in (self._prior_roots or ()):
                 self._root = event.turn_id
 
+    def _display(self, event: Event) -> tuple[DisplayEvent, ...]:
+        payload = event.typed_payload()
+        if isinstance(payload, RequiresActionPayload):
+            for action in payload.actions:
+                if action.call_id:
+                    self._action_ids[action.call_id] = action.id
+        result: list[DisplayEvent] = []
+        for display in display_batch(event, session_id=self._session.id):
+            if self._explicit_ask is not None and isinstance(
+                display, BetaManagedAgentsAgentToolUseEvent | BetaManagedAgentsAgentMCPToolUseEvent
+            ):
+                qualified = (
+                    display.mcp_server_name + "/" + display.name
+                    if display.type == "agent.mcp_tool_use"
+                    else display.name
+                )
+                display = display.model_copy(
+                    update={
+                        "evaluated_permission": "ask" if self._explicit_ask(qualified) else "allow"
+                    }
+                )
+            result.append(display)
+        return tuple(result)
+
     def _frames(self, event: Event) -> list[TurnEvent]:
         if event.thread_id is not None or (
             event.turn_id != self._root and event.type != "session.status_terminated"
@@ -322,20 +348,7 @@ class SelfHostedTurnIO:
         frames: list[TurnEvent] = []
         if event.type == "session.status_terminated":
             self._terminated = True
-        for display in display_batch(event, session_id=self._session.id):
-            if self._explicit_ask is not None and isinstance(
-                display, BetaManagedAgentsAgentToolUseEvent | BetaManagedAgentsAgentMCPToolUseEvent
-            ):
-                qualified = (
-                    display.mcp_server_name + "/" + display.name
-                    if display.type == "agent.mcp_tool_use"
-                    else display.name
-                )
-                display = display.model_copy(
-                    update={
-                        "evaluated_permission": "ask" if self._explicit_ask(qualified) else "allow"
-                    }
-                )
+        for display in self._display(event):
             encoded = display.model_dump_json(exclude={"processed_at"})
             if self._displayed.get(display.id) != encoded:
                 self._displayed[display.id] = encoded
@@ -380,6 +393,26 @@ class SelfHostedTurnIO:
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         inputs = _inputs(events)
+        if any(
+            isinstance(item, UserToolConfirmation) and item.action_id not in self._action_ids
+            for item in inputs
+        ):
+            async with asyncio.timeout(REPLAY_TIMEOUT_S):
+                snapshot = await _edge(self._backend.events.reconcile(self._scope, self._session))
+                if snapshot.session != self._session:
+                    raise ScopeViolation(self._session.id, "foreign SelfHosted confirmation")
+                for action in snapshot.required_actions:
+                    if action.call_id:
+                        self._action_ids[action.call_id] = action.id
+        resolved: list[InputEvent] = []
+        for item in inputs:
+            if isinstance(item, UserToolConfirmation):
+                action_id = self._action_ids.get(item.action_id)
+                if action_id is None:
+                    raise UnsupportedCapability(("host_origin_confirmation_identity",), PROFILE)
+                item = item.model_copy(update={"action_id": action_id})
+            resolved.append(item)
+        inputs = tuple(resolved)
         if len(inputs) > 1:
             if any(isinstance(item, UserMessage) for item in inputs):
                 raise UnsupportedCapability(("host_turn_input_batch",), PROFILE)
@@ -540,7 +573,7 @@ class SelfHostedTurnIO:
                             "upstream", retryable=False, native_code="conflicting_root_outcome"
                         )
                     self._terminal = payload.outcome
-                result.extend(display_batch(value, session_id=self._session.id))
+                result.extend(self._display(value))
             return result
 
     async def replay_usage(self, *, timeout_s: float = 8.0) -> tuple[UsageObservation, ...]:
