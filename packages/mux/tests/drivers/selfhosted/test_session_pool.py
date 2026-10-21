@@ -200,5 +200,7 @@ async def test_empty_session_is_refused_before_token_or_http(session_id, mode):
             )
         )
         with pytest.raises(ValueError, match="session id"):
-            await transport.request("GET", "/v0/sessions/s/events", session_id=session_id)
+            await transport.request(
+                "GET", "/v0/sessions/s/events", session_id=session_id, after_seq=0
+            )
     assert calls == []
