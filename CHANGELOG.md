@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
+
 - Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance for locally provisioned skill versions attached to shared agents.
 - Reject self-hosted session-pool credentials without pool routing and empty
   transport session IDs; document matching Entra authentication in the harness.

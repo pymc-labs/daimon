@@ -273,3 +273,42 @@ def test_entra_binding_checks_origin_audience_and_tenant_before_minting(
         validate_harness_auth(
             HarnessConfig(harness_url=url, auth_mode="entra", auth_ref=audience), settings, tenant
         )
+
+
+def test_pool_binding_loads_from_settings_but_environment_requires_pool_routing(monkeypatch):
+    from daimon.core.config import load_selfhosted_settings
+    from daimon.core.turn.selfhosted_deployment import validate_harness_auth
+    from mux.drivers.selfhosted.config import HarnessConfig
+
+    monkeypatch.setenv(
+        "DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS",
+        json.dumps(
+            [
+                {
+                    "auth_mode": "entra",
+                    "name": "https://dynamicsessions.io",
+                    "origin": "https://pool.example",
+                    "tenants": [str(SCOPE.tenant_id)],
+                }
+            ]
+        ),
+    )
+    settings = load_selfhosted_settings(_env_file=None)
+    pool = dict(
+        harness_url="https://pool.example",
+        auth_mode="entra",
+        auth_ref="https://dynamicsessions.io",
+    )
+    validate_harness_auth(
+        HarnessConfig.model_validate(pool | {"session_pool": True}), settings, SCOPE.tenant_id
+    )
+    with pytest.raises(ValidationError, match="requires session_pool=true"):
+        HarnessConfig.model_validate(pool | {"session_pool": False})
+    with pytest.raises(AdmissionDenied):
+        validate_harness_auth(
+            HarnessConfig.model_validate(
+                pool | {"session_pool": True, "harness_url": "https://other.example"}
+            ),
+            settings,
+            SCOPE.tenant_id,
+        )

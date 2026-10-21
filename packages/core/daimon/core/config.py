@@ -1242,9 +1242,17 @@ class HarnessAuthBinding(McpCredentialBinding):
 
     @model_validator(mode="after")
     def valid_reference(self) -> HarnessAuthBinding:
-        from mux.drivers.selfhosted.config import HarnessConfig
+        from mux.drivers.selfhosted.config import SESSION_POOL_AUDIENCE, HarnessConfig
 
-        HarnessConfig(harness_url=self.origin, auth_mode=self.auth_mode, auth_ref=self.name)
+        # A binding authorizes an audience/origin, not an environment's routing.
+        # Validate the fixed pool audience in its required routing mode here;
+        # the actual environment must still explicitly opt into session_pool.
+        HarnessConfig(
+            harness_url=self.origin,
+            auth_mode=self.auth_mode,
+            auth_ref=self.name,
+            session_pool=self.auth_mode == "entra" and self.name == SESSION_POOL_AUDIENCE,
+        )
         if self.auth_mode == "bearer_env" and not self.name.startswith(
             "DAIMON_SELFHOSTED__HARNESS_TOKEN_"
         ):
