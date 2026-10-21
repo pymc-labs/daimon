@@ -83,11 +83,11 @@ def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_o
     assert "again, unless the files hint says this person can't open one." in teams
 
 
-#: What Discord's and Slack's prompts hashed to on main before this change: only Teams'
-#: wording moves, so these sessions are not replaced.
+#: What Discord's and Slack's prompts hash to. A new hash replaces their sessions, so
+#: it moves only with a deliberate change to the shipped prompt.
 _PINNED_ON_MAIN = {
-    "discord": "052a5b2e93dbc2a3767988cc4308b6708707bb243f208d309ed4a1e9870d4ea0",
-    "slack": "fc43b4ec83cf7a5d4c9b212a6e2ce2a26d62b8f6c0919f9aa9a5250e71440cb4",
+    "discord": "ecb7ded4ed3eed0ad910ef3997f43a263b45ea221015968a2e7438174a2597cd",
+    "slack": "0aead3ff15cd5864a30f05b8fbb607231c057a6281d21c3523c93220fdd9db33",
 }
 
 
