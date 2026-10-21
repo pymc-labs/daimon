@@ -5,13 +5,16 @@ from __future__ import annotations
 from typing import Literal
 
 import pytest
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock
 from daimon.core.turn.status_lines import (
     DRAFT_LOG_LINES,
+    MAX_PLAN_LINES,
     draft_log,
     format_draft,
     format_duration,
     format_headline,
+    format_plan_lines,
     format_summary,
     format_tool_lines,
     has_running_tool,
@@ -37,6 +40,27 @@ def _call(
         input=input or {},
         mcp_server_name=server,
         status=status,
+    )
+
+
+def _plan(
+    steps: list[tuple[str, str]],
+    *,
+    status: Literal["pending", "complete", "failed"] = "pending",
+    via_search: bool = False,
+) -> ToolUseBlock:
+    arguments: dict[str, object] = {
+        "steps": [{"step": step, "status": state} for step, state in steps]
+    }
+    return ToolUseBlock(
+        kind="tool_use",
+        id=f"tu_plan_{len(steps)}_{status}",
+        type="agent.mcp_tool_use",
+        name="call_tool" if via_search else "update_plan",
+        input={"name": "update_plan", "arguments": arguments} if via_search else arguments,
+        mcp_server_name=DAIMON_SERVER_NAME,
+        status=status,
+        is_error=status == "failed",
     )
 
 
@@ -75,7 +99,7 @@ def test_format_draft_flattens_whitespace_and_clips() -> None:
         "one line, so a single quote marker covers the draft"
     )
     clipped = format_draft("x" * 400)
-    assert len(clipped) == 301 and clipped.endswith("…"), "clipped to 300 chars plus an ellipsis"
+    assert len(clipped) == 121 and clipped.endswith("…"), "clipped to 120 chars plus an ellipsis"
 
 
 def test_has_running_tool_only_when_a_call_is_pending() -> None:
@@ -126,6 +150,25 @@ def test_tool_lines_never_show_arguments() -> None:
     shown = "".join(lines)
     assert "mcp-secret" not in shown, "an MCP call's arguments must never reach the card"
     assert "custom-secret" not in shown, "a custom call's arguments must never reach the card"
+
+
+def test_only_allowlisted_built_in_fields_reach_the_card() -> None:
+    """Details are an allowlist: bash, other built-in fields and same-named tools stay hidden."""
+    lines = format_tool_lines(
+        [
+            _call("bash", input={"command": "curl -H 'Authorization: bash-secret'"}),
+            _call("grep", input={"pattern": "grep-secret"}),
+            _call("web_fetch", input={"url": "https://x.example.com/?key=url-secret"}),
+            _call("write", input={"file_path": "/a/b.txt", "content": "write-secret"}),
+            _call("web_search", type="agent.mcp_tool_use", server="s", input={"query": "s-secret"}),
+            _call("read", type="agent.custom_tool_use", input={"file_path": "/custom-secret"}),
+        ]
+    )
+    shown = "".join(lines)
+    for secret in ("bash-secret", "grep-secret", "url-secret", "write-secret"):
+        assert secret not in shown, f"{secret} must never reach the card"
+    for secret in ("s-secret", "custom-secret"):
+        assert secret not in shown, f"a non-built-in tool named like one leaks nothing: {secret}"
 
 
 def test_finished_tool_lines_follow_the_order_calls_finished() -> None:
@@ -310,45 +353,121 @@ def test_optional_backend_context_does_not_shift_existing_positional_fields() ->
     assert signature.parameters["id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
 
 
-@pytest.mark.usefixtures("status_log_on")
 def test_the_draft_log_keeps_the_last_three_lines_oldest_first() -> None:
     earlier: tuple[str, ...] = ()
     latest: str | None = None
     for line in ("one", "two", "three", "four", "five"):
         earlier, latest = roll_draft(earlier, latest, line)
-    assert DRAFT_LOG_LINES == 3
-    assert draft_log(earlier, latest) == ("three", "four", "five")
+    assert DRAFT_LOG_LINES == 3, "three lines share the card"
+    assert draft_log(earlier, latest) == ("three", "four", "five"), "the newest three, oldest first"
 
 
-@pytest.mark.usefixtures("status_log_on")
 def test_the_draft_log_grows_from_nothing_to_one_to_three_lines() -> None:
-    assert draft_log((), None) == ()
+    assert draft_log((), None) == (), "no message yet, no draft"
     earlier, latest = roll_draft((), None, "one")
-    assert draft_log(earlier, latest) == ("one",)
+    assert draft_log(earlier, latest) == ("one",), "the first message is the only line"
     earlier, latest = roll_draft(earlier, latest, "two")
     earlier, latest = roll_draft(earlier, latest, "three")
-    assert draft_log(earlier, latest) == ("one", "two", "three")
+    assert draft_log(earlier, latest) == ("one", "two", "three"), "lines add up to three"
 
 
-@pytest.mark.usefixtures("status_log_on")
 def test_the_draft_log_does_not_repeat_the_latest_line() -> None:
     earlier, latest = roll_draft((), None, "one")
-    assert roll_draft(earlier, latest, "one") == ((), "one")
-
-
-def test_with_the_switch_off_the_draft_keeps_only_the_latest_line() -> None:
-    earlier: tuple[str, ...] = ()
-    latest: str | None = None
-    for line in ("one", "two", "three"):
-        earlier, latest = roll_draft(earlier, latest, line)
-    assert draft_log(earlier, latest) == ("three",)
+    assert roll_draft(earlier, latest, "one") == ((), "one"), "a repeated line is shown once"
 
 
 @pytest.mark.usefixtures("status_log_on")
-def test_with_the_log_on_each_entry_is_cut_to_120_characters() -> None:
-    assert format_draft("x" * 121) == "x" * 120 + "…"
-    assert format_draft("x" * 120) == "x" * 120
+def test_the_draft_log_is_the_same_whether_answers_keep_messages_apart() -> None:
+    """`turn.status_log` now only shapes the answer; the card logs either way."""
+    earlier, latest = roll_draft((), None, "one")
+    earlier, latest = roll_draft(earlier, latest, "two")
+    assert draft_log(earlier, latest) == ("one", "two"), "the log does not depend on the switch"
+    assert format_draft("x" * 121) == "x" * 120 + "…", "nor does the line length"
 
 
-def test_by_default_a_draft_is_cut_to_300_characters() -> None:
-    assert format_draft("x" * 301) == "x" * 300 + "…"
+def test_built_in_tools_show_one_allowlisted_detail() -> None:
+    """A search shows its query, a fetch its host, a file tool its base name."""
+    lines = format_tool_lines(
+        [
+            _call("web_search", "complete", input={"query": "pymc  marketing\nmix"}),
+            _call(
+                "web_fetch",
+                "complete",
+                input={"url": "https://user:pw@Docs.Example.com:8443/a/b?token=t#x"},
+            ),
+            _call("read", "complete", input={"file_path": "/workspace/repo/src/model.py"}),
+            _call("edit", input={"path": "C:\\work\\notes.txt"}),
+        ]
+    )
+    assert lines == (
+        "✔️ Searched the web: pymc marketing mix",
+        "✔️ Fetched a web page: docs.example.com",
+        "✔️ Read a file: model.py",
+        "🖋️ Editing a file: notes.txt",
+    ), "each built-in shows its one field, on one line"
+
+
+def test_a_long_detail_is_clipped_and_a_bad_one_dropped() -> None:
+    lines = format_tool_lines(
+        [
+            _call("web_search", input={"query": "q" * 80}),
+            _call("web_fetch", input={"url": "not a url"}),
+            _call("write", input={"file_path": 42}),
+            _call("read", input={"file_path": "/"}),
+        ]
+    )
+    assert lines[0] == f"🔍 Searching the web: {'q' * 40}…", "a long query is clipped"
+    assert lines[1:] == ("🔍 Fetching a web page", "🖋️ Writing a file", "🔍 Reading a file"), (
+        "an input that is not a usable value leaves the plain label"
+    )
+
+
+def test_tool_details_never_carry_backticks_or_line_breaks() -> None:
+    lines = format_tool_lines([_call("web_search", input={"query": "`rm -rf`\r\n@everyone\u200b"})])
+    assert "`" not in lines[0] and "\n" not in lines[0] and "\r" not in lines[0], (
+        "a detail must stay inside the adapter's inline code"
+    )
+
+
+def test_plan_lines_draw_the_latest_plan_as_a_checklist() -> None:
+    content: list[ContentBlock] = [
+        _plan([("Load data", "in_progress"), ("Fit model", "pending")]),
+        _plan(
+            [("Load data", "completed"), ("Fit model", "in_progress"), ("Report", "pending")],
+            status="complete",
+            via_search=True,
+        ),
+    ]
+    assert format_plan_lines(content) == ("✔️ Load data", "▶️ Fit model", "▫️ Report"), (
+        "the newest update wins, also when called through the MCP search interface"
+    )
+
+
+def test_a_long_plan_folds_finished_steps_then_cuts_the_tail() -> None:
+    steps: list[tuple[str, str]] = [(f"step {i}", "completed") for i in range(4)]
+    steps += [("now", "in_progress")] + [(f"later {i}", "pending") for i in range(5)]
+    lines = format_plan_lines([_plan(steps)])
+    assert len(lines) == MAX_PLAN_LINES, "the plan stays within its line budget"
+    assert lines[0] == "✔️ 4 done", "finished steps at the top fold into one line"
+    assert lines[1] == "▶️ now", "the step in progress stays in view"
+    assert lines[-1] == "+2 more", "what does not fit is counted"
+
+
+def test_plan_lines_skip_failed_calls_and_malformed_steps() -> None:
+    content: list[ContentBlock] = [
+        _plan([("Good", "pending"), ("Odd", "maybe"), ("", "pending")]),
+        _plan([("Rejected", "pending")], status="failed"),
+    ]
+    assert format_plan_lines(content) == ("▫️ Good",), (
+        "a failed update is ignored and a malformed step left out"
+    )
+
+
+def test_a_plan_update_leaves_the_tool_lines_only_when_the_plan_is_shown() -> None:
+    content: list[ContentBlock] = [_plan([("Load", "in_progress")]), _call("bash")]
+    assert format_tool_lines(content, plan_shown=True) == ("🖋️ Running a command",), (
+        "the plan is drawn as the checklist, not as a tool line"
+    )
+    assert format_tool_lines(content) == ("🖋️ Update plan (daimon-mcp)", "🖋️ Running a command"), (
+        "with progress plans off the call is an ordinary tool line"
+    )

@@ -1,9 +1,15 @@
 """Words for the in-progress turn card, shared by the chat adapters.
 
-Discord and Slack both draw a headline, a code block of tool lines and
-the last few draft lines from the same `TurnState`; this module owns the words so the
-two cards cannot drift, and each adapter adds only its own markup. A tool
-line names the tool and never shows its arguments.
+Discord, Slack and Teams all draw a headline, the progress plan, a block of
+tool lines and the last few draft lines from the same `TurnState`; this module
+owns the words so the cards cannot drift, and each adapter adds only its own
+markup.
+
+A tool line names the tool. Its arguments stay off the card, because they can
+hold anything a model or a person typed, keys included. The one exception is
+a short allowlist of the sandbox's own built-in tools, each showing one field
+that says where it looked and cannot carry a secret on its own: the search
+query, the web page's host name, the file's base name (`_DETAILS`).
 """
 
 from __future__ import annotations
@@ -11,18 +17,23 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Literal, cast
+from urllib.parse import urlsplit
 
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.state import ContentBlock, ToolUseBlock
-from daimon.core.turn.status_log import status_log_enabled
+from daimon.core.turn.state import ContentBlock, ToolUseBlock, daimon_tool_input
 from mux.profiles import get_profile
 
 MAX_TOOL_LINES = 6
-DRAFT_MAX_CHARS = 300
 DRAFT_LOG_LINES = 3
-# Each entry of the draft log, when `turn.status_log` is on: three of them share the card.
-DRAFT_LOG_ENTRY_MAX_CHARS = 120
+# Three draft lines share the card, so each is cut short.
+DRAFT_LINE_MAX_CHARS = 120
+MAX_PLAN_LINES = 6
+PLAN_TOOL = "update_plan"
 _LABEL_MAX_CHARS = 48
+_DETAIL_MAX_CHARS = 40
+_PLAN_STEP_MAX_CHARS = 60
 # Em spaces: chat clients collapse runs of plain spaces but keep these.
 SUMMARY_GAP = "\u2003\u2003"
 
@@ -31,6 +42,13 @@ _FAILED_ICON = "🚫"
 _WRITE_ICON = "🖋️"
 _LIST_ICON = "📜"
 _LOOKUP_ICON = "🔍"
+
+PlanStatus = Literal["pending", "in_progress", "completed"]
+_PLAN_ICONS: Mapping[PlanStatus, str] = {
+    "completed": _DONE_ICON,
+    "in_progress": "▶️",
+    "pending": "▫️",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +81,39 @@ _VERB_ICONS: Mapping[str, str] = {
     "view": _LOOKUP_ICON,
 }
 _WORD_BREAK = re.compile(r"[\s_.-]+|(?<=[a-z0-9])(?=[A-Z])")
+_HOST_NAME = re.compile(r"[a-z0-9.-]{1,253}")
+
+
+def _query_detail(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _host_detail(value: object) -> str | None:
+    """The host alone: a URL's path, query and user info can carry a token."""
+    if not isinstance(value, str):
+        return None
+    try:
+        host = urlsplit(value.strip()).hostname
+    except ValueError:
+        return None
+    return host if host is not None and _HOST_NAME.fullmatch(host) else None
+
+
+def _base_name_detail(value: object) -> str | None:
+    """The base name alone: the directories above it say nothing the person needs."""
+    if not isinstance(value, str):
+        return None
+    return PurePosixPath(value.replace("\\", "/")).name or None
+
+
+# Built-in tools whose line may show one field of their input, and how to read it.
+_DETAILS: Mapping[str, tuple[tuple[str, ...], Callable[[object], str | None]]] = {
+    "web_search": (("query",), _query_detail),
+    "web_fetch": (("url",), _host_detail),
+    "read": (("file_path", "path"), _base_name_detail),
+    "write": (("file_path", "path"), _base_name_detail),
+    "edit": (("file_path", "path"), _base_name_detail),
+}
 
 
 def format_duration(seconds: float) -> str:
@@ -116,14 +167,8 @@ def format_headline(
 
 
 def format_draft(text: str) -> str:
-    """The draft on one line, clipped, so a single quote marker covers all of it.
-
-    Clipped to ``DRAFT_MAX_CHARS``, or to ``DRAFT_LOG_ENTRY_MAX_CHARS`` when
-    `turn.status_log` is on and the card shows several lines.
-    """
-    limit = DRAFT_LOG_ENTRY_MAX_CHARS if status_log_enabled() else DRAFT_MAX_CHARS
-    flat = " ".join(text.split())
-    return flat[:limit] + "…" if len(flat) > limit else flat
+    """The draft on one line, cut at ``DRAFT_LINE_MAX_CHARS``, so one quote marker covers it."""
+    return _one_line(text, DRAFT_LINE_MAX_CHARS)
 
 
 def roll_draft(earlier: Sequence[str], latest: str | None, new: str) -> tuple[tuple[str, ...], str]:
@@ -131,10 +176,7 @@ def roll_draft(earlier: Sequence[str], latest: str | None, new: str) -> tuple[tu
 
     The log keeps the last ``DRAFT_LOG_LINES`` lines, so at most that many
     including ``new``; a line equal to the latest one is not added twice.
-    With `turn.status_log` off, only the latest line is kept.
     """
-    if not status_log_enabled():
-        return (), new
     if new == latest:
         return tuple(earlier), new
     lines = (*earlier, latest) if latest else tuple(earlier)
@@ -152,16 +194,21 @@ def has_running_tool(content: Sequence[ContentBlock]) -> bool:
 
 
 def format_tool_lines(
-    content: Sequence[ContentBlock], *, finished_ids: Sequence[str] = ()
+    content: Sequence[ContentBlock], *, finished_ids: Sequence[str] = (), plan_shown: bool = False
 ) -> tuple[str, ...]:
     """Finished calls, then running ones, within MAX_TOOL_LINES; running ones win.
 
     Finished calls read in the order they finished, per ``finished_ids``; any
     it does not list come first, in call order. Older calls fold into one
     ``+N earlier`` line on top. Lines carry no backtick, so an adapter can
-    fence them in a code block as they are.
+    fence them in a code block as they are. With ``plan_shown``, plan updates
+    are drawn as the plan (`format_plan_lines`), so they get no line here.
     """
-    calls = [block for block in content if isinstance(block, ToolUseBlock)]
+    calls = [
+        block
+        for block in content
+        if isinstance(block, ToolUseBlock) and not (plan_shown and _is_plan_call(block))
+    ]
     running = [call for call in calls if call.status == "pending"][-MAX_TOOL_LINES:]
     budget = MAX_TOOL_LINES - len(running)
     finish_order = {tool_id: i for i, tool_id in enumerate(finished_ids)}
@@ -182,6 +229,8 @@ def _tool_line(call: ToolUseBlock) -> str:
     if narration is not None:
         icon = narration.icon
         label = narration.finished if is_finished else narration.running
+        if (detail := _built_in_detail(call)) is not None:
+            label = f"{label}: {detail}"
     else:
         icon, label = _humanize(call.name)
         label = _clip(label)
@@ -206,3 +255,77 @@ def _humanize(name: str) -> tuple[str, str]:
 
 def _clip(text: str) -> str:
     return text if len(text) <= _LABEL_MAX_CHARS else text[: _LABEL_MAX_CHARS - 1] + "…"
+
+
+def _one_line(text: str, limit: int) -> str:
+    """Printable characters on one line, cut at ``limit`` with an ellipsis."""
+    flat = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    return flat[:limit] + "…" if len(flat) > limit else flat
+
+
+def _built_in_detail(call: ToolUseBlock) -> str | None:
+    """The one allowlisted field of a built-in call, on one short line, or None."""
+    entry = _DETAILS.get(call.name)
+    if entry is None:
+        return None
+    keys, read = entry
+    value = next((call.input[key] for key in keys if key in call.input), None)
+    detail = read(value)
+    if detail is None:
+        return None
+    return _one_line(detail, _DETAIL_MAX_CHARS) or None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanStep:
+    step: str
+    status: PlanStatus
+
+
+def _is_plan_call(block: ToolUseBlock) -> bool:
+    return daimon_tool_input(block, PLAN_TOOL) is not None
+
+
+def plan_steps(content: Sequence[ContentBlock]) -> tuple[PlanStep, ...]:
+    """The steps of the turn's latest plan update; a malformed step is left out."""
+    for block in reversed(content):
+        if not isinstance(block, ToolUseBlock):
+            continue
+        arguments = daimon_tool_input(block, PLAN_TOOL)
+        if arguments is None:
+            continue
+        raw: object = arguments.get("steps")
+        if not isinstance(raw, list):
+            return ()
+        steps: list[PlanStep] = []
+        for item in raw:  # pyright: ignore[reportUnknownVariableType]  # model-written JSON
+            if not isinstance(item, dict):
+                continue
+            entry = cast("dict[str, object]", item)
+            text, status = entry.get("step"), entry.get("status")
+            if isinstance(text, str) and text.strip() and status in _PLAN_ICONS:
+                steps.append(PlanStep(text, cast("PlanStatus", status)))
+        return tuple(steps)
+    return ()
+
+
+def format_plan_lines(content: Sequence[ContentBlock]) -> tuple[str, ...]:
+    """The latest plan as a checklist within MAX_PLAN_LINES, oldest step first.
+
+    Finished steps at the top fold into one ``N done`` line first, so the step
+    in progress stays in view; a plan still too long ends in ``+N more``. Lines
+    carry no backtick, like the tool lines.
+    """
+    steps = list(plan_steps(content))
+    folded = 0
+    while len(steps) + (1 if folded else 0) > MAX_PLAN_LINES and steps[0].status == "completed":
+        steps.pop(0)
+        folded += 1
+    lines = [f"{_DONE_ICON} {folded} done"] if folded else []
+    lines += [
+        f"{_PLAN_ICONS[step.status]} {_one_line(step.step, _PLAN_STEP_MAX_CHARS)}" for step in steps
+    ]
+    if len(lines) > MAX_PLAN_LINES:
+        hidden = len(lines) - (MAX_PLAN_LINES - 1)
+        lines = [*lines[: MAX_PLAN_LINES - 1], f"+{hidden} more"]
+    return tuple(line.replace("`", "'") for line in lines)

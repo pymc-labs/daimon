@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
@@ -512,6 +513,27 @@ class HubSettings(BaseModel):
     @property
     def discord_configured(self) -> bool:
         return self.discord_client_id is not None and self.discord_client_secret is not None
+
+
+class ProgressPlansSettings(BaseModel):
+    """Progress plans: the agent keeps a short plan the working card draws.
+
+    `mode` is the deployment tier of the same cascade thread participation
+    uses (deployment, workspace, channel, thread); the agent's
+    `set_progress_plans` tool writes the other tiers when a person asks.
+    """
+
+    mode: CascadeMode = Field(
+        default=CascadeMode.OFF,
+        description=(
+            'Deployment default for progress plans on the "Working on it…" card (Discord, '
+            "Slack and Teams). On, the agent keeps a short checklist of a longer task's "
+            "steps on the card and may add one-line updates on what it found and does "
+            "next. off: shown only where a workspace, channel or thread is turned on. "
+            "disabled: never shown, and cannot be turned on. on: shown everywhere unless "
+            "turned off below."
+        ),
+    )
 
 
 class ThreadParticipationSettings(BaseModel):
@@ -1702,13 +1724,12 @@ class TurnSettings(BaseModel):
     status_log: bool = Field(
         default=False,
         description=(
-            'Show an agent\'s recent short updates on the "Working on it…" card. Off by '
-            "default: the card shows only the latest line the agent wrote, and consecutive "
-            "messages from the agent are joined into one block of text. On (Discord, Slack "
-            "and Teams): the card shows the last three messages the agent wrote, oldest "
-            "first, one line each (cut at 120 characters), and an answer made of several "
-            "messages keeps every one, set apart by a blank line instead of being run "
-            "together."
+            "Keep each message the agent writes apart in its answer. Off by default: "
+            "consecutive messages from the agent are joined into one block of text. On: an "
+            "answer made of several messages keeps every one, set apart by a blank line "
+            'instead of being run together. Either way the "Working on it…" card shows the '
+            "last three messages the agent wrote, oldest first, one line each (cut at 120 "
+            "characters)."
         ),
     )
 
@@ -2112,6 +2133,10 @@ class Settings(BaseSettings):
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,
         description="Replying in threads unprompted. See ThreadParticipationSettings.",
+    )
+    progress_plans: ProgressPlansSettings = Field(
+        default_factory=ProgressPlansSettings,
+        description="The agent's plan on the working card. See ProgressPlansSettings.",
     )
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None

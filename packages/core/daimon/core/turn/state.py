@@ -79,7 +79,14 @@ def daimon_tool_arguments(block: ToolUseBlock, tool: str) -> Mapping[str, object
     interface (`call_tool(name=tool, arguments={...})`), which is how a large
     daimon catalog is reached.
     """
-    if block.mcp_server_name != DAIMON_SERVER_NAME or block.status != "complete" or block.is_error:
+    if block.status != "complete" or block.is_error:
+        return None
+    return daimon_tool_input(block, tool)
+
+
+def daimon_tool_input(block: ToolUseBlock, tool: str) -> Mapping[str, object] | None:
+    """`daimon_tool_arguments` for a call that may still be running; None once it failed."""
+    if block.mcp_server_name != DAIMON_SERVER_NAME or block.status == "failed" or block.is_error:
         return None
     arguments: object = block.input
     if block.name == _CALL_TOOL:

@@ -87,6 +87,7 @@ from daimon.core.turn.prepare import (
     insert_mapping,
     stamp_session_seal,
 )
+from daimon.core.turn.progress_plans import progress_plans_prefix
 from daimon.core.turn.provider_actions import (
     ProviderActionApproval,
     ProviderActionHook,
@@ -1052,7 +1053,16 @@ async def run_prepared_turn_impl(
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
     # every ordinary turn, which then sends byte-identical bytes to before.
     context = context_prompt(origin, system=prepared.admission.agent.system)
-    prefix = context + prepared.continuity.user_prefix
+    plans = await progress_plans_prefix(
+        deps.sessionmaker,
+        deployment=deps.progress_plans,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=prepared.admission.origin_channel_id,
+        thread_id=thread_id,
+        chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
+    )
+    prefix = context + plans + prepared.continuity.user_prefix
 
     @contextlib.asynccontextmanager
     async def persisted(
@@ -1269,7 +1279,7 @@ async def run_prepared_turn_impl(
             # died. What goes instead is this loss's own framing -- daimon's
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
-            reseeded_message = _with_prefix(loss_user_prefix, await reseed_user_message())
+            reseeded_message = _with_prefix(plans + loss_user_prefix, await reseed_user_message())
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into

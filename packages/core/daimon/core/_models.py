@@ -2342,6 +2342,38 @@ class ThreadParticipationScope(Base):
     )
 
 
+class ProgressPlanScope(Base):
+    """An explicit progress-plans setting at one scope.
+
+    Same shape and meaning as `ThreadParticipationScope`: one row per (tenant,
+    platform, scope, scope_id), an empty scope_id for the workspace row, and no
+    row means "inherit". `daimon.core.scope_cascade.resolve_cascade` turns the
+    rows into an effective mode.
+    """
+
+    __tablename__ = "progress_plan_scopes"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "scope", "scope_id", name="pk_progress_plan_scopes"
+        ),
+        CheckConstraint(
+            "scope IN ('workspace', 'channel', 'thread')", name="ck_progress_plan_scopes_scope"
+        ),
+        CheckConstraint("mode IN ('on', 'off', 'disabled')", name="ck_progress_plan_scopes_mode"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    scope_id: Mapped[str] = mapped_column(Text)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ThreadAutoResponse(Base):
     """One row per reply the agent posted in a thread unprompted.
 

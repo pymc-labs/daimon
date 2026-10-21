@@ -8,9 +8,11 @@ from enum import Enum
 from typing import Literal
 
 from daimon.core.platform_words import scrub_other_platforms
+from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
     format_draft,
+    format_plan_lines,
     format_tool_lines,
     has_running_tool,
     roll_draft,
@@ -61,6 +63,8 @@ class CardState:
 
     phase: TurnPhase = TurnPhase.THINKING
     tool_lines: tuple[str, ...] = ()
+    plan_lines: tuple[str, ...] = ()
+    """The agent's latest progress plan as a checklist; empty unless progress plans are on."""
     agent_name: str = ""
     platform: str | None = None
     """The chat platform the card is on: the draft and tool lines never name another app."""
@@ -106,11 +110,21 @@ def update(state: CardState, event: CardEvent) -> CardState:
 def update_activity(state: CardState, turn: TurnState) -> CardState:
     """Fold the turn's tool calls into the card: Working while one runs, else Thinking.
 
-    A no-op once the turn is terminal, so a late render cannot reopen the card.
+    With progress plans on for the turn, the latest plan update becomes the
+    checklist and leaves the tool lines. A no-op once the turn is terminal, so
+    a late render cannot reopen the card.
     """
     if state.phase in _TERMINAL_PHASES:
         return state
     phase = TurnPhase.TOOL_RUNNING if has_running_tool(turn.content) else TurnPhase.THINKING
-    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
-    lines = tuple(scrub_other_platforms(line, state.platform) for line in lines)
-    return dataclasses.replace(state, phase=phase, tool_lines=lines)
+    plan_shown = progress_plans_shown()
+    lines = format_tool_lines(
+        turn.content, finished_ids=turn.finished_tool_ids, plan_shown=plan_shown
+    )
+    plan = format_plan_lines(turn.content) if plan_shown else ()
+    return dataclasses.replace(
+        state,
+        phase=phase,
+        tool_lines=tuple(scrub_other_platforms(line, state.platform) for line in lines),
+        plan_lines=tuple(scrub_other_platforms(line, state.platform) for line in plan),
+    )
