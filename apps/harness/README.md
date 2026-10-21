@@ -446,11 +446,16 @@ validation; leave the default on `agents_sdk` meanwhile. The image CI job builds
 
 Codex bundled skills and skill instruction injection are disabled explicitly.
 The relay reconstructs user messages from authoritative C3 input and preserves
-durable history verbatim. It discards controller-origin user/developer messages
-and removes private paths from controller continuations before provider I/O.
+durable history verbatim. It records the stable ID of the controller's initial
+user item and discards the injected user/developer preamble before it. It retains
+compaction prompts and replacement summaries after that item, with private-path
+scrubbing before provider I/O and history. Native in-turn compaction stays enabled;
+older harness history still needs separate compaction (F55).
 Marker-prefixed user text remains intact. Harness-provided skills remain
 available through C3. Denied calls count toward `max_tool_calls`;
-the relay also caps model requests per turn at `min(max_tool_calls + 2, 128)`.
+ordinary model requests and internal compaction requests each have a separate
+`min(max_tool_calls + 2, 128)` cap. Both are metered; compaction requests do not
+consume ordinary continuation slots.
 Only the harness-owned Responses request fields and reasoning effort/summary
 cross the provider boundary. Shutdown joins usage commits before turn end,
 including when cancellation and the deadline overlap. Cancellation or deadline
@@ -488,3 +493,9 @@ root to avoid traversing unrelated Docker overlays. It retains real UID
 separation, environment scrubbing and non-dumpability. This does not validate
 the production image's mount layout; run the existing image probes in CI.
 The comparison and measured results are in `CODEX-SPIKE.md`.
+
+
+The long-turn compaction probe adds `--backend codex --scenario compaction` to
+the command above. It runs 14 distinct large `seq` commands sequentially, verifies
+exactly-once execution and observed checkpoint compaction, and saves measured
+provider usage plus output digests in `codex-compaction.json`.

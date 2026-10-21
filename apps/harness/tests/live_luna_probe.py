@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -84,8 +85,18 @@ class AuditTransport(httpx.AsyncBaseTransport):
             for e in events
             if e.turn_id == context.request.turn_id and e.type == "model_request_started"
         ]
+        users = [item for item in body.get("input", []) if item.get("role") == "user"]
+        private_paths_absent = context.state_dir is None or str(
+            context.state_dir
+        ) not in json.dumps(body)
+        assert private_paths_absent
         observations = self.state["observations"]
         record = {
+            "compaction_prompt": bool(
+                len(users) > 1 and "id" not in users[-1] and body["input"][-1] == users[-1]
+            ),
+            "compaction_summary": any("id" in user for user in users),
+            "private_paths_absent": private_paths_absent,
             "turn_id": context.request.turn_id,
             "request_id": starts[-1].data["request_id"],
             "started_seq_before_network": starts[-1].seq,
@@ -117,7 +128,9 @@ async def wait_started(server, task):
             await asyncio.sleep(0.01)
 
 
-async def run_loop(home: Path, output: Path, backend: str, api_key: str, binary: str):
+async def run_loop(
+    home: Path, output: Path, backend: str, api_key: str, binary: str, scenario=None
+):
     os.environ["HARNESS_LOOP"] = backend
     os.environ["HARNESS_LIVE_PROBE"] = "openai"
     os.environ["HARNESS_RUNTIME_MODE"] = "probe"
@@ -211,15 +224,19 @@ async def run_loop(home: Path, output: Path, backend: str, api_key: str, binary:
             timeout=150,
             headers={"Authorization": "Bearer " + token},
         ) as client:
-            for name in [
-                "plain",
-                "mcp_auto",
-                "approve",
-                "deny",
-                "isolated_bash",
-                "multi_request",
-                "cancel",
-            ]:
+            for name in (
+                [scenario]
+                if scenario
+                else [
+                    "plain",
+                    "mcp_auto",
+                    "approve",
+                    "deny",
+                    "isolated_bash",
+                    "multi_request",
+                    "cancel",
+                ]
+            ):
                 turn_id = backend + "-" + name
                 policy = {tool: "deny" for tool in ["bash", "read", "write", "edit", "probe/*"]}
                 mcp_servers = []
@@ -241,6 +258,16 @@ async def run_loop(home: Path, output: Path, backend: str, api_key: str, binary:
                     )
                     if name == "multi_request":
                         prompt = 'Call the available echo tool with text="first". Wait for its result, then call the echo tool again with the returned string as text. After both results reply briefly. You must perform both calls sequentially.'
+                elif name == "compaction":
+                    policy["bash"] = "auto"
+                    commands = [f"seq {i * 100000} {i * 100000 + 19999}" for i in range(1, 15)]
+                    prompt = (
+                        "Run these 14 commands in order, one bash tool call per command, "
+                        "waiting for each result before the next. Run each command exactly once "
+                        "without changing or shortening it. After all 14, report the first number "
+                        "from each output in order. Keep track of completed commands if context "
+                        "is compacted; never repeat a completed command.\n" + "\n".join(commands)
+                    )
                 elif name == "isolated_bash":
                     policy["bash"] = "auto"
                     prompt = "Call bash exactly once to execute this command, then report the result: python3 -c \"import os; print('tool_uid='+str(os.geteuid())); print('openai_key_visible='+str('OPENAI_API_KEY' in os.environ))\""
@@ -256,13 +283,16 @@ async def run_loop(home: Path, output: Path, backend: str, api_key: str, binary:
                     "mcp_servers": mcp_servers,
                     "skills": [],
                     "tool_policy": policy,
-                    "limits": {"max_tool_calls": 5, "deadline_s": 120},
+                    "limits": {
+                        "max_tool_calls": 22 if name == "compaction" else 5,
+                        "deadline_s": 600 if name == "compaction" else 120,
+                    },
                 }
                 events, errors = [], []
                 count_before = len(executed)
                 cancel_trigger = None
                 try:
-                    async with asyncio.timeout(140):
+                    async with asyncio.timeout(620 if name == "compaction" else 140):
                         async with client.stream("POST", "/v0/turns", json=request) as response:
                             response.raise_for_status()
                             async for line in response.aiter_lines():
@@ -386,7 +416,36 @@ async def run_loop(home: Path, output: Path, backend: str, api_key: str, binary:
                         or "openai_key_visible=False" not in tool_result
                     ):
                         errors.append("tool_isolation_not_proven")
+                compaction_evidence = {}
+                if name == "compaction":
+                    actual = [
+                        e["data"]["input"]["command"] for e in events if e["type"] == "tool_use"
+                    ]
+                    if actual != commands:
+                        errors.append("commands_repeated_or_missing")
+                    if not any(r["compaction_prompt"] for r in observed) or not any(
+                        r["compaction_summary"] for r in observed
+                    ):
+                        errors.append("compaction_not_observed")
+                    history = supervisor.journal.history("luna-live")
+                    # Persist a compact transcript with output digests rather than
+                    # megabytes of seq output. Inventory and usage remain exact.
+                    compaction_evidence = {
+                        "commands": actual,
+                        "history_private_paths_absent": str(home) not in json.dumps(history),
+                    }
+                    if not compaction_evidence["history_private_paths_absent"]:
+                        errors.append("private_path_in_history")
+                    for event in events:
+                        if event["type"] == "tool_result":
+                            output_text = str(event["data"]["output"])
+                            event["data"]["output"] = {
+                                "excerpt": output_text[:100],
+                                "characters": len(output_text),
+                                "sha256": hashlib.sha256(output_text.encode()).hexdigest(),
+                            }
                 result = {
+                    **compaction_evidence,
                     "backend": backend,
                     "scenario": name,
                     "model": MODEL,
@@ -442,6 +501,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--backend", choices=["codex", "agents_sdk"])
+    parser.add_argument("--scenario", choices=["compaction"])
     args = parser.parse_args()
     assert os.geteuid() == 0, "probe needs real service/tool UID separation"
     assert os.environ.get("HARNESS_LIVE_PROBE") == "openai", "explicit probe opt-in required"
@@ -462,7 +522,9 @@ def main():
             child = os.fork()
             if child == 0:
                 try:
-                    results = asyncio.run(run_loop(home, output, backend, api_key, args.binary))
+                    results = asyncio.run(
+                        run_loop(home, output, backend, api_key, args.binary, args.scenario)
+                    )
                     if any(result["errors"] for result in results):
                         os._exit(1)
                 except BaseException as exc:

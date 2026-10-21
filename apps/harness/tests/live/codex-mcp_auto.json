@@ -9,13 +9,13 @@
   "errors": [],
   "usage_checks": [
     {
-      "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
+      "request_id": "e442b066-7ac4-40c9-9dd1-a112e5387e22",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
     },
     {
-      "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
+      "request_id": "772c0a7e-2d3c-4779-97f3-308b089ea1f4",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
@@ -23,12 +23,15 @@
   ],
   "api_observations": [
     {
+      "compaction_prompt": true,
+      "compaction_summary": false,
+      "private_paths_absent": true,
       "turn_id": "codex-mcp_auto",
-      "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
+      "request_id": "e442b066-7ac4-40c9-9dd1-a112e5387e22",
       "started_seq_before_network": 12,
       "stream": true,
       "http_status": 200,
-      "response_id": "resp_08018a0a981859b9016ad87ce7840087d1ac307c8e56f0dd6a",
+      "response_id": "resp_03dab5cd9fa5a417016ad886179bdc87d1bb4d63f50609a2e1",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 217,
@@ -51,12 +54,15 @@
       ]
     },
     {
+      "compaction_prompt": false,
+      "compaction_summary": false,
+      "private_paths_absent": true,
       "turn_id": "codex-mcp_auto",
-      "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
+      "request_id": "772c0a7e-2d3c-4779-97f3-308b089ea1f4",
       "started_seq_before_network": 16,
       "stream": true,
       "http_status": 200,
-      "response_id": "resp_08018a0a981859b9016ad87ce911e487d1abf76e5fed367768",
+      "response_id": "resp_03dab5cd9fa5a417016ad88619026c87d19205ea8131961157",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 312,
@@ -84,7 +90,7 @@
       "seq": 11,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:47.184044Z",
+      "at": "2026-10-21T09:29:59.056894Z",
       "type": "status_running",
       "data": {}
     },
@@ -92,10 +98,10 @@
       "seq": 12,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:47.338050Z",
+      "at": "2026-10-21T09:29:59.458981Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
+        "request_id": "e442b066-7ac4-40c9-9dd1-a112e5387e22",
         "model": "gpt-6-luna"
       }
     },
@@ -103,10 +109,10 @@
       "seq": 13,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:48.869187Z",
+      "at": "2026-10-21T09:30:00.805903Z",
       "type": "usage",
       "data": {
-        "request_id": "428fd084-960a-4d9e-bafa-bd1b96aba54e",
+        "request_id": "e442b066-7ac4-40c9-9dd1-a112e5387e22",
         "model": "gpt-6-luna",
         "input_tokens": 217,
         "output_tokens": 25,
@@ -118,10 +124,10 @@
       "seq": 14,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:48.878447Z",
+      "at": "2026-10-21T09:30:00.819735Z",
       "type": "tool_use",
       "data": {
-        "call_id": "call_4vb5hLJin47Z5NkQAgWd7v1f",
+        "call_id": "call_wveotEgLIv0rO39CNtbHBtSy",
         "name": "probe/echo",
         "input": {
           "text": "luna-mcp_auto"
@@ -133,10 +139,10 @@
       "seq": 15,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:48.893552Z",
+      "at": "2026-10-21T09:30:00.841159Z",
       "type": "tool_result",
       "data": {
-        "call_id": "call_4vb5hLJin47Z5NkQAgWd7v1f",
+        "call_id": "call_wveotEgLIv0rO39CNtbHBtSy",
         "output": {
           "meta": null,
           "content": [
@@ -159,10 +165,10 @@
       "seq": 16,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:48.908216Z",
+      "at": "2026-10-21T09:30:00.861860Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
+        "request_id": "772c0a7e-2d3c-4779-97f3-308b089ea1f4",
         "model": "gpt-6-luna"
       }
     },
@@ -170,10 +176,10 @@
       "seq": 17,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:49.975424Z",
+      "at": "2026-10-21T09:30:01.867969Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
+        "message_id": "codex-mcp_auto:msg_03dab5cd9fa5a417016ad88619c6dc87d181630ee747bd70e0",
         "text": "echo"
       }
     },
@@ -181,10 +187,10 @@
       "seq": 18,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:49.980253Z",
+      "at": "2026-10-21T09:30:01.874131Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
+        "message_id": "codex-mcp_auto:msg_03dab5cd9fa5a417016ad88619c6dc87d181630ee747bd70e0",
         "text": ":l"
       }
     },
@@ -192,10 +198,10 @@
       "seq": 19,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:50.016028Z",
+      "at": "2026-10-21T09:30:01.898796Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
+        "message_id": "codex-mcp_auto:msg_03dab5cd9fa5a417016ad88619c6dc87d181630ee747bd70e0",
         "text": "una"
       }
     },
@@ -203,10 +209,10 @@
       "seq": 20,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:50.019147Z",
+      "at": "2026-10-21T09:30:01.908049Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
+        "message_id": "codex-mcp_auto:msg_03dab5cd9fa5a417016ad88619c6dc87d181630ee747bd70e0",
         "text": "-m"
       }
     },
@@ -214,10 +220,10 @@
       "seq": 21,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:50.020807Z",
+      "at": "2026-10-21T09:30:01.909888Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
+        "message_id": "codex-mcp_auto:msg_03dab5cd9fa5a417016ad88619c6dc87d181630ee747bd70e0",
         "text": "cp"
       }
     },
@@ -225,10 +231,10 @@
       "seq": 22,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:50.022362Z",
+      "at": "2026-10-21T09:30:01.911346Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
+        "message_id": "codex-mcp_auto:msg_03dab5cd9fa5a417016ad88619c6dc87d181630ee747bd70e0",
         "text": "_auto"
       }
     },
@@ -236,10 +242,10 @@
       "seq": 23,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:50.152171Z",
+      "at": "2026-10-21T09:30:02.037405Z",
       "type": "agent_message",
       "data": {
-        "message_id": "codex-mcp_auto:msg_08018a0a981859b9016ad87ce9e3c887d19e993577ff5d4d24",
+        "message_id": "codex-mcp_auto:msg_03dab5cd9fa5a417016ad88619c6dc87d181630ee747bd70e0",
         "parts": [
           {
             "type": "text",
@@ -252,10 +258,10 @@
       "seq": 24,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:50.160753Z",
+      "at": "2026-10-21T09:30:02.062995Z",
       "type": "usage",
       "data": {
-        "request_id": "3cadb4e0-2b22-491e-908d-4fc3a37aafbb",
+        "request_id": "772c0a7e-2d3c-4779-97f3-308b089ea1f4",
         "model": "gpt-6-luna",
         "input_tokens": 312,
         "output_tokens": 10,
@@ -267,7 +273,7 @@
       "seq": 25,
       "session_id": "luna-live",
       "turn_id": "codex-mcp_auto",
-      "at": "2026-10-21T08:50:50.459438Z",
+      "at": "2026-10-21T09:30:02.355561Z",
       "type": "turn_ended",
       "data": {
         "outcome": "completed"

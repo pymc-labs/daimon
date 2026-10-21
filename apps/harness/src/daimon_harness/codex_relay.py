@@ -13,7 +13,7 @@ import secrets
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import httpx
@@ -48,6 +48,8 @@ class ResponsesRelay:
         self.stopping = False
         self.handlers: set[asyncio.Task[object]] = set()
         self.model_requests = 0
+        self.compaction_requests = 0
+        self.controller_user_id: str | None = None
         self.private_paths: tuple[str, ...] = (
             (str(context.state_dir),) if context.state_dir is not None else ()
         )
@@ -153,25 +155,58 @@ class ResponsesRelay:
 
     def clean_input(self, items: list[JsonValue]) -> list[JsonValue]:
         result: list[JsonValue] = []
+        after_user = False
         for item in items:
             if not isinstance(item, dict):
                 continue
             if item.get("role") in {"system", "developer"}:
                 continue
-            # Ephemeral controllers mix injections with a copy of C3 input.
-            # All authoritative user messages are reconstructed below.
             if item.get("role") == "user":
-                continue
+                if (
+                    self.controller_user_id is not None
+                    and item.get("id") == self.controller_user_id
+                ):
+                    after_user = True
+                    continue
+                # In the pinned single-turn protocol, preamble injections precede
+                # our original user item. Compaction's prompt and replacement
+                # summary follow it. Never infer provenance from text prefixes.
+                if not after_user:
+                    continue
             result.append(self.clean_paths(item))
         return result
 
     async def forward(self, request: web.Request) -> web.StreamResponse:
-        if self.model_requests >= min(self.context.request.limits.max_tool_calls + 2, 128):
-            self.failure = HarnessError("model_request_limit", "Maximum model requests exceeded")
-            raise web.HTTPServiceUnavailable(text="Maximum model requests exceeded")
-        self.model_requests += 1
         source = cast(dict[str, JsonValue], await request.json())
         incoming = cast(list[JsonValue], source.get("input", []))
+        users = [item for item in incoming if isinstance(item, dict) and item.get("role") == "user"]
+        if self.model_requests == 0 and self.controller_user_id is None and users:
+            # First request: the pinned controller appends the C3 copy after its
+            # preamble. Its stable item ID survives local context replacement.
+            self.controller_user_id = str(users[-1]["id"])
+        if self.controller_user_id is not None and not any(
+            item.get("id") == self.controller_user_id for item in users
+        ):
+            self.failure = HarnessError("codex_protocol", "Codex lost the original user item")
+            raise web.HTTPBadGateway(text="Codex lost the original user item")
+        # Local compaction appends an ID-less user prompt; replacement summaries
+        # are ordinary ID-bearing user items after our stable anchor instead.
+        compacting = bool(
+            self.controller_user_id is not None
+            and incoming
+            and isinstance(incoming[-1], dict)
+            and incoming[-1].get("role") == "user"
+            and "id" not in incoming[-1]
+        )
+        limit = min(self.context.request.limits.max_tool_calls + 2, 128)
+        count = self.compaction_requests if compacting else self.model_requests
+        if count >= limit:
+            self.failure = HarnessError("model_request_limit", "Maximum model requests exceeded")
+            raise web.HTTPServiceUnavailable(text="Maximum model requests exceeded")
+        if compacting:
+            self.compaction_requests += 1
+        else:
+            self.model_requests += 1
         parts: list[JsonValue] = []
         for part in self.context.request.input:
             if part.type == "text":
@@ -244,7 +279,9 @@ class ResponsesRelay:
                     lines.clear()
                     if payload == "[DONE]":
                         continue
-                    event = json.loads(payload)
+                    # Provider summaries can echo private controller paths. Scrub
+                    # before both Codex sees them and durable history retains them.
+                    event = cast(dict[str, Any], self.clean_paths(json.loads(payload)))
                     kind = event.get("type", "")
                     encoded = ("data: " + json.dumps(event) + "\n\n").encode()
                     item = event.get("item")

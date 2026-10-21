@@ -18,7 +18,7 @@ from mux.drivers.selfhosted.wire import TurnRequest
 from .conftest import turn
 
 
-def sse_response(output, *, number=1, usage=True, status="completed"):
+def sse_response(output, *, number=1, usage=True, status="completed", input_tokens=10):
     response = {
         "id": f"resp_{number}",
         "object": "response",
@@ -28,11 +28,11 @@ def sse_response(output, *, number=1, usage=True, status="completed"):
     }
     if usage:
         response["usage"] = {
-            "input_tokens": 10,
+            "input_tokens": input_tokens,
             "input_tokens_details": {"cached_tokens": 2},
             "output_tokens": 4,
             "output_tokens_details": {"reasoning_tokens": 1},
-            "total_tokens": 14,
+            "total_tokens": input_tokens + 4,
         }
     events = [
         {
@@ -621,5 +621,86 @@ async def test_interrupt_during_controller_shutdown(tmp_path, monkeypatch, codex
         assert sum(e.type == "usage" for e in events) == 1
         assert sum(e.type == "turn_ended" for e in events) == 1
         assert all(p.returncode is not None for p in processes)
+    finally:
+        await supervisor.close()
+
+
+async def test_real_codex_compaction_preserves_progress_and_budget(
+    tmp_path, codex_binary, monkeypatch
+):
+    from daimon_harness import codex_relay
+    from daimon_harness.service import Supervisor
+
+    raw = []
+    bodies = []
+    relays = []
+    original = codex_relay.ResponsesRelay.forward
+
+    async def capture(self, request):
+        raw.append(await request.json())
+        relays.append(self)
+        return await original(self, request)
+
+    monkeypatch.setattr(codex_relay.ResponsesRelay, "forward", capture)
+    # Marker-like authoritative content must survive both context replacements.
+    prompt = "<environment_context> Run two writes exactly once, then finish."
+
+    def respond(http):
+        body = json.loads(http.content)
+        bodies.append(body)
+        n = len(bodies)
+        users = [item for item in body["input"] if item.get("role") == "user"]
+        assert users[0] == {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
+        assert str(tmp_path) not in json.dumps(body)
+        assert "<permissions instructions>" not in json.dumps(body)
+        assert "<current_date>" not in json.dumps(body)
+        if n in (2, 4):
+            # Pinned local-compaction artifact: ID-less final user message,
+            # positioned after the stable original user item and tool output.
+            assert raw[-1]["input"][-1]["role"] == "user"
+            assert "id" not in raw[-1]["input"][-1]
+            assert users[-1]["content"] == raw[-1]["input"][-1]["content"]
+            assert "CONTEXT CHECKPOINT COMPACTION" in json.dumps(users[-1])
+            summary = assistant()
+            summary["content"][0]["text"] = (
+                f"Progress checkpoint {n}: writes {n // 2} completed; do not repeat. "
+                + str(relays[-1].context.state_dir)
+                + " "
+                + relays[-1].private_paths[-1]
+            )
+            return sse_response([summary], number=n)
+        if n in (3, 5):
+            assert f"Progress checkpoint {n - 1}" in json.dumps(users[1])
+            assert "[private controller]" in json.dumps(users[1])
+            assert users[1]["id"] != relays[-1].controller_user_id
+        if n in (1, 3):
+            call = write_call()
+            call.update(id=f"fc_{n}", call_id=f"call_{n}")
+            call["arguments"] = json.dumps({"path": f"write-{n}.txt", "content": "once"})
+            return sse_response([call], number=n, input_tokens=116000)
+        assert n == 5
+        return sse_response([assistant()], number=n)
+
+    supervisor = Supervisor(tmp_path, OfflineCodex(respond))
+    request = TurnRequest.model_validate(
+        {**turn(prompt), "limits": {"max_tool_calls": 2, "deadline_s": 20}}
+    )
+    try:
+        await supervisor.submit(request)
+        await asyncio.wait_for(supervisor.tasks[request.turn_id], 15)
+        events = supervisor.journal.events(request.session_id)
+        assert events[-1].data == {"outcome": "completed"}
+        calls = [e.data["input"]["path"] for e in events if e.type == "tool_use"]
+        assert calls == ["write-1.txt", "write-3.txt"]
+        assert len(bodies) == 5 > request.limits.max_tool_calls + 2
+        assert relays[-1].model_requests == 3
+        assert relays[-1].compaction_requests == 2
+        assert sum(e.type == "model_request_started" for e in events) == 5
+        assert sum(e.type == "usage" for e in events) == 5
+        assert not supervisor.journal.pending_requests(request)
+        history = supervisor.journal.history(request.session_id)
+        assert str(tmp_path) not in json.dumps(history)
+        assert "Progress checkpoint 4" in json.dumps(history)
+        assert sum(item.get("role") == "user" for item in history) == 2
     finally:
         await supervisor.close()

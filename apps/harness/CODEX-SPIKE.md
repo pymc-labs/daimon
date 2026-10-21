@@ -20,7 +20,7 @@ Paid OpenAI Responses probes were subsequently authorized by C12.1 and completed
 as described below. No Azure resource was used. The checksum-verified Codex
 image stage was built locally; full-image validation runs in CI.
 
-Offline validation passed with both `HARNESS_LOOP` values: 227 harness tests
+Offline validation passed with both `HARNESS_LOOP` values: 228 harness tests
 passed, 4 skipped (platform/data/live gates). Strict pyright, repository Ruff
 and all 14 import-boundary contracts passed. Additional regression coverage keeps
 original MCP server/tool policy identities and refuses ambiguous function aliases. The standalone UID probe passed
@@ -49,7 +49,7 @@ file, or authenticate to the relay. Its receipt was
 | MCP | Harness streamable-HTTP client, origin bindings, scoped env references | Same client in wrapper; dynamic tools carry schemas/results, no credentials or upstream MCP config in Codex |
 | Sandbox | Separate service/tool UIDs, workspace rules, resource limits, process cleanup | Same authoritative boundary; Codex read-only sandbox plus disabled environment/native tools; relay rejects native model calls |
 | Cancel | Supervisor cancels and joins protected tool workers | Interrupt RPC, bounded controller reap and relay cancellation, then the same protected supervisor cleanup |
-| History | Durable Responses input/output; one context-overflow recovery attempt | Durable Responses history prepended by relay to ephemeral Codex turns; no native rollout dependency; context-overflow retry missing |
+| History | Durable Responses input/output; one context-overflow recovery attempt | Durable Responses history prepended by relay to ephemeral Codex turns; native in-turn checkpoint compaction retained; context-overflow retry missing |
 | Dependencies | Python SDK pinned in uv.lock | SDK remains for fallback/shared clients; adds a pinned Rust executable and experimental protocol surface |
 
 ## Why the relay is necessary
@@ -107,8 +107,10 @@ Sources checked:
   events can change. The pin is mandatory; upgrades need the same offline and
   image probes. Error logs are intentionally not streamed from the controller.
 - **History:** the canonical journal survives controller restarts, but native
-  thread resume/compaction and Agents SDK/Codex history migration are not promised.
-  Add bounded context-overflow handling before long production conversations.
+  thread resume and Agents SDK/Codex history migration are not promised. Codex's
+  in-turn checkpoint compaction works, but older harness history is still prepended
+  on each request. Add harness history compaction and bounded context-overflow
+  handling before long production conversations (F55).
 - **Durability:** this lane delegates every event to the existing wrapper. Its
   base checkout does not contain lane 4's pending remote WAL/checkpoint/sequence
   reservation implementation (C4.5–C4.12). Merge/rebase and test those paths
@@ -134,7 +136,7 @@ default until the listed review, live and durability gates pass.
 
 ## Live Luna probes
 
-Codex refreshed after round-2 fixes on 2026-10-21, 08:50–08:51 UTC.
+Codex refreshed after round-3 fixes on 2026-10-21, 09:29–09:30 UTC.
 Agents SDK comparison retained from 08:07–08:09 UTC on the same date.
 
 Both loops passed seven scenarios through the real authenticated harness HTTP
@@ -150,10 +152,10 @@ in the service, scrubbed from the environment, and absent from tool execution.
 | Scenarios passing | 7/7 | 7/7 |
 | Requests | 13 | 13 |
 | Measured / unknown | 12 / 1 cancelled | 12 / 1 cancelled |
-| Measured input tokens | 6,269 | 6,247 |
+| Measured input tokens | 6,221 | 6,247 |
 | Cached input tokens (subset) | 0 | 0 |
-| Measured output tokens | 262 | 269 |
-| Reasoning tokens (subset) | 22 | 28 |
+| Measured output tokens | 237 | 269 |
+| Reasoning tokens (subset) | 0 | 28 |
 | Plain output deltas | 5 | 1 after response completion |
 | Sequential MCP calls | 3 requests, 2 tool calls | 3 requests, 2 tool calls |
 
@@ -183,7 +185,7 @@ Round-1 fixes explicitly disable `[skills.bundled]` and skill instructions,
 remove controller skill/environment injections and private paths at the relay,
 and test `$imagegen`/`$skill-installer` against the real binary. Round-2 fixes
 reconstruct the user message directly from C3 input, preserve durable history
-verbatim, and discard controller-origin user/developer items by provenance.
+verbatim, and discard the controller's injected user/developer preamble by provenance.
 Real-binary tests preserve all three marker prefixes across prior history and
 a tool continuation, while controller injections remain absent. Private path
 scrubbing applies only to controller continuations. Harness-supplied C3 skills
@@ -191,7 +193,9 @@ remain supported. Cancel/deadline during shutdown forces controller reap and
 propagates interruption; regression tests verify the cancel HTTP receipt and
 terminal outcome. Both loop suites also pass with inherited probe variables
 and a synthetic API key; individual probe tests opt in explicitly. Denied calls now count against `max_tool_calls`,
-and model requests are capped at `min(max_tool_calls + 2, 128)`. Relay request
+and ordinary model requests are capped at `min(max_tool_calls + 2, 128)`.
+Compaction requests have a separate counter with the same cap and do not consume
+ordinary continuation slots; both kinds remain fully metered. Relay request
 fields are allowlisted and usage outcomes are idempotent by request id; shielded
 shutdown finishes all handlers before the terminal event. Cancellation
 also suppresses writes to already closed relay transports. Native calls were
@@ -206,3 +210,38 @@ The probe scopes startup credential-file scanning to its private scratch root
 because this is a build host with unrelated Docker mounts; production mount
 validation is unchanged. Live Azure, container layout, remote durability and
 normal review remain enablement gates.
+
+
+## Round-3 compaction repair
+
+Codex 0.162.1 local checkpoint compaction stays enabled. The first controller
+request appends its copy of C3 input after the injected preamble. The relay
+records that user item's ID, reconstructs authoritative C3 input verbatim, and
+excludes preamble user/system/developer items. The stable ID remains in Codex's
+replacement history. User items after it are controller continuations: the
+ID-less trailing compaction prompt and the ID-bearing replacement summary.
+They are forwarded with private-path scrubbing, without classifying their text
+by prefix. A missing original user ID fails closed rather than silently losing
+progress. Provider output is scrubbed before forwarding or retaining it, so a
+summary cannot carry private controller paths into later requests or history.
+
+A real pinned-binary regression reports 116,000 input tokens after each of two
+write calls. It triggers two compactions, carries both summaries into subsequent
+requests, executes each write exactly once, and completes in five measured
+requests. Only three requests consume the ordinary continuation budget; two
+use the separately bounded compaction budget. Injected state/scratch paths are
+absent from provider requests and durable history after both compactions.
+
+Live Luna validation on 2026-10-21, 09:27–09:28 UTC reran the review's 14-command
+workload: `seq N N+19999`, for N = 100000, 200000, …, 1400000, sequentially.
+All 14 commands ran exactly once, all 14 first numbers were reported correctly,
+and the turn completed in 17 requests including two compactions. Every request
+has one measured usage outcome, matching all four independent provider counts;
+none is unknown. Tokens: 1,069,091 input, 797,087 cached input (subset), 847
+output, and 91 reasoning (subset). This is a separate long-turn experiment,
+not part of the seven-scenario comparison totals above. It replaces the failed
+round-3 behavior (21 executions of seven unique commands, no remaining commands,
+and a request-limit error). Sanitized inventory, usage and output digests are
+in `tests/live/codex-compaction.json`; large tool outputs are represented by
+excerpts, lengths and SHA-256 rather than repeated numeric text. The reusable
+probe is `live_luna_probe.py --backend codex --scenario compaction`.

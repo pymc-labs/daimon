@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bound denied calls and model continuations, disable bundled controller skills,
   and enforce one usage outcome before turn end. OpenAI live probes require
   explicit probe mode and refuse Azure configuration. Preserve marker-prefixed
-  user input and honor cancellation or deadlines during controller shutdown.
+  user input, preserve checkpoint compaction prompts and summaries, and honor
+  cancellation or deadlines during controller shutdown. Meter internal compaction
+  separately from the ordinary continuation budget.
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
 
