@@ -461,6 +461,7 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "mcp_ask_accept"),
         (False, False, "stored_deny"),
         (False, False, "proxy_default"),
+        (False, False, "anthropic_disabled"),
         (False, False, "proxy_safety"),
         (False, False, "inspection_allow_chat"),
         (False, False, "inspection_allow_unattended"),
@@ -807,7 +808,11 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     deferred = []
     cancellations = []
 
+    original_http = httpx.AsyncClient.request
+
     async def http(self, method, url, **kwargs):
+        if isinstance(self._transport, httpx.ASGITransport):
+            return await original_http(self, method, url, **kwargs)
         call = httpx.Request(method, url, json=kwargs.get("json"), headers=kwargs["headers"])
         requests.append(call)
         if pool:
@@ -857,9 +862,52 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             assert admission is not None and admission["admission_key"] == key
             admitted_keys.append(key)
             token = call.headers["X-Daimon-MCP-Authorization"].removeprefix("Bearer ")
-            token_ids.append(
-                uuid.UUID(jwt.decode(token, options={"verify_signature": False})["jti"])
+            claims = jwt.decode(
+                token,
+                "offline-test-signing-material-32-bytes",
+                algorithms=["HS256"],
+                options={"verify_aud": False},
             )
+            assert claims["anthropic_disabled"] is True
+            token_ids.append(uuid.UUID(claims["jti"]))
+            if scenario == "anthropic_disabled":
+                # Exercise the exact credential received by daimon-mcp while
+                # the production turn is active, before finalizer revocation.
+                from daimon.adapters.mcp.server import create_mcp_app
+                from daimon.core.config import DatabaseSettings, Settings
+                from daimon.testing.asgi import mcp_session
+
+                app = create_mcp_app(
+                    settings=Settings(
+                        database=DatabaseSettings(url=os.environ["DAIMON_DATABASE__TEST_URL"]),
+                        mcp=request.deps.mcp,
+                        _env_file=None,
+                    ),
+                    sessionmaker=request.deps.sessionmaker,
+                    anthropic=ForbiddenAnthropic(),
+                )
+                refused = await mcp_session(
+                    app,
+                    token=token,
+                    method="tools/call",
+                    params={
+                        "name": "call_tool",
+                        "arguments": {"name": "list_agents", "arguments": {}},
+                    },
+                )
+                assert refused["result"]["isError"] is True
+                assert "unavailable during a self-hosted turn" in json.dumps(refused)
+                neutral = await mcp_session(
+                    app,
+                    token=token,
+                    method="tools/call",
+                    params={
+                        "name": "call_tool",
+                        "arguments": {"name": "now", "arguments": {}},
+                    },
+                )
+                assert neutral["result"].get("isError", False) is False
+                assert "content" in neutral["result"]
             assert token.encode() not in call.content
             assert body["model"] == "gpt-5"
             if scenario == "retained_skills":
