@@ -155,26 +155,6 @@ async def test_sdk_tool_loop_meters_each_request(
     assert [kind for kind, _ in events].count("tool_result") == 1
 
 
-def live_test_deployment() -> str:
-    deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-6-luna")
-    if deployment != "gpt-6-luna":
-        raise ValueError("Live harness tests require AZURE_OPENAI_DEPLOYMENT=gpt-6-luna")
-    return deployment
-
-
-@pytest.mark.parametrize("deployment", [None, "gpt-6-luna", "gpt-6.1-sol", "other"])
-def test_live_deployment_guard_is_luna_only(monkeypatch, deployment):
-    if deployment is None:
-        monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
-    else:
-        monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", deployment)
-    if deployment in {None, "gpt-6-luna"}:
-        assert live_test_deployment() == "gpt-6-luna"
-    else:
-        with pytest.raises(ValueError, match="require.*gpt-6-luna"):
-            live_test_deployment()
-
-
 @pytest.mark.skipif(
     not (
         os.environ.get("AZURE_OPENAI_ENDPOINT")
@@ -184,7 +164,7 @@ def test_live_deployment_guard_is_luna_only(monkeypatch, deployment):
 )
 async def test_live_azure_responses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     body = turn()
-    body["model"] = live_test_deployment()
+    body["model"] = luna_deployment()
 
     monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", checked_client)
     body["input"] = [{"type": "text", "text": "Reply with the word ready. Do not use tools."}]
