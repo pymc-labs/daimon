@@ -101,8 +101,8 @@ def test_the_plan_shows_as_its_own_block_only_with_progress_plans_on(on: bool) -
         state = card.on_activity(card.CardState(started_at=100.0), _plan_turn())
     texts = [block["text"] for block in _live(state)["body"] if "text" in block]
     if on:
-        assert texts[1] == "✔️ Load data\n\n▶️ Fit", "one paragraph per step after the headline"
+        assert texts[1] == "✔️ Load data\n\n🖋️ Fit", "one paragraph per step after the headline"
         assert "Details" not in texts, "the plan update is not listed as a tool"
     else:
-        assert not any("▶️" in text for text in texts), "off: no checklist"
+        assert not any("✔️ Load data" in text for text in texts), "off: no checklist"
         assert "Details" in texts, "off: the call is an ordinary tool line"

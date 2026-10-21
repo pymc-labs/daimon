@@ -47,7 +47,7 @@ _TURN = TurnState(
         )
     ]
 )
-_PLAN = ["✔️ Load the data", "▶️ Fit the model", "▫️ Write it up"]
+_PLAN = ["✔️ Load the data", "🖋️ Fit the model", "\u2003\u2002Write it up"]
 
 
 def _discord() -> list[str]:

@@ -22,6 +22,8 @@ from daimon.core.turn.status_lines import (
 )
 
 ToolType = Literal["agent.tool_use", "agent.custom_tool_use", "agent.mcp_tool_use"]
+# A pending plan step has no icon: an em and an en space keep it in line.
+_PENDING = "  "
 
 
 def _call(
@@ -438,7 +440,7 @@ def test_plan_lines_draw_the_latest_plan_as_a_checklist() -> None:
             via_search=True,
         ),
     ]
-    assert format_plan_lines(content) == ("✔️ Load data", "▶️ Fit model", "▫️ Report"), (
+    assert format_plan_lines(content) == ("✔️ Load data", "🖋️ Fit model", f"{_PENDING}Report"), (
         "the newest update wins, also when called through the MCP search interface"
     )
 
@@ -449,8 +451,8 @@ def test_a_long_plan_folds_finished_steps_then_cuts_the_tail() -> None:
     lines = format_plan_lines([_plan(steps)])
     assert len(lines) == MAX_PLAN_LINES, "the plan stays within its line budget"
     assert lines[0] == "✔️ 4 done", "finished steps at the top fold into one line"
-    assert lines[1] == "▶️ now", "the step in progress stays in view"
-    assert lines[-1] == "+2 more", "what does not fit is counted"
+    assert lines[1] == "🖋️ now", "the step in progress stays in view"
+    assert lines[-1] == f"{_PENDING}+2 more", "what does not fit is counted"
 
 
 def test_plan_lines_skip_failed_calls_and_malformed_steps() -> None:
@@ -458,7 +460,7 @@ def test_plan_lines_skip_failed_calls_and_malformed_steps() -> None:
         _plan([("Good", "pending"), ("Odd", "maybe"), ("", "pending")]),
         _plan([("Rejected", "pending")], status="failed"),
     ]
-    assert format_plan_lines(content) == ("▫️ Good",), (
+    assert format_plan_lines(content) == (f"{_PENDING}Good",), (
         "a failed update is ignored and a malformed step left out"
     )
 

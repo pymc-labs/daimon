@@ -236,11 +236,11 @@ class TestToBlocks:
     def test_the_plan_is_its_own_section_between_the_headline_and_details(self) -> None:
         state = replace(
             _make_state(phase=TurnPhase.TOOL_RUNNING),
-            plan_lines=("✔️ Load *data*", "▶️ Fit <model>"),
+            plan_lines=("✔️ Load *data*", "🖋️ Fit <model>"),
             tool_lines=("🔍 Reading a file",),
         )
         blocks = to_blocks(state, now=None)
-        assert blocks[1]["text"]["text"] == "✔️ Load *data*\n▶️ Fit &lt;model&gt;", (
+        assert blocks[1]["text"]["text"] == "✔️ Load *data*\n🖋️ Fit &lt;model&gt;", (
             "the plan follows the headline, one escaped line per step"
         )
         assert blocks[2]["type"] == "context", "the details come after the plan"

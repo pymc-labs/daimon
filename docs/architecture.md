@@ -1090,9 +1090,11 @@ so the tool list and the system prompt stay the same whether the switch is on
 or off. Before a chat turn `run_prepared_turn` resolves the cascade once; when
 it resolves on, a short `<progress_plans>` block goes in front of the user
 message and the turn's `TurnObservation` is marked, so the card draws the
-latest `update_plan` steps as a checklist above the tool lines (finished steps
-at the top fold into one line, at most six lines) and leaves the call out of
-the tool lines. Off, nothing is added and the card ignores the call.
+latest `update_plan` steps as a checklist above the tool lines in the card's
+own icons (✔️ done, 🖋️ in progress, a pending step plain text set in line;
+finished steps at the top fold into one line, at most six lines) and leaves
+the call out of the tool lines. Off, nothing is added and the call is an
+ordinary tool line.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement

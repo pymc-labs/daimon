@@ -183,17 +183,17 @@ class TestToEmbedData:
     def test_the_plan_leads_the_description_above_the_quoted_drafts(self) -> None:
         state = dataclasses.replace(
             update(_make_state(phase=TurnPhase.THINKING), EmbedEvent(kind="message", label="one")),
-            plan_lines=("✔️ 2 done", "▶️ Fit *model*", "+1 more"),
+            plan_lines=("✔️ 2 done", "🖋️ Fit *model*", "\u2003\u2002+1 more"),
         )
         assert to_embed_data(state, now=1.0).description == (
-            "✔️ 2 done\n▶️ Fit \\*model\\*\n+1 more\n\n> one"
+            "✔️ 2 done\n🖋️ Fit \\*model\\*\n\u2003\u2002+1 more\n\n> one"
         ), "the escaped checklist comes first, then the draft quote"
 
     def test_a_worst_case_plan_and_draft_log_fit_an_embed_description(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
         for _ in range(3):
             state = update(state, EmbedEvent(kind="message", label="*" * 400))
-        state = dataclasses.replace(state, plan_lines=("▫️ " + "*" * 60 + "…",) * 6)
+        state = dataclasses.replace(state, plan_lines=("\u2003\u2002" + "*" * 60 + "…",) * 6)
         assert len(to_embed_data(state, now=1.0).description) <= 4096
 
     def test_tool_line_markdown_stays_in_inline_code(self) -> None:

@@ -44,10 +44,14 @@ _LIST_ICON = "📜"
 _LOOKUP_ICON = "🔍"
 
 PlanStatus = Literal["pending", "in_progress", "completed"]
+# The card's own words: done as a finished tool, in progress as a running one.
+# A pending step has no icon; an em and an en space hold its text in line with
+# the steps that have one, and keep a leading "-" or "1." from becoming a list.
+_PLAN_PENDING = "\u2003\u2002"
 _PLAN_ICONS: Mapping[PlanStatus, str] = {
-    "completed": _DONE_ICON,
-    "in_progress": "▶️",
-    "pending": "▫️",
+    "completed": f"{_DONE_ICON} ",
+    "in_progress": f"{_WRITE_ICON} ",
+    "pending": _PLAN_PENDING,
 }
 
 
@@ -323,9 +327,9 @@ def format_plan_lines(content: Sequence[ContentBlock]) -> tuple[str, ...]:
         folded += 1
     lines = [f"{_DONE_ICON} {folded} done"] if folded else []
     lines += [
-        f"{_PLAN_ICONS[step.status]} {_one_line(step.step, _PLAN_STEP_MAX_CHARS)}" for step in steps
+        f"{_PLAN_ICONS[step.status]}{_one_line(step.step, _PLAN_STEP_MAX_CHARS)}" for step in steps
     ]
     if len(lines) > MAX_PLAN_LINES:
         hidden = len(lines) - (MAX_PLAN_LINES - 1)
-        lines = [*lines[: MAX_PLAN_LINES - 1], f"+{hidden} more"]
+        lines = [*lines[: MAX_PLAN_LINES - 1], f"{_PLAN_PENDING}+{hidden} more"]
     return tuple(line.replace("`", "'") for line in lines)
