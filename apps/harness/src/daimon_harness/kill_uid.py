@@ -19,7 +19,17 @@ def terminated(pid: int) -> bool:
         # A zombie is dead and cannot finish a pending syscall. Its parent
         # (or tini) owns reaping; signal 0 alone cannot distinguish it.
         state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        return state in {"Z", "X"}
+        if state not in {"Z", "X"}:
+            return False
+        # pthread_exit can leave the leader zombie while another thread is
+        # still executing. Inspect every present thread before declaring death.
+        for thread in Path(f"/proc/{pid}/task").iterdir():
+            try:
+                if (thread / "stat").read_text().rsplit(")", 1)[1].split()[0] not in {"Z", "X"}:
+                    return False
+            except FileNotFoundError:
+                continue
+        return True
     except FileNotFoundError:
         # hidepid can return ENOENT for a live, non-dumpable process. Only
         # ESRCH from the kernel signal probe proves it disappeared.
@@ -36,7 +46,7 @@ def terminated(pid: int) -> bool:
 
 def visible_proc(mountinfo: Path = Path("/proc/self/mountinfo")) -> bool:
     """Enumeration is proof only if procfs cannot hide non-dumpable tool tasks."""
-    for line in mountinfo.read_text().splitlines():
+    for line in reversed(mountinfo.read_text().splitlines()):
         mount, separator, filesystem = line.partition(" - ")
         fields, backing = mount.split(), filesystem.split()
         if separator and fields[4] == "/proc" and backing[0] == "proc":

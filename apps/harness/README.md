@@ -775,7 +775,7 @@ and host-visible completion/admission after warning failures. A separate regress
 boundary for warning delivery. Remote uploads extend a measurement-only oracle;
 they never advance the simulated host's event cursor.
 
-Reproduce the nine isolated mutation checks from the repository root:
+Reproduce the twelve isolated mutation checks from the repository root:
 
 ```sh
 scratch=$(mktemp -d)
@@ -785,7 +785,7 @@ HARNESS_MUTATION_IMAGE=daimon-harness:l4-hardening \
 
 The script reverts each fix separately in copied source, using the same Hypothesis
 property (seed 7, including explicit regression traces). Expected pytest exit: 1
-for mutations 1–6 and 8–9. Restoring startup repair before WAL reconciliation loses measured
+for mutations 1–6 and 8–12. Restoring startup repair before WAL reconciliation loses measured
 usage; restoring submit-owned warning delivery strands a claim; removing pending
 measured-response persistence loses measured usage; removing terminal WAL records
 emits events after a terminal; disabling the divergence seal makes a mid-process
@@ -820,3 +820,35 @@ use HTTPS or loopback HTTP when `X-Daimon-MCP-Authorization` is present. Generic
 `allow_insecure_http` consent cannot override C3.9a; non-loopback HTTP turns with
 MCP credentials are refused by the driver before any I/O. AKS uses HTTPS for
 both hops with the chart CA.
+
+Cleanup retries run outside the request lock. A retained failed context returns
+structured retryable `503 workers_active` immediately; other sessions in multi
+mode can continue. Open SSE readers receive cleanup-pending keepalives until
+recovery or sandbox replacement. Each cleanup attempt has a ten-second ceiling;
+subprocess creation, pipe drainage and file-helper reaping have two-second waits.
+Three consecutive background cleanup failures emit structured
+`harness.cleanup_failed` / `harness.cleanup_exhausted` logs, fail health and
+readiness, and exit with status 1 after one second. Retries run independently of
+client traffic, so requests cannot postpone replacement. The pool must replace
+the sandbox, allowing the host to restore its last durable checkpoint.
+Before startup recovery or serving, a bounded trusted helper enumerates orphaned
+tool UIDs, kills their processes, and verifies termination; any failure refuses
+startup. The final `/proc` mount must allow the verifier's reserved group 60002
+when hidepid is enabled, including in single mode. A zombie process leader with
+live threads still counts as alive.
+
+I5 covers local workers. Cancellation cannot recall a request already accepted
+by a remote MCP server; its remote side effects can finish after the terminal.
+Such servers need their own cancellation/idempotency controls. The harness joins
+its local MCP worker before publishing a terminal and never retries a claimed
+turn after sandbox loss.
+
+Degraded checkpoint restores reconstruct pending user warnings from the durable
+workspace omission report. Mutation 10 removes that reconstruction and must fail
+the FIFO / HOME destruction regression. Mutation 11 disables cleanup escalation
+and must fail the never-dying-worker regression. Mutation 12 restores unconditional
+cancel success and must fail the terminal race stress test under both loops.
+`/cancel` waits at most eleven seconds for an active executor to finalize,
+returning retryable 503 if cleanup is still pending. Already sealed sessions
+return 503 immediately. Success derives from the committed terminal;
+a cancel racing with a committed completion returns `cancelled:false`.

@@ -217,7 +217,21 @@ async def main() -> None:
                 assert str(scratch) in str(exc), str(exc)
             finally:
                 scratch.chmod(0o755)
+    orphan = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        user=10001,
+        group=10001,
+        extra_groups=[],
+        env={},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     app = create_app(home=home)
+    lifecycle = app.router.lifespan_context(app)
+    await lifecycle.__aenter__()
+    assert await asyncio.to_thread(orphan.wait, timeout=2) == -signal.SIGKILL
+    print("startup_orphan_sweep_verified", flush=True)
     mode = app.state.supervisor.session_mode
     assert os.geteuid() == 10000
     journal: Journal = app.state.supervisor.journal
@@ -538,7 +552,7 @@ async def main() -> None:
                     await asyncio.sleep(0.01)
     if mode == "single":
         await checkpoint_probe(home)
-    await app.state.supervisor.close()
+    await lifecycle.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":

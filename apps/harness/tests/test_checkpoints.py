@@ -1841,6 +1841,8 @@ async def cleanup_failure_case(supervisor, client, monkeypatch, turn_id, *, real
     previous_adapter = supervisor.adapter
     supervisor.adapter = StuckModel()
     with monkeypatch.context() as patch:
+        patch.setattr("daimon_harness.service.CLEANUP_RETRY_DELAY", 0.01)
+        patch.setattr("daimon_harness.service.CLEANUP_FAILURE_LIMIT", 1000)
         if not real_timeout:
             patch.setattr(TurnContext, "stop_workers", failed_stop)
         try:
@@ -1863,6 +1865,8 @@ async def cleanup_failure_case(supervisor, client, monkeypatch, turn_id, *, real
             release.set()
             await asyncio.gather(*workers, return_exceptions=True)
             supervisor.adapter = previous_adapter
+        if turn_id in supervisor.cleanups:
+            await asyncio.wait_for(supervisor.cleanups[turn_id], timeout=3)
         response = await client.get("/v0/sessions/session-1/events")
         assert response.status_code == 200, response.text
         events = response.json()["events"]
@@ -1974,3 +1978,31 @@ async def test_interrupted_export_is_retried_without_publishing_partial_archive(
             assert (sandbox / "work/result.txt").read_text() == "durable"
         finally:
             restored.close()
+
+
+async def test_degraded_fifo_warning_survives_destroyed_home(tmp_path):
+    import os
+
+    blobs = MemoryBlobs()
+    home = tmp_path / "home"
+    async with harness(home, blobs) as (supervisor, client):
+        assert (await client.post("/v0/turns", json=turn())).status_code == 202
+        await supervisor.tasks["turn-1"]
+        await supervisor.flush_checkpoints()
+        sandbox, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
+        os.mkfifo(sandbox / "work" / "omitted.fifo")
+        await supervisor.checkpoint("session-1")
+        assert (supervisor.journal.root / "checkpoint.notice").exists()
+    shutil.rmtree(home)
+    async with harness(home, blobs) as (supervisor, client):
+        assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
+        sandbox, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
+        assert not (sandbox / "work" / "omitted.fifo").exists()
+        assert (
+            await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
+        ).status_code == 202
+        await supervisor.tasks["next"]
+        events = (await client.get("/v0/sessions/session-1/events")).json()["events"]
+        warnings = [event for event in events if event["type"] == "checkpoint_warning"]
+        assert len(warnings) == 1, "restored degraded checkpoint lost warning"
+        assert warnings[0]["turn_id"] == "next"

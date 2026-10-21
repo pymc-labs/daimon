@@ -9,6 +9,8 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
+import sys
 import threading
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +61,10 @@ from .storage_worker import StorageWorker
 T = TypeVar("T")
 
 CHECKPOINT_SHUTDOWN_TIMEOUT = 5.0
+CLEANUP_TIMEOUT = 10.0
+CLEANUP_FAILURE_LIMIT = 3
+CLEANUP_RETRY_DELAY = 1.0
+CANCEL_JOIN_TIMEOUT = CLEANUP_TIMEOUT + 1.0
 
 audit_logger = logging.getLogger("daimon_harness.audit")
 audit_logger.setLevel(logging.INFO)
@@ -125,6 +131,9 @@ class Supervisor:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.contexts: dict[str, TurnContext] = {}
         self.changed = asyncio.Event()
+        self.cleanups: dict[str, asyncio.Task[None]] = {}
+        self.cleanup_failures: dict[str, int] = {}
+        self.unhealthy = False
 
     def attach_durability(self) -> None:
         if self.checkpoints is not None:
@@ -262,18 +271,72 @@ class Supervisor:
                 self.checkpoint_result(request.session_id, None)
         return None
 
-    async def cleanup_failed_turns(self) -> None:
+    def start_cleanup(self, turn_id: str) -> None:
+        if turn_id not in self.cleanups or self.cleanups[turn_id].done():
+            self.cleanups[turn_id] = asyncio.create_task(self.retry_cleanup(turn_id))
+
+    async def retry_cleanup(self, turn_id: str) -> None:
+        # Own retries independently of client traffic and the admission lock.
+        owner = self.tasks.get(turn_id)
+        if owner is not None and not owner.done():
+            await asyncio.wait({owner}, timeout=CLEANUP_TIMEOUT)
+        if owner is not None and owner.done() and not owner.cancelled():
+            owner.exception()
+        while turn_id in self.contexts and not self.unhealthy:
+            context = self.contexts[turn_id]
+            try:
+                async with asyncio.timeout(CLEANUP_TIMEOUT):
+                    await context.stop_workers()
+            except Exception as exc:
+                failures = self.cleanup_failures.get(turn_id, 0) + 1
+                self.cleanup_failures[turn_id] = failures
+                audit_logger.error(
+                    json.dumps(
+                        {
+                            "event": "harness.cleanup_failed",
+                            "session_id": context.request.session_id,
+                            "turn_id": turn_id,
+                            "failures": failures,
+                            "reason": type(exc).__name__,
+                        }
+                    )
+                )
+                if failures >= CLEANUP_FAILURE_LIMIT:
+                    self.unhealthy = True
+                    audit_logger.critical(
+                        json.dumps(
+                            {
+                                "event": "harness.cleanup_exhausted",
+                                "turn_id": turn_id,
+                                "failures": failures,
+                            }
+                        )
+                    )
+                    # Give readiness probes a chance to observe the failed state;
+                    # hard exit also handles uninterruptible tasks during shutdown.
+                    asyncio.get_running_loop().call_later(1.0, self.exit_unhealthy)
+                    self.changed.set()
+                    return
+                await asyncio.sleep(CLEANUP_RETRY_DELAY)
+            else:
+                self.contexts.pop(turn_id, None)
+                self.cleanup_failures.pop(turn_id, None)
+                self.changed.set()
+
+    def exit_unhealthy(self) -> None:
+        os._exit(1)
+
+    async def cleanup_failed_turns(self, session_id: str | None = None) -> None:
+        if self.unhealthy:
+            raise HarnessError("workers_active", "Sandbox cleanup exhausted; replacement required")
         for turn_id, context in list(self.contexts.items()):
+            if session_id is not None and context.request.session_id != session_id:
+                continue
             task = self.tasks.get(turn_id)
             if task is not None and not task.done():
                 continue
-            try:
-                await context.stop_workers()
-            except Exception:
-                raise HarnessError(
-                    "workers_active", "Tool cleanup incomplete; session sealed"
-                ) from None
-            self.contexts.pop(turn_id, None)
+            self.start_cleanup(turn_id)
+            raise HarnessError("workers_active", "Tool cleanup incomplete; session sealed")
 
     def reopen_journal(self) -> None:
         if self.reopen_pending:
@@ -314,7 +377,7 @@ class Supervisor:
                 # WAL reconciliation is complete. If repair fails, retry it
                 # against this incarnation instead of abandoning its new block.
                 self.restored = True
-                self.recover(sandbox_lost=cursor_file.exists())
+                self.recover(sandbox_lost=cursor_file.exists(), session_id=session_id)
             except ConflictError:
                 raise
             except Exception as exc:
@@ -340,14 +403,17 @@ class Supervisor:
             and (request.turn_id not in self.tasks or self.tasks[request.turn_id].done())
             for request in self.journal.turns(session_id)
         ):
-            self.recover(sandbox_lost=(self.journal.root / "restore.cursor").exists())
+            self.recover(
+                sandbox_lost=(self.journal.root / "restore.cursor").exists(), session_id=session_id
+            )
         self.journal.announce_gap(session_id)
 
     async def ensure_session(self, session_id: str, after_seq: int = 0) -> None:
         identifier(session_id)
+        await self.cleanup_failed_turns(session_id)
         async with self.submissions:
             try:
-                await self.cleanup_failed_turns()
+                await self.cleanup_failed_turns(session_id)
                 await self.io(self.prepare_session, session_id, after_seq)
                 self.retry_pending_checkpoint(session_id)
             except ConflictError:
@@ -355,7 +421,7 @@ class Supervisor:
             except ValueError:
                 raise HTTPException(status_code=422, detail="Invalid client cursor") from None
 
-    def recover(self, sandbox_lost: bool = False) -> None:
+    def recover(self, sandbox_lost: bool = False, session_id: str | None = None) -> None:
         self.journal.require_converged()
         if (self.journal.root / "restore.pending").exists() or (
             (self.journal.root / "restore.cursor").exists() and not sandbox_lost
@@ -365,7 +431,7 @@ class Supervisor:
         cursor_file = self.journal.root / "restore.cursor"
         sandbox_lost = sandbox_lost or cursor_file.exists()
         # A claimed turn can have executed tools. Never retry it after a process crash.
-        for request in self.journal.turns():
+        for request in self.journal.turns(session_id):
             if not self.journal.ended(request.turn_id):
                 task = self.tasks.get(request.turn_id)
                 if task is not None and not task.done():
@@ -521,7 +587,8 @@ class Supervisor:
             async def finalize() -> None:
                 nonlocal failure, workers_stopped
                 if context is not None:
-                    await context.stop_workers()
+                    async with asyncio.timeout(CLEANUP_TIMEOUT):
+                        await context.stop_workers()
                     workers_stopped = True
                 original_failure = failure
                 for request_id in await self.io(self.journal.pending_requests, request):
@@ -561,13 +628,16 @@ class Supervisor:
                 # Retain the context until worker cleanup succeeds (I5).
                 if workers_stopped:
                     self.contexts.pop(request.turn_id, None)
+                elif context is not None:
+                    asyncio.get_running_loop().call_soon(self.start_cleanup, request.turn_id)
                 self.changed.set()
 
     async def submit(
         self, request: TurnRequest, mcp_authorization: str | None = None, after_seq: int = 0
     ) -> None:
+        await self.cleanup_failed_turns(request.session_id)
         async with self.submissions:
-            await self.cleanup_failed_turns()
+            await self.cleanup_failed_turns(request.session_id)
             await self.io(self.prepare_session, request.session_id, after_seq)
             self.retry_pending_checkpoint(request.session_id)
             if self.session_mode == "single":
@@ -588,7 +658,16 @@ class Supervisor:
         after = 0
         while True:
             self.changed.clear()
-            await self.ensure_session(request.session_id)
+            try:
+                await self.ensure_session(request.session_id)
+            except HarnessError as exc:
+                if exc.kind != "workers_active":
+                    raise
+                # An SSE response cannot change its HTTP status after headers.
+                # Keep it open while cleanup retries; replacement closes it.
+                yield ": cleanup pending; retryable\n\n"
+                await asyncio.sleep(0.1)
+                continue
             complete = await self.io(self.journal.ended, request.turn_id)
             events = await self.io(self.journal.events, request.session_id, after)
             if not events and not complete:
@@ -610,7 +689,15 @@ class Supervisor:
         for task in self.tasks.values():
             if not task.done() and not task.cancelling():
                 task.cancel()
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        if self.tasks:
+            done, _ = await asyncio.wait(set(self.tasks.values()), timeout=CLEANUP_TIMEOUT)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()
+        for cleanup in self.cleanups.values():
+            cleanup.cancel()
+        if self.cleanups:
+            await asyncio.wait(set(self.cleanups.values()), timeout=CLEANUP_TIMEOUT)
 
         def close_resources() -> None:
             if self.checkpoints is not None:
@@ -748,6 +835,20 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with (supervisor.journal.root / "process.lock").open("a") as lease:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not test_mode:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    [sys.executable, "-I", str(Path(__file__).with_name("startup_sweep.py"))],
+                    user=0,
+                    group=0,
+                    extra_groups=[60002],
+                    env={},
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=True,
+                )
             if supervisor.checkpoints is None:
                 await supervisor.io(supervisor.recover)
             try:
@@ -768,6 +869,8 @@ def create_app(
     app.state.supervisor = supervisor
 
     async def health() -> HealthResponse:
+        if supervisor.unhealthy:
+            raise HarnessError("workers_active", "Sandbox cleanup exhausted; replacement required")
         return HealthResponse(version=os.environ.get("HARNESS_VERSION", "development"))
 
     async def turns(
@@ -866,10 +969,15 @@ def create_app(
             return CancelResponse(cancelled=False)
         if not task.cancelling():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        done, _ = await asyncio.wait({task}, timeout=CANCEL_JOIN_TIMEOUT)
+        if not done:
+            raise HarnessError("workers_active", "Tool cleanup pending; retry cancellation")
+        if not task.cancelled():
+            task.exception()
         if not await supervisor.io(supervisor.journal.ended, turn_id):
-            raise HTTPException(status_code=503, detail="Tool cleanup incomplete; session sealed")
-        return CancelResponse(cancelled=True)
+            raise HarnessError("workers_active", "Tool cleanup incomplete; session sealed")
+        terminal = await supervisor.io(supervisor.journal.terminal_outcome, turn_id)
+        return CancelResponse(cancelled=terminal == "interrupted")
 
     async def events(
         session_id: str,
@@ -978,6 +1086,8 @@ def create_app(
         raise HTTPException(status_code=404, detail="Unknown C3 route")
 
     async def readiness() -> dict[str, bool]:
+        if supervisor.unhealthy:
+            raise HarnessError("workers_active", "Sandbox cleanup exhausted; replacement required")
         return {"ready": True}
 
     app.add_api_route("/v0/healthz", health, methods=["GET"], dependencies=secured)

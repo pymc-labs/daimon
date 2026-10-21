@@ -1,4 +1,4 @@
-"""Run nine recovery mutations on isolated source copies (never edit the checkout).
+"""Run twelve recovery mutations on isolated source copies (never edit the checkout).
 
 Usage: uv run python apps/harness/tests/recovery_mutations.py <empty scratch directory>
 Run from the repository root; each property-test failure is retained in scratch.
@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in range(1, 10):
+for number in range(1, 13):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -87,7 +87,8 @@ for number in range(1, 10):
                 image,
                 "-c",
                 "uv pip install --python /opt/venv/bin/python azure-storage-blob==12.31.0 "
-                "zstandard==0.25.0 && exec /opt/venv/bin/python /probe.py",
+                "zstandard==0.25.0 aiohttp==3.13.5 openai-agents==0.20.0 openai==2.54.0 "
+                "&& exec /opt/venv/bin/python /probe.py",
             ],
             text=True,
         ).strip()
@@ -122,7 +123,7 @@ for number in range(1, 10):
             "for pid in present_pids():",
             'for pid in range(2, int(Path("/proc/sys/kernel/ns_last_pid").read_text()) + 1):',
         )
-    else:
+    elif number == 9:
         change(
             "checkpoints.py",
             "(records or remote_seq or after_seq)",
@@ -133,6 +134,16 @@ for number in range(1, 10):
             'if pending.exists():\n                raise ValueError("observed session has no remote checkpoint")',
             'if pending.exists() or after_seq > 0:\n                raise ValueError("observed session has no remote checkpoint")',
         )
+    elif number == 10:
+        change(
+            "checkpoints.py",
+            '            workspace_report = manifest.get("workspace", {})',
+            "            workspace_report = {}",
+        )
+    elif number == 11:
+        change("service.py", "if failures >= CLEANUP_FAILURE_LIMIT:", "if False:")
+    elif number == 12:
+        change("service.py", 'cancelled=terminal == "interrupted"', "cancelled=True")
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:
         result = subprocess.run(
@@ -140,10 +151,14 @@ for number in range(1, 10):
                 "uv",
                 "run",
                 "pytest",
-                (
-                    "apps/harness/tests/test_kill_uid.py::test_sparse_four_million_pid_namespace_and_wrap"
-                    if number == 8
-                    else "apps/harness/tests/test_sequence_ratchet.py::test_sequence_ratchet_random_interleavings"
+                {
+                    8: "apps/harness/tests/test_kill_uid.py::test_sparse_four_million_pid_namespace_and_wrap",
+                    10: "apps/harness/tests/test_checkpoints.py::test_degraded_fifo_warning_survives_destroyed_home",
+                    11: "apps/harness/tests/test_wedge_hardening.py::test_never_dying_worker_escalates_without_request_lock",
+                    12: "apps/harness/tests/test_wedge_hardening.py::test_cancel_terminal_race_stress",
+                }.get(
+                    number,
+                    "apps/harness/tests/test_sequence_ratchet.py::test_sequence_ratchet_random_interleavings",
                 ),
                 "-xq",
                 "--hypothesis-seed=7",
@@ -151,6 +166,7 @@ for number in range(1, 10):
             env=env,
             stdout=output,
             stderr=subprocess.STDOUT,
+            timeout=300,
         )
     print(f"mutation {number}: pytest exit {result.returncode}", flush=True)
     assert result.returncode == 1
@@ -163,5 +179,8 @@ for number in range(1, 10):
         6: "I5: poll ended a turn with live workers",
         8: "AssertionError: cleanup scanned the PID allocation range",
         9: "AssertionError: empty remote cursor fence rejected",
+        10: "restored degraded checkpoint lost warning",
+        11: "cleanup escalation missing",
+        12: "cancel acknowledged a completed turn",
     }
     assert expected[number] in (root / f"mutation-{number}.log").read_text()
