@@ -48,7 +48,7 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
-from daimon.core.channel_backend import is_selfhosted_channel
+from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -95,6 +95,7 @@ from daimon.core.routine_delivery import (
     render_routine_controls,
 )
 from daimon.core.rule_views import (
+    is_routine_parent_unknown,
     routine_answers_only_owner,
     routine_destination_channel,
     routine_destination_place,
@@ -265,6 +266,33 @@ async def _build_fire(
             # Headless routines have no self-hosted runtime yet. Refuse before
             # resolving agents, environments, defaults or credentials at Anthropic.
             target = delivery_target(row, platform=platform)
+            if is_routine_parent_unknown(row):
+                await record_result(
+                    s, row.id, tail=None, error="routine_destination_parent_unknown"
+                )
+                return
+            parent_channel = routine_destination_channel(row)
+            if row.destination_kind == "thread" and parent_channel is not None:
+                thread_id = (
+                    target.thread_ts
+                    if platform == "slack" and target is not None
+                    else row.destination_id
+                )
+                if (
+                    await effective_thread_backend(
+                        s,
+                        tenant_id=row.tenant_id,
+                        platform=platform,
+                        channel_id=parent_channel,
+                        thread_id=thread_id,
+                        caller_id=row.created_by_user_id,
+                    )
+                    == "selfhosted"
+                ):
+                    await record_result(
+                        s, row.id, tail=None, error="selfhosted_routines_unsupported"
+                    )
+                    return
             channels = {
                 channel
                 for channel in (

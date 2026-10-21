@@ -55,7 +55,10 @@ Routines whose saved channel or delivery destination selects the self-hosted
 backend stop before provider resolution, with
 `last_error=selfhosted_routines_unsupported`. Headless routines currently require
 Anthropic Managed Agents; switching a channel to self-hosted does not silently
-run its scheduled prompts through Anthropic.
+run its scheduled prompts through Anthropic. Thread destinations also check the
+requesting caller's retained backend. Legacy thread destinations whose parent
+channel is unknown stop with `last_error=routine_destination_parent_unknown`;
+set their destination again to record the parent before running them.
 
 Timers and task continuations retain their thread's backend after a channel
 backend change, including Anthropic timers in channels switched to self-hosted.

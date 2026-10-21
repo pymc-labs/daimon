@@ -2666,6 +2666,10 @@ async def test_fire_does_not_invite_a_post_when_placement_cannot_be_checked(
         policy=TenantAccessPolicy(**policy_kwargs),
     )
 
+    if kind == "thread":
+        assert after.last_error == "routine_destination_parent_unknown"
+        assert not seen, "unknown parent must refuse before starting the provider turn"
+        return
     trigger = str(seen["trigger_message"])
     assert "Do not post to the destination yourself" in trigger
     assert "posts your full final reply there" not in trigger
@@ -2819,7 +2823,8 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
-    assert fetched is not None and fetched.last_error == "own_agents_only"
+    expected = "routine_destination_parent_unknown" if channel_id is None else "own_agents_only"
+    assert fetched is not None and fetched.last_error == expected
     await client.close()
 
 
@@ -3115,3 +3120,92 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
     after = await get_routine(db_session, row.id, tenant_id=tenant.id)
     assert after is not None
     assert after.last_error == "selfhosted_routines_unsupported"
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("backend_case", ["legacy", "current", "retained"])
+async def test_thread_routine_checks_parent_and_retained_backend_before_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    platform: Literal["discord", "slack", "teams"],
+    backend_case: str,
+) -> None:
+    from typing import cast
+
+    from daimon.core.anthropic_guard import without_anthropic
+    from daimon.core.channel_backend import channel_ref, set_channel_backend
+    from daimon.core.stores import mux_state
+    from daimon.testing.factories import make_account, make_platform_principal
+    from mux.contracts.config import BackendConfig
+    from mux.contracts.ids import ThreadRef
+    from mux.contracts.resources import ProviderBinding
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"thread routine accessed Anthropic.{name}")
+
+    tenant = await make_tenant(db_session, platform=platform)
+    parent = "19:room@thread.tacv2" if platform == "teams" else "4200"
+    thread_id = f"{parent};messageid=4242" if platform == "teams" else "4242"
+    destination = f"{parent}:{thread_id}" if platform == "slack" else thread_id
+    channel = channel_ref(tenant.id, platform, parent)
+    revision = await set_channel_backend(
+        db_session,
+        channel,
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+    )
+    if backend_case == "retained":
+        account = await make_account(db_session, tenant=tenant)
+        await make_platform_principal(
+            db_session, tenant=tenant, account=account, platform=platform, external_id="owner"
+        )
+        await mux_state.put_binding(
+            db_session,
+            ProviderBinding(
+                id="routine-selfhosted",
+                thread=ThreadRef(channel=channel, thread_id=thread_id),
+                provider=revision.backend,
+                profile=revision.profile,
+                native_refs={},
+                generation=1,
+                config_revision=revision.local,
+                legacy_account_id=str(account.id),
+            ),
+            expected_generation=0,
+        )
+        await set_channel_backend(db_session, channel, BackendConfig())
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="agt_saved",
+        agent_name="test",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="private scheduled content",
+        # Discord's legacy destination does not carry its parent. Other
+        # platforms encode the parent and can still resolve retained bindings.
+        channel_id=None if backend_case == "legacy" else parent,
+        destination_kind="thread",
+        destination_id=destination,
+    )
+    await db_session.commit()
+    fire = await _build_fire(
+        client=cast(AsyncAnthropic, NoAnthropic()),
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with without_anthropic():
+        await fire(row)
+    after = await get_routine(db_session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    expected = (
+        "routine_destination_parent_unknown"
+        if platform == "discord" and backend_case == "legacy"
+        else "selfhosted_routines_unsupported"
+    )
+    assert after.last_error == expected
+    assert after.last_result_tail is None
