@@ -70,7 +70,13 @@ async def checkpoint_probe(home: Path) -> None:
     assert report["degraded"] is True
     assert report["skipped_count"] >= 3, report
     # A normal venv and special entries must not prevent later snapshots.
-    old.append(request, "status_running", {})
+    # I3 keeps the completed turn immutable; the next snapshot belongs to a
+    # separately claimed turn in the same session.
+    second = request.model_copy(
+        update={"turn_id": "probe-second", "idempotency_key": "probe-second"}
+    )
+    assert old.claim(second)
+    old.append(second, "status_running", {})
     checkpoints.save(old, "probe")
     old.close()
     fresh = Journal(home / "checkpoint-new")
@@ -82,9 +88,14 @@ async def checkpoint_probe(home: Path) -> None:
     assert await context.bash("cat result; ./run") == "exit_code=0\npersistedexecutable\n"
     modes = await context.bash("stat -c '%a' run result; test ! -e pipe && echo skipped")
     assert modes == "exit_code=0\n700\n600\nskipped\n", modes
-    assert restored.events("probe")[-1].type == "status_running"
+    events = restored.events("probe")
+    assert events[-1].type == "status_running" and events[-1].turn_id == second.turn_id
+    assert restored.ended(request.turn_id) and not restored.ended(second.turn_id)
+    assert [event.type for event in events if event.turn_id == request.turn_id] == ["turn_ended"]
+    assert restored.find(second.turn_id) == second
     assert (sandbox / "work").stat().st_uid == uid
     restored.close()
+    print(f"checkpoint_restore_verified service_uid={os.geteuid()} workspace_uid={uid}", flush=True)
 
 
 async def main() -> None:
