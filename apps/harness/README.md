@@ -262,7 +262,10 @@ The default suite uses a fake adapter and a mocked Azure HTTP transport under
 the real Agents SDK. The live Azure test is skipped unless `AZURE_OPENAI_ENDPOINT`
 and either `AZURE_OPENAI_API_KEY` or `AZURE_CLIENT_ID` are set; it uses
 `AZURE_OPENAI_DEPLOYMENT` (test default `gpt-6-luna`) and incurs model usage.
-The live test refuses any deployment other than `gpt-6-luna` (C12).
+The live test refuses any deployment other than `gpt-6-luna` (C12). It also
+checks the Responses model echo before the SDK continues, accepting Luna or
+a dated Luna version and aborting on another model. The echo check happens
+after the first request: never alias another model as `gpt-6-luna`.
 For cheap smoke tests, deploy `gpt-6-luna` version `2026-09-22` and set
 `AZURE_OPENAI_DEPLOYMENT=gpt-6-luna`. The harness uses each request's model
 as its deployment name. See [Azure model selection](../../deploy/azure/README.md#model-selection)

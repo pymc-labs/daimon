@@ -59,7 +59,7 @@ async def test_selfhosted_discord_and_teams_followed_threads_stay_mention_only(
         original = await set_channel_backend(
             db_session,
             channel,
-            BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+            BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
         )
         if switched:
             account = await make_account(db_session, tenant=tenant)
@@ -198,7 +198,7 @@ async def test_selfhosted_timer_dispatch_never_resolves_at_anthropic(
     )
     target = await SelfHostedAgents(db_session_factory).create(
         scope,
-        AgentSpec(name="timer-agent", model=ModelRef(provider="selfhosted", id="gpt-5")),
+        AgentSpec(name="timer-agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
         key="timer-target",
     )
     monkeypatch.setattr("daimon.core.turn.runtimes.ensure_channel_runtime", lambda _: ready)
@@ -294,7 +294,7 @@ async def test_selfhosted_adapter_turn_enters_guard_before_dispatch(
     await set_channel_backend(
         db_session,
         channel_ref(tenant.id, platform, "4200"),
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
     )
     await db_session.commit()
     client = cast(AsyncAnthropic, NoAnthropic())

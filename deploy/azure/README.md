@@ -206,7 +206,8 @@ outputs into local environment state.
 ## Model selection
 
 Both Bicep entrypoints accept `modelName` (default `gpt-6.1-sol`),
-`modelVersion` (`2026-09-29`), `modelDeploymentName` (defaults to `modelName`),
+`modelVersion` (derived from `modelName`: Sol `2026-09-29`, Luna `2026-09-22`),
+`modelDeploymentName` (defaults to `modelName`),
 `modelSku` (`DataZoneStandard`) and `modelCapacity` (1 quota unit).
 `AZURE_OPENAI_DEPLOYMENT` follows `modelDeploymentName`, including custom aliases.
 These replace the earlier `gpt5*` parameter names; update local parameter files.
@@ -222,7 +223,20 @@ also support Container Apps dynamic sessions with custom containers.
 See [model availability](https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-models/concepts/models-sold-directly-by-azure)
 and [deployment data processing](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/deployment-types).
 
-For cheap smoke tests, add these entries to your local parameter file's
+For azd smoke deployments, select Luna before provisioning:
+
+```bash
+azd env set AZURE_MODEL_NAME gpt-6-luna
+azd provision
+```
+
+The azd parameter file maps `AZURE_MODEL_NAME` (default `gpt-6.1-sol`);
+Bicep derives the version and deployment name. For other models supply an
+explicit `modelVersion` in your local parameter file. A missing default for
+an unknown model fails with a message to supply the version.
+
+For cheap smoke tests on the group deployment route, add these entries to
+your local parameter file's
 `parameters` object (omit `modelDeploymentName` to use `gpt-6-luna`):
 
 ```json

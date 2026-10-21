@@ -78,12 +78,12 @@ async def test_real_neutral_tools_resolve_local_isolation(
     )
     local = await agents.create(
         scope,
-        AgentSpec(name="local", model=ModelRef(provider="selfhosted", id="gpt-5")),
+        AgentSpec(name="local", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
         key="local",
     )
     await agents.create(
         scope,
-        AgentSpec(name="secret", model=ModelRef(provider="selfhosted", id="gpt-5")),
+        AgentSpec(name="secret", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
         key="secret",
     )
     executing = local.ref.id
@@ -95,7 +95,7 @@ async def test_real_neutral_tools_resolve_local_isolation(
                 principal_id="test",
                 authorization_id="test",
             ),
-            AgentSpec(name="foreign", model=ModelRef(provider="selfhosted", id="gpt-5")),
+            AgentSpec(name="foreign", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
             key="foreign",
         )
         executing = foreign_agent.ref.id

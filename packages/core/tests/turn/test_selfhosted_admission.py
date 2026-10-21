@@ -58,7 +58,7 @@ async def test_admits_without_anthropic_key_or_calls(
         channel_ref(tenant.id, "discord", "channel"),
         1,
         resolve_default(
-            BackendConfig(backend=LOOP.provider, profile="selfhosted.loop", model="gpt-5")
+            BackendConfig(backend=LOOP.provider, profile="selfhosted.loop", model="gpt-6-luna")
         ),
     )
     await mux_state.put_config_revision(db_session, revision)
@@ -84,7 +84,7 @@ async def test_admits_without_anthropic_key_or_calls(
         now=datetime.now(UTC),
     )
     assert result.agent.id == agent.ref.id and result.environment.id == env.ref.id
-    assert result.agent.model.id == "gpt-5"
+    assert result.agent.model.id == "gpt-6-luna"
     assert result.backend_revision == revision
     assert result.source_sealed == sealed
     assert result.memory_read_only == sealed

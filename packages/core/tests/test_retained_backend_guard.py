@@ -46,7 +46,7 @@ async def test_participation_uses_retained_backend_before_history_and_classifier
     )
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal(100))
     channel = channel_ref(tenant.id, platform, "channel")
-    local = BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5")
+    local = BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
     if shared:
         await set_channel_backend(db_session, channel, BackendConfig(thread_mode="shared"))
     original = await set_channel_backend(

@@ -1,3 +1,4 @@
+import { defaultModelVersion } from '../models.bicep'
 import { validateNamePrefix } from '../names.bicep'
 import { validateChartStorage } from '../chart-storage.bicep'
 
@@ -27,7 +28,7 @@ param modelDeploymentName string = modelName
 param modelCapacity int = 1
 @allowed(['DataZoneStandard', 'GlobalStandard'])
 param modelSku string = 'DataZoneStandard'
-param modelVersion string = '2026-09-29'
+param modelVersion string = defaultModelVersion(modelName)
 @allowed([false])
 param enablePrivateNetworking bool = false
 param appEnvironment object = {}

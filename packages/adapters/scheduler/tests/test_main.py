@@ -3093,7 +3093,7 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
     await set_channel_backend(
         db_session,
         channel_ref(tenant.id, tenant.platform, "dest" if at_destination else "origin"),
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
     )
     row = await create_routine(
         db_session,
@@ -3153,7 +3153,7 @@ async def test_thread_routine_checks_parent_and_retained_backend_before_anthropi
     revision = await set_channel_backend(
         db_session,
         channel,
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
     )
     if backend_case == "retained":
         account = await make_account(db_session, tenant=tenant)

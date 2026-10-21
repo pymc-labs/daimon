@@ -16,6 +16,7 @@ from mux.drivers.selfhosted.wire import TurnRequest
 from openai import AsyncAzureOpenAI
 
 from .conftest import turn
+from .live_probe import luna_deployment, verify_luna_response
 
 
 async def test_managed_identity_without_api_key_uses_real_async_transport():
@@ -161,11 +162,18 @@ async def test_sdk_tool_loop_meters_each_request(
     ),
     reason="requires explicit Azure OpenAI credentials",
 )
-async def test_live_azure_responses(tmp_path: Path) -> None:
+async def test_live_azure_responses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     body = turn()
-    body["model"] = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-6-luna")
-    if body["model"] != "gpt-6-luna":
-        pytest.skip("C12: live tests only permit the gpt-6-luna deployment")
+    body["model"] = luna_deployment()
+
+    def checked_client(**kwargs):
+        return AsyncAzureOpenAI(
+            **kwargs,
+            max_retries=0,
+            http_client=httpx.AsyncClient(event_hooks={"response": [verify_luna_response]}),
+        )
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", checked_client)
     body["input"] = [{"type": "text", "text": "Reply with the word ready. Do not use tools."}]
     events: list[tuple[str, object]] = []
 

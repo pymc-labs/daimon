@@ -328,7 +328,9 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
                 ref=agent,
                 revision=Revision(local=1),
                 created_at=NOW,
-                spec=AgentSpec(name="agent", model=ModelRef(provider="selfhosted", id="gpt-5")),
+                spec=AgentSpec(
+                    name="agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna")
+                ),
             )
 
     agents = cast(Agents, TenantAgents())

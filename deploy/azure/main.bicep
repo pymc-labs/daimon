@@ -1,3 +1,4 @@
+import { defaultModelVersion } from './models.bicep'
 import { validateNamePrefix } from './names.bicep'
 import { validateChartStorage, chartArtifactsEnvironment } from './chart-storage.bicep'
 
@@ -16,7 +17,7 @@ param modelDeploymentName string = modelName
 param modelCapacity int = 1
 @allowed(['DataZoneStandard', 'GlobalStandard'])
 param modelSku string = 'DataZoneStandard'
-param modelVersion string = '2026-09-29'
+param modelVersion string = defaultModelVersion(modelName)
 
 @allowed([false])
 @description('Private networking is not implemented in this public-endpoint baseline. True is refused.')

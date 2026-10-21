@@ -452,7 +452,9 @@ def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) ->
         params = template["parameters"]
         assert not any(name.startswith("gpt5") for name in params)
         assert params["modelName"]["defaultValue"] == "gpt-6.1-sol"
-        assert params["modelVersion"]["defaultValue"] == "2026-09-29"
+        assert params["modelVersion"]["defaultValue"] == (
+            "[__bicep.defaultModelVersion(parameters('modelName'))]"
+        )
         assert params["modelDeploymentName"]["defaultValue"] == "[parameters('modelName')]"
         assert params["modelSku"]["defaultValue"] == "DataZoneStandard"
         assert params["modelSku"]["allowedValues"] == ["DataZoneStandard", "GlobalStandard"]
@@ -480,3 +482,57 @@ def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) ->
         templates["main.bicep"]["outputs"]["harnessEnvironment"]["value"]["AZURE_OPENAI_DEPLOYMENT"]
         == "[if(parameters('deployAi'), parameters('modelDeploymentName'), '')]"
     )
+
+
+async def test_production_model_defaults_agree_across_surfaces(templates: dict[str, dict]) -> None:
+    import inspect
+    from unittest.mock import Mock
+
+    from daimon.adapters.cli.commands.selfhosted import selfhosted_init_command
+    from mux.contracts.ids import Scope
+    from mux.drivers.selfhosted import SelfHostedDriver
+    from mux.profiles import backend_selection
+
+    expected = "gpt-6.1-sol"
+    assert inspect.signature(selfhosted_init_command).parameters["model"].default == expected
+    assert backend_selection("selfhosted").model == expected
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        assert templates[entrypoint]["parameters"]["modelName"]["defaultValue"] == expected
+    # Inspect only the models port: no turn, transport or model request is made.
+    driver = SelfHostedDriver(
+        Mock(),
+        account_scope_id="test",
+        agents=Mock(),
+        environments=Mock(),
+        authorization=lambda *args: False,
+    )
+    scope = Scope(tenant_id="test", account_id="test", principal_id="test", authorization_id="test")
+    assert [info.model.id for info in await driver.models.list(scope, "selfhosted")] == [expected]
+
+
+@pytest.mark.parametrize(
+    "model,version",
+    [("gpt-6.1-sol", "2026-09-29"), ("gpt-6-luna", "2026-09-22"), ("custom-model", "")],
+)
+def test_default_model_versions_evaluate_offline(templates, tmp_path, model, version):
+    source = tmp_path / "models.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/models.bicep", tmp_path)
+    source.write_text(
+        f"using none\nimport {{ knownModelVersion }} from '{relative}'\n"
+        f"param version = knownModelVersion('{model}')\n"
+    )
+    target = tmp_path / "models.json"
+    result = subprocess.run(
+        ["bicep", "build-params", str(source), "--outfile", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["parameters"]["version"]["value"] == version
+
+
+def test_azd_model_name_uses_env_with_sol_default():
+    parameters = json.loads((ROOT / "deploy/azure/azd/main.parameters.json").read_text())
+    assert parameters["parameters"]["modelName"]["value"] == "${AZURE_MODEL_NAME=gpt-6.1-sol}"
+    # Leave the version unset so the production mapping follows a Luna selection.
+    assert "modelVersion" not in parameters["parameters"]

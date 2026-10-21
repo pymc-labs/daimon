@@ -1348,7 +1348,7 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
             principal_id="test",
             authorization_id="test",
         ),
-        AgentSpec(name="local-agent", model=ModelRef(provider="selfhosted", id="gpt-5")),
+        AgentSpec(name="local-agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
         key="local-agent",
     )
     runtime = McpRuntime(

@@ -510,7 +510,7 @@ async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
         ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="789"),
         1,
         resolve_default(
-            BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5")
+            BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
         ),
     )
     admission = Admission(

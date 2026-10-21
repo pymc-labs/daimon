@@ -5,7 +5,7 @@ from mux.drivers.selfhosted.wire import DATA_MODELS, Event, TurnRequest
 from pydantic import ValidationError
 
 DATA = {
-    "model_request_started": {"request_id": "r", "model": "gpt-5"},
+    "model_request_started": {"request_id": "r", "model": "gpt-6-luna"},
     "status_running": {},
     "agent_message_delta": {"message_id": "msg-1", "text": "hello"},
     "agent_message": {"message_id": "msg-1", "parts": [{"type": "text", "text": "hello"}]},
@@ -20,7 +20,7 @@ DATA = {
     },
     "usage": {
         "request_id": "r",
-        "model": "gpt-5",
+        "model": "gpt-6-luna",
         "input_tokens": 5,
         "cached_input_tokens": 0,
         "output_tokens": 2,
@@ -75,7 +75,7 @@ def test_request_round_trip() -> None:
             "session_id": "s",
             "turn_id": "t",
             "idempotency_key": "k",
-            "model": "gpt-5",
+            "model": "gpt-6-luna",
             "instructions": "help",
             "input": [
                 {"type": "text", "text": "hi"},

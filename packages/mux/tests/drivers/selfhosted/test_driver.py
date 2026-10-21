@@ -191,7 +191,7 @@ async def setup(client, harness, **options):
         if harness.foundry
         else DirectTransport(client, base_url="https://harness", token="test-token")
     )
-    options.setdefault("model", "gpt-6-luna")
+    options.setdefault("deployment", "gpt-6-luna")
     driver = SelfHostedDriver(
         transport,
         account_scope_id="tenant",
