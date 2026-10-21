@@ -212,6 +212,7 @@ concurrent polling requirements cannot be met by Foundry. Preserve the direct
 C3 endpoints and the same image; verify persistence and cancellation in that
 environment before using it for a tenant.
 
+<<<<<<< HEAD
 ## Azure Container Apps session-pool routing
 
 For `HARNESS_SESSION_MODE=single`, configure the environment's native
@@ -249,6 +250,64 @@ admission. If forwarding fails, keep admission disabled until the verified
 per-session authentication alternative is implemented. Each sandbox is ephemeral:
 use a long timed cooldown, and checkpoint/restore durable state before relying
 on workspace persistence after sandbox destruction.
+=======
+## Durable checkpoints for ephemeral sandboxes
+
+Configure the harness with `HARNESS_CHECKPOINT_ACCOUNT_URL` (an HTTPS Azure
+Storage account origin), `HARNESS_CHECKPOINT_CONTAINER` (an existing private
+container), and optionally `HARNESS_CHECKPOINT_KEEP` (1–100, default 3).
+Checkpointing requires `HARNESS_SESSION_MODE=single`. Grant the harness identity
+Storage Blob Data Contributor on the checkpoint container. Provision the
+container separately; the harness never creates cloud resources. Azure Blob
+[encrypts stored data at rest](https://learn.microsoft.com/en-us/azure/storage/common/storage-service-encryption).
+
+The service captures `ManagedIdentityCredential` before scrubbing the identity
+environment. It requires the header-protected `IDENTITY_ENDPOINT` and
+`IDENTITY_HEADER`; it never falls back to IMDS, workload identity files, account
+keys or connection strings. The workspace exporter runs as the tool UID with
+an empty environment; only the service can access the archive, journal and
+storage client. If the live pool exposes only a tool-reachable session identity,
+keep admission disabled until a host-minted, per-session SAS carrier exists.
+Live authentication and identity isolation still require deployment verification.
+
+Before model I/O, each `model_request_started` is committed locally and included
+in a remote checkpoint. After tool workers stop, every terminal turn (including
+cancellation) checkpoints the SQLite journal, history, turn/idempotency inventory
+and `work/` to `sessions/<sandbox_id>/<seq>.tar.zst`. SQLite's backup API includes
+committed WAL data. Each upload completes before terminal state is exposed or
+cancellation succeeds; failed persistence returns 503 and seals new work until
+a retry succeeds. Old snapshots are pruned only after a successful upload.
+
+An authenticated first turn, poll, action or cancel restores the latest snapshot
+when local state is empty. An interrupted restore retries before serving.
+Corrupt snapshots and conflicting local workspace state fail closed. Journal
+sequence numbers, history and replay keys continue without re-executing a turn.
+An unfinished restored turn ends as interrupted; every started request without
+usage becomes `usage_unavailable`, preserving unknown usage for reconciliation.
+A completed request whose usage missed the latest checkpoint also stays unknown;
+no zero-token observation is fabricated.
+
+Every C3 request carries the nonsecret `session_id` query parameter. For cold
+actions/cancel it is required when checkpointing is enabled, and must match the
+sandbox's binding and the turn's session. For turns and polls it must match the
+body/path. The driver preserves existing query parameters and sends this context
+through both direct and invocation transports. Older harnesses ignore it.
+
+Workspace snapshots support regular files and directories, up to 512 MiB and
+50,000 entries; links, devices and sockets refuse checkpointing. Extraction
+rejects traversal and links, verifies file digests and SQLite integrity, and
+restores tool ownership separately from service-owned journals. Skills and tmp
+files are regenerated and are not durable workspace state. Use a long timed pool
+cooldown (for example, four hours) to reduce churn; checkpoints provide recovery
+when Azure destroys a sandbox.
+
+Blob access follows the Azure SDK's
+[upload](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-upload-python)
+and [download](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-download-python)
+APIs. The harness also runs without checkpoint configuration for local persistent
+volumes; ephemeral production pools must configure and verify recovery before
+admission is enabled.
+>>>>>>> 1d0dbb575 (feat(harness): checkpoint and restore ephemeral session state)
 
 ## Tests
 

@@ -2,6 +2,9 @@
 
 Wire parts intentionally differ from mux content parts: images are always inline.
 An event validates its data against its type before entering a durable journal.
+Every C3 request carries the nonsecret ``session_id`` query parameter, including
+turn actions and cancellation, so an empty sandbox can restore before handling it.
+The parameter must match the turn body or events path and the sandbox binding.
 """
 
 from __future__ import annotations

@@ -11,7 +11,6 @@ import re
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from functools import partial
 from pathlib import Path
 from typing import Annotated, TypeVar, cast
 
@@ -31,6 +30,7 @@ from mux.drivers.selfhosted.wire import (
 from pydantic import JsonValue, ValidationError
 
 from .auth import Authenticator
+from .checkpoints import Checkpoints, configured_checkpoints, sync_directory
 from .codex_adapter import CodexModelAdapter
 from .credentials import (
     credential_log_redaction,
@@ -63,8 +63,18 @@ audit_logger.propagate = False
 
 class Supervisor:
     def __init__(
-        self, home: Path, adapter: ModelAdapter, session_mode: str = "single", token: str = ""
+        self,
+        home: Path,
+        adapter: ModelAdapter,
+        session_mode: str = "single",
+        token: str = "",
+        checkpoints: Checkpoints | None = None,
     ) -> None:
+        if checkpoints is not None and session_mode != "single":
+            raise RuntimeError("remote checkpoints require single session mode")
+        self.checkpoints = checkpoints
+        self.restored = False
+        self.checkpoint_pending: str | None = None
         self.operator_credentials = {
             name: value
             for name, value in os.environ.items()
@@ -74,6 +84,11 @@ class Supervisor:
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="harness-journal")
         self.submissions = asyncio.Lock()
         self.journal = Journal(home)
+        pending = self.journal.root / "checkpoint.pending"
+        if pending.exists():
+            if checkpoints is None:
+                raise RuntimeError("pending checkpoint requires storage configuration")
+            self.checkpoint_pending = identifier(pending.read_text())
         self.session_mode = session_mode
         if session_mode == "single":
             try:
@@ -95,10 +110,75 @@ class Supervisor:
 
     async def io(self, operation: Callable[..., T], *args: object) -> T:
         # One worker owns all SQLite operations, including ordered event commits.
-        future = asyncio.get_running_loop().run_in_executor(self.worker, partial(operation, *args))
+        def guarded() -> T:
+            if self.checkpoint_pending is not None and operation in {
+                self.journal.events,
+                self.journal.ended,
+                self.journal.complete,
+            }:
+                self.checkpoint(self.checkpoint_pending)
+            return operation(*args)
+
+        future = asyncio.get_running_loop().run_in_executor(self.worker, guarded)
         return await asyncio.shield(future)
 
+    def checkpoint(self, session_id: str) -> None:
+        if self.checkpoints is None:
+            return
+        self.checkpoint_pending = session_id
+        marker = self.journal.root / "checkpoint.pending"
+        try:
+            with marker.open("w") as output:
+                output.write(session_id)
+                output.flush()
+                os.fsync(output.fileno())
+            sync_directory(self.journal.root)
+            self.checkpoints.save(self.journal, session_id)
+            marker.unlink()
+            sync_directory(self.journal.root)
+        except Exception:
+            raise HTTPException(status_code=503, detail="Session checkpoint unavailable") from None
+        self.checkpoint_pending = None
+
+    def durable_append(
+        self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]
+    ) -> None:
+        self.journal.append(request, kind, data)
+        if kind in {"model_request_started", "turn_ended"}:
+            # Request inventory reaches Blob before model I/O; terminal state
+            # reaches Blob before stream delivery or cancellation acknowledgement.
+            self.checkpoint(request.session_id)
+
+    def prepare_session(self, session_id: str) -> None:
+        if self.session_mode == "single":
+            self.journal.bind_session(session_id)
+        if self.checkpoints is not None and not self.restored:
+            try:
+                self.journal = self.checkpoints.restore(self.journal, session_id)
+                self.journal.bind_session(session_id)
+                self.recover()
+            except ConflictError:
+                raise
+            except Exception:
+                self.journal.close()
+                self.journal = Journal(self.home)
+                raise HTTPException(status_code=503, detail="Session restore unavailable") from None
+            self.restored = True
+        if self.checkpoint_pending is not None:
+            self.checkpoint(self.checkpoint_pending)
+
+    async def ensure_session(self, session_id: str) -> None:
+        identifier(session_id)
+        async with self.submissions:
+            try:
+                await self.io(self.prepare_session, session_id)
+            except ConflictError:
+                raise HTTPException(status_code=409, detail="session_bound") from None
+
     def recover(self) -> None:
+        if (self.journal.root / "restore.pending").exists():
+            # Partial publication must be restored before repairing turn state.
+            return
         # A claimed turn can have executed tools. Never retry it after a process crash.
         for request in self.journal.turns():
             if not self.journal.ended(request.turn_id):
@@ -123,6 +203,7 @@ class Supervisor:
                         },
                     )
                 self.journal.append(request, "turn_ended", {"outcome": "interrupted"})
+                self.checkpoint(request.session_id)
 
     async def run(self, request: TurnRequest, credentials: dict[str, str]) -> None:
         credentials = self.secrets | credentials
@@ -136,7 +217,7 @@ class Supervisor:
             if kind == "error":
                 failure = {"kind": data["kind"], "message": data["message"]}
             await self.io(
-                self.journal.append,
+                self.durable_append,
                 request,
                 kind,
                 cast(dict[str, JsonValue], redact(data, credentials)),
@@ -220,10 +301,12 @@ class Supervisor:
                 data: dict[str, JsonValue] = {"outcome": outcome}
                 if outcome == "errored":
                     data["error"] = failure or {"kind": "harness", "message": "Harness turn failed"}
-                await emit("turn_ended", data)
-                credentials.clear()
-                self.contexts.pop(request.turn_id, None)
-                self.changed.set()
+                try:
+                    await emit("turn_ended", data)
+                finally:
+                    credentials.clear()
+                    self.contexts.pop(request.turn_id, None)
+                    self.changed.set()
 
             finalization = asyncio.create_task(finalize())
             while not finalization.done():
@@ -235,6 +318,7 @@ class Supervisor:
 
     async def submit(self, request: TurnRequest, mcp_authorization: str | None = None) -> None:
         async with self.submissions:
+            await self.io(self.prepare_session, request.session_id)
             if self.session_mode == "single":
                 await self.io(self.journal.bind_session, request.session_id)
             if await self.io(self.journal.is_replay, request):
@@ -253,6 +337,7 @@ class Supervisor:
         after = 0
         while True:
             self.changed.clear()
+            await self.ensure_session(request.session_id)
             complete = await self.io(self.journal.ended, request.turn_id)
             events = await self.io(self.journal.events, request.session_id, after)
             if not events and not complete:
@@ -278,6 +363,8 @@ class Supervisor:
         if isinstance(self.adapter, AzureModelAdapter) and self.adapter.credential is not None:
             await self.adapter.credential.close()
         await self.io(self.journal.close)
+        if self.checkpoints is not None:
+            await self.io(self.checkpoints.close)
         self.worker.shutdown(wait=True)
         self.log_redaction.__exit__(None, None, None)
         self.secrets.clear()
@@ -288,6 +375,7 @@ def create_app(
     home: Path | None = None,
     token: str | None = None,
     adapter: ModelAdapter | None = None,
+    checkpoints: Checkpoints | None = None,
 ) -> FastAPI:
     """One worker per session sandbox; the HOME lease rejects accidental replicas."""
     root = home or Path.home()
@@ -324,7 +412,6 @@ def create_app(
     if loop not in {"agents_sdk", "codex"}:
         raise RuntimeError("HARNESS_LOOP must be agents_sdk or codex")
     selected = adapter or (CodexModelAdapter() if loop == "codex" else AzureModelAdapter())
-    supervisor = Supervisor(root, selected, session_mode, auth.token)
     audit_logger.info(
         json.dumps(
             {
@@ -333,6 +420,19 @@ def create_app(
                 "provider": "openai_probe" if getattr(selected, "live_probe", "") else "azure",
             }
         )
+    )
+    if (
+        checkpoints is None
+        and test_mode
+        and any(
+            os.environ.get(name)
+            for name in ("HARNESS_CHECKPOINT_ACCOUNT_URL", "HARNESS_CHECKPOINT_CONTAINER")
+        )
+    ):
+        raise RuntimeError("test mode requires an injected checkpoint store")
+    configured = checkpoints or configured_checkpoints()
+    supervisor = Supervisor(
+        root, selected, session_mode, auth.token, configured
     )
     if not test_mode:
         prepare_service(root)
@@ -369,7 +469,10 @@ def create_app(
         caller: str = Depends(authenticate),
         accept: Annotated[str | None, Header()] = None,
         x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
+        session_id: Annotated[str | None, Query()] = None,
     ) -> Response:
+        if session_id is not None and session_id != request.session_id:
+            raise HTTPException(status_code=409, detail="session_mismatch")
         audit_logger.info(
             json.dumps(
                 {
@@ -394,7 +497,24 @@ def create_app(
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    async def actions(turn_id: str, action: ActionRequest) -> dict[str, bool]:
+    async def restore_for_turn(turn_id: str, session_id: str | None) -> None:
+        if supervisor.checkpoints is not None and session_id is None:
+            raise HTTPException(status_code=422, detail="session_id query parameter is required")
+        if session_id is not None:
+            try:
+                await supervisor.ensure_session(session_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="Invalid session identifier") from None
+            request = await supervisor.io(supervisor.journal.find, turn_id)
+            if request is not None and request.session_id != session_id:
+                raise HTTPException(status_code=409, detail="session_mismatch")
+
+    async def actions(
+        turn_id: str,
+        action: ActionRequest,
+        session_id: Annotated[str | None, Query()] = None,
+    ) -> dict[str, bool]:
+        await restore_for_turn(turn_id, session_id)
         context = supervisor.contexts.get(turn_id)
         if context is None:
             raise HTTPException(status_code=404, detail="No active turn")
@@ -410,7 +530,11 @@ def create_app(
         future.set_result(action)
         return {"accepted": True}
 
-    async def cancel(turn_id: str) -> CancelResponse:
+    async def cancel(
+        turn_id: str,
+        session_id: Annotated[str | None, Query()] = None,
+    ) -> CancelResponse:
+        await restore_for_turn(turn_id, session_id)
         task = supervisor.tasks.get(turn_id)
         if task is None or task.done():
             return CancelResponse(cancelled=False)
@@ -421,13 +545,22 @@ def create_app(
         if not task.cancelling():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        if supervisor.checkpoint_pending is not None:
+            raise HTTPException(status_code=503, detail="Session checkpoint unavailable")
         if not await supervisor.io(supervisor.journal.ended, turn_id):
             raise HTTPException(status_code=503, detail="Tool cleanup incomplete; session sealed")
         return CancelResponse(cancelled=True)
 
-    async def events(session_id: str, after_seq: int = Query(default=0, ge=0)) -> EventsResponse:
+    async def events(
+        session_id: str,
+        after_seq: int = Query(default=0, ge=0),
+        context_session_id: Annotated[str | None, Query(alias="session_id")] = None,
+    ) -> EventsResponse:
+        if context_session_id is not None and context_session_id != session_id:
+            raise HTTPException(status_code=409, detail="session_mismatch")
         try:
             identifier(session_id)
+            await supervisor.ensure_session(session_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid session identifier") from exc
         if supervisor.session_mode == "single":
@@ -446,10 +579,16 @@ def create_app(
         caller: str = Depends(authenticate),
         accept: Annotated[str | None, Header()] = None,
         x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
+        session_id: Annotated[str | None, Query()] = None,
     ) -> Response:
         route = envelope.c3
         method, path = route.method, route.path
-        if route.query and not (
+        context_id = route.query.get("session_id", session_id)
+        if context_id is not None and not isinstance(context_id, str):
+            raise HTTPException(status_code=422, detail="Invalid session context")
+        if session_id is not None and context_id != session_id:
+            raise HTTPException(status_code=409, detail="session_mismatch")
+        if set(route.query) - {"session_id"} and not (
             method == "GET" and re.fullmatch(r"/v0/sessions/[^/]+/events", path)
         ):
             raise HTTPException(status_code=422, detail="Unexpected query parameters")
@@ -464,6 +603,7 @@ def create_app(
                     caller,
                     accept,
                     x_daimon_mcp_authorization,
+                    context_id,
                 )
             if method == "POST" and (
                 match := re.fullmatch(r"/v0/turns/([^/]+)/(actions|cancel)", path)
@@ -471,13 +611,13 @@ def create_app(
                 turn_id, operation = match.groups()
                 if operation == "actions":
                     return JSONResponse(
-                        await actions(turn_id, ActionRequest.model_validate(route.body))
+                        await actions(turn_id, ActionRequest.model_validate(route.body), context_id)
                     )
                 if route.body not in (None, {}):
                     raise HTTPException(status_code=422, detail="Cancel body must be empty")
-                return JSONResponse((await cancel(turn_id)).model_dump())
+                return JSONResponse((await cancel(turn_id, context_id)).model_dump())
             if method == "GET" and (match := re.fullmatch(r"/v0/sessions/([^/]+)/events", path)):
-                if set(route.query) - {"after_seq"}:
+                if set(route.query) - {"after_seq", "session_id"}:
                     raise HTTPException(status_code=422, detail="Unexpected query parameters")
                 raw_after = route.query.get("after_seq", 0)
                 if isinstance(raw_after, bool) or not isinstance(raw_after, (str, int)):
@@ -485,7 +625,9 @@ def create_app(
                 after = int(raw_after)
                 if after < 0:
                     raise ValueError("negative cursor")
-                return JSONResponse((await events(match[1], after)).model_dump(mode="json"))
+                return JSONResponse(
+                    (await events(match[1], after, context_id)).model_dump(mode="json")
+                )
         except (ValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="Invalid C3 invocation") from exc
         raise HTTPException(status_code=404, detail="Unknown C3 route")

@@ -293,6 +293,7 @@ repository root with `docker build -f apps/report-host/Dockerfile .`.
 
 ### Self-hosted agent harness
 
+<<<<<<< HEAD
 For an Azure Container Apps dynamic-session pool, use the pool's published
 management endpoint as `harness_url` and set the environment's native
 configuration to `session_pool: true`, `transport: "direct"`,
@@ -304,6 +305,21 @@ session identifier, including event polling, approvals and cancellation.
 Keep admission disabled until live header forwarding and durable state recovery
 have been verified. See `apps/harness/README.md` for routing and authentication
 details.
+=======
+Ephemeral harness sandboxes require Blob checkpoints before enabling selfhosted
+admission. Set `HARNESS_CHECKPOINT_ACCOUNT_URL` to the HTTPS storage account
+origin and `HARNESS_CHECKPOINT_CONTAINER` to an existing private container;
+`HARNESS_CHECKPOINT_KEEP` defaults to three snapshots. Use single-session mode
+and a service identity with Storage Blob Data Contributor on that container.
+The harness requires a header-protected managed identity endpoint, captures it
+before scrubbing the tool environment, and refuses an IMDS fallback.
+
+The harness checkpoints workspace files, conversation history and request
+inventory before model I/O and after each terminal turn, including cancellation.
+A new sandbox restores before serving authenticated session requests. Storage
+failure returns 503; corrupt recovery refuses new work. See
+`apps/harness/README.md` for limits, permissions and deployment verification.
+>>>>>>> 1d0dbb575 (feat(harness): checkpoint and restore ephemeral session state)
 
 The standalone harness image defaults to the OpenAI Agents SDK against Azure OpenAI.
 `HARNESS_LOOP=codex` opts into the Codex app-server loop using the same harness

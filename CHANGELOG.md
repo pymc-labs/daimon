@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Self-hosted channels skip Anthropic thread naming, organic participation, cosmetic responder lookups and session-file sweeps. Their MCP credentials block Anthropic-specific operations while keeping message and file posting available under agent rules. Timers and task continuations resolve local targets, and unavailable follow-up runtimes or handovers refuse without provider calls. Unsupported scheduled routines stop before provider resolution.
 - Keep stricter tool approval permissions when replay repeats a call, and recover partially completed selfhosted approval batches after a host restart.
+- Restore selfhosted workspace, history and usage inventory from Azure Blob checkpoints after an ephemeral sandbox is destroyed; checkpoint terminal turns and cancellation before acknowledging completion.
 
 - Join harness tool workers before completing cancellation or accepting another turn, and retain reasoning alongside tool calls during context-overflow recovery.
 

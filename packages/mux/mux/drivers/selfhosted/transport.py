@@ -199,8 +199,16 @@ class DirectTransport:
         if not session_id.strip():
             raise ValueError("session id is required")
         parsed = urlsplit(path)
+<<<<<<< HEAD
         if parsed.scheme or parsed.netloc or parsed.fragment or not parsed.path.startswith("/v0/"):
             raise ValueError("direct transport requires an absolute C3 path")
+=======
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        if any(key.lower() == "session_id" for key, _ in query):
+            raise ValueError("session context is derived from the mux session")
+        query.append(("session_id", session_id))
+        path = parsed.path + "?" + urlencode(query)
+>>>>>>> 1d0dbb575 (feat(harness): checkpoint and restore ephemeral session state)
         turn = method == "POST" and parsed.path == "/v0/turns"
         if mcp_authorization is not None and not turn:
             raise ValueError("MCP authorization is only valid for turn submission")
@@ -251,6 +259,10 @@ class FoundryInvocationsTransport(DirectTransport):
         if not session_id.strip():
             raise ValueError("session id is required")
         parsed = urlsplit(path)
+        query_params = parse_qsl(parsed.query, keep_blank_values=True)
+        if any(key.lower() == "session_id" for key, _ in query_params):
+            raise ValueError("session context is derived from the mux session")
+        query_params.append(("session_id", session_id))
         turn = method == "POST" and parsed.path == "/v0/turns"
         if mcp_authorization is not None and not turn:
             raise ValueError("MCP authorization is only valid for turn submission")
@@ -258,12 +270,16 @@ class FoundryInvocationsTransport(DirectTransport):
             "c3": {
                 "method": method,
                 "path": parsed.path,
-                "query": dict(parse_qsl(parsed.query)),
+                "query": dict(query_params),
                 "body": dict(body) if body is not None else None,
             }
         }
         query = urlencode(
-            {"api-version": self._api_version, "agent_session_id": sandbox_id(session_id)}
+            {
+                "api-version": self._api_version,
+                "agent_session_id": sandbox_id(session_id),
+                "session_id": session_id,
+            }
         )
         url = (
             f"{self._base_url}/agents/{quote(self._agent_name, safe='')}"

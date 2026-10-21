@@ -838,10 +838,13 @@ async def test_refreshing_harness_token_and_per_call_mcp_credentials(foundry):
     if foundry:
         assert all(
             request.url.query.decode()
-            == f"api-version=custom&agent_session_id={sandbox_id('session')}"
+            == f"api-version=custom&agent_session_id={sandbox_id('session')}&session_id=session"
             for request in requests
         )
-        assert json.loads(requests[-1].content)["c3"]["query"] == {"after_seq": "9"}
+        assert json.loads(requests[-1].content)["c3"]["query"] == {
+            "after_seq": "9",
+            "session_id": "session",
+        }
 
 
 @pytest.mark.parametrize("ack", [None, {}, {"accepted": True, "turn_id": "wrong"}, "not-json"])
@@ -896,7 +899,7 @@ async def test_poll_retries_honor_retry_after_and_keep_cursor(status, monkeypatc
         )
     assert delays == [0.25]
     assert [str(request.url) for request in requests] == [
-        "https://harness/v0/sessions/session/events?after_seq=12"
+        "https://harness/v0/sessions/session/events?after_seq=12&session_id=session"
     ] * 2
     response = httpx.Response(503)
     for attempt in range(8):

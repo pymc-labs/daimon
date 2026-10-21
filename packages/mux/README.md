@@ -1276,3 +1276,8 @@ qualified server/tool identity.
 The dynamic-session pool audience requires `session_pool=true`; transport
 requests require a nonempty session ID. The pool container must independently
 validate Entra tokens for that audience and allowlist the invoking host principal.
+
+
+Selfhosted C3 transports send the nonsecret `session_id` query parameter on every
+request, including actions/cancel and event polling, so an empty sandbox can
+restore and verify session/turn ownership before handling it.

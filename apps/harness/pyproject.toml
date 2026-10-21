@@ -5,6 +5,7 @@ description = "Self-hosted Daimon agent harness"
 requires-python = ">=3.12"
 dependencies = [
     "daimon-mux", "fastapi>=0.115", "uvicorn>=0.34",
+    "azure-storage-blob>=12.27,<13", "zstandard>=0.23,<1",
     "openai-agents==0.20.0", "openai>=2.54,<3", "azure-identity>=1.25", "aiohttp>=3.13.5,<4", "pyjwt[crypto]>=2.12",
 ]
 
