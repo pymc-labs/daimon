@@ -20,7 +20,7 @@ Paid OpenAI Responses probes were subsequently authorized by C12.1 and completed
 as described below. No Azure resource was used. The checksum-verified Codex
 image stage was built locally; full-image validation runs in CI.
 
-Offline validation passed with both `HARNESS_LOOP` values: 202 harness tests
+Offline validation passed with both `HARNESS_LOOP` values: 222 harness tests
 passed, 4 skipped (platform/data/live gates). Strict pyright, repository Ruff
 and all 14 import-boundary contracts passed. Additional regression coverage keeps
 original MCP server/tool policy identities and refuses ambiguous function aliases. The standalone UID probe passed

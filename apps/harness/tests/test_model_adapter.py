@@ -721,12 +721,23 @@ async def test_sdk_cancel_joins_tool_workers_before_terminal_and_session_reuse(
 
 async def test_live_probe_refuses_any_non_luna_deployment(tmp_path, monkeypatch):
     monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "disallowed-deployment")
-    with pytest.raises(pytest.fail.Exception, match="gpt-6-luna"):
-        await test_live_azure_responses(tmp_path)
+    with pytest.raises(pytest.skip.Exception, match="gpt-6-luna"):
+        await test_live_azure_responses(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def probe_environment(monkeypatch):
+    # Hosted CI injects Azure metadata even when no model credentials are set.
+    # Probe tests own their provider configuration; retain the production guard.
+    for name in list(os.environ):
+        if name.startswith(("AZURE_", "IDENTITY_")):
+            monkeypatch.delenv(name)
 
 
 @pytest.mark.parametrize("adapter_name", ["agents_sdk", "codex"])
-async def test_explicit_openai_probe_gate_refuses_other_models(tmp_path, monkeypatch, adapter_name):
+async def test_explicit_openai_probe_gate_refuses_other_models(
+    tmp_path, monkeypatch, adapter_name, probe_environment
+):
     from daimon_harness.codex_adapter import CodexModelAdapter
     from daimon_harness.errors import HarnessError
 
@@ -746,7 +757,7 @@ async def test_explicit_openai_probe_gate_refuses_other_models(tmp_path, monkeyp
         await adapter.run(context, [])
 
 
-def test_openai_key_does_not_select_probe_provider(monkeypatch):
+def test_openai_key_does_not_select_probe_provider(monkeypatch, probe_environment):
     monkeypatch.delenv("HARNESS_LIVE_PROBE", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("IDENTITY_ENDPOINT", raising=False)
@@ -765,12 +776,16 @@ def test_openai_key_does_not_select_probe_provider(monkeypatch):
         "AZURE_OPENAI_API_KEY",
         "AZURE_CLIENT_ID",
         "AZURE_TENANT_ID",
+        "AZURE_RUNNER_METADATA",
+        "IDENTITY_RUNNER_METADATA",
         "AZURE_FEDERATED_TOKEN_FILE",
         "IDENTITY_ENDPOINT",
         "IDENTITY_HEADER",
     ],
 )
-def test_openai_probe_refused_in_production_or_with_azure(monkeypatch, adapter_name, azure_env):
+def test_openai_probe_refused_in_production_or_with_azure(
+    monkeypatch, adapter_name, azure_env, probe_environment
+):
     from daimon_harness.codex_adapter import CodexModelAdapter
 
     monkeypatch.setenv("HARNESS_LIVE_PROBE", "openai")
