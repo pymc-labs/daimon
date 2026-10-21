@@ -1061,18 +1061,38 @@ that event changed the state.
 
 Managed Agents delivers each `agent.message` whole (its streamed deltas are
 previews that never reach the reducer). With `DAIMON_TURN__STATUS_LOG` off, the
-default, the reducer joins consecutive messages into one text block, the answer
-is every text after the last tool call, and the status card shows the latest
-line. With it on, the reducer keeps every message as its own text block, an
-answer of several messages keeps every one set apart by a blank line (a run of
-messages before a tool call is one candidate for a sealed answer, joined the
-same way, so Discord compares like with like when it drops a repeat), and the
-status card on Discord, Slack and Teams shows the last three messages as a
-small log under the tool lines, oldest first, each cut to one line of 120
-characters. On Slack the log's section is also held under Slack's 3,000
-character limit after escaping. For a non-Anthropic provider, each new message
-item starts a new entry and its previews and snapshots revise that entry.
-`daimon.core.turn.status_log` holds the switch.
+default, the reducer joins consecutive messages into one text block and the
+answer is every text after the last tool call. With it on, the reducer keeps
+every message as its own text block, and an answer of several messages keeps
+every one set apart by a blank line (a run of messages before a tool call is
+one candidate for a sealed answer, joined the same way, so Discord compares
+like with like when it drops a repeat). `daimon.core.turn.status_log` holds the
+switch. Either way the status card on Discord, Slack and Teams shows the last
+three messages as a small log under the tool lines, oldest first, each cut to
+one line of 120 characters. On Slack the log's section is also held under
+Slack's 3,000 character limit after escaping. For a non-Anthropic provider,
+each new message item starts a new entry and its previews and snapshots revise
+that entry.
+
+A tool line names the tool and nothing it was called with, with one
+exception: an allowlist in `daimon.core.turn.status_lines` adds one field of a
+built-in tool's input, clipped to one line. `web_search` shows its query,
+`web_fetch` the host name only, and `read`, `write` and `edit` the file's base
+name. Bash, MCP and custom tools stay name-only, so a command, a URL's path or
+query, or a directory never reaches the card.
+
+Progress plans are a second switch on the same scope cascade as thread
+participation (`daimon.core.scope_cascade`): `DAIMON_PROGRESS_PLANS__MODE`,
+then workspace, channel and thread rows in `progress_plan_scopes`, set with the
+`set_progress_plans` tool, Slack included (a Slack thread is keyed
+`<channel>:<thread ts>`). The `update_plan` tool is registered on every turn,
+so the tool list and the system prompt stay the same whether the switch is on
+or off. Before a chat turn `run_prepared_turn` resolves the cascade once; when
+it resolves on, a short `<progress_plans>` block goes in front of the user
+message and the turn's `TurnObservation` is marked, so the card draws the
+latest `update_plan` steps as a checklist above the tool lines (finished steps
+at the top fold into one line, at most six lines) and leaves the call out of
+the tool lines. Off, nothing is added and the card ignores the call.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 121 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 124 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -274,6 +274,17 @@ Plain-text mention tools: let a typed "@<bot name>" start a turn, workspace-wide
 | --- | --- | --- |
 | `get_plain_text_mentions` | all callers | Report whether a typed "@<your name>" in a channel or thread starts a reply here. |
 | `set_plain_text_mentions` | admin only | Let a typed "@<your name>" in a channel or thread start a reply. |
+
+## `progress_plans`
+
+Progress-plan tools: the switch (`set_progress_plans`, `get_progress_plans`) and the
+plan.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_progress_plans` | Discord callers, Slack callers, Teams callers | Report whether progress plans are on for a thread or channel, and which tier decided it. |
+| `set_progress_plans` | Discord callers, Slack callers, Teams callers | Turn progress plans on or off where you are asked to. |
+| `update_plan` | Discord callers, Slack callers, Teams callers | Show the task's plan as a checklist on the progress card. |
 
 ## `promo_codes`
 

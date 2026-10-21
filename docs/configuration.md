@@ -30,6 +30,7 @@ typo is silent — check the spelling here.
 - [Environment](#environment)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
+- [Progress Plans](#progress-plans)
 - [Slack](#slack)
 - [Teams](#teams)
 - [GitHub](#github)
@@ -659,7 +660,7 @@ Replying in threads unprompted. See ThreadParticipationSettings.
 
 ### `DAIMON_THREAD_PARTICIPATION__MODE`
 
-`ParticipationMode` · optional · default `off`
+`CascadeMode` · optional · default `off`
 
 Deployment default for replying in threads unprompted. off: mention-only until a thread,
 channel or workspace is turned on. disabled: mention-only and cannot be turned on. on:
@@ -691,6 +692,28 @@ How many earlier thread messages the classifier sees before deciding.
 Model that decides whether a burst of unprompted messages deserves a reply. One short
 call per quiet burst; a small, fast model is the point. The call sets effort low, so
 pick a model that supports the effort parameter.
+
+## Progress Plans
+
+Read from `daimon.core.config.ProgressPlansSettings`. Prefix `DAIMON_PROGRESS_PLANS__`.
+
+Progress plans: the agent keeps a short plan the working card draws.
+
+`mode` is the deployment tier of the same cascade thread participation uses (deployment,
+workspace, channel, thread); the agent's `set_progress_plans` tool writes the other
+tiers when a person asks.
+
+The agent's plan on the working card. See ProgressPlansSettings.
+
+### `DAIMON_PROGRESS_PLANS__MODE`
+
+`CascadeMode` · optional · default `off`
+
+Deployment default for progress plans on the "Working on it…" card (Discord, Slack and
+Teams). On, the agent keeps a short checklist of a longer task's steps on the card and
+may add one-line updates on what it found and does next. off: shown only where a
+workspace, channel or thread is turned on. disabled: never shown, and cannot be turned
+on. on: shown everywhere unless turned off below.
 
 ## Slack
 
@@ -1323,12 +1346,11 @@ execution. Requires mux and channel_backends; off by default.
 
 `bool` · optional · default `False`
 
-Show an agent's recent short updates on the "Working on it…" card. Off by default: the
-card shows only the latest line the agent wrote, and consecutive messages from the agent
-are joined into one block of text. On (Discord, Slack and Teams): the card shows the
-last three messages the agent wrote, oldest first, one line each (cut at 120
-characters), and an answer made of several messages keeps every one, set apart by a
-blank line instead of being run together.
+Keep each message the agent writes apart in its answer. Off by default: consecutive
+messages from the agent are joined into one block of text. On: an answer made of several
+messages keeps every one, set apart by a blank line instead of being run together.
+Either way the "Working on it…" card shows the last three messages the agent wrote,
+oldest first, one line each (cut at 120 characters).
 
 ## Thread Naming
 
