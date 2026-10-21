@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix AKS bootstrap image builds with explicit BuildKit-enabled ACR Tasks for
   both production Dockerfiles; check Azure CLI support early and stop before
   cluster creation if either build or push fails, with streamed run diagnostics.
+- Preserve sandbox checkpoint eviction protection across controller restarts;
+  require fresh durability confirmation before retiring a pod with unknown state.
+
 - Keep sandboxes with failed checkpoints through idle and age eviction, retry
   idle checkpoints during maintenance, and expose the blocked count in readiness.
   Reject late checkpoint writes after session deletion to prevent data resurrection.

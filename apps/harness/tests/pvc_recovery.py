@@ -1,6 +1,9 @@
 """Mapping adapter runs the existing recovery fault injector against real PVC writes."""
 
+import time
+import weakref
 from collections.abc import MutableMapping
+from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,7 +31,7 @@ class DiskObjects(MutableMapping):
         return iter(self.store.list("sessions/"))
 
     def __len__(self):
-        return len(list(self))
+        return sum(1 for _ in self)
 
     def copy(self):
         return dict(self)
@@ -58,17 +61,32 @@ class HTTPObjects(DiskObjects):
         self.app = create_app(
             controller=self.controller, root=Path(self.directory.name), token="host"
         )
-        self.client = TestClient(self.app, base_url="https://test")
+        # A managed client owns one portal/event loop for ALL requests; contended
+        # controller locks cannot move between per-request event loops.
+        lifetime = ExitStack()
+        self._cleanup = weakref.finalize(self, lifetime.close)
+        self.client = lifetime.enter_context(TestClient(self.app, base_url="https://test"))
         self.prefixes = set()
 
+    def close(self):
+        self._cleanup()
+        self.directory.cleanup()
+
     def remote(self, name):
-        from daimon_harness.controller import SESSION
+        from daimon_harness.controller import SESSION, TEMPLATE, TOUCHED
         from daimon_harness.pvc_store import ControllerStore
 
         prefix = "/".join(name.split("/")[:2]) + "/"
         self.prefixes.add(prefix)
         key = name.split("/")[1]
-        pod = {"metadata": {"uid": key, "labels": {SESSION: key}}}
+        pod = {
+            "metadata": {
+                "name": key,
+                "uid": key,
+                "labels": {SESSION: key, TEMPLATE: self.controller.version},
+                "annotations": {TOUCHED: str(time.time())},
+            }
+        }
         self.kube.items[key] = pod
         token = self.controller.credential(pod, "checkpoint")
         self.controller.capabilities[token] = pod

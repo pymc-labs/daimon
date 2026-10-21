@@ -32,7 +32,9 @@ and temporary proof support from the original measurement: 1547m baseline +
 original memory requests leave room for four 256Mi sandboxes as well. This
 is a requests budget, not a throughput guarantee; size the cap for your release. Sandboxes recycle
 when idle and checkpointed after 24 hours; unknown activity is evicted after
-three failed probes unless a checkpoint was reported pending. Non-durable pods
+three failed probes only after a fresh durability confirmation. Pending state
+persists in a pod annotation; after controller restart, all bound pods stay
+protected until a fresh successful checkpoint report. Non-durable pods
 are retained and their idle checkpoints retried; readiness exposes their count.
 The 48-hour hard lifetime applies after a successful checkpoint, below 7-day
 cert validity.

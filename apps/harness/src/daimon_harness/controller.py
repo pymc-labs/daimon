@@ -43,6 +43,7 @@ SESSION = "daimon-session"
 TOUCHED = "daimon-last-active"
 TEMPLATE = "daimon-template"
 CREATED = "daimon-created"
+CHECKPOINT_PENDING = "daimon-checkpoint-pending"
 logger = logging.getLogger(__name__)
 
 
@@ -170,6 +171,7 @@ class Controller:
         self.unknown_limit, self.probe_timeout = unknown_limit, probe_timeout
         self.unknown: dict[str, int] = defaultdict(int)
         self.checkpoint_blocked: set[str] = set()
+        self.observed: set[str] = set()
         self.kube, self.template, self.owner = kube, template, owner
         self.warm, self.idle, self.maximum, self.clock = warm, idle, maximum, clock
         self.version = hashlib.sha256(json.dumps(template, sort_keys=True).encode()).hexdigest()[
@@ -191,7 +193,22 @@ class Controller:
 
     async def pods(self) -> list[dict[str, Any]]:
         self.inventory = await self.kube.list(self.owner)
-        self.checkpoint_blocked.intersection_update(p["metadata"]["uid"] for p in self.inventory)
+        bound = {
+            p["metadata"]["uid"]: p
+            for p in self.inventory
+            if p["metadata"]["labels"][SESSION] != "warm"
+            and not p["metadata"].get("deletionTimestamp")
+        }
+        self.checkpoint_blocked.intersection_update(bound)
+        # Restore before maintenance: a new controller must obtain a fresh
+        # durable=true report even if the previous controller observed success.
+        self.checkpoint_blocked.update(bound.keys() - self.observed)
+        self.checkpoint_blocked.update(
+            uid
+            for uid, p in bound.items()
+            if p["metadata"].get("annotations", {}).get(CHECKPOINT_PENDING) == "true"
+        )
+        self.observed = set(bound)
         self.capabilities = {
             self.credential(p, "checkpoint"): p
             for p in self.inventory
@@ -300,8 +317,14 @@ class Controller:
                     self.unknown.pop(meta["uid"], None)
                     if not durable:
                         self.checkpoint_blocked.add(meta["uid"])
+                        if annotations.get(CHECKPOINT_PENDING) != "true":
+                            await self.kube.patch(
+                                pod, {"annotations": {CHECKPOINT_PENDING: "true"}}
+                            )
                         logger.warning("sandbox_eviction_blocked reason=checkpoint_pending")
                         return
+                    if annotations.get(CHECKPOINT_PENDING) == "true":
+                        await self.kube.patch(pod, {"annotations": {CHECKPOINT_PENDING: "false"}})
                     self.checkpoint_blocked.discard(meta["uid"])
                     if age < self.hard_age and (
                         active

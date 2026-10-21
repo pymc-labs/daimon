@@ -678,10 +678,16 @@ async def test_hostile_activity_is_bounded_and_other_pods_still_reap(reply):
     await ctl.release(second)
     now[0] += 901
 
+    confirmed = False
+
     async def upstream(request):
         if request.url.path.endswith("bootstrap"):
             return httpx.Response(200)
         if request.headers["authorization"].endswith(ctl.credential(first, "c3")):
+            if not confirmed:
+                return httpx.Response(
+                    200, json={"active": True, "last_activity": 1000, "durable": True}
+                )
             if reply == "never":
                 await asyncio.Event().wait()
             if reply == "keyerror":
@@ -698,6 +704,10 @@ async def test_hostile_activity_is_bounded_and_other_pods_still_reap(reply):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
         ctl.client = client
+        # Unknown-worker eviction requires a successful durability observation
+        # in this controller lifetime; newly discovered workers stay protected.
+        await ctl.maintain_pod(first)
+        confirmed = True
         async with asyncio.timeout(1):
             await ctl.maintain()
             assert second["metadata"]["name"] not in kube.items
@@ -892,3 +902,96 @@ async def test_maintenance_heartbeat_stale_fails_liveness(tmp_path, monkeypatch)
         transport=httpx.ASGITransport(app=app), base_url="https://test"
     ) as client:
         assert (await client.get("/liveness")).status_code == 503
+
+
+@pytest.mark.parametrize("previous_report", [False, None, True])
+async def test_restart_protects_pending_and_unknown_durability(tmp_path, previous_report):
+    from daimon_harness.controller import CHECKPOINT_PENDING
+
+    now = [1000]
+    ctl = controller(Kube(), warm=0, clock=lambda: now[0])
+    pod = await ctl.acquire("uncheckpointed")
+    await ctl.release(pod)
+    now[0] += 901
+
+    async def initial(request):
+        return httpx.Response(
+            200, json={"active": True, "last_activity": 1000, "durable": previous_report}
+        )
+
+    if previous_report is not None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(initial)) as client:
+            ctl.client = client
+            await ctl.maintain()
+        annotations = ctl.kube.items[pod["metadata"]["name"]]["metadata"]["annotations"]
+        assert (annotations.get(CHECKPOINT_PENDING) == "true") is (previous_report is False)
+
+    restarted = controller(ctl.kube, warm=0, clock=lambda: now[0])
+    durable = False
+
+    async def probe(request):
+        if request.url.path.endswith("bootstrap"):
+            return httpx.Response(200)
+        if not durable:
+            raise httpx.ConnectError("transient probe failure")
+        return httpx.Response(200, json={"active": False, "last_activity": 1000, "durable": True})
+
+    app = create_app(controller=restarted, root=tmp_path, token="host")
+    # Production lifespan rebuilds the durable protection before starting its
+    # maintenance task. Assert this pre-maintenance state explicitly too.
+    await restarted.pods()
+    assert pod["metadata"]["uid"] in restarted.checkpoint_blocked
+    async with httpx.AsyncClient(transport=httpx.MockTransport(probe)) as client:
+        restarted.client = client
+        for _ in range(restarted.unknown_limit + 1):
+            await restarted.maintain()
+        assert pod["metadata"]["name"] in ctl.kube.items
+        assert pod["metadata"]["uid"] in restarted.checkpoint_blocked
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://test"
+        ) as caller:
+            assert (await caller.get("/readiness")).json()["checkpoint_blocked_sandboxes"] == 1
+        durable = True
+        await restarted.maintain()
+        assert not ctl.kube.items
+        assert not restarted.checkpoint_blocked
+
+
+async def test_http_recovery_store_owns_one_loop_and_closes(tmp_path):
+    import time
+
+    from .pvc_recovery import HTTPObjects
+
+    store = HTTPObjects()
+    loops = set()
+    original = store.controller.pods
+
+    async def observed():
+        loops.add(asyncio.get_running_loop())
+        return await original()
+
+    store.controller.pods = observed
+    upload = store.store.upload
+
+    def delayed(*args):
+        time.sleep(0.01)  # Force concurrent HTTP calls to contend on the session lock.
+        return upload(*args)
+
+    store.store.upload = delayed
+    directory = store.store.root
+    try:
+        for batch in range(2):
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        store.__setitem__, f"sessions/s/wal/{batch}-{i}", b"inventory"
+                    )
+                    for i in range(4)
+                )
+            )
+        assert len(loops) == 1
+        assert len(store) == 8
+    finally:
+        store.close()
+    assert store.client.portal is None
+    assert not directory.exists()

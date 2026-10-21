@@ -938,8 +938,12 @@ is idempotent. Disk admission thresholds are `minFreeBytes` (default
 1 GiB) and `minFreeFraction` (default 0.1). Existing remote WAL/reservation barriers
 remain fail-closed before paid work. Checkpoint writes retain temp-file fsync,
 atomic rename and parent-directory fsync before acknowledgment. Each sandbox activity/bootstrap probe has a four-second bound and a separate
-HTTP client. Unknown activity is evicted after three failed probes unless a
-previous probe reported a pending checkpoint. Pods reporting `durable=false`
+HTTP client. After a fresh successful durability report, unknown activity is
+evicted after three failed probes unless a later probe reported a pending
+checkpoint. Pending checkpoints are recorded in the pod's
+`daimon-checkpoint-pending` annotation and restored before maintenance starts.
+After controller restart, all discovered bound pods remain protected until a
+fresh `durable=true` report, including pods whose last known checkpoint succeeded. Pods reporting `durable=false`
 survive idle, template and age eviction, including the 48-hour hard age; idle
 activity polls retry their checkpoint. Readiness exposes
 `checkpoint_blocked_sandboxes`, and maintenance logs `sandbox_eviction_blocked`.
