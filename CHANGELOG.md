@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Give AKS Postgres imports a configurable 15-minute shared retry budget with
+  alternating sources, capped jittered backoff and sanitized per-attempt errors.
+  Support optional Docker Hub credentials and repair existing tags from the pinned digest.
+
 - Import the pinned AKS Postgres image from ECR Public with Docker Hub fallback,
   bounded transient retries, and Linux/amd64 child-manifest verification. Repair
   partial imports, skip complete images, and refuse mismatched digests before AKS creation.

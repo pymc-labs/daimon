@@ -2,6 +2,7 @@
 
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -13,11 +14,42 @@ TAG = "18-alpine"
 SOURCES = ("public.ecr.aws/docker/library/postgres", "docker.io/library/postgres")
 
 
-def azure(*args):
-    return subprocess.run(["az", *args], capture_output=True, text=True, check=False)
+def azure(*args, deadline=None):
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("Postgres import budget exhausted; stopping before AKS creation")
+    try:
+        return subprocess.run(
+            ["az", *args], capture_output=True, text=True, check=False, timeout=remaining
+        )
+    except subprocess.TimeoutExpired:
+        # TimeoutExpired includes argv, which can contain the Docker Hub token.
+        raise TimeoutError(
+            "Postgres import command timed out; stopping before AKS creation"
+        ) from None
 
 
-def complete(acr, repository):
+def sanitized_excerpt(message):
+    for name in ("DOCKERHUB_USERNAME", "DOCKERHUB_TOKEN"):
+        secret = os.environ.get(name)
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+            message = message.replace(json.dumps(secret)[1:-1], "[REDACTED]")
+    message = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", message)
+    message = re.sub(r"(?i)\b(?:Bearer|Basic)\s+\S+", "[REDACTED]", message)
+    message = re.sub(r"(https?://)[^\s/@]+(?::[^\s/@]*)?@", r"\1[REDACTED]@", message)
+    message = re.sub(
+        r"(?i)(?:--)?\b(?:[a-z0-9_-]*[_-])?"
+        r"(?:password|passwd|token|secret|api[_-]?key|sig|authorization|username)"
+        r"[\"']?\s*(?:[:=]\s*|\s+)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)",
+        "[REDACTED]",
+        message,
+    )
+    message = re.sub(r"[A-Za-z0-9_+/.=-]{24,}", "[REDACTED]", message)
+    return " ".join(message.split())[:240] or "no error detail returned"
+
+
+def complete(acr, repository, deadline=None, repair_mismatch=False):
     metadata = azure(
         "acr",
         "repository",
@@ -30,16 +62,27 @@ def complete(acr, repository):
         "digest",
         "-o",
         "tsv",
+        deadline=deadline,
     )
     if metadata.returncode:
         return False
     actual = metadata.stdout.strip()
     if actual != DIGEST:
-        raise ValueError(
-            f"Postgres digest mismatch: expected {DIGEST}, got {actual!r}; refusing provisioning"
-        )
+        if repair_mismatch:
+            print("Existing Postgres tag has another digest; repairing from the pinned source")
+            return False
+        raise ValueError("Postgres digest mismatch after import; refusing provisioning")
     index = azure(
-        "acr", "manifest", "show", "-r", acr, "-n", f"{repository}@{DIGEST}", "-o", "json"
+        "acr",
+        "manifest",
+        "show",
+        "-r",
+        acr,
+        "-n",
+        f"{repository}@{DIGEST}",
+        "-o",
+        "json",
+        deadline=deadline,
     )
     if index.returncode:
         return False
@@ -56,7 +99,16 @@ def complete(acr, repository):
             if not re.fullmatch(r"sha256:[0-9a-f]{64}", child):
                 return False
             manifest = azure(
-                "acr", "manifest", "show", "-r", acr, "-n", f"{repository}@{child}", "-o", "json"
+                "acr",
+                "manifest",
+                "show",
+                "-r",
+                acr,
+                "-n",
+                f"{repository}@{child}",
+                "-o",
+                "json",
+                deadline=deadline,
             )
             if manifest.returncode:
                 return False
@@ -79,12 +131,26 @@ def main():
     delay = int(os.environ.get("POSTGRES_IMPORT_RETRY_SECONDS", "5"))
     if not 0 <= delay <= 60:
         raise ValueError("POSTGRES_IMPORT_RETRY_SECONDS must be between 0 and 60")
-    if complete(acr, repository):
+    budget = float(os.environ.get("POSTGRES_IMPORT_BUDGET_SECONDS", "900"))
+    if not 0 < budget <= 86400:
+        raise ValueError("POSTGRES_IMPORT_BUDGET_SECONDS must be between 0 and 86400")
+    username, token = os.environ.get("DOCKERHUB_USERNAME"), os.environ.get("DOCKERHUB_TOKEN")
+    if bool(username) != bool(token):
+        raise ValueError("Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN, or neither")
+    deadline = time.monotonic() + budget
+    if complete(acr, repository, deadline, repair_mismatch=True):
         print(f"Pinned Postgres {repository}:{TAG} is already complete; skipping import")
     else:
-        for source in SOURCES:
-            for attempt in range(1, 4):
-                print(f"Importing pinned Postgres from {source} (attempt {attempt}/3)", flush=True)
+        attempt = 0
+        backoff = delay
+        while time.monotonic() < deadline:
+            source = SOURCES[attempt % len(SOURCES)]
+            attempt += 1
+            print(f"Importing pinned Postgres from {source} (attempt {attempt})", flush=True)
+            credentials = []
+            if source.startswith("docker.io/") and username and token:
+                credentials = ["--username", username, "--password", token]
+            try:
                 result = azure(
                     "acr",
                     "import",
@@ -97,39 +163,28 @@ def main():
                     "--force",
                     "-o",
                     "none",
+                    *credentials,
+                    deadline=deadline,
                 )
-                if result.returncode == 0:
-                    if complete(acr, repository):
-                        break
-                    print(
-                        "Postgres index or linux/amd64 manifest is missing; retrying with --force",
-                        file=sys.stderr,
-                    )
-                else:
-                    # Do not echo raw CLI output or optional operator credentials.
-                    transient = re.search(
-                        r"\b(?:429|5\d\d)\b|TooManyRequests|Rate.?exceed",
-                        result.stderr,
-                        re.IGNORECASE,
-                    )
-                    if not transient:
-                        print(
-                            f"Postgres import from {source} failed; trying the next source",
-                            file=sys.stderr,
-                        )
-                        break
-                    print(f"Postgres source {source} returned a transient error", file=sys.stderr)
-                if attempt < 3:
-                    time.sleep(delay * 2 ** (attempt - 1))
+            except TimeoutError as error:
+                raise TimeoutError(f"Postgres import {source} attempt {attempt}: {error}") from None
+            if result.returncode == 0:
+                if complete(acr, repository, deadline):
+                    break
+                excerpt = (
+                    "index or linux/amd64 manifest missing after import; will repair with --force"
+                )
             else:
-                continue
-            if result.returncode == 0 and complete(acr, repository):
-                break
+                excerpt = sanitized_excerpt(result.stderr or result.stdout)
+            print(f"Postgres import {source} attempt {attempt}: {excerpt}", file=sys.stderr)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Postgres import budget exhausted; stopping before AKS creation")
+            # Alternate sources throughout the shared budget. Jitter prevents synchronized retries.
+            time.sleep(min(remaining, 60, random.uniform(0.8, 1.2) * backoff))
+            backoff = min(60, backoff * 2)
         else:
-            raise ValueError(
-                "Postgres import exhausted both sources or linux/amd64 remains missing; "
-                "stopping before AKS creation"
-            )
+            raise TimeoutError("Postgres import budget exhausted; stopping before AKS creation")
     (state / "postgres-digest").write_text(DIGEST + "\n")
     print(f"Verified Postgres {repository}:{TAG}: pinned index and linux/amd64 manifest present")
 
@@ -137,6 +192,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, OSError) as error:
+    except (ValueError, KeyError, OSError, TimeoutError) as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1) from None
