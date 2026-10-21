@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user input, preserve checkpoint compaction prompts and summaries, and honor
   cancellation or deadlines during controller shutdown. Meter internal compaction
   separately from the ordinary continuation budget.
+- Count recovered self-hosted usage once, replay answers below receipt cursors after a restart, and flush pending checkpoints before closing shared credentials.
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
 

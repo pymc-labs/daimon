@@ -485,6 +485,7 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "inspection_auto_chat"),
         (False, False, "inspection_auto_unattended"),
         (False, False, "long_history"),
+        (False, False, "receipt_restart"),
         (False, False, "retained_skills"),
     ],
 )
@@ -1211,6 +1212,57 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     else:
         assert not pending.rows
 
+    async def persist_projection_cursor(cursor):
+        store = mux_state.PostgresStateStore(request.deps.sessionmaker)
+        slot = Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id=request.thread_id),
+            account_id=SCOPE.account_id,
+        )
+        lease = await store.acquire_lease(
+            slot, holder="fixture", turn_id="fixture", now=request.now(), ttl=timedelta(seconds=30)
+        )
+        try:
+            await store.append_events(
+                prepared.session_ref, (), fence=lease, cursor=str(cursor), now=request.now()
+            )
+        finally:
+            await store.release_lease(lease)
+
+    if scenario == "receipt_restart":
+        from mux.contracts.ids import PageRequest
+
+        # Receipts can commit ahead of the answer projection. A fresh driver
+        # has no local history and must replay the first answer below the fence.
+        wire.events[-1]["seq"] = 10
+        await persist_projection_cursor(0)
+        async with request.deps.sessionmaker() as db, db.begin():
+            await contexts.advance_replay_cursor(
+                db, tenant_id=TENANT, binding_id=binding.id, seq=10
+            )
+        previous_runtime = prepared.runtime
+        requests.clear()
+        prepared = await bind_session_impl(
+            request.deps,
+            admitted,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="caller",
+            thread_id=request.thread_id,
+            session_account_id=ACCOUNT,
+            reuse_existing=True,
+        )
+        assert prepared.runtime is not previous_runtime
+        assert (
+            await prepared.backend.events.reconcile(SCOPE, prepared.session_ref)
+        ).state == "idle"
+        page = await prepared.backend.events.list(SCOPE, prepared.session_ref, page=PageRequest())
+        gets = [call for call in requests if call.method == "GET"]
+        assert gets and gets[0].url.params["after_seq"] == "10"
+        assert gets[0].url.params["replay_after_seq"] == "0"
+        assert "answer 1" in str(page.data)
+        assert page.data[-1].type == "session.turn_ended"
+        assert wire.posts == 1
+
     if scenario == "long_history":
         import time
 
@@ -1236,6 +1288,8 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                     }
                 )
         floor = len(wire.events)
+        # Prior invocations saved their answers as well as accounting receipts.
+        await persist_projection_cursor(floor)
         async with request.deps.sessionmaker() as db, db.begin():
             await contexts.advance_replay_cursor(
                 db, tenant_id=TENANT, binding_id=binding.id, seq=floor

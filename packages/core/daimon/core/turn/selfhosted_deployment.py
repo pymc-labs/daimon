@@ -507,9 +507,12 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             if method == "GET" and parsed.path.endswith("/events"):
                 query = dict(parse_qsl(parsed.query, keep_blank_values=True))
                 floor = await history_floor(session_id)
-                query["after_seq"] = str(max(int(query["after_seq"]), floor))
-                if "replay_after_seq" in query:
-                    query["replay_after_seq"] = str(max(int(query["replay_after_seq"]), floor))
+                original_cursor = int(query["after_seq"])
+                replay_cursor = max(int(query.get("replay_after_seq", original_cursor)), floor)
+                fence = max(original_cursor, after_seq, floor)
+                query["after_seq"] = str(fence)
+                if "replay_after_seq" in query or replay_cursor < fence:
+                    query["replay_after_seq"] = str(replay_cursor)
                 path = parsed.path + "?" + urlencode(query)
             result = await transport_impl.request(
                 method,
@@ -572,7 +575,14 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         operation = active.operation_key if active is not None else None
         key = (session_id, operation)
         if key not in history_floors:
-            floor = await receipt_cursor(session_id)
+            # Receipts can commit before the answer projection. Only the
+            # saved projection or invocation baseline proves a replay floor.
+            from daimon.core.stores.mux_state import PostgresStateStore
+
+            store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
+            projection = await store.projection(session_id)
+            cursor = projection.cursor if projection is not None else ""
+            floor = int(cursor) if cursor.isdecimal() else 0
             if active is not None:
                 baseline = await active.store.get_operation(
                     active.scope, active.operation_key + ":baseline:0"

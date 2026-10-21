@@ -1300,3 +1300,8 @@ direct and invocation transports retain it with session context and optional
 Checkpoint warnings queued after a reader closes attach to the next new turn,
 so the host can show the non-terminal notice within that turn. Recovered remote
 usage keeps its original request identity and measured token counts.
+
+Identical recovered usage (same request identity, model and token counts) is an
+idempotent replay; conflicting counts still fail with `duplicate_usage`. When
+core raises the restore fence above the driver's cursor, it retains the original
+replay range so an accounting receipt cannot hide an answer or terminal event.

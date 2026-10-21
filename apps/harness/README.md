@@ -595,3 +595,9 @@ Event replay may include `replay_after_seq` to read an older range while
 `after_seq` still carries the highest durable client cursor for restore fencing.
 This lets a resumed invocation replay its saved baseline without reusing event
 sequences after sandbox loss.
+
+Graceful shutdown allows five seconds for pending checkpoint uploads and closes
+the shared model/storage identity only after storage calls finish. A stalled
+upload cannot hold process exit; its cleanup retains the credential and log
+redaction until the call unwinds. Restore retains acknowledged remote usage at
+its original sequence rather than publishing it again above the client cursor.

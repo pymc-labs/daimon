@@ -287,7 +287,24 @@ class Checkpoints:
                     event.type in {"model_request_started", "usage"}
                     or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
                 ) and (event.type, event.data.get("request_id")) not in known:
-                    journal.append(request, event.type, event.data)
+                    if event.seq <= after_seq:
+                        # Retain acknowledged inventory at its original position
+                        # for pending-request repair and older-range replay. Never
+                        # republish it above the client's acknowledged high-water.
+                        db = journal.connection(session_id)
+                        with db:
+                            prior = db.execute(
+                                "SELECT body FROM events WHERE seq=?", (event.seq,)
+                            ).fetchone()
+                            if prior is not None and Event.model_validate_json(prior[0]) != event:
+                                raise ValueError("write-ahead changed an acknowledged event")
+                            db.execute(
+                                "INSERT OR IGNORE INTO events(seq, body, turn_id, type) "
+                                "VALUES (?, ?, ?, ?)",
+                                (event.seq, event.model_dump_json(), event.turn_id, event.type),
+                            )
+                    else:
+                        journal.append(request, event.type, event.data)
                     known.add((event.type, event.data.get("request_id")))
         return journal
 

@@ -139,7 +139,7 @@ class SelfHostedEvents:
         self._cancels: dict[tuple[ResourceRef, str], CancelReceipt] = {}
         self._stream_cursors: dict[ResourceRef, int] = {}
 
-    def _remember(self, ref: ResourceRef, raw: wire.Event) -> Event:
+    def _remember(self, ref: ResourceRef, raw: wire.Event) -> Event | None:
         if raw.session_id != ref.id:
             raise ScopeViolation(ref.id, "harness replay contains a foreign session")
         history = self._history.setdefault(ref, {})
@@ -152,6 +152,13 @@ class SelfHostedEvents:
                 if old.seq != raw.seq and old.type == "usage":
                     prior = usage(old, ref)
                     if prior.id == observation.id:
+                        if prior.model_dump(
+                            exclude={"observed_at", "native_meter"}
+                        ) == observation.model_dump(exclude={"observed_at", "native_meter"}):
+                            # Keep the raw seq for continuity, but deliver and
+                            # account for this logical model response only once.
+                            history[raw.seq] = raw
+                            return None
                         raise ProviderError(
                             "upstream", retryable=False, native_code="duplicate_usage"
                         )
@@ -228,7 +235,8 @@ class SelfHostedEvents:
             if event.seq <= last:
                 raise ProviderError("upstream", retryable=False, native_code="unordered_replay")
             if event.seq not in self._history.get(ref, {}):
-                result.append(self._remember(ref, event))
+                if remembered := self._remember(ref, event):
+                    result.append(remembered)
             elif self._history[ref][event.seq] != event:
                 raise ContinuityLost(ref.id, ("harness changed a committed event",))
             last = event.seq

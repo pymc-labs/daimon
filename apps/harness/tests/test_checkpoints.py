@@ -1336,3 +1336,210 @@ async def test_delayed_checkpoint_failure_is_delivered_on_next_turn_after_reader
             )
             == 1
         )
+
+
+async def test_shutdown_returns_while_checkpoint_upload_remains_blocked(
+    tmp_path, monkeypatch, caplog
+):
+    import threading
+
+    from daimon_harness import service
+
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    class BlockedBlob(MemoryBlobs):
+        def upload(self, name, source):
+            if name.endswith(".tar.zst"):
+                started.set()
+                release.wait()
+            try:
+                super().upload(name, source)
+                if name.endswith(".tar.zst"):
+                    import logging
+
+                    logging.getLogger("storage.late").warning("late token: %s", "test")
+            finally:
+                if name.endswith(".tar.zst"):
+                    finished.set()
+
+    monkeypatch.setattr(service, "CHECKPOINT_SHUTDOWN_TIMEOUT", 0.05)
+    try:
+        async with asyncio.timeout(5):
+            async with harness(tmp_path, BlockedBlob()) as (supervisor, client):
+                await client.post("/v0/turns", json=turn())
+                await supervisor.tasks["turn-1"]
+                assert await asyncio.to_thread(started.wait, 3)
+            assert not release.is_set()
+            assert supervisor.storage_worker.closed and supervisor.wal_worker.closed
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 3)
+    assert "late token: [redacted]" in caplog.text
+    assert "late token: test" not in caplog.text
+
+
+def test_blocked_storage_does_not_queue_more_work_or_prevent_process_exit():
+    import subprocess
+    import sys
+
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import threading
+from daimon_harness.storage_worker import StorageWorker
+worker = StorageWorker("blocked-storage")
+started = threading.Event()
+def blocked():
+    started.set()
+    threading.Event().wait()
+worker.submit(blocked)
+assert started.wait(1)
+try:
+    worker.submit(lambda: None)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError("queued behind blocked storage")
+worker.shutdown(wait=False, cancel_futures=True)
+print("closed")
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=True,
+    )
+    assert child.stdout.strip() == "closed"
+
+
+async def test_shutdown_flushes_delayed_upload_before_closing_shared_captured_identity(
+    tmp_path, monkeypatch
+):
+    import time
+
+    from azure.core.credentials import AccessToken
+    from daimon_harness.model_adapter import AzureModelAdapter
+    from daimon_harness.service import Supervisor
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1:1/identity")
+    monkeypatch.setenv("IDENTITY_HEADER", "synthetic-shared-identity-header")
+    adapter = AzureModelAdapter()
+    identity = adapter.identity
+    assert identity is not None
+    issued = []
+
+    async def token(*scopes, **kwargs):
+        issued.append(scopes)
+        return AccessToken("synthetic-blob-token", int(time.time()) + 3600)
+
+    monkeypatch.setattr(identity.credential, "get_token", token)
+
+    class DelayedBlob(MemoryBlobs):
+        def upload(self, name, source):
+            time.sleep(0.05)
+            assert not identity.closed
+            identity.get_token("https://storage.azure.com/.default")
+            super().upload(name, source)
+
+        def close(self):
+            identity.close()
+
+    blobs = DelayedBlob()
+    supervisor = Supervisor(tmp_path, adapter, checkpoints=Checkpoints(blobs))
+    request = TurnRequest.model_validate(turn())
+    supervisor.journal.claim(request)
+    supervisor.journal.append(request, "turn_ended", {"outcome": "completed"})
+    supervisor.schedule_checkpoint(request.session_id)
+    await supervisor.close()
+    assert issued == [("https://storage.azure.com/.default",)]
+    assert identity.closed
+    assert len(blobs.uploads) == 1 and blobs.uploads[0].endswith(".tar.zst")
+    assert not (tmp_path / ".daimon/checkpoint.pending").exists()
+
+
+async def test_surviving_real_driver_recovers_wal_usage_once_after_sandbox_loss(tmp_path):
+    from .interop_support import SCOPE, driver_session, message
+
+    ready_a, allow_b, ready_b = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class TwoRequests:
+        calls = 0
+
+        async def run(self, context, history):
+            self.calls += 1
+            await context.emit("model_request_started", {"request_id": "A", "model": "test"})
+            await context.emit(
+                "usage",
+                dict(
+                    request_id="A",
+                    model="test",
+                    input_tokens=1000,
+                    cached_input_tokens=0,
+                    output_tokens=100,
+                    reasoning_tokens=0,
+                ),
+            )
+            ready_a.set()
+            await allow_b.wait()
+            await context.emit("model_request_started", {"request_id": "B", "model": "test"})
+            ready_b.set()
+            await asyncio.Event().wait()
+
+    blobs, model = MemoryBlobs(), TwoRequests()
+    current = None
+
+    async def forward(request):
+        assert current is not None
+        response = await current.request(
+            request.method,
+            request.url.path,
+            params=dict(request.url.params),
+            content=request.content,
+            headers={**dict(request.headers), "authorization": "Bearer test"},
+        )
+        assert response.is_success, response.text
+        return response
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(forward), base_url="https://test"
+    ) as client:
+        async with harness(tmp_path / "old", blobs, model) as (_, old_client):
+            current = old_client
+            driver, session = await driver_session(client)
+            receipt = await driver.events.send(
+                SCOPE, session.ref, [message("question")], key="paid"
+            )
+            await asyncio.wait_for(ready_a.wait(), 3)
+            await driver.events.reconcile(SCOPE, session.ref)
+            first_usage = await driver.usage.reconcile(SCOPE, session.ref)
+            assert len(first_usage) == 1 and first_usage[0].input_tokens == 1000
+            allow_b.set()
+            await asyncio.wait_for(ready_b.wait(), 3)
+            await driver.events.reconcile(SCOPE, session.ref)
+            acknowledged = await driver.events.cursor(session.ref)
+            # No terminal checkpoint survives destruction of the old sandbox.
+            blobs.fail = True
+        shutil.rmtree(tmp_path / "old")
+        assert not any(name.endswith(".tar.zst") for name in blobs.blobs)
+        blobs.fail = False
+        new_model = FakeModelAdapter()
+        async with harness(tmp_path / "new", blobs, new_model) as (supervisor, new_client):
+            current = new_client
+            assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
+            observations = await driver.usage.reconcile(SCOPE, session.ref)
+            measured = [value for value in observations if value.completeness == "measured"]
+            unknown = [value for value in observations if value.completeness == "unknown"]
+            assert measured == list(first_usage)
+            assert len(unknown) == 1 and unknown[0].id.endswith(":request:B")
+            assert supervisor.journal.ended(receipt.turn_id)
+            recovered = supervisor.journal.events(session.ref.id, acknowledged)
+            assert not any(
+                event.type == "usage" and event.data["request_id"] == "A" for event in recovered
+            )
+            assert recovered[-1].type == "turn_ended"
+            assert model.calls == 1 and new_model.calls == 0
+            assert await driver.usage.reconcile(SCOPE, session.ref) == observations

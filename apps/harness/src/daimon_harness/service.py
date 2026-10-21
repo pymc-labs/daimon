@@ -8,9 +8,10 @@ import json
 import logging
 import os
 import re
+import threading
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, TypeVar, cast
 
@@ -51,8 +52,11 @@ from .isolation import (
 from .journal import MAX_CURSOR, ConflictError, Journal, identifier
 from .model_adapter import AzureModelAdapter, ModelAdapter
 from .runtime import TurnContext
+from .storage_worker import StorageWorker
 
 T = TypeVar("T")
+
+CHECKPOINT_SHUTDOWN_TIMEOUT = 5.0
 
 audit_logger = logging.getLogger("daimon_harness.audit")
 audit_logger.setLevel(logging.INFO)
@@ -75,10 +79,8 @@ class Supervisor:
         self.checkpoints = checkpoints
         self.restored = False
         self.checkpoint_warned = False
-        self.storage_worker = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="harness-storage"
-        )
-        self.wal_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="harness-wal")
+        self.storage_worker = StorageWorker("harness-storage")
+        self.wal_worker = StorageWorker("harness-wal")
         self.checkpoint_task: asyncio.Task[None] | None = None
         self.checkpoint_dirty: str | None = None
         self.pending_snapshot: Snapshot | None = None
@@ -497,17 +499,65 @@ class Supervisor:
             if not task.done() and not task.cancelling():
                 task.cancel()
         await asyncio.gather(*self.tasks.values(), return_exceptions=True)
-        if isinstance(self.adapter, AzureModelAdapter) and self.adapter.credential is not None:
-            await self.adapter.credential.close()
-        await self.flush_checkpoints()
+
+        def close_resources() -> None:
+            if self.checkpoints is not None:
+                self.checkpoints.close()
+            if isinstance(self.adapter, AzureModelAdapter) and self.adapter.identity is not None:
+                self.adapter.identity.close()
+
+        close_submitted = False
+        try:
+            async with asyncio.timeout(CHECKPOINT_SHUTDOWN_TIMEOUT):
+                await self.flush_checkpoints()
+                if not self.wal_worker.busy:
+                    closing = asyncio.get_running_loop().run_in_executor(
+                        self.storage_worker, close_resources
+                    )
+                    close_submitted = True
+                    await closing
+        except Exception as exc:
+            audit_logger.warning("checkpoint_failed stage=shutdown reason=%s", type(exc).__name__)
+            if self.checkpoint_task is not None:
+                self.checkpoint_task.cancel()
+                await asyncio.gather(self.checkpoint_task, return_exceptions=True)
+        if self.pending_snapshot is not None:
+            self.pending_snapshot.close()
+            self.pending_snapshot = None
         await self.io(self.journal.close)
-        if self.checkpoints is not None:
-            await self.io(self.checkpoints.close)
-        self.wal_worker.shutdown(wait=False)
-        self.storage_worker.shutdown(wait=True)
+        self.wal_worker.shutdown(wait=False, cancel_futures=True)
+        self.storage_worker.shutdown(wait=False, cancel_futures=True)
         self.worker.shutdown(wait=True)
-        self.log_redaction.__exit__(None, None, None)
-        self.secrets.clear()
+
+        def release_storage() -> None:
+            # Keep redaction active while an abandoned SDK call can still log.
+            # Cleanup is also daemonized: closing a broken network client must
+            # not become a second unbounded shutdown wait.
+            for worker in (self.storage_worker, self.wal_worker):
+                if worker.active is not None:
+                    with suppress(BaseException):
+                        worker.active.result()
+            try:
+                if not close_submitted:
+                    close_resources()
+            except Exception as exc:
+                audit_logger.warning(
+                    "checkpoint_failed stage=resource_close reason=%s", type(exc).__name__
+                )
+            finally:
+                self.log_redaction.__exit__(None, None, None)
+                self.secrets.clear()
+
+        if (
+            self.storage_worker.busy
+            or self.wal_worker.busy
+            or (self.checkpoints is not None and not close_submitted)
+        ):
+            threading.Thread(
+                target=release_storage, name="harness-storage-close", daemon=True
+            ).start()
+        else:
+            release_storage()
 
 
 def create_app(

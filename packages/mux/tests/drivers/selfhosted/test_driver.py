@@ -1649,3 +1649,28 @@ async def test_transport_refuses_an_omitted_recovery_fence_before_http(foundry):
         with pytest.raises(TypeError, match="after_seq"):
             await transport.request("POST", "/v0/turns/turn/cancel", session_id="session")
     assert calls == []
+
+
+@pytest.mark.parametrize("changed", [False, True])
+async def test_republished_usage_is_idempotent_only_for_identical_model_and_tokens(changed):
+    fake = Harness("running")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="paid")
+        await driver.events.reconcile(SCOPE, session.ref)
+        original = await driver.usage.reconcile(SCOPE, session.ref)
+        data = next(event["data"] for event in fake.events if event["type"] == "usage").copy()
+        if changed:
+            data["input_tokens"] += 1
+        fake.emit("usage", data)
+        fake.finish("interrupted")
+        if changed:
+            with pytest.raises(ProviderError) as error:
+                await driver.events.reconcile(SCOPE, session.ref)
+            assert error.value.native_code == "duplicate_usage"
+        else:
+            assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
+            assert await driver.usage.reconcile(SCOPE, session.ref) == original
+            page = await driver.events.list(SCOPE, session.ref, page=PageRequest())
+            assert sum(event.type == "usage.observed" for event in page.data) == 1
+            assert page.data[-1].type == "session.turn_ended"
