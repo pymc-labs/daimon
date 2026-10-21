@@ -1319,7 +1319,8 @@ asserted as strings only and are never sent to a model in tests.
 The harness C3 transport accepts `allow_insecure_http=True` only for literal or
 name patterns classified as in-cluster by `HarnessConfig`; no DNS resolution
 verifies the destination. The operator must restrict harness ingress to the
-same release's host/controller pods with NetworkPolicy (accepted risk F76).
+same release's host/controller pods with NetworkPolicy. AKS uses chart-CA HTTPS
+for both Services; F76 covers the remaining controller-to-sandbox HTTP hop.
 HTTPS remains the default, and metadata endpoints are refused.
 
 MCP credentials require HTTPS or loopback. The legacy wire field

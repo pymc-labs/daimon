@@ -70,6 +70,11 @@ class EntraTokenProvider:
         await self._credential.close()
 
 
+def build_harness_http_client() -> httpx.AsyncClient:
+    """Honor the operator's combined SSL_CERT_FILE bundle, with TLS verification."""
+    return httpx.AsyncClient(timeout=30, trust_env=True)
+
+
 def validate_harness_auth(config: HarnessConfig, settings: SelfHostedSettings, tenant: str) -> None:
     """Validate origin, audience and tenant before resolving any credential."""
     from daimon.core.config import HarnessAuthBinding
@@ -477,7 +482,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 return await credential()
 
             if transport_impl is None:
-                client = httpx.AsyncClient(timeout=30)
+                client = build_harness_http_client()
                 if config.transport == "foundry_invocations":
                     if config.project_endpoint is None or config.agent_name is None:
                         raise AdmissionDenied(reason="backend_unsupported")
