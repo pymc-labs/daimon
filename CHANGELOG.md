@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refuse MCP authorization on non-loopback HTTP harness requests before credential refresh or network I/O (C3.9a), even with HTTP consent.
 
 - Add `daimon selfhosted turn` for billed operator turns with persistent threads, enforce selfhosted admission before provider access, and require explicit consent for harness HTTP. MCP credentials require TLS or loopback, with a scoped CA bundle for in-cluster TLS. Reject normalized TEST tariff names at startup unless explicitly enabled, and keep diagnostic logging failures from interrupting metering.
+- Secure both Helm MCP and harness Services with retained CA certificates; fix
+  installer retries, adapter ports, and persisted tool-result verification.
+
 ### Fixed
 
 - Serve in-cluster MCP over verified TLS with a chart-generated CA, scoped harness trust and protected host-to-harness HTTP ingress.

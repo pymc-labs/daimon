@@ -28,11 +28,27 @@ spec:
       {{- end }}
       terminationGracePeriodSeconds: 90
       {{- if eq $name "mcp" }}
-      securityContext: {fsGroup: 1000}
+      securityContext: {runAsUser: 0}
       {{- end }}
       automountServiceAccountToken: false
       imagePullSecrets: {{ $.Values.imagePullSecrets | toJson }}
       initContainers:
+        - name: prepare-host-ca
+          image: {{ include "d.image" (dict "root" $ "image" $.Values.images.host) | quote }}
+          imagePullPolicy: {{ $.Values.images.host.pullPolicy }}
+          command: [python, -c]
+          args:
+            - "import certifi; from pathlib import Path; Path('/target/ca-bundle.crt').write_bytes(Path(certifi.where()).read_bytes() + bytes([10]) + Path('/source/ca.crt').read_bytes())"
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - {name: host-ca-source, mountPath: /source, readOnly: true}
+            - {name: host-ca, mountPath: /target}
         - name: wait-for-postgres
           image: {{ include "d.image" (dict "root" $ "image" $.Values.images.postgres) | quote }}
           imagePullPolicy: {{ $.Values.images.postgres.pullPolicy }}
@@ -87,7 +103,14 @@ spec:
           {{- if $init }}
           command: [sh, -ec, "alembic upgrade head && daimon defaults apply"]
           {{- else if eq $name "mcp" }}
-          command: [uvicorn, "daimon.adapters.mcp.server:create_mcp_app", --factory, --host, 0.0.0.0, --port, {{ $svc.port | quote }}, --ssl-keyfile, /etc/daimon/mcp-tls/tls.key, --ssl-certfile, /etc/daimon/mcp-tls/tls.crt]
+          command: [python, -c]
+          args:
+            - >-
+              import os, pwd, uvicorn;
+              os.environ['HOME'] = pwd.getpwuid(1000).pw_dir;
+              config = uvicorn.Config('daimon.adapters.mcp.server:create_mcp_app', factory=True, host='0.0.0.0', port={{ $svc.port }}, ssl_keyfile='/etc/daimon/mcp-tls/tls.key', ssl_certfile='/etc/daimon/mcp-tls/tls.crt');
+              config.load(); os.setgroups([]); os.setgid(1000); os.setuid(1000);
+              uvicorn.Server(config).run()
           {{- else if eq $name "scheduler" }}
           command: [daimon-scheduler]
           {{- else }}
@@ -98,6 +121,10 @@ spec:
           env:
             - {name: PGSSLROOTCERT, value: /etc/ssl/certs/ca-certificates.crt}
             {{- $hostEnv := mergeOverwrite (deepCopy $.Values.host.env) $svc.env }}
+            {{- $_ := set $hostEnv "SSL_CERT_FILE" "/etc/daimon/ca/ca-bundle.crt" }}
+            {{- if eq $name "scheduler" }}{{ $_ := set $hostEnv "DAIMON_SCHEDULER__HEALTH_PORT" (toString $svc.port) }}{{ end }}
+            {{- if eq $name "discord" }}{{ $_ := set $hostEnv "DAIMON_DISCORD__HEALTH_PORT" (toString $svc.port) }}{{ end }}
+            {{- if eq $name "teams" }}{{ $_ := set $hostEnv "DAIMON_TEAMS__PORT" (toString $svc.port) }}{{ end }}
             {{- if $.Values.host.runtimeSecret }}
             {{- $_ := set $hostEnv "DAIMON_TURN__PROVIDER_RUNTIME_FILE" "/etc/daimon-runtime/runtime.json" }}
             {{- end }}
@@ -117,11 +144,11 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 3
           readinessProbe:
-            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}, scheme: {{ ternary "HTTPS" "HTTP" (eq $name "mcp") }}}
+            httpGet: {path: {{ default $svc.healthPath $svc.readyPath }}, port: {{ $svc.port }}, scheme: {{ ternary "HTTPS" "HTTP" (eq $name "mcp") }}}
             initialDelaySeconds: 5
           {{- end }}
-          {{- if or (eq $name "mcp") $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
           volumeMounts:
+            - {name: host-ca, mountPath: /etc/daimon/ca, readOnly: true}
             {{- if eq $name "mcp" }}
             - {name: mcp-tls, mountPath: /etc/daimon/mcp-tls, readOnly: true}
             {{- end }}
@@ -131,14 +158,17 @@ spec:
             {{- if $.Values.keyVaultCSI.enabled }}
             - {name: secrets-store, mountPath: /mnt/secrets-store, readOnly: true}
             {{- end }}
-          {{- end }}
-      {{- if or (eq $name "mcp") $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
       volumes:
+        - {name: host-ca, emptyDir: {}}
+        - name: host-ca-source
+          secret:
+            secretName: {{ include "d.mcpTLSSecret" $ }}
+            items: [{key: ca.crt, path: ca.crt}]
         {{- if eq $name "mcp" }}
         - name: mcp-tls
           secret:
             secretName: {{ include "d.mcpTLSSecret" $ }}
-            defaultMode: 0440
+            defaultMode: 0400
         {{- end }}
         {{- if $.Values.host.runtimeSecret }}
         - name: runtime
@@ -154,7 +184,6 @@ spec:
             volumeAttributes:
               secretProviderClass: {{ required "keyVaultCSI.secretProviderClass required" $.Values.keyVaultCSI.secretProviderClass }}
         {{- end }}
-      {{- end }}
 {{- if $svc.port }}
 ---
 apiVersion: v1

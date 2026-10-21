@@ -5,7 +5,7 @@ in AKS; no ACA, Key Vault, Blob or Flexible Server. D2s_v6 is the minimum test
 size; Standard_D4s_v6 is recommended for production. Follow the [recipe](README.md#aks-recipe--empty-resource-group-to-a-running-pilot).
 
 **Prerequisites:** dedicated RG/budget; Azure CLI login, Helm, kubectl, Python 3;
-reviewed checkout containing PR #1276 for in-cluster HTTP. RG Owner, or Contributor
+reviewed checkout containing the verified harness TLS client for both HTTPS Services. RG Owner, or Contributor
 plus ACR role-assignment rights. Subscription admin registers ContainerService,
 ContainerRegistry, CognitiveServices, Compute, Network and Storage. Confirm Dsv6
 capacity and **Luna DataZoneStandard quota** in eastus2 or an approved EU region;
@@ -40,7 +40,7 @@ Rates above are explicit **TEST rates** with opt-in; replace and disable for pro
 Keep `AKS_STATE` private. Egress proof checks DNS and blocked curls in both pods.
 
 **Security:** data/workspaces stay in the tenant cluster; inference uses Azure
-OpenAI's approved US/EU Data Zone. MCP uses chart-CA TLS; pilot keys use Secrets. Production
+OpenAI's approved US/EU Data Zone. MCP and harness use chart-CA TLS; pilot keys use Secrets. Production
 needs the reviewed MI proxy. Shared kernel/node: trusted users only; no per-session
 VM isolation, HA, automatic DB backup or PITR. Minimal requests: 250m / 1408 MiB;
 observed D2 allocatable: 1900m / 5.66 GiB. Memory limits overcommit; bound concurrency.

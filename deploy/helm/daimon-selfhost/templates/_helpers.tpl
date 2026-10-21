@@ -25,3 +25,5 @@ volumes:
 {{- define "d.mcpURL" -}}
 {{- printf "https://%s-mcp:%v/mcp" (include "d.name" .) .Values.services.mcp.port -}}
 {{- end -}}
+
+{{- define "d.priority" -}}{{ printf "%s-%s" (include "d.name" .) .Release.Namespace | trunc 240 | trimSuffix "-" }}{{- end -}}

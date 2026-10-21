@@ -19,7 +19,7 @@ spec:
     metadata:
       labels: {app: {{ include "d.name" . }}-postgres}
     spec:
-      priorityClassName: {{ include "d.name" . }}-postgres
+      priorityClassName: {{ include "d.priority" . }}-postgres
       automountServiceAccountToken: false
       imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
       containers:

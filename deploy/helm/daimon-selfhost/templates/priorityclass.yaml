@@ -3,7 +3,7 @@
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
-  name: {{ include "d.name" $ }}-{{ $name }}
+  name: {{ include "d.priority" $ }}-{{ $name }}
 value: {{ $value }}
 globalDefault: false
 preemptionPolicy: PreemptLowerPriority

@@ -21,8 +21,9 @@ for resource in resources:
         ]
     elif container["name"] == "harness":
         container["args"] = [
-            container["args"][0].replace("python -m daimon_harness", "python /validation/fake.py")
+            container["args"][0].replace("daimon_harness.service:create_app", "fake:create_app")
         ]
+        container["env"].append(dict(name="PYTHONPATH", value="/validation"))
         container["volumeMounts"].append(
             dict(name="offline", mountPath="/validation", readOnly=True)
         )

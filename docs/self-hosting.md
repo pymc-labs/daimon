@@ -1667,3 +1667,6 @@ certificate. The harness trusts the read-only `HARNESS_MCP_CA_BUNDLE`; optional
 operator/cert-manager Secrets support managed certificates. HTTP consent applies
 only to the host-to-harness bearer hop, with same-release ingress isolation.
 Explicit TEST tariffs also require the selfhosted `ALLOW_TEST_TARIFFS` opt-in.
+
+The AKS Helm recipe serves both MCP and harness over HTTPS with a generated CA;
+trusted hosts use a combined root bundle, while sandbox MCP trust stays scoped.

@@ -1,5 +1,4 @@
 {{- if .Values.harness.enabled }}
-{{- if not .Values.networkPolicy.enabled }}{{ fail "HTTP harness requires same-release ingress NetworkPolicy (C3.9a/F76)" }}{{ end }}
 {{- if ne .Values.harness.sessions.mode "multi" }}{{ fail "Only multi is implemented; pod-per-session needs the F72 router" }}{{ end }}
 apiVersion: v1
 kind: ServiceAccount
@@ -43,7 +42,7 @@ spec:
       serviceAccountName: {{ include "d.name" . }}-harness
       automountServiceAccountToken: false
       imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
-      priorityClassName: {{ include "d.name" . }}-harness
+      priorityClassName: {{ include "d.priority" . }}-harness
       terminationGracePeriodSeconds: 90
       initContainers:
         - name: prepare-mcp-ca
@@ -66,7 +65,7 @@ spec:
           imagePullPolicy: {{ .Values.images.harness.pullPolicy }}
           command: [/usr/bin/tini, --, sh, -ec]
           args:
-            - mount -o remount,hidepid=2,gid=60002 /proc; chmod 755 /tmp /var/tmp /dev/shm /run/lock; chmod 600 /dev/termination-log; chown 0:0 /home/harness; chmod 711 /home/harness; exec setpriv --bounding-set=-sys_admin,-setpcap -- python -m daimon_harness
+            - mount -o remount,hidepid=2,gid=60002 /proc; chmod 755 /tmp /var/tmp /dev/shm /run/lock; chmod 600 /dev/termination-log; chown 0:0 /home/harness; chmod 711 /home/harness; exec setpriv --bounding-set=-sys_admin,-setpcap -- uvicorn daimon_harness.service:create_app --factory --host 0.0.0.0 --port 8088 --loop asyncio --timeout-graceful-shutdown 10 --ssl-keyfile /etc/daimon/harness-tls/tls.key --ssl-certfile /etc/daimon/harness-tls/tls.crt
           securityContext: {{ .Values.harness.securityContext | toJson }}
           envFrom:
             - secretRef: {name: {{ .Values.secrets.harness }}}
@@ -99,11 +98,12 @@ spec:
             {{- end }}
           ports: [{containerPort: 8088}]
           readinessProbe:
-            httpGet: {path: /readiness, port: 8088}
+            httpGet: {path: /readiness, port: 8088, scheme: HTTPS}
             initialDelaySeconds: 5
           resources: {{ .Values.harness.resources | toJson }}
           volumeMounts:
             - {name: home, mountPath: /home/harness}
+            - {name: harness-tls, mountPath: /etc/daimon/harness-tls, readOnly: true}
             - {name: mcp-ca, mountPath: /etc/daimon/mcp-ca, readOnly: true}
             {{- if .Values.keyVaultCSI.enabled }}
             - {name: secrets-store, mountPath: /mnt/secrets-store, readOnly: true}
@@ -127,6 +127,11 @@ spec:
             limits: {memory: 128Mi}
         {{- end }}
       volumes:
+        - name: harness-tls
+          secret:
+            secretName: {{ include "d.mcpTLSSecret" . }}
+            defaultMode: 0400
+            items: [{key: tls.crt, path: tls.crt}, {key: tls.key, path: tls.key}]
         - {name: mcp-ca, emptyDir: {medium: Memory}}
         - name: mcp-ca-source
           secret:

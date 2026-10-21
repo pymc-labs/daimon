@@ -5,7 +5,7 @@ import os
 import urllib.request
 from uuid import uuid4
 
-base = "http://coke-daimon-harness:8088"
+base = "https://coke-daimon-harness:8088"
 token = os.environ["DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY"]
 session = "aks-preflight-" + uuid4().hex
 for instruction in (

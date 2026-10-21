@@ -52,6 +52,8 @@ images:
 azureOpenAI: {deployment: gpt-6-luna}
 postgres: {storage: 1Gi}
 harness: {storage: 1Gi}
+services:
+  teams: {enabled: true}
 YAML
 helm lint "$chart"
 helm template smoke "$chart" -f "$scratch/local.yaml" > "$scratch/rendered.yaml"
@@ -76,7 +78,11 @@ helm status smoke -n daimon -o json | python3 -c \
 kubectl -n daimon get pods -o json | python3 -c \
   'import json,sys; pods=json.load(sys.stdin)["items"]; assert all(c["restartCount"] == 0 for p in pods for c in p["status"].get("containerStatuses", [])); print("No main-container restarts during delayed-Postgres install")'
 kubectl -n daimon logs job/smoke-daimon-init-1 | tail -5
-kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
+# A failed terminal pod (as left by a recovered Job retry) must not block readiness.
+kubectl -n daimon run terminal-job-pod --image=postgres:18-alpine --restart=Never --command -- sh -c 'exit 1'
+kubectl -n daimon wait pod/terminal-job-pod --for=jsonpath='{.status.phase}'=Failed --timeout=60s
+kubectl -n daimon rollout status deployment --timeout=300s
+kubectl -n daimon rollout status statefulset --timeout=300s
 kubectl -n daimon get pods
 kubectl -n daimon exec deployment/smoke-daimon-mcp -- python -c \
   'import ssl,urllib.request; ctx=ssl.create_default_context(cafile="/etc/daimon/mcp-tls/ca.crt"); print(urllib.request.urlopen("https://smoke-daimon-mcp:8765/healthz", context=ctx).read().decode())'
@@ -94,6 +100,15 @@ kubectl -n daimon rollout status statefulset/smoke-daimon-harness --timeout=120s
 kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- python - after "$pod_scratch/evidence.json" < "$chart/tests/probe.py"
 kubectl -n daimon exec smoke-daimon-harness-0 -- python -c \
   'from pathlib import Path; assert Path("/home/harness/executions").read_text().splitlines() == ["kind-one", "kind-two", "kind-one-read", "kind-two-read"]; print("Replay did not execute; new turns read persisted files")'
+# Delete the original file and demonstrate that completion alone cannot pass.
+kubectl -n daimon exec smoke-daimon-harness-0 -- python -c \
+  'from pathlib import Path; files=list(Path("/home/harness").rglob("kind-proof.txt")); assert files; [p.unlink() for p in files]'
+if kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- python - missing "$pod_scratch/evidence.json" < "$chart/tests/probe.py" > "$scratch/missing.log" 2>&1; then
+  echo 'Missing-file persistence check unexpectedly passed' >&2
+  exit 1
+fi
+rg 'Missing exact persisted tool result' "$scratch/missing.log"
+echo 'Deleted file correctly fails tool-result check'
 # Exercise the exact recipe registration with #1276 application images, no model I/O.
 uv run python - "$scratch/local.yaml" "$scratch/aks-values.json" <<'PYLOCAL'
 import json, sys, yaml

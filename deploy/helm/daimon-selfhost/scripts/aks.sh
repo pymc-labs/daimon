@@ -62,14 +62,22 @@ if not (p/'pg.env').exists():
 host = urlsplit(endpoint).hostname
 ips = sorted({r[4][0]+'/32' for r in socket.getaddrinfo(host,443,socket.AF_INET)})
 assert ips, 'AOAI must resolve to IPv4 endpoint addresses'
-values = {
+values_path = p/'aks-values.json'
+values = json.loads(values_path.read_text()) if values_path.exists() else {}
+def merge(target, updates):
+    for key, value in updates.items():
+        if isinstance(value, dict):
+            merge(target.setdefault(key, {}), value)
+        else:
+            target[key] = value
+merge(values, {
     'images': {'registry': acr+'.azurecr.io', 'host': {'tag':tag}, 'harness': {'tag':tag}},
-    'azureOpenAI': {'endpoint':endpoint, 'deployment':'gpt-6-luna',
+    'azureOpenAI': {'endpoint':endpoint, 'deployment':values.get('azureOpenAI', {}).get('deployment', 'gpt-6-luna'),
                     'apiKeySecretRef':{'name':'daimon-aoai','key':'AZURE_OPENAI_API_KEY'}},
-    'services': {'teams':{'enabled':False}},
+    'services': {'teams':{'enabled':values.get('services', {}).get('teams', {}).get('enabled', False)}},
     'host': {'env': {'DAIMON_ANTHROPIC__BASE_URL':'http://127.0.0.1:9'}},
     'networkPolicy': {'azureOpenAICidrs':ips},
-}
+})
 (p/'aks-values.json').write_text(json.dumps(values, indent=2)+'\n')
 (p/'aoai-host').write_text(host)
 PY
@@ -77,12 +85,20 @@ PY
     kubectl -n daimon create secret generic "daimon-${pair%:*}" \
       --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   done
+  runtime_secret=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("host", {}).get("runtimeSecret", ""))' "$AKS_STATE/aks-values.json")
+  if [[ -n $runtime_secret ]]; then
+    [[ -f "$AKS_STATE/runtime.json" ]] || { echo 'Saved registration requires AKS_STATE/runtime.json' >&2; exit 1; }
+    kubectl -n daimon create secret generic "$runtime_secret" \
+      --from-file=runtime.json="$AKS_STATE/runtime.json" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  fi
   helm upgrade --install coke "$chart" -n daimon -f "$AKS_STATE/aks-values.json" \
     --wait --wait-for-jobs --timeout 15m
   kubectl -n daimon rollout status statefulset/coke-daimon-harness --timeout=300s
-  kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
+  kubectl -n daimon rollout status deployment --timeout=300s
+  kubectl -n daimon rollout status statefulset --timeout=300s
+  mcp_port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("services", {}).get("mcp", {}).get("port", 8765))' "$AKS_STATE/aks-values.json")
   kubectl -n daimon exec deployment/coke-daimon-mcp -- python -c \
-    'import ssl,urllib.request; ctx=ssl.create_default_context(cafile="/etc/daimon/mcp-tls/ca.crt"); assert urllib.request.urlopen("https://coke-daimon-mcp:8765/healthz", context=ctx).status == 200; print("MCP HTTPS healthy")'
+    'import ssl,sys,urllib.request; ctx=ssl.create_default_context(); assert urllib.request.urlopen(sys.argv[1], context=ctx).status == 200; print("MCP HTTPS healthy")' "https://coke-daimon-mcp:$mcp_port/healthz"
   ;;
 register)
   bash "$chart/scripts/register.sh"
@@ -132,6 +148,15 @@ PY
       --for="jsonpath={.status.ephemeralContainerStatuses[?(@.name=='$probe')].state.terminated.exitCode}=28"
     kubectl -n daimon logs "$pod" -c "$probe"
     echo "curl in $pod timed out; no TLS/auth failure accepted"
+  done
+  for pod in coke-daimon-harness-0 "$host_pod"; do
+    probe="imds-proof-$(date +%s)"
+    kubectl -n daimon debug "pod/$pod" --image=curlimages/curl:8.16.0 \
+      --container="$probe" --attach=false -- curl --noproxy '*' --connect-timeout 5 --max-time 10 \
+      -H Metadata:true -sS -o /dev/null 'http://169.254.169.254/metadata/instance?api-version=2021-02-01'
+    kubectl -n daimon wait "pod/$pod" --timeout=90s \
+      --for="jsonpath={.status.ephemeralContainerStatuses[?(@.name=='$probe')].state.terminated.exitCode}=28"
+    echo "IMDS curl in $pod timed out"
   done
   ;;
 teardown)

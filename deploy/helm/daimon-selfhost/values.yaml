@@ -20,8 +20,8 @@ postgres:
 init: {enabled: true, backoffLimit: 2, activeDeadlineSeconds: 900}
 services:
   enabled: true
-  mcp: {enabled: true, port: 8765, healthPath: /healthz, env: {}}
-  teams: {enabled: true, port: 3978, healthPath: /healthz, env: {}}
+  mcp: {enabled: true, port: 8765, healthPath: /healthz, readyPath: /readyz, env: {}}
+  teams: {enabled: false, port: 3978, healthPath: /healthz, readyPath: /readyz, env: {}}
   scheduler: {enabled: true, port: 8082, healthPath: /healthz, env: {}}
   discord: {enabled: false, port: 8081, healthPath: /healthz, env: {}}
   slack: {enabled: false, port: 0, healthPath: "", env: {}}
@@ -85,6 +85,9 @@ networkPolicy:
   blobCidrs: []
   # External PG only: explicit IPv4 /32 destinations for the host pods.
   hostPostgresCidrs: []
+  # Host Teams pod only; never selects the harness. Resolve Bot Framework/Entra
+  # endpoint IPs and keep the /32 list current before enabling Teams delivery.
+  teamsEgress: {enabled: false, cidrs: []}
   # Federation needs Entra HTTPS in the proxy pod too.
   entraCidrs: []
 keyVaultCSI:
