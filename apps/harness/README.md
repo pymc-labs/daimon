@@ -577,3 +577,8 @@ The long-turn compaction probe adds `--backend codex --scenario compaction` to
 the command above. It runs 14 distinct large `seq` commands sequentially, verifies
 exactly-once execution and observed checkpoint compaction, and saves measured
 provider usage plus output digests in `codex-compaction.json`.
+
+Event replay may include `replay_after_seq` to read an older range while
+`after_seq` still carries the highest durable client cursor for restore fencing.
+This lets a resumed invocation replay its saved baseline without reusing event
+sequences after sandbox loss.

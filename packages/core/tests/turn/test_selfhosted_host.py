@@ -46,7 +46,9 @@ class Wire:
     def handle(self, request):
         assert request.headers["authorization"] == "Bearer offline"
         if request.method == "GET":
-            after = int(request.url.params.get("after_seq", "0"))
+            after = int(
+                request.url.params.get("replay_after_seq", request.url.params.get("after_seq", "0"))
+            )
             return httpx.Response(
                 200, json={"events": [e for e in self.events if e["seq"] > after], "complete": True}
             )

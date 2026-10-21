@@ -653,6 +653,7 @@ def create_app(
         session_id: str,
         after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
         context_session_id: Annotated[str | None, Query(alias="session_id")] = None,
+        replay_after_seq: Annotated[int | None, Query(ge=0, le=MAX_CURSOR)] = None,
     ) -> EventsResponse:
         if context_session_id is not None and context_session_id != session_id:
             raise HTTPException(status_code=409, detail="session_mismatch")
@@ -668,7 +669,11 @@ def create_app(
                 raise HTTPException(status_code=409, detail="session_bound") from exc
         complete = await supervisor.io(supervisor.journal.complete, session_id)
         return EventsResponse(
-            events=await supervisor.io(supervisor.journal.events, session_id, after_seq),
+            events=await supervisor.io(
+                supervisor.journal.events,
+                session_id,
+                after_seq if replay_after_seq is None else min(after_seq, replay_after_seq),
+            ),
             complete=complete,
         )
 
@@ -728,7 +733,7 @@ def create_app(
                     raise HTTPException(status_code=422, detail="Cancel body must be empty")
                 return JSONResponse((await cancel(turn_id, context_id, cursor)).model_dump())
             if method == "GET" and (match := re.fullmatch(r"/v0/sessions/([^/]+)/events", path)):
-                if set(route.query) - {"after_seq", "session_id"}:
+                if set(route.query) - {"after_seq", "session_id", "replay_after_seq"}:
                     raise HTTPException(status_code=422, detail="Unexpected query parameters")
                 raw_after = route.query.get("after_seq", 0)
                 if isinstance(raw_after, bool) or not isinstance(raw_after, (str, int)):
@@ -736,8 +741,15 @@ def create_app(
                 after = int(raw_after)
                 if not 0 <= after <= MAX_CURSOR:
                     raise ValueError("negative cursor")
+                replay = route.query.get("replay_after_seq")
+                if replay is not None:
+                    if isinstance(replay, bool) or not isinstance(replay, (str, int)):
+                        raise ValueError("invalid replay cursor")
+                    replay = int(replay)
+                    if not 0 <= replay <= MAX_CURSOR:
+                        raise ValueError("invalid replay cursor")
                 return JSONResponse(
-                    (await events(match[1], after, context_id)).model_dump(mode="json")
+                    (await events(match[1], after, context_id, replay)).model_dump(mode="json")
                 )
         except (ValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="Invalid C3 invocation") from exc

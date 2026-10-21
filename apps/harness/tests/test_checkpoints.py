@@ -723,7 +723,8 @@ async def test_fresh_driver_uses_persisted_projection_and_delivers_next_turn_usa
             assert received[-1].type == "session.turn_ended"
             assert all(event.sequence > 13 for event in received)
             usage = await fresh.usage.reconcile(SCOPE, resumed.ref)
-            assert len(usage) == 1 and usage[0].completeness == "measured"
+            assert usage and all(item.completeness == "measured" for item in usage)
+            assert any(item.turn_id == received[-1].turn_id for item in usage)
         await fresh.aclose()
 
 
@@ -911,3 +912,102 @@ async def test_snapshot_failure_does_not_fail_the_turn(tmp_path, monkeypatch):
         events = (await client.get("/v0/sessions/session-1/events")).json()["events"]
         assert events[-1]["data"]["outcome"] == "completed"
         assert sum(e["type"] == "checkpoint_warning" for e in events) == 1
+
+
+@pytest.mark.parametrize("foundry", [False, True])
+async def test_old_baseline_with_newer_high_water_replays_without_false_gap(tmp_path, foundry):
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    blobs = MemoryBlobs()
+    async with harness(tmp_path / "old", blobs) as (supervisor, _):
+        request = TurnRequest.model_validate(turn())
+
+        def populate():
+            supervisor.journal.claim(request)
+            supervisor.journal.append(request, "status_running", {})
+            for index in range(1000):
+                supervisor.journal.append(
+                    request,
+                    "agent_message_delta",
+                    {
+                        "message_id": "long-message",
+                        "text": str(index),
+                    },
+                )
+            supervisor.journal.append(request, "turn_ended", {"outcome": "completed"})
+
+        await supervisor.io(populate)
+        await supervisor.checkpoint("session-1")
+    async with harness(tmp_path / "new", blobs) as (_, client):
+        query = {"after_seq": 1002, "replay_after_seq": 990, "session_id": "session-1"}
+        if foundry:
+            response = await client.post(
+                "/invocations",
+                json={
+                    "c3": {
+                        "method": "GET",
+                        "path": "/v0/sessions/session-1/events",
+                        "query": query,
+                    }
+                },
+            )
+        else:
+            response = await client.get("/v0/sessions/session-1/events", params=query)
+        assert response.status_code == 200
+        events = response.json()["events"]
+        assert [event["seq"] for event in events] == list(range(991, 1003))
+        assert not any(event["type"] == "history_gap" for event in events)
+        clamped = await client.get(
+            "/v0/sessions/session-1/events",
+            params={
+                "after_seq": 1002,
+                "replay_after_seq": 2000,
+            },
+        )
+        assert clamped.json()["events"] == []
+        negative = await client.get(
+            "/v0/sessions/session-1/events",
+            params={
+                "after_seq": 1002,
+                "replay_after_seq": -1,
+            },
+        )
+        assert negative.status_code == 422
+
+
+@pytest.mark.parametrize("foundry", [False, True])
+async def test_restore_replay_range_does_not_lower_the_high_water_fence(tmp_path, foundry):
+    from daimon_harness.journal import Journal
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    blobs = MemoryBlobs()
+    journal = Journal(tmp_path / "old")
+    request = TurnRequest.model_validate(turn())
+    journal.bind_session("session-1")
+    journal.claim(request)
+    journal.append(request, "status_running", {})
+    journal.append(request, "model_request_started", {"request_id": "lost", "model": "test"})
+    Checkpoints(blobs).save(journal, "session-1")
+    journal.close()
+    async with harness(tmp_path / "new", blobs) as (_, client):
+        query = {"after_seq": 9, "replay_after_seq": 1, "session_id": "session-1"}
+        if foundry:
+            response = await client.post(
+                "/invocations",
+                json={
+                    "c3": {
+                        "method": "GET",
+                        "path": "/v0/sessions/session-1/events",
+                        "query": query,
+                    }
+                },
+            )
+        else:
+            response = await client.get("/v0/sessions/session-1/events", params=query)
+        assert response.status_code == 200
+        events = response.json()["events"]
+        assert events[0]["seq"] == 2
+        gap = next(event for event in events if event["type"] == "history_gap")
+        assert gap["seq"] == 10 and gap["data"]["from_seq"] == 3 and gap["data"]["to_seq"] == 9
+        assert all(event["seq"] > 9 for event in events[1:])
+        assert events[-1]["data"]["error"]["kind"] == "sandbox_lost"

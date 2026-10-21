@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from daimon.core.turn.errors import AdmissionDenied
@@ -498,9 +498,13 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 else datetime.now(UTC) + timedelta(seconds=8)
             )
             if method == "GET" and "/events?after_seq=" in path:
-                prefix, _, raw_after = path.partition("after_seq=")
-                after = max(int(raw_after), await history_floor(session_id))
-                path = prefix + "after_seq=" + str(after)
+                parsed = urlsplit(path)
+                query = dict(parse_qsl(parsed.query))
+                floor = await history_floor(session_id)
+                query["after_seq"] = str(max(int(query["after_seq"]), floor))
+                if "replay_after_seq" in query:
+                    query["replay_after_seq"] = str(max(int(query["replay_after_seq"]), floor))
+                path = parsed.path + "?" + urlencode(query)
             result = await transport_impl.request(
                 method,
                 path,

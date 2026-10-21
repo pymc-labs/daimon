@@ -8,6 +8,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
+from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import ValidationError
@@ -202,9 +203,13 @@ class SelfHostedEvents:
             raise ContinuityLost(binding.id, ("environment changed since session creation",))
         self._c.check_environment(environment)
         after = await self.cursor(ref)
+        replay_after = max(self._history.get(ref, {}), default=0)
+        query = {"after_seq": after}
+        if replay_after < after:
+            query["replay_after_seq"] = replay_after
         raw = await self._c.transport.request(
             "GET",
-            f"/v0/sessions/{segment(ref.id)}/events?after_seq={after}",
+            f"/v0/sessions/{segment(ref.id)}/events?{urlencode(query)}",
             session_id=ref.id,
             deadline=deadline,
         )

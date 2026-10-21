@@ -284,7 +284,11 @@ class CheckpointWarningData(ResponseModel):
 
 
 class HistoryGapData(ResponseModel):
-    """Recovery boundary; requests carry after_seq alongside session_id in the query."""
+    """Recovery boundary; after_seq fences restore, replay_after_seq selects replay.
+
+    Both travel alongside session_id in the query; replay_after_seq is optional
+    on event reads and never lowers the restore fence.
+    """
 
     from_seq: int = Field(ge=0)
     to_seq: int = Field(ge=0)

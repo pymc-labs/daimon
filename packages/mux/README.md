@@ -1287,3 +1287,8 @@ driver therefore retains continuity after a host restart. After sandbox
 loss, `history_gap` normalizes to an authoritative `session.history_gap`; recovery
 continues above the client cursor and reconciles interrupted-turn usage. Clean
 restores emit no gap. `checkpoint_warning` maps to a non-terminal native notice.
+
+Event replay may include `replay_after_seq` to read an older range while
+`after_seq` still carries the highest durable client cursor for restore fencing.
+This lets a resumed invocation replay its saved baseline without reusing event
+sequences after sandbox loss.
