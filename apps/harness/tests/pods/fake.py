@@ -1,8 +1,12 @@
 """Offline adapter; production UID isolation, real tools and checkpoint path."""
 
 import asyncio
+from contextlib import AsyncExitStack
 
+from agents.mcp import MCPServerStreamableHttp
 from daimon_harness.__main__ import main
+from daimon_harness.credentials import mcp_headers
+from daimon_harness.model_adapter import bound_mcp_http_client
 from daimon_harness.service import create_app
 
 
@@ -24,6 +28,28 @@ class Fake:
             result = await context.bash("cat proof.txt")
         else:
             result = {"stdout": "done"}
+        async with AsyncExitStack() as stack:
+            for config in context.request.mcp_servers:
+                connection = await stack.enter_async_context(
+                    MCPServerStreamableHttp(
+                        name=config.name,
+                        params={
+                            "url": config.url,
+                            "headers": mcp_headers(
+                                config, context.credentials, context.credential_bindings
+                            ),
+                            "httpx_client_factory": bound_mcp_http_client,
+                        },
+                    )
+                )
+                assert "whoami" in [tool.name for tool in await connection.list_tools()]
+
+                async def execute(connection=connection):
+                    response = await connection.call_tool("whoami", {})
+                    return response.model_dump(mode="json")
+
+                remote = await context.tool("mcp-smoke", "daimon-mcp/whoami", {}, execute, mcp=True)
+                result["mcp"] = remote
         await context.emit(
             "usage",
             {

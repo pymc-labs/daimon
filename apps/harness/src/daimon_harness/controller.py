@@ -13,6 +13,8 @@ import hashlib
 import hmac
 import io
 import json
+import logging
+import math
 import os
 import secrets
 import shutil
@@ -22,7 +24,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -40,6 +42,8 @@ OWNER = "daimon-controller"
 SESSION = "daimon-session"
 TOUCHED = "daimon-last-active"
 TEMPLATE = "daimon-template"
+CREATED = "daimon-created"
+logger = logging.getLogger(__name__)
 
 
 class PodAPI(Protocol):
@@ -151,11 +155,20 @@ class Controller:
         *,
         warm: int = 1,
         idle: float = 900,
-        maximum: int = 1,
+        maximum: int = 4,
         clock: Callable[[], float] = time.time,
+        max_age: float = 86400,
+        hard_age: float = 2 * 86400,
+        unknown_limit: int = 3,
+        probe_timeout: float = 4,
     ):
         if not 0 <= warm <= 2 or maximum < 1 or warm > maximum:
             raise ValueError("invalid sandbox capacity/warm pool")
+        if not 0 < max_age < hard_age < 7 * 86400 or unknown_limit < 1:
+            raise ValueError("sandbox lifetime must remain below certificate validity")
+        self.max_age, self.hard_age = max_age, hard_age
+        self.unknown_limit, self.probe_timeout = unknown_limit, probe_timeout
+        self.unknown: dict[str, int] = defaultdict(int)
         self.kube, self.template, self.owner = kube, template, owner
         self.warm, self.idle, self.maximum, self.clock = warm, idle, maximum, clock
         self.version = hashlib.sha256(json.dumps(template, sort_keys=True).encode()).hexdigest()[
@@ -191,7 +204,7 @@ class Controller:
         pod["metadata"] = {
             "name": name,
             "labels": {OWNER: self.owner, SESSION: session, TEMPLATE: self.version},
-            "annotations": {TOUCHED: str(self.clock())},
+            "annotations": {TOUCHED: str(self.clock()), CREATED: str(self.clock())},
         }
         await self.kube.create(pod)
 
@@ -199,14 +212,15 @@ class Controller:
         uid = pod["metadata"]["uid"]
         if uid in self.bootstrapped or self.client is None:
             return
-        response = await self.client.post(
-            self.url(pod) + "/internal/bootstrap",
-            json={
-                "c3": self.credential(pod, "c3"),
-                "checkpoint": self.credential(pod, "checkpoint"),
-            },
-        )
-        response.raise_for_status()
+        async with asyncio.timeout(self.probe_timeout):
+            response = await self.client.post(
+                self.url(pod) + "/internal/bootstrap",
+                json={
+                    "c3": self.credential(pod, "c3"),
+                    "checkpoint": self.credential(pod, "checkpoint"),
+                },
+            )
+            response.raise_for_status()
         self.bootstrapped.add(uid)
 
     @staticmethod
@@ -216,39 +230,11 @@ class Controller:
     async def maintain(self) -> None:
         pods = await self.pods()
         for pod in pods:
-            meta = pod["metadata"]
-            if meta.get("deletionTimestamp"):
-                continue
-            warm = meta["labels"][SESSION] == "warm"
-            stale = meta["labels"].get(TEMPLATE) != self.version
-            if dead(pod) or (warm and stale):
-                await self.kube.delete(pod)
-                continue
-            if not warm and not self.active[meta["name"]]:
-                async with self.locks[meta["labels"][SESSION]]:
-                    if self.active[meta["name"]]:
-                        continue
-                    touched = float(meta.get("annotations", {}).get(TOUCHED, self.clock()))
-                    if self.clock() - touched < self.idle:
-                        continue
-                    if self.client is not None:
-                        try:
-                            await self.bootstrap(pod)
-                            response = await self.client.get(
-                                self.url(pod) + "/internal/activity",
-                                headers={"Authorization": "Bearer " + self.credential(pod, "c3")},
-                            )
-                            response.raise_for_status()
-                            activity = response.json()
-                            if (
-                                activity["active"]
-                                or self.clock() - activity["last_activity"] < self.idle
-                            ):
-                                continue
-                        except httpx.HTTPError:
-                            # Unknown activity is not permission to kill paid work.
-                            continue
-                    await self.kube.delete(pod)
+            try:
+                await self.maintain_pod(pod)
+            except Exception as exc:
+                # Never log untrusted response bodies or credentials.
+                logger.warning("sandbox_maintenance_failed reason=%s", type(exc).__name__)
         if self.allocating:
             return
         self.allocating = True
@@ -259,6 +245,75 @@ class Controller:
                 await self.make(self.owner + "-warm-" + secrets.token_hex(5))
         finally:
             self.allocating = False
+
+    async def maintain_pod(self, pod: dict[str, Any]) -> None:
+        meta = pod["metadata"]
+        if meta.get("deletionTimestamp"):
+            return
+        warm = meta["labels"][SESSION] == "warm"
+        stale = meta["labels"].get(TEMPLATE) != self.version
+        annotations = meta.get("annotations", {})
+        # Kubernetes timestamp survives controller restarts; annotation covers fake API.
+        from datetime import datetime
+
+        born = float(annotations.get(CREATED, self.clock()))
+        if meta.get("creationTimestamp"):
+            born = datetime.fromisoformat(
+                meta["creationTimestamp"].replace("Z", "+00:00")
+            ).timestamp()
+        age = self.clock() - born
+        if dead(pod) or (warm and (stale or age >= self.max_age)):
+            await self.kube.delete(pod)
+            return
+        if warm:
+            return
+        async with self.locks[meta["labels"][SESSION]]:
+            if self.active[meta["name"]]:
+                return
+            touched = float(annotations.get(TOUCHED, self.clock()))
+            if self.clock() - touched < self.idle and age < self.max_age and not stale:
+                return
+            if self.client is not None:
+                try:
+                    async with asyncio.timeout(self.probe_timeout):
+                        await self.bootstrap(pod)
+                        response = await self.client.get(
+                            self.url(pod) + "/internal/activity",
+                            headers={"Authorization": "Bearer " + self.credential(pod, "c3")},
+                        )
+                        response.raise_for_status()
+                        raw_activity = response.json()
+                        if not isinstance(raw_activity, dict):
+                            raise ValueError("invalid activity")
+                        activity = cast(dict[str, Any], raw_activity)
+                        active, last = activity.get("active"), activity.get("last_activity")
+                        durable = activity.get("durable", False)
+                        if (
+                            type(active) is not bool
+                            or type(last) not in (int, float)
+                            or not math.isfinite(cast(float, last))
+                            or type(durable) is not bool
+                        ):
+                            raise ValueError("invalid activity")
+                    self.unknown.pop(meta["uid"], None)
+                    if age < self.hard_age and (
+                        active
+                        or ((age >= self.max_age or stale) and not durable)
+                        or (
+                            age < self.max_age
+                            and not stale
+                            and self.clock() - cast(float, last) < self.idle
+                        )
+                    ):
+                        return
+                except Exception as exc:
+                    self.unknown[meta["uid"]] += 1
+                    logger.warning("sandbox_activity_unknown reason=%s", type(exc).__name__)
+                    if self.unknown[meta["uid"]] < self.unknown_limit and age < self.hard_age:
+                        return
+            # Lost/wedged workers reconcile from the write-ahead inventory on restore.
+            await self.kube.delete(pod)
+            self.unknown.pop(meta["uid"], None)
 
     async def acquire(self, session: str) -> dict[str, Any]:
         key = sandbox_id(session)
@@ -293,7 +348,9 @@ class Controller:
                     else:
                         if len(pods) >= self.maximum:
                             raise HTTPException(
-                                503, "sandbox capacity busy; retry", headers={"Retry-After": "15"}
+                                503,
+                                "Busy, try again shortly",
+                                headers={"Retry-After": "2", "X-Daimon-Error": "sandbox_busy"},
                             )
                         await self.make(self.owner + "-" + key, key)
                     found = next(
@@ -351,7 +408,8 @@ def create_app(
             json.loads(Path(os.environ["HARNESS_POD_TEMPLATE"]).read_text()),
             os.environ["HARNESS_CONTROLLER_NAME"],
             warm=int(os.environ.get("HARNESS_WARM_POOL", "1")),
-            maximum=int(os.environ.get("HARNESS_MAX_SANDBOXES", "1")),
+            maximum=int(os.environ.get("HARNESS_MAX_SANDBOXES", "4")),
+            idle=float(os.environ.get("HARNESS_IDLE_SECONDS", "300")),
         )
     ctl = controller
     store = PVCStore(root or Path("/checkpoints"))
@@ -364,7 +422,8 @@ def create_app(
     client = http_client or httpx.AsyncClient(
         verify=context, timeout=httpx.Timeout(180, read=None), trust_env=False
     )
-    ctl.client = client if production else None
+    control_client = httpx.AsyncClient(verify=context, timeout=4, trust_env=False)
+    ctl.client = control_client if production else None
     maintenance_task: asyncio.Task[None] | None = None
     retention = float(os.environ.get("HARNESS_CHECKPOINT_RETENTION_SECONDS", str(30 * 86400)))
     buckets: dict[str, tuple[float, int]] = {}
@@ -376,28 +435,36 @@ def create_app(
             disk.total * float(os.environ.get("HARNESS_MIN_FREE_FRACTION", "0.1")),
         )
 
-    def collect() -> None:
+    async def collect() -> None:
         sessions = store.root / "sessions"
-        if not sessions.exists():
-            return
-        bound = {p["metadata"]["labels"][SESSION] for p in ctl.inventory}
-        for directory in sessions.iterdir():
-            if directory.is_dir() and directory.name not in bound:
-                newest = max(
-                    (p.stat().st_mtime for p in directory.rglob("*") if p.is_file()),
-                    default=directory.stat().st_mtime,
-                )
-                if time.time() - newest > retention:
-                    shutil.rmtree(directory)
-        from .checkpoints import sync_directory
+        with suppress(FileNotFoundError):
+            for directory in sessions.iterdir():
+                async with ctl.locks[directory.name]:
+                    # Recheck the live binding after taking the SAME lock as acquire/restore.
+                    bound = {p["metadata"]["labels"][SESSION] for p in await ctl.pods()}
+                    if directory.name in bound:
+                        continue
+                    with suppress(FileNotFoundError):
+                        if (
+                            directory.is_dir()
+                            and time.time() - directory.stat().st_mtime > retention
+                        ):
+                            await asyncio.to_thread(shutil.rmtree, directory)
+                            from .checkpoints import sync_directory
 
-        sync_directory(sessions)
+                            await asyncio.to_thread(sync_directory, sessions)
+
+    heartbeat = time.monotonic()
 
     async def maintenance() -> None:
+        nonlocal heartbeat
         while True:
-            with suppress(httpx.HTTPError):
+            try:
                 await ctl.maintain()
-            await asyncio.to_thread(collect)
+                await collect()
+            except Exception as exc:
+                logger.warning("controller_maintenance_failed reason=%s", type(exc).__name__)
+            heartbeat = time.monotonic()
             await asyncio.sleep(10)
 
     @asynccontextmanager
@@ -420,6 +487,7 @@ def create_app(
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 await client.aclose()
+                await control_client.aclose()
                 if isinstance(ctl.kube, Kubernetes):
                     await ctl.kube.client.aclose()
 
@@ -433,11 +501,18 @@ def create_app(
     app.add_exception_handler(httpx.HTTPError, upstream_unavailable)
     app.add_exception_handler(OSError, upstream_unavailable)
 
+    @app.get("/liveness")
+    async def liveness():
+        if (
+            maintenance_task is not None and maintenance_task.done()
+        ) or time.monotonic() - heartbeat > 60:
+            raise HTTPException(503, "maintenance heartbeat stale")
+        return {"ok": True}
+
     @app.get("/readiness")
     async def readiness():
-        if (maintenance_task is not None and maintenance_task.done()) or not space_ok():
-            raise HTTPException(503, "maintenance or checkpoint storage unavailable")
-        return {"ok": True}
+        await liveness()
+        return {"ok": True, "admission_available": space_ok()}
 
     @app.middleware("http")
     async def separate_ports(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -455,9 +530,14 @@ def create_app(
             if len(raw) > 16384:
                 raise HTTPException(413)
         try:
-            body = json.loads(raw)
+            raw_body = json.loads(raw)
         except ValueError:
             raise HTTPException(422, "invalid certificate request") from None
+        if not isinstance(raw_body, dict):
+            raise HTTPException(422, "invalid certificate request")
+        body = cast(dict[str, Any], raw_body)
+        if not isinstance(body.get("csr"), str) or not isinstance(body.get("uid"), str):
+            raise HTTPException(422, "invalid certificate request")
         uid = body.get("uid", "")
         pod = next(
             (
@@ -595,7 +675,14 @@ def create_app(
             identifier(session)
         except ValueError:
             raise HTTPException(422, "invalid session_id") from None
-        if not space_ok():
+        low_disk = not space_ok()
+        if (
+            low_disk
+            and not any(
+                p["metadata"]["labels"][SESSION] == sandbox_id(session) for p in await ctl.pods()
+            )
+            and not (store.root / "sessions" / sandbox_id(session)).exists()
+        ):
             raise HTTPException(
                 503, "checkpoint disk near full; retry", headers={"Retry-After": "30"}
             )
@@ -618,6 +705,8 @@ def create_app(
                 in {"authorization", "accept", "content-type", "x-daimon-mcp-authorization"}
             }
             headers["authorization"] = "Bearer " + ctl.credential(pod, "c3")
+            if low_disk:
+                headers["x-daimon-admission-blocked"] = "true"
             url = ctl.url(pod) + f"/v0/{path}"
             outgoing = client.build_request(
                 request.method,
@@ -649,5 +738,6 @@ def create_app(
             await close()
             raise
 
+    app.state.collect = collect
     app.state.handlers = (readiness, objects, proxy, separate_ports, certificate, delete_session)
     return app

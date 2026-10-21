@@ -8,6 +8,20 @@ import yaml
 for doc in yaml.safe_load_all(sys.stdin):
     if not doc:
         continue
+    if doc["kind"] == "Deployment" and doc["metadata"]["name"].endswith("-mcp"):
+        spec = doc["spec"]["template"]["spec"]
+        spec.pop("initContainers", None)
+        spec["volumes"] = [{"name": "tls", "secret": {"secretName": "smoke-daimon-mcp-tls"}}]
+        spec["containers"] = [
+            {
+                "name": "mcp",
+                "image": __import__("os").environ["HARNESS_SMOKE_IMAGE"],
+                "imagePullPolicy": "Never",
+                "command": ["python", "/opt/l16-mcp.py"],
+                "volumeMounts": [{"name": "tls", "mountPath": "/tls", "readOnly": True}],
+                "readinessProbe": {"tcpSocket": {"port": 8765}},
+            }
+        ]
     if doc["kind"] == "ConfigMap" and "pod.json" in doc.get("data", {}):
         pod = json.loads(doc["data"]["pod.json"])
         pod["spec"]["containers"][0]["args"] = [

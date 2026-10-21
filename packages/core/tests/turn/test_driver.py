@@ -1142,3 +1142,28 @@ async def test_driver_acknowledges_only_after_final_delivery():
         billing=_EXEMPT,
     )
     assert phases == ["accepted", "done"]
+
+
+async def test_sandbox_busy_renders_clear_user_message() -> None:
+    from daimon.core.turn.driver import _finalize_upstream
+    from mux.errors import ProviderError
+
+    rendered = []
+
+    async def render(state):
+        rendered.append(state)
+        return True
+
+    final = await _finalize_upstream(
+        state_cell=[TurnState()],
+        lifecycle=RecordingLifecycle(),
+        render_once=render,
+        session_id="busy",
+        err=ProviderError("rate_limited", retryable=True, native_code="sandbox_busy"),
+        rate_limit_until=None,
+        retry_after_s=None,
+        renders_failed=0,
+    )
+    assert final.error is not None
+    assert final.error.message == "Busy, try again shortly"
+    assert rendered[-1].error.message == "Busy, try again shortly"

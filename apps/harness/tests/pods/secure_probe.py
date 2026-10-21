@@ -39,14 +39,20 @@ with httpx.Client(
             "model": "fake",
             "instructions": "smoke",
             "input": [{"type": "text", "text": mode}],
-            "mcp_servers": [],
+            "mcp_servers": [
+                {
+                    "name": "daimon-mcp",
+                    "url": "https://smoke-daimon-mcp.daimon-pods.svc:8765/mcp",
+                    "headers_env": {"Authorization": "DAIMON_MCP_AUTHORIZATION"},
+                }
+            ],
             "skills": [],
             "limits": {"max_tool_calls": 3, "deadline_s": 30},
         },
         headers={"X-Daimon-MCP-Authorization": "Bearer synthetic-forwarding-check"},
         extensions=extensions,
     )
-    response.raise_for_status()
+    assert response.is_success, (response.status_code, response.text)
     for _ in range(300):
         response = client.get("/v0/sessions/secure-smoke/events", extensions=extensions)
         response.raise_for_status()
@@ -65,8 +71,10 @@ with httpx.Client(
         for e in events
         if e["type"] == "agent_message" and e["turn_id"] == mode
     )
+    assert any("DAIMON_MCP_TOOL_OK" in json.dumps(e) for e in events if e["type"] == "tool_result")
+    assert "synthetic-forwarding-check" not in json.dumps(events)
     busy = client.get("/v0/sessions/exceeds-capacity/events", extensions=extensions)
-    assert busy.status_code == 503 and busy.headers["retry-after"] == "15"
+    assert busy.status_code == 503 and busy.headers["x-daimon-error"] == "sandbox_busy"
     Path(args.output).write_text(
         json.dumps(
             {"mode": mode, "seconds": time.monotonic() - started, "events": events}, indent=2

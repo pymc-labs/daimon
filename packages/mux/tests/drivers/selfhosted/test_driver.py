@@ -1682,3 +1682,26 @@ async def test_republished_usage_is_idempotent_only_for_identical_model_and_toke
             page = await driver.events.list(SCOPE, session.ref, page=PageRequest())
             assert sum(event.type == "usage.observed" for event in page.data) == 1
             assert page.data[-1].type == "session.turn_ended"
+
+
+async def test_capacity_busy_is_immediate_and_preserves_safe_message():
+    calls = []
+
+    async def busy(request):
+        calls.append(request)
+        return httpx.Response(
+            503,
+            json={"detail": "Busy, try again shortly"},
+            headers={"Retry-After": "2", "X-Daimon-Error": "sandbox_busy"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(busy)) as client:
+        transport = DirectTransport(client, base_url="https://harness", token="host")
+        from mux.errors import ProviderError
+
+        with pytest.raises(ProviderError) as exc:
+            await transport.request("GET", "/v0/sessions/a/events", session_id="a", after_seq=0)
+        assert len(calls) == 1
+        assert exc.value.native_code == "sandbox_busy"
+        assert exc.value.native_message == "Busy, try again shortly"
+        assert exc.value.retryable

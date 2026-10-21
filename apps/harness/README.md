@@ -825,7 +825,7 @@ both hops with the chart CA.
 
 Set `harness.mode: perConversation` in the lane-14 Helm chart. Apply
 `deploy/helm/patches/per-conversation.patch` to PR #1273 at
-`780b1e6a10cf0098693c44458e038454cebef6d1`. The chart is not vendored here.
+`473a53a2ad0e315314c53d2615243ab46645a6f5`. The chart is not vendored here.
 The host uses `https://<release>-daimon-harness.<namespace>.svc:8088`, direct
 transport and `session_pool: false`. Host code and the MCP CA client integrate
 with PR #1276. The controller preserves C3 JSON/SSE, cursors, MCP headers and
@@ -881,13 +881,13 @@ claims warm pods and records activity (and inherently permits image mutation
 there). No watch, Secrets, exec, PVC, Service, node or cluster-wide verbs exist.
 Helm/operator privileges create namespaces, fixed resources and credential copies.
 
-Admission caps total sandboxes (including warm and terminating pods), default 1
-on the D2s_v6. Warm pods count toward capacity and can be claimed at the cap.
+Admission caps total sandboxes (including warm and terminating pods), default 4
+on the D2s_v6 when replacing the shared harness. Warm pods count toward capacity and can be claimed at the cap.
 Sandboxes have negative priority below host/Postgres/controller and never preempt.
 Requests are controller 25m/128Mi and sandbox 50m/256Mi. Capacity measurements
 must use these defaults and include the existing release's reserved resources.
 Template hashes cover image, configuration, Secret data observed by Helm and an operator rotation revision;
-stale warm pods are deleted before reuse. Active turns are checked in the sandbox
+stale warm pods are deleted before reuse; stale bound pods recycle once idle and checkpointed. Active turns are checked in the sandbox
 before idle reaping, including after a controller restart. Maintenance failure
 fails readiness. Session-specific locks serialize claims; no global lock spans
 Kubernetes calls.
@@ -898,8 +898,8 @@ session directory. An operator-configurable idle retention (default 30 days)
 expires unbound session directories; explicit authenticated session deletion removes
 its pod and durable directory. Expiry/deletion forfeits resume and requires host
 lifecycle coordination. Active/bound sessions are never retention-collected.
-Readiness fails and new admission returns retryable busy when free space is below
-10% or 1 GiB. The single controller/PVC is an availability and backup boundary;
+Readiness reports low disk and new admission returns retryable busy below
+10% or 1 GiB; existing-turn events, cancellation and idempotent replay remain reachable. The single controller/PVC is an availability and backup boundary;
 PVC loss remains data loss. HTTP has no production fallback on any credential hop.
 
 ### Operation and recovery
@@ -907,10 +907,15 @@ PVC loss remains data loss. HTTP has no production fallback on any credential ho
 One Recreate controller holds a PVC flock. Kubernetes labels and UID/resourceVersion
 preconditions retain single-flight routing across restart and warm-claim conflicts.
 A 10-second maintenance loop retains a warm pool (default 1, configurable 0–2),
-reaps idle sandboxes after 900 seconds, and expires unbound checkpoints after
+reaps idle sandboxes after `idleSeconds` (default 300), and expires unbound checkpoints after
 `harness.perConversation.retentionSeconds` (default 30 days). `maxSandboxes`
-(default 1) includes warm, active and terminating pods. Admission at capacity
-returns 503 with Retry-After. Increase the cap and warm count only with a measured
+(default 4) includes warm, active and terminating pods. Admission at capacity
+returns 503 with a prompt “Busy, try again shortly” message and Retry-After.
+With cap 1, a second user gets busy; at the default cap, a fifth does.
+Removing the replaced shared harness and temporary proof pods from the original
+D2s_v6 measurement gives 1547m baseline + 25m controller + 200m for four
+sandboxes = 1772m of 1900m allocatable CPU; memory requests also fit.
+This is a requests budget, not a concurrent model throughput guarantee. Increase the cap and warm count only with a measured
 node budget; large PyMC workloads need larger requests and limits.
 
 The sandbox namespace defaults to `<release>-sandboxes`; the operator supplies
@@ -929,11 +934,14 @@ idle retention expires it. Retention is the documented point after which an
 abandoned conversation cannot resume. Back up the PVC for longer retention.
 
 Listing visits only the requested session directory, and missing-object deletion
-is idempotent. Disk readiness/admission thresholds are `minFreeBytes` (default
+is idempotent. Disk admission thresholds are `minFreeBytes` (default
 1 GiB) and `minFreeFraction` (default 0.1). Existing remote WAL/reservation barriers
 remain fail-closed before paid work. Checkpoint writes retain temp-file fsync,
-atomic rename and parent-directory fsync before acknowledgment. A maintenance
-crash fails readiness. Checkpoints use a separate HTTPS listener on 8089, and
+atomic rename and parent-directory fsync before acknowledgment. Each sandbox activity/bootstrap probe has a four-second bound and a separate
+HTTP client. Unknown activity is evicted after three failed probes. Idle and
+checkpointed pods recycle after 24 hours; a 48-hour hard limit prevents expired
+7-day server certificates from stranding capacity. A stale maintenance heartbeat
+fails liveness and readiness; per-pod failures are logged and isolated. Checkpoints use a separate HTTPS listener on 8089, and
 all capability checks use the in-memory inventory before any storage/API work.
 Per-capability 100 requests/second limits return 429; store clients retry boundedly.
 
@@ -953,3 +961,8 @@ atomic rename and directory fsync. The commit-order test detects those missing
 barriers; it does not simulate a physical power failure. Kindnet does not enforce
 NetworkPolicy; AKS negative probes establish the network boundary. Measurement
 receipts live with the program's lane status, not in the public documentation.
+
+Per-conversation MCP URLs are chart-owned and namespace-qualified. Remove the
+short-name overrides written by #1273 register.sh or replace both with the
+chart URL; conflicting overrides fail rendering. See deploy/helm/patches/README.md
+for installation ordering and certificate rotation.

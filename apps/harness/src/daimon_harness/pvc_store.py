@@ -62,6 +62,11 @@ class PVCStore:
                 os.fsync(output.fileno())
             os.replace(temporary, target)
             sync_directory(target.parent)
+            parts = Path(name).parts
+            if len(parts) >= 3 and parts[0] == "sessions":
+                session = self.root / "sessions" / parts[1]
+                os.utime(session, None)
+                sync_directory(session)
         finally:
             Path(temporary).unlink(missing_ok=True)
 

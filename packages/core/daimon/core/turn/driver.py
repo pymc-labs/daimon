@@ -1958,7 +1958,12 @@ async def _finalize_upstream(
     retry_after_s: float | None,
     renders_failed: int,
 ) -> TurnState:
-    turn_err = TurnError(kind="upstream", message=str(err), cause=err)
+    message = (
+        "Busy, try again shortly"
+        if isinstance(err, ProviderError) and err.native_code == "sandbox_busy"
+        else str(err)
+    )
+    turn_err = TurnError(kind="upstream", message=message, cause=err)
     state_cell[0] = dataclasses.replace(
         state_cell[0],
         error=turn_err,

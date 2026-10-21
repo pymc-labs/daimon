@@ -1,8 +1,7 @@
 diff --git a/deploy/helm/daimon-selfhost/templates/_helpers.tpl b/deploy/helm/daimon-selfhost/templates/_helpers.tpl
-index da5ecde..bd06ca4 100644
 --- a/deploy/helm/daimon-selfhost/templates/_helpers.tpl
 +++ b/deploy/helm/daimon-selfhost/templates/_helpers.tpl
-@@ -23,7 +23,11 @@ volumes:
+@@ -23,7 +23,11 @@
  {{- default (printf "%s-mcp-tls" (include "d.name" .)) .Values.mcpTLS.existingSecret -}}
  {{- end -}}
  {{- define "d.mcpURL" -}}
@@ -10,16 +9,14 @@ index da5ecde..bd06ca4 100644
 +{{- printf "https://%s-mcp.%s.svc:%v/mcp" (include "d.name" .) .Release.Namespace .Values.services.mcp.port -}}
 +{{- else -}}
  {{- printf "https://%s-mcp:%v/mcp" (include "d.name" .) .Values.services.mcp.port -}}
- {{- end -}}
 +{{- end -}}
+ {{- end -}}
 
  {{- define "d.priority" -}}{{ printf "%s-%s" (include "d.name" .) .Release.Namespace | trunc 240 | trimSuffix "-" }}{{- end -}}
 diff --git a/deploy/helm/daimon-selfhost/templates/controller.yaml b/deploy/helm/daimon-selfhost/templates/controller.yaml
-new file mode 100644
-index 0000000..0e066e3
 --- /dev/null
 +++ b/deploy/helm/daimon-selfhost/templates/controller.yaml
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,241 @@
 +{{- if and .Values.harness.enabled (eq .Values.harness.mode "perConversation") }}
 +{{- if or .Values.harness.miProxy.enabled .Values.keyVaultCSI.enabled }}{{ fail "perConversation supports explicit sandbox Secrets only" }}{{ end }}
 +{{- if not .Values.networkPolicy.enabled }}{{ fail "perConversation requires NetworkPolicy" }}{{ end }}
@@ -127,7 +124,12 @@ index 0000000..0e066e3
 +    {{- $env = append $env (dict "name" "HARNESS_SECRET_REVISION" "value" (printf "%s%s%s" (toJson $modelSecret.data) (toJson $trustSecret.data) (toJson $data) | sha256sum)) }}
 +    {{- range $k, $v := .Values.harness.env }}
 +    {{- if or (eq $k "HARNESS_TOKEN") (eq $k "HARNESS_CHECKPOINT_TOKEN") }}{{ fail "sandbox capabilities cannot be configured in pod env" }}{{ end }}
++    {{- $existing := dict }}{{ range $item := $env }}{{ $_ := set $existing $item.name $item.value }}{{ end }}
++    {{- if hasKey $existing $k }}
++    {{- if ne (toString (get $existing $k)) (toString $v) }}{{ fail (printf "conflicting chart-owned sandbox env %s" $k) }}{{ end }}
++    {{- else }}
 +    {{- $env = append $env (dict "name" $k "value" (toString $v)) }}
++    {{- end }}
 +    {{- end }}
 +    {{- $container := dict "name" "harness" "image" (include "d.image" (dict "root" . "image" .Values.images.harness))
 +      "command" (list "/usr/bin/tini" "--" "sh" "-ec") "args" (list "chmod 600 /dev/termination-log; exec python -m daimon_harness")
@@ -184,11 +186,13 @@ index 0000000..0e066e3
 +            - {name: HARNESS_CONTROLLER_NAME, value: {{ $name }}}
 +            - {name: HARNESS_POD_TEMPLATE, value: /templates/pod.json}
 +            - {name: HARNESS_WARM_POOL, value: {{ .Values.harness.perConversation.warmPool | quote }}}
++            - {name: HARNESS_IDLE_SECONDS, value: {{ .Values.harness.perConversation.idleSeconds | quote }}}
 +            - {name: HARNESS_MAX_SANDBOXES, value: {{ .Values.harness.perConversation.maxSandboxes | quote }}}
 +            - {name: HARNESS_CHECKPOINT_RETENTION_SECONDS, value: {{ .Values.harness.perConversation.retentionSeconds | int64 | quote }}}
 +            - {name: HARNESS_MIN_FREE_BYTES, value: {{ .Values.harness.perConversation.minFreeBytes | int64 | quote }}}
 +            - {name: HARNESS_MIN_FREE_FRACTION, value: {{ .Values.harness.perConversation.minFreeFraction | quote }}}
 +          ports: [{containerPort: 8088}, {containerPort: 8089}]
++          livenessProbe: {httpGet: {scheme: HTTPS, path: /liveness, port: 8088}, periodSeconds: 10, failureThreshold: 3}
 +          readinessProbe: {httpGet: {scheme: HTTPS, path: /readiness, port: 8088}}
 +          resources: {{ .Values.harness.perConversation.controllerResources | toJson }}
 +          volumeMounts:
@@ -255,7 +259,6 @@ index 0000000..0e066e3
 +    {{- end }}
 +{{- end }}
 diff --git a/deploy/helm/daimon-selfhost/templates/harness.yaml b/deploy/helm/daimon-selfhost/templates/harness.yaml
-index 819a69b..2aa6af4 100644
 --- a/deploy/helm/daimon-selfhost/templates/harness.yaml
 +++ b/deploy/helm/daimon-selfhost/templates/harness.yaml
 @@ -1,4 +1,4 @@
@@ -264,11 +267,27 @@ index 819a69b..2aa6af4 100644
  {{- if ne .Values.harness.sessions.mode "multi" }}{{ fail "Only multi is implemented; pod-per-session needs the F72 router" }}{{ end }}
  apiVersion: v1
  kind: ServiceAccount
+diff --git a/deploy/helm/daimon-selfhost/templates/host.yaml b/deploy/helm/daimon-selfhost/templates/host.yaml
+--- a/deploy/helm/daimon-selfhost/templates/host.yaml
++++ b/deploy/helm/daimon-selfhost/templates/host.yaml
+@@ -123,6 +123,13 @@
+           env:
+             - {name: PGSSLROOTCERT, value: /etc/ssl/certs/ca-certificates.crt}
+             {{- $hostEnv := mergeOverwrite (deepCopy $.Values.host.env) $svc.env }}
++            {{- if eq $.Values.harness.mode "perConversation" }}
++            {{- $url := include "d.mcpURL" $ }}
++            {{- range $env := list $.Values.host.env $svc.env }}
++            {{- if and (hasKey $env "DAIMON_MCP__PUBLIC_URL") (ne (get $env "DAIMON_MCP__PUBLIC_URL") $url) }}{{ fail "perConversation requires chart-owned namespace-qualified DAIMON_MCP__PUBLIC_URL" }}{{ end }}
++            {{- end }}
++            {{- $_ := set $hostEnv "DAIMON_MCP__PUBLIC_URL" $url }}
++            {{- end }}
+             {{- $_ := set $hostEnv "SSL_CERT_FILE" "/etc/daimon/ca/ca-bundle.crt" }}
+             {{- if eq $name "scheduler" }}{{ $_ := set $hostEnv "DAIMON_SCHEDULER__HEALTH_PORT" (toString $svc.port) }}{{ end }}
+             {{- if eq $name "discord" }}{{ $_ := set $hostEnv "DAIMON_DISCORD__HEALTH_PORT" (toString $svc.port) }}{{ end }}
 diff --git a/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml b/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml
-index 1815a4b..1852799 100644
 --- a/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml
 +++ b/deploy/helm/daimon-selfhost/templates/mcp-tls.yaml
-@@ -24,4 +24,27 @@ metadata:
+@@ -24,4 +24,27 @@
    name: {{ $name }}
  type: kubernetes.io/tls
  data: {{ $data | toJson }}
@@ -281,7 +300,7 @@ index 1815a4b..1852799 100644
 +  namespace: {{ default (printf "%s-sandboxes" .Release.Name) .Values.harness.perConversation.sandboxNamespace }}
 +data:
 +  ca.crt: {{ index $data "ca.crt" | b64dec | quote }}
-+{{- end }}
+ {{- end }}
 +{{- end }}
 +
 +{{- if and .Values.mcpTLS.existingSecret .Values.harness.enabled (eq .Values.harness.mode "perConversation") }}
@@ -295,9 +314,8 @@ index 1815a4b..1852799 100644
 +  namespace: {{ default (printf "%s-sandboxes" .Release.Name) .Values.harness.perConversation.sandboxNamespace }}
 +data:
 +  ca.crt: {{ required "existingSecret requires ca.crt" (index $external.data "ca.crt") | b64dec | quote }}
- {{- end }}
++{{- end }}
 diff --git a/deploy/helm/daimon-selfhost/templates/networkpolicy.yaml b/deploy/helm/daimon-selfhost/templates/networkpolicy.yaml
-index 9bca977..936597e 100644
 --- a/deploy/helm/daimon-selfhost/templates/networkpolicy.yaml
 +++ b/deploy/helm/daimon-selfhost/templates/networkpolicy.yaml
 @@ -1,4 +1,4 @@
@@ -307,10 +325,9 @@ index 9bca977..936597e 100644
  kind: NetworkPolicy
  metadata: {name: {{ include "d.name" . }}-harness}
 diff --git a/deploy/helm/daimon-selfhost/values.yaml b/deploy/helm/daimon-selfhost/values.yaml
-index 86b1843..5424df1 100644
 --- a/deploy/helm/daimon-selfhost/values.yaml
 +++ b/deploy/helm/daimon-selfhost/values.yaml
-@@ -39,6 +39,24 @@ host:
+@@ -39,6 +39,25 @@
      requests: {cpu: 50m, memory: 256Mi}
      limits: {memory: 1536Mi}
  harness:
@@ -320,7 +337,8 @@ index 86b1843..5424df1 100644
 +    # Explicit credential revision must change for an in-place Secret rotation.
 +    rotationRevision: "1"
 +    warmPool: 1
-+    maxSandboxes: 1
++    maxSandboxes: 4
++    idleSeconds: 300
 +    retentionSeconds: 2592000
 +    minFreeBytes: 1073741824
 +    minFreeFraction: "0.1"

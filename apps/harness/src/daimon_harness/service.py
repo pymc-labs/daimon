@@ -568,7 +568,11 @@ class Supervisor:
                 self.changed.set()
 
     async def submit(
-        self, request: TurnRequest, mcp_authorization: str | None = None, after_seq: int = 0
+        self,
+        request: TurnRequest,
+        mcp_authorization: str | None = None,
+        after_seq: int = 0,
+        admission_blocked: bool = False,
     ) -> None:
         async with self.submissions:
             await self.cleanup_failed_turns()
@@ -578,6 +582,10 @@ class Supervisor:
                 await self.io(self.journal.bind_session, request.session_id)
             if await self.io(self.journal.is_replay, request):
                 return
+            if admission_blocked:
+                raise HTTPException(
+                    503, "checkpoint disk near full; retry", headers={"Retry-After": "30"}
+                )
             if any(isinstance(skill, URLSkill) for skill in request.skills):
                 raise ValueError("URL skills are not supported; send an inline bundle")
             credentials = turn_credentials(
@@ -801,7 +809,10 @@ def create_app(
             from .pvc_store import ControllerStore
 
             supervisor.checkpoints = Checkpoints(
-                ControllerStore(os.environ["HARNESS_CHECKPOINT_CONTROLLER_URL"], body["checkpoint"])
+                ControllerStore(
+                    os.environ["HARNESS_CHECKPOINT_CONTROLLER_URL"], body["checkpoint"]
+                ),
+                keep=int(os.environ.get("HARNESS_CHECKPOINT_KEEP", "3")),
             )
             supervisor.attach_durability()
             auth.token = body["c3"]
@@ -819,6 +830,9 @@ def create_app(
                 "active": bool(supervisor.contexts)
                 or any(not task.done() for task in supervisor.tasks.values()),
                 "last_activity": last_activity,
+                "durable": supervisor.checkpoint_pending is None
+                and supervisor.checkpoint_dirty is None
+                and (supervisor.checkpoint_task is None or supervisor.checkpoint_task.done()),
             }
 
         app.state.pod_activity_handler = pod_activity
@@ -833,6 +847,7 @@ def create_app(
         x_daimon_mcp_authorization: Annotated[str | None, Header()] = None,
         session_id: Annotated[str | None, Query()] = None,
         after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
+        x_daimon_admission_blocked: Annotated[str | None, Header()] = None,
     ) -> Response:
         if session_id is not None and session_id != request.session_id:
             raise HTTPException(status_code=409, detail="session_mismatch")
@@ -847,7 +862,12 @@ def create_app(
             )
         )
         try:
-            await supervisor.submit(request, x_daimon_mcp_authorization, after_seq)
+            await supervisor.submit(
+                request,
+                x_daimon_mcp_authorization,
+                after_seq,
+                admission_blocked=pod_mode and x_daimon_admission_blocked == "true",
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid turn configuration") from exc
         except ConflictError as exc:
