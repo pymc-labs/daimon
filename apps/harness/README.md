@@ -28,7 +28,7 @@ custom container, and route every call for that session to its sandbox identifie
 The service takes a process lease to prevent two workers operating on one journal.
 
 `HARNESS_SESSION_MODE=multi` requires a `/proc` mount with `hidepid=2` or
-`hidepid=invisible`, no exempt proc group, UID switching, and shared scratch directories that
+`hidepid=invisible`, with `gid=60002`, UID switching, and shared scratch directories that
 are not writable by any tool UID (including ACL grants). Unsafe configurations
 refuse startup. Session UIDs are allocated persistently from 10001 through 60000;
 exhaustion refuses further sessions. Each session has private `work` and `tmp`
@@ -316,12 +316,38 @@ output truncated. No checkpoint is published until export exits successfully.
 Persistent failure keeps the durable pending marker; the next authenticated
 request schedules another background attempt without delaying the request.
 
-Cleanup verifies individual namespace PIDs after SIGKILL; a live or unverifiable
-signalable process at the deadline makes `kill_uid` fail, preserving the I5 seal.
-It probes PID numbers up to `/proc/sys/kernel/ns_last_pid` instead of relying on
-`kill(-1, 0)` (which can report success for inaccessible UIDs) or proc directory
-visibility (which hidepid can restrict). Verified zombies cannot write and are
-left for their parent/tini to reap. An incomplete scan fails closed.
+Cleanup broadcasts SIGKILL as the session tool UID, then enumerates only numeric
+entries actually present in `/proc` and probes each PID's signal permission and
+state. Work is proportional to present processes, independent of `ns_last_pid`
+and PID allocation wrap; survivors above a wrapped counter are still checked.
+Verified zombies cannot write and are left for their parent/tini to reap. A live
+or unverifiable signalable process at the deadline fails cleanup and preserves
+the I5 seal. Disappearance is confirmed with ESRCH, including ENOENT stat reads.
+
+Enumeration requires verified proc mount visibility. With hidepid enabled, the
+trusted cleanup helper alone receives supplementary group **60002** and the proc
+mount must have `gid=60002`; ordinary tools and exporters never receive it.
+A trusted `python -I` bootstrap starts at UID 0, then drops every root UID before
+signalling: real UID is the session tool UID (Linux signal permission), effective
+and saved UIDs are **100000 + session tool UID** (preventing tool ptrace and
+cross-session verifier signals), with no capabilities,
+non-dumpable state and no-new-privileges. The bootstrap opens no workspace data.
+These reserved identities are outside the session UID/group range (10001–60000)
+and own no workspace or credential files. It lets trusted cleanup see even non-dumpable
+tool processes without giving tools cross-session visibility. Multi mode refuses
+startup without `hidepid=2,gid=60002` (or `hidepid=invisible,gid=60002`); cleanup
+fails closed if it cannot verify proc visibility. Single mode normally uses
+`hidepid=0`; a hidden proc mount needs the same verifier exemption.
+
+A dedicated cgroup v2 leaf with `cgroup.kill` would avoid proc visibility
+requirements, but the cached production image's cgroup mount is read-only and
+has no delegated subtree. ACA delegation has not been verified live, so this
+implementation uses the proc fallback and does not depend on writable cgroups.
+Operators must supply the proc mount options before service startup; the service
+does not acquire mount capabilities. CI configures the multi-mode mount as root,
+then drops privileges before running tools. The production-image probe also
+burns 256008 real PIDs (`HARNESS_PROBE_PID_BURN=1`) and verifies subsequent tools,
+cleanup, checkpoint publication and restore.
 
 An authenticated first turn, poll, action or cancel restores the latest snapshot
 when local state is empty. An interrupted restore retries before serving.
@@ -329,6 +355,10 @@ Corrupt snapshots and conflicting local workspace state fail closed. Journal
 sequence numbers, history and replay keys continue without re-executing a turn.
 Every request includes `after_seq`, seeded from the host's persisted session
 projection, including after a host process restart.
+An ahead-of-local client cursor is accepted even when remote storage is entirely
+empty (no checkpoint, WAL or reservation). It creates a durable restore fence
+and a covering history gap above that cursor; subsequent stale-cursor submits
+continue normally. Missing bytes cannot be recovered, but sequences are never reused.
 Restore durably places its next event above the checkpoint, remote reserved
 high-water and client cursor before publication. An abandoned reservation emits
 `history_gap` with reason `sandbox_restored`, including when the checkpoint covers
@@ -737,7 +767,7 @@ and host-visible completion/admission after warning failures. A separate regress
 boundary for warning delivery. Remote uploads extend a measurement-only oracle;
 they never advance the simulated host's event cursor.
 
-Reproduce the seven isolated mutation checks from the repository root:
+Reproduce the nine isolated mutation checks from the repository root:
 
 ```sh
 scratch=$(mktemp -d)
@@ -747,7 +777,7 @@ HARNESS_MUTATION_IMAGE=daimon-harness:l4-hardening \
 
 The script reverts each fix separately in copied source, using the same Hypothesis
 property (seed 7, including explicit regression traces). Expected pytest exit: 1
-for mutations 1–6. Restoring startup repair before WAL reconciliation loses measured
+for mutations 1–6 and 8–9. Restoring startup repair before WAL reconciliation loses measured
 usage; restoring submit-owned warning delivery strands a claim; removing pending
 measured-response persistence loses measured usage; removing terminal WAL records
 emits events after a terminal; disabling the divergence seal makes a mid-process
@@ -770,3 +800,9 @@ harness rejects it with 422 before persisting the ratchet. In particular,
 `after_seq=2**53` and `2**53-1` cannot fence a session beyond the wire range.
 Cursors from events actually emitted by this journal remain valid for replay;
 reservation writes and event/gap allocation never exceed the wire maximum.
+
+Mutation 8 restores the PID allocation-range scan; the
+4-million-PID/wrap regression must reject it. Mutation 9 restores the empty-remote
+cursor rejection; an explicit and randomly generated property operation must
+fail with `empty remote cursor fence rejected`. The production PID-burn image
+probe is enabled in CI's single-session run. Neither image probe calls a model.

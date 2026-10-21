@@ -284,6 +284,7 @@ OPERATIONS = st.lists(
                 "recover_retry",
                 "local_commit_failure",
                 "cleanup_failure",
+                "empty_remote_cursor",
             ]
         ),
         st.integers(min_value=0, max_value=3000),
@@ -317,6 +318,7 @@ OPERATIONS = st.lists(
 @example(trace=[("local_commit_failure", 0, 0)] * 8)
 @example(trace=[("local_commit_failure", 0, 1)] * 8)
 @example(trace=[("cleanup_failure", 0, 0)] * 8)
+@example(trace=[("empty_remote_cursor", 3000, 0)] * 8)
 async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trace):
     with tempfile.TemporaryDirectory(prefix="sequence-reservation-", dir=tmp_path) as scratch:
         root, blobs, oracle = Path(scratch), ReservationBlobs(), HostSeen()
@@ -413,7 +415,48 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
             }
             await restart(0, cancel_first=True)
             for operation, cursor, which in trace:
-                if operation in {"restore", "crash", "cold_cancel"}:
+                if operation == "empty_remote_cursor":
+                    # A separate genuinely cold session has no checkpoint, WAL,
+                    # or reservation. An ahead cursor is still a valid fence.
+                    async with harness(root / f"empty-{serial}", ReservationBlobs()) as (
+                        cold,
+                        cold_client,
+                    ):
+                        serial += 1
+                        fence = max(1, cursor)
+                        response = await cold_client.post(
+                            "/v0/turns", json=turn(), params={"after_seq": fence}
+                        )
+                        assert response.status_code == 202, "empty remote cursor fence rejected"
+                        await cold.tasks["turn-1"]
+                        response = await cold_client.get(EVENTS, params={"after_seq": fence})
+                        assert response.status_code == 200, response.text
+                        events = response.json()["events"]
+                        empty_oracle = HostSeen()
+                        empty_oracle.complete(events)
+                        assert all(e["seq"] > fence for e in events)
+                        assert any(
+                            e["type"] == "history_gap"
+                            and e["data"]["from_seq"] == 1
+                            and e["data"]["to_seq"] >= fence
+                            for e in events
+                        )
+                        assert events[-1]["type"] == "turn_ended"
+                        response = await cold_client.post(
+                            "/v0/turns", json=turn(turn_id="next", key="next")
+                        )
+                        assert response.status_code == 202, (
+                            "empty remote cursor wedged later submit"
+                        )
+                        await cold.tasks["next"]
+                        response = await cold_client.get(EVENTS)
+                        assert response.status_code == 200 and response.json()["complete"]
+                        empty_oracle.complete(response.json()["events"])
+                        assert any(
+                            e["type"] == "turn_ended" and e["turn_id"] == "next"
+                            for e in response.json()["events"]
+                        )
+                elif operation in {"restore", "crash", "cold_cancel"}:
                     await restart(
                         min(cursor, clients[which]),
                         local=operation == "crash",

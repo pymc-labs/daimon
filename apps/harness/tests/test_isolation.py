@@ -60,14 +60,16 @@ app.state.supervisor.journal.close()
 
 
 @pytest.mark.parametrize("hidepid", ["0", "1", "2", "invisible"])
-@pytest.mark.parametrize("exempt_group", [False, True])
-def test_proc_mount_requires_hidden_pids_without_exempt_group(tmp_path, hidepid, exempt_group):
+@pytest.mark.parametrize("exempt_group", [None, 10001, 60002])
+def test_proc_mount_requires_reserved_verifier_group(tmp_path, hidepid, exempt_group):
     from daimon_harness.isolation import proc_hides_other_users
 
     mountinfo = tmp_path / "mountinfo"
-    options = f"rw,hidepid={hidepid}" + (",gid=10001" if exempt_group else "")
+    options = f"rw,hidepid={hidepid}" + (f",gid={exempt_group}" if exempt_group else "")
     mountinfo.write_text(f"25 24 0:22 / /proc rw,nosuid - proc proc {options}\n")
-    assert proc_hides_other_users(mountinfo) == (hidepid in {"2", "invisible"} and not exempt_group)
+    assert proc_hides_other_users(mountinfo) == (
+        hidepid in {"2", "invisible"} and exempt_group == 60002
+    )
 
 
 def test_multi_mode_refuses_unsafe_proc_tmp_and_missing_uid_switch(tmp_path, monkeypatch):
@@ -82,7 +84,7 @@ def test_multi_mode_refuses_unsafe_proc_tmp_and_missing_uid_switch(tmp_path, mon
     mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw\n")
     with pytest.raises(RuntimeError, match="hidepid"):
         isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
-    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw,hidepid=2\n")
+    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw,hidepid=2,gid=60002\n")
     scratch.chmod(0o1777)
     with pytest.raises(RuntimeError, match="not writable"):
         isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))

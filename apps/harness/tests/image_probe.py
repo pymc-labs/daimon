@@ -18,6 +18,28 @@ from daimon_harness.runtime import TurnContext, discard_event
 from daimon_harness.service import create_app
 from mux.drivers.selfhosted.wire import InlineSkill, TurnRequest
 
+# Allocate real namespace PIDs in a separate, single-threaded interpreter.
+PID_BURN_PROGRAM = """
+import os
+workers = []
+for _ in range(8):
+    worker = os.fork()
+    if worker == 0:
+        for _ in range(32_000):
+            child = os.fork()
+            if child == 0:
+                os._exit(0)
+            _, status = os.waitpid(child, 0)
+            if status:
+                os._exit(1)
+        os._exit(0)
+    workers.append(worker)
+for worker in workers:
+    assert os.waitpid(worker, 0)[1] == 0, "PID burn worker failed"
+print("pid_burn_verified allocated=256008", flush=True)
+
+"""
+
 
 async def checkpoint_probe(home: Path) -> None:
     """Exercise publication with the real service caps and tool-owned workspace."""
@@ -220,6 +242,17 @@ async def main() -> None:
         context.write("file.txt", name)
         contexts.append(context)
     first = contexts[0]
+    if os.environ.get("HARNESS_PROBE_PID_BURN") == "1":
+        await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-c", PID_BURN_PROGRAM],
+            env={},
+            check=True,
+            timeout=600,
+        )
+        assert await first.bash("echo after-pid-burn") == "exit_code=0\nafter-pid-burn\n"
+        first.stop_processes()
+        print("pid_burn_tool_cleanup_verified", flush=True)
     assert await first.async_file_operation("write", "async.txt", content="one two") == "written"
     assert await first.async_file_operation("edit", "async.txt", old="two", new="three") == "edited"
     assert await first.async_file_operation("read", "async.txt") == "one three"
@@ -300,6 +333,105 @@ async def main() -> None:
         finally:
             process.kill()
             process.wait(timeout=2)
+    verifier = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import os,time; from pathlib import Path; "
+            "from daimon_harness.kill_uid import isolate_verifier, VERIFY_UID_BASE, PROC_VERIFY_GID; "
+            f"isolate_verifier({first.tool_uid}); "
+            f"assert os.getresuid() == ({first.tool_uid}, VERIFY_UID_BASE+{first.tool_uid}, VERIFY_UID_BASE+{first.tool_uid}); "
+            "assert os.getgroups() == [PROC_VERIFY_GID]; "
+            "status=Path('/proc/self/status').read_text(); "
+            "assert 'CapPrm:\\t0000000000000000'.replace('\\t',chr(9)) in status; "
+            "assert 'CapEff:\\t0000000000000000'.replace('\\t',chr(9)) in status; "
+            "assert 'NoNewPrivs:\\t1'.replace('\\t',chr(9)) in status; "
+            "print('protected',flush=True); time.sleep(30)",
+        ],
+        user=0,
+        group=0,
+        extra_groups=[],
+        env={},
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert verifier.stdout is not None
+        assert verifier.stdout.readline().strip() == "protected"
+        output = await first.bash(
+            "python -c 'import ctypes; libc=ctypes.CDLL(None,use_errno=True); "
+            f"assert libc.ptrace(16,{verifier.pid},0,0) == -1; "
+            "assert ctypes.get_errno() == 1; print(12345)'"
+        )
+        assert "12345" in output
+        assert verifier.wait(timeout=2) == -signal.SIGKILL
+        print("cleanup_verifier_protected", flush=True)
+    finally:
+        if verifier.poll() is None:
+            verifier.kill()
+            verifier.wait(timeout=2)
+    if mode == "multi":
+        foreign_verifier = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import time; from daimon_harness.kill_uid import isolate_verifier; "
+                f"isolate_verifier({second.tool_uid}); print('ready',flush=True); time.sleep(30)",
+            ],
+            user=0,
+            group=0,
+            extra_groups=[],
+            env={},
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert foreign_verifier.stdout is not None
+            assert foreign_verifier.stdout.readline().strip() == "ready"
+            first.stop_processes()
+            assert foreign_verifier.poll() is None, "cleanup killed another session's verifier"
+            second.stop_processes()
+            assert foreign_verifier.wait(timeout=2) == -signal.SIGKILL
+            print("cross_session_verifier_isolation_verified", flush=True)
+        finally:
+            if foreign_verifier.poll() is None:
+                foreign_verifier.kill()
+                foreign_verifier.wait(timeout=2)
+    # Non-dumpable same-UID tasks disappear under hidepid=2. Only the trusted
+    # verifier's group may enumerate them; ordinary tools stay unprivileged.
+    hidden = subprocess.Popen(
+        [sys.executable, "-c", "import ctypes,time; ctypes.CDLL(None).prctl(4,0); time.sleep(30)"],
+        user=first.tool_uid,
+        group=first.tool_uid,
+        extra_groups=[],
+        env={},
+    )
+    try:
+        await asyncio.sleep(0.1)
+        from daimon_harness.kill_uid import PROC_VERIFY_GID
+
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from daimon_harness.kill_uid import present_pids, visible_proc; import sys; assert visible_proc(); assert int(sys.argv[1]) in present_pids()",
+                str(hidden.pid),
+            ],
+            user=first.tool_uid,
+            group=first.tool_uid,
+            extra_groups=[PROC_VERIFY_GID],
+            env={},
+            check=True,
+        )
+        first.stop_processes()
+        assert hidden.wait(timeout=2) == -signal.SIGKILL
+        print("non_dumpable_cleanup_verified", flush=True)
+    finally:
+        if hidden.poll() is None:
+            hidden.kill()
+            hidden.wait(timeout=2)
     # A detached tool process races parent-directory replacement while the service
     # asks the file helper to read/write/edit. The private target is service-owned.
     protected = journal.root / "race-target"

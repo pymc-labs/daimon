@@ -292,12 +292,18 @@ class TurnContext:
 
     def stop_processes(self) -> None:
         if can_switch_uid():
-            # kill(-1) excludes the caller and reaches setsid descendants even
-            # under hidepid. Never run this as the service or test runner UID.
+            # Trusted bootstrap drops all root UIDs/caps before broadcasting as
+            # the session's real UID; protected effective UID prevents ptrace.
+            # kill(-1) excludes the caller and reaches setsid descendants.
             subprocess.run(
-                [sys.executable, "-I", str(Path(__file__).with_name("kill_uid.py"))],
-                user=self.tool_uid,
-                group=self.tool_uid,
+                [
+                    sys.executable,
+                    "-I",
+                    str(Path(__file__).with_name("kill_uid.py")),
+                    str(self.tool_uid),
+                ],
+                user=0,
+                group=0,
                 extra_groups=[],
                 env={},
                 stdin=subprocess.DEVNULL,

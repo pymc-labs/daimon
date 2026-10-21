@@ -332,7 +332,11 @@ class Checkpoints:
             self.reservation_high_water(session_id),
             max((record.high_water for record in records), default=0),
         )
-        if (records or remote_seq) and not self.names(session_id) and not pending.exists():
+        if (
+            (records or remote_seq or after_seq)
+            and not self.names(session_id)
+            and not pending.exists()
+        ):
             cursor_file = journal.root / "restore.cursor"
             stage = cursor_file.with_suffix(".next")
             with stage.open("w") as output_file:
@@ -538,7 +542,7 @@ class Checkpoints:
             return journal
         checkpoints = self.names(session_id)
         if not checkpoints:
-            if pending.exists() or after_seq > 0:
+            if pending.exists():
                 raise ValueError("observed session has no remote checkpoint")
             return journal
         if not pending.exists():

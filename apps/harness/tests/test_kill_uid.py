@@ -3,6 +3,7 @@
 import asyncio
 import signal
 import subprocess
+from pathlib import Path
 
 import pytest
 from daimon_harness import kill_uid
@@ -21,6 +22,8 @@ def test_kill_uid_deadline_requires_no_remaining_processes(monkeypatch, survivor
         if sig == 0 and (pid != 9 or not survivors):
             raise ProcessLookupError
 
+    monkeypatch.setattr(kill_uid, "visible_proc", lambda: True)
+    monkeypatch.setattr(kill_uid, "present_pids", lambda: [1, 8, 9])
     monkeypatch.setattr(kill_uid.os, "kill", kill)
     monkeypatch.setattr(kill_uid.os, "getpid", lambda: 8)
     monkeypatch.setattr(kill_uid, "terminated", lambda pid: False)
@@ -71,3 +74,58 @@ def test_hidden_process_is_not_assumed_dead(monkeypatch, error):
     monkeypatch.setattr(kill_uid.Path, "read_text", denied)
     monkeypatch.setattr(kill_uid.os, "kill", lambda pid, sig: None)
     assert not kill_uid.terminated(9)
+
+
+@pytest.mark.parametrize("counter", [4_000_000, 9])
+@pytest.mark.parametrize("survivor", [False, True])
+def test_sparse_four_million_pid_namespace_and_wrap(monkeypatch, counter, survivor):
+    probes = []
+
+    def kill(pid, sig):
+        probes.append(pid)
+        if sig == 0 and (pid != 3_999_999 or not survivor):
+            raise ProcessLookupError
+
+    monkeypatch.setattr(kill_uid, "visible_proc", lambda: True)
+    monkeypatch.setattr(
+        kill_uid.Path,
+        "iterdir",
+        lambda self: iter(map(Path, ["/proc/1", "/proc/8", "/proc/3999999", "/proc/self"])),
+    )
+    monkeypatch.setattr(kill_uid.Path, "read_text", lambda self: str(counter))
+    monkeypatch.setattr(kill_uid.os, "getpid", lambda: 8)
+    monkeypatch.setattr(kill_uid.os, "kill", kill)
+    monkeypatch.setattr(kill_uid, "terminated", lambda pid: False)
+    assert kill_uid.kill_uid(timeout=0) == int(survivor), "sparse PID cleanup failed"
+    assert len(probes) == 2, "cleanup scanned the PID allocation range"
+    assert 3_999_999 in probes, "PID wrap hid a surviving process"
+
+
+@pytest.mark.parametrize(
+    "options,groups,visible",
+    [
+        ("", [], True),
+        (",hidepid=0", [], True),
+        (",hidepid=1", [], False),
+        (",hidepid=2", [], False),
+        (",hidepid=invisible,gid=60002", [], False),
+        (",hidepid=2,gid=60002", [60002], True),
+        (",hidepid=2,gid=10002", [60002], False),
+        (",hidepid=4,gid=60002", [60002], False),
+        (",hidepid=ptraceable,gid=60002", [60002], False),
+    ],
+)
+def test_proc_enumeration_requires_verified_visibility(
+    tmp_path, monkeypatch, options, groups, visible
+):
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(f"25 24 0:22 / /proc rw - proc proc rw{options}\n")
+    monkeypatch.setattr(kill_uid.os, "getgroups", lambda: groups)
+    monkeypatch.setattr(kill_uid.os, "getegid", lambda: 10001)
+    assert kill_uid.visible_proc(mountinfo) == visible
+
+
+def test_hidden_proc_mount_fails_closed_before_enumerating(monkeypatch):
+    monkeypatch.setattr(kill_uid, "visible_proc", lambda: False)
+    monkeypatch.setattr(kill_uid, "present_pids", lambda: pytest.fail("hidden enumeration"))
+    assert kill_uid.kill_uid() == 1

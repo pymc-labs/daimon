@@ -1078,9 +1078,18 @@ async def test_restore_replay_range_does_not_lower_the_high_water_fence(tmp_path
 async def test_observed_session_without_any_checkpoint_cannot_reuse_sequences(tmp_path):
     async with harness(tmp_path, MemoryBlobs()) as (supervisor, client):
         response = await client.post("/v0/turns", json=turn(), params={"after_seq": 13})
-        assert response.status_code == 503
-        assert not await supervisor.io(supervisor.journal.turns)
-        assert not supervisor.tasks
+        assert response.status_code == 202, response.text
+        await supervisor.tasks["turn-1"]
+        response = await client.get("/v0/sessions/session-1/events", params={"after_seq": 13})
+        assert response.status_code == 200, response.text
+        events = response.json()["events"]
+        gap = next(event for event in events if event["type"] == "history_gap")
+        assert gap["seq"] > 13 and gap["data"]["from_seq"] == 1 and gap["data"]["to_seq"] >= 13
+        assert all(event["seq"] > 13 for event in events)
+        assert events[-1]["type"] == "turn_ended"
+        response = await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
+        assert response.status_code == 202, response.text
+        await supervisor.tasks["next"]
 
 
 async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoint(tmp_path):

@@ -1,4 +1,4 @@
-"""Run seven recovery mutations on isolated source copies (never edit the checkout).
+"""Run nine recovery mutations on isolated source copies (never edit the checkout).
 
 Usage: uv run python apps/harness/tests/recovery_mutations.py <empty scratch directory>
 Run from the repository root; each property-test failure is retained in scratch.
@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in range(1, 8):
+for number in range(1, 10):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -68,7 +68,7 @@ for number in range(1, 8):
             "                if workers_stopped:\n",
             "                if True:\n",
         )
-    else:
+    elif number == 7:
         change(
             "checkpoints.py",
             "command.extend((str(user), str(EXPORT_UID)))",
@@ -116,6 +116,23 @@ for number in range(1, 8):
         finally:
             subprocess.run(["docker", "rm", "-f", container], check=True, stdout=subprocess.DEVNULL)
         continue
+    elif number == 8:
+        change(
+            "kill_uid.py",
+            "for pid in present_pids():",
+            'for pid in range(2, int(Path("/proc/sys/kernel/ns_last_pid").read_text()) + 1):',
+        )
+    else:
+        change(
+            "checkpoints.py",
+            "(records or remote_seq or after_seq)",
+            "(records or remote_seq)",
+        )
+        change(
+            "checkpoints.py",
+            'if pending.exists():\n                raise ValueError("observed session has no remote checkpoint")',
+            'if pending.exists() or after_seq > 0:\n                raise ValueError("observed session has no remote checkpoint")',
+        )
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:
         result = subprocess.run(
@@ -123,7 +140,11 @@ for number in range(1, 8):
                 "uv",
                 "run",
                 "pytest",
-                "apps/harness/tests/test_sequence_ratchet.py::test_sequence_ratchet_random_interleavings",
+                (
+                    "apps/harness/tests/test_kill_uid.py::test_sparse_four_million_pid_namespace_and_wrap"
+                    if number == 8
+                    else "apps/harness/tests/test_sequence_ratchet.py::test_sequence_ratchet_random_interleavings"
+                ),
                 "-xq",
                 "--hypothesis-seed=7",
             ],
@@ -140,5 +161,7 @@ for number in range(1, 8):
         4: "event after terminal",
         5: "measured became unknown",
         6: "I5: poll ended a turn with live workers",
+        8: "AssertionError: cleanup scanned the PID allocation range",
+        9: "AssertionError: empty remote cursor fence rejected",
     }
     assert expected[number] in (root / f"mutation-{number}.log").read_text()

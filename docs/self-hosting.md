@@ -1574,3 +1574,8 @@ operator-verified model tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
 `DAIMON_BILLING__SELFHOSTED__MODELS`. See [selfhosted Azure usage](billing.md#selfhosted-azure-usage)
 for tariff histories, the runtime admission gate and durable snapshot, explicit
 compute-cost attribution, and paginated pending-usage reconciliation.
+
+Harness process cleanup enumerates present `/proc` PIDs, including after PID wrap.
+If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;
+only that helper receives the exemption group. Multi-session harness mode requires
+`hidepid=2,gid=60002`. Ordinary tool processes do not receive the exemption.

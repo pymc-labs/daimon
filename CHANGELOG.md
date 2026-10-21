@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
+
 - Isolate self-hosted checkpoint exporters from tool cleanup, retry interrupted exports, and keep sessions sealed when process termination cannot be verified.
 
 - Keep self-hosted sessions sealed until failed tool cleanup succeeds, and retry journal reopen failures on subsequent requests.

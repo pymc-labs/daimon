@@ -160,9 +160,7 @@ def proc_hides_other_users(mountinfo: Path = Path("/proc/self/mountinfo")) -> bo
         fields, backing = mount.split(), filesystem.split()
         if separator and fields[4] == "/proc" and backing[0] == "proc":
             options = set(fields[5].split(",")) | set(backing[2].split(","))
-            return bool(options & {"hidepid=2", "hidepid=invisible"}) and not any(
-                option.startswith("gid=") for option in options
-            )
+            return bool(options & {"hidepid=2", "hidepid=invisible"}) and "gid=60002" in options
     return False
 
 
@@ -174,7 +172,9 @@ def validate_session_mode(
         raise RuntimeError("HARNESS_SESSION_MODE must be single or multi")
     if mode == "multi" and os.environ.get("HARNESS_TEST_MODE") != "1":
         if not can_switch_uid() or not proc_hides_other_users(mountinfo):
-            raise RuntimeError("multi session mode requires UID switching and hidepid=2 /proc")
+            raise RuntimeError(
+                "multi session mode requires UID switching and hidepid=2,gid=60002 /proc"
+            )
         validate_shared_directories(
             shared_storage_roots(mountinfo) if shared_roots is None else shared_roots
         )

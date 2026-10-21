@@ -358,7 +358,7 @@ jobs:
       - name: tool UID cannot access the Codex relay
         run: docker run --rm -i daimon-harness:test python - < apps/harness/tests/codex_relay_probe.py
       - name: isolated tool identities
-        run: docker run --rm -i daimon-harness:test python - < apps/harness/tests/image_probe.py
+        run: docker run --rm -i -e HARNESS_PROBE_PID_BURN=1 daimon-harness:test python - < apps/harness/tests/image_probe.py
       - name: managed identity startup without an API key
         run: docker run --rm -i daimon-harness:test python - < apps/harness/tests/identity_probe.py
       - name: arbitrary credential mount isolation
@@ -375,7 +375,7 @@ jobs:
           docker run --rm -i --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
             -e HARNESS_SESSION_MODE=multi \
             daimon-harness:test bash -c \
-            'mount -o remount,hidepid=2 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python -' < apps/harness/tests/image_probe.py
+            'mount -o remount,hidepid=2,gid=60002 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python -' < apps/harness/tests/image_probe.py
 
   # Unique candidate tags are deliberately not the 7-char SHA tags consumed
   # by promote.yml. Passing digests pins staging to these exact tested images;
