@@ -174,6 +174,8 @@ async def dispatch_pending_continuations(
             tenant_id=row.tenant_id,
             platform=platform,
             channel_id=row.parent_channel_id,
+            thread_id=row.thread_id,
+            caller_id=row.requester_external_user_id,
             force=row.target_ma_agent_id.startswith("sh_agent_"),
         ):
             claim = await claim_wake(sessionmaker, idempotency_key=row.idempotency_key, now=now())

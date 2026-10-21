@@ -42,17 +42,17 @@ async def guard_selfhosted_channel(
     tenant_id: UUID,
     platform: str,
     channel_id: str,
-    thread_id: str | None = None,
-    caller_id: str | None = None,
+    thread_id: str | None,
+    caller_id: str | None,
     force: bool = False,
 ) -> AsyncIterator[bool]:
     """Forbid provider helpers for the whole adapter operation, including child tasks."""
-    from daimon.core.channel_backend import is_selfhosted_turn
+    from daimon.core.channel_backend import effective_thread_backend
 
     disabled = force or _disabled.get()
     if not disabled:
         async with sessionmaker() as session:
-            disabled = await is_selfhosted_turn(
+            backend = await effective_thread_backend(
                 session,
                 tenant_id=tenant_id,
                 platform=platform,
@@ -60,5 +60,6 @@ async def guard_selfhosted_channel(
                 thread_id=thread_id,
                 caller_id=caller_id,
             )
+            disabled = backend == "selfhosted"
     with without_anthropic() if disabled else nullcontext():
         yield disabled

@@ -461,6 +461,8 @@ async def switch_thread_on_request(
         tenant_id=tenant_id,
         platform=platform,
         channel_id=parent_channel_id,
+        thread_id=thread_id,
+        caller_id=caller.platform_user_id,
         force=ma_agent_id.startswith("sh_agent_"),
     ) as selfhosted:
         if selfhosted:

@@ -110,15 +110,15 @@ async def is_selfhosted_channel(
     return revision is not None and revision.backend == "selfhosted"
 
 
-async def is_selfhosted_turn(
+async def effective_thread_backend(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     platform: str,
     channel_id: str,
-    thread_id: str | None = None,
-    caller_id: str | None = None,
-) -> bool:
+    thread_id: str | None,
+    caller_id: str | None,
+) -> Provider:
     """Honor the retained shared/caller binding before the current channel selection.
 
     Slot order and legacy-session fallback match admission. Only local facts
@@ -152,7 +152,7 @@ async def is_selfhosted_turn(
                 default = resolve_default(BackendConfig())
                 if (binding.provider, binding.profile) != (default.backend, default.profile):
                     raise BackendUnsupported("retained_default_mismatch")
-                return False
+                return default.backend
             if retained is None or (
                 retained.channel != channel
                 or retained.local != binding.config_revision
@@ -160,7 +160,7 @@ async def is_selfhosted_turn(
                 or retained.profile != binding.profile
             ):
                 raise BackendUnsupported("retained_binding_mismatch")
-            return retained.backend == "selfhosted"
+            return retained.backend
         if principal is not None:
             previous = await get_thread_session_at(
                 session,
@@ -175,8 +175,8 @@ async def is_selfhosted_turn(
                     raise ScopeViolation(
                         previous.ma_session_id, "session history differs from authorized channel"
                     )
-                return False
-    return latest is not None and latest.backend == "selfhosted"
+                return "anthropic"
+    return latest.backend if latest is not None else "anthropic"
 
 
 async def current_backend_and_sharing(

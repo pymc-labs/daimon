@@ -50,8 +50,9 @@ records, including agent rules. Isolation views, timer lists, current-place card
 and tenant summaries use the same live local records and retain channel
 visibility boundaries. Cosmetic Slack identity lookup is skipped.
 Adapter turns and continuation dispatch inherit the same Anthropic prohibition.
-Organic participation and adapter turn guards use a thread's retained backend
-binding before the channel's current selection. A retained self-hosted thread
+Organic participation, adapter turns, handovers and continuation guards use one
+effective backend resolver with the thread and caller identity. It checks the
+retained backend binding before the channel's current selection. A retained self-hosted thread
 stays mention-only after a channel backend change; a retained Anthropic thread
 can still reply after its channel switches to self-hosted. New threads use the
 current channel selection. Discord `/here`, Slack `/here` and Teams `here`

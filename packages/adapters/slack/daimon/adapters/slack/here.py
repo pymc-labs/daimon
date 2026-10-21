@@ -127,6 +127,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 tenant_id=tenant_id,
                 platform="slack",
                 channel_id=channel_id,
+                thread_id=None,
                 caller_id=user_id,
             ),
             runtime.sessionmaker() as session,

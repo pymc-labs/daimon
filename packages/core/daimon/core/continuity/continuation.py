@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Final, Literal
 
 from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import AnthropicDisabled, require_anthropic_allowed
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_timer_seed,
@@ -465,8 +466,16 @@ async def decide_continuation(
             )
     else:
         try:
+            require_anthropic_allowed()
             await get_setup_agent(
                 anthropic, tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
+            )
+        except AnthropicDisabled:
+            return ContinuationDecision(
+                action="blocked_preparation_failed",
+                message="This follow-up requires Anthropic, which is disabled "
+                "for this conversation. "
+                "Send a message in this conversation to continue.",
             )
         except DaimonError:
             # `get_setup_agent` already distinguishes "gone" from "not yours" and

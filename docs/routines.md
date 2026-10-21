@@ -57,6 +57,11 @@ backend stop before provider resolution, with
 Anthropic Managed Agents; switching a channel to self-hosted does not silently
 run its scheduled prompts through Anthropic.
 
+Timers and task continuations retain their thread's backend after a channel
+backend change, including Anthropic timers in channels switched to self-hosted.
+A follow-up that requires a prohibited provider reports a preparation block,
+not a missing target.
+
 Timers and task continuations in a self-hosted conversation resolve their
 target from tenant-scoped local records. They run through the conversation
 runtime when installed; otherwise they stop with a notice asking the person
