@@ -57,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Parameterize Azure model deployments with a `gpt-6.1-sol` default and DataZoneStandard SKU; document `gpt-6-luna` smoke tests and align selfhosted profile, driver and CLI defaults.
+
 - Hardened harness tool processes, caller authorization and MCP credential scoping; cache binary skill bundles and honor per-tool approval policies.
 
 - Harness tool policies accept explicit denial and validated built-in, MCP tool and server wildcard keys.

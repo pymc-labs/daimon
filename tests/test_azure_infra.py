@@ -443,3 +443,40 @@ def test_chart_storage_guard_controls_defaults_and_role_assignments(
             "fail('S3 artifact secret mappings are incompatible with chartStorage=azure_blob; "
             "set chartStorage=''external''.')"
         ) in validator["output"]["value"]
+
+
+def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) -> None:
+    names = ("modelName", "modelVersion", "modelDeploymentName", "modelSku", "modelCapacity")
+    for entrypoint, module_name in (("main.bicep", "ai"), ("azd/main.bicep", "daimon")):
+        template = templates[entrypoint]
+        params = template["parameters"]
+        assert not any(name.startswith("gpt5") for name in params)
+        assert params["modelName"]["defaultValue"] == "gpt-6.1-sol"
+        assert params["modelVersion"]["defaultValue"] == "2026-09-29"
+        assert params["modelDeploymentName"]["defaultValue"] == "[parameters('modelName')]"
+        assert params["modelSku"]["defaultValue"] == "DataZoneStandard"
+        assert params["modelSku"]["allowedValues"] == ["DataZoneStandard", "GlobalStandard"]
+        assert params["modelCapacity"]["defaultValue"] == 1
+        assert params["modelCapacity"]["minValue"] == 1
+        module = next(r for r in template["resources"] if r["name"] == module_name)
+        for name in names:
+            assert module["properties"]["parameters"][name]["value"] == f"[parameters('{name}')]"
+    deployment = next(
+        r
+        for r in templates["modules/ai.bicep"]["resources"]
+        if r["type"] == "Microsoft.CognitiveServices/accounts/deployments"
+    )
+    assert deployment["properties"]["model"] == {
+        "format": "OpenAI",
+        "name": "[parameters('modelName')]",
+        "version": "[parameters('modelVersion')]",
+    }
+    assert "parameters('modelDeploymentName')" in deployment["name"]
+    assert deployment["sku"] == {
+        "name": "[parameters('modelSku')]",
+        "capacity": "[parameters('modelCapacity')]",
+    }
+    assert (
+        templates["main.bicep"]["outputs"]["harnessEnvironment"]["value"]["AZURE_OPENAI_DEPLOYMENT"]
+        == "[if(parameters('deployAi'), parameters('modelDeploymentName'), '')]"
+    )

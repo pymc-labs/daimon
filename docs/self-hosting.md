@@ -373,6 +373,10 @@ The opt-in `selfhosted.loop` backend runs chat turns through a separately
 operated `daimon-harness/0` service. Set `DAIMON_TURN__PATH=mux` and enable
 channel backends and `DAIMON_SELFHOSTED__ADMISSION_ENABLED=true`, then select
 the selfhosted agent/environment for the channel.
+The `selfhosted.loop` profile and `daimon selfhosted init` default to the Azure
+deployment name `gpt-6.1-sol`; pass `--model` for another deployment. Azure
+templates parameterize model name, version, deployment name, SKU and capacity;
+see the [Azure deployment guide](https://github.com/pymc-labs/daimon/blob/main/deploy/azure/README.md) for Luna smoke tests.
 Each caller gets a separate persistent harness session. Steer, shared sessions,
 workers, session transfer, memory stores and workspace export/import are not
 supported. Admission refuses policies the harness cannot enforce.

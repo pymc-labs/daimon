@@ -10,12 +10,13 @@ param location string = resourceGroup().location
 @description('Lowercase letters and digits, starting with a letter; used in globally unique resource names.')
 param namePrefix string = 'daimon'
 
-param gpt5DeploymentName string = 'gpt-5'
+param modelName string = 'gpt-6.1-sol'
+param modelDeploymentName string = modelName
 @minValue(1)
-param gpt5Capacity int = 1
-@allowed(['GlobalStandard', 'DataZoneStandard', 'Standard'])
-param gpt5Sku string = 'GlobalStandard'
-param gpt5ModelVersion string = '2025-08-07'
+param modelCapacity int = 1
+@allowed(['DataZoneStandard', 'GlobalStandard'])
+param modelSku string = 'DataZoneStandard'
+param modelVersion string = '2026-09-29'
 
 @allowed([false])
 @description('Private networking is not implemented in this public-endpoint baseline. True is refused.')
@@ -89,10 +90,11 @@ module ai './modules/ai.bicep' = if (deployAi) {
     name: '${stem}-ai'
     tags: tags
     runtimePrincipalId: foundation.outputs.identityPrincipalId
-    deploymentName: gpt5DeploymentName
-    capacity: gpt5Capacity
-    deploymentSku: gpt5Sku
-    modelVersion: gpt5ModelVersion
+    modelName: modelName
+    modelDeploymentName: modelDeploymentName
+    modelCapacity: modelCapacity
+    modelSku: modelSku
+    modelVersion: modelVersion
   }
 }
 
@@ -219,7 +221,7 @@ output daimonSecretNames object = commonSecrets
 output harnessEnvironment object = {
   AZURE_CLIENT_ID: foundation.outputs.identityClientId
   AZURE_OPENAI_ENDPOINT: deployAi ? ai!.outputs.openaiEndpoint : ''
-  AZURE_OPENAI_DEPLOYMENT: deployAi ? gpt5DeploymentName : ''
+  AZURE_OPENAI_DEPLOYMENT: deployAi ? modelDeploymentName : ''
   AZURE_OPENAI_API_VERSION: deployAi ? '2025-04-01-preview' : ''
   AZURE_AI_PROJECT_ENDPOINT: deployAi ? ai!.outputs.projectEndpoint : ''
 }

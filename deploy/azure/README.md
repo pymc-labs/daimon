@@ -21,7 +21,7 @@ it has no automatic build/deploy hooks.
 | Storage | LRS Blob, private `charts` container, versioning and seven-day soft delete, shared keys disabled |
 | ACR | Basic, admin credentials disabled, image pulls via managed identity |
 | Logs | 30-day retention, 1 GiB/day ingestion cap (enforcement can lag) |
-| AI | Optional (`deployAi=true` by default): AIServices account, GPT-5 deployment, `daimon` Foundry project with system identity |
+| AI | Optional (`deployAi=true` by default): AIServices account, model deployment, `daimon` Foundry project with system identity |
 
 The `services` array defaults to `['discord', 'teams', 'mcp', 'scheduler']`.
 For a Discord-only install, use `['discord', 'mcp', 'scheduler']`; for Teams only,
@@ -82,12 +82,12 @@ Developer CLI (`azd`), Docker with BuildKit, and Bicep first.
   `Microsoft.KeyVault`, `Microsoft.Storage`, `Microsoft.DBforPostgreSQL`,
   and `Microsoft.CognitiveServices` resource providers.
 - Confirm the chosen region supports B1ms PostgreSQL, Container Apps,
-  AIServices projects, the requested GPT-5 model version/SKU, and hosted agents.
+  AIServices projects, the requested model version/SKU, and hosted agents.
   Region support for one does not imply the others. Check the
   [model availability table](https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-models/concepts/models-sold-directly-by-azure)
   and [hosted-agent prerequisites](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/deploy-hosted-agent).
-- Obtain GPT-5 quota for **that region and deployment SKU**, sufficient for
-  `gpt5Capacity`. Its units are Azure model quota units, not a universal TPM
+- Obtain model quota for **that region and deployment SKU**, sufficient for
+  `modelCapacity`. Its units are Azure model quota units, not a universal TPM
   multiplier. Check Container Apps consumption CPU quota (at least 2.5 vCPU
   for four serving replicas plus init), PostgreSQL availability and ACR quota.
 - Group deployment needs resource creation permissions plus role-assignment
@@ -131,7 +131,7 @@ name can be recreated. An unprotected development vault still needs recovery
 or an authorized purge before reusing its name. AI account soft deletion can
 also reserve the custom subdomain; recover/purge it or rename the deployment.
 
-If GPT-5 quota/entitlement is pending, set `deployAi=false` in your local
+If model quota/entitlement is pending, set `deployAi=false` in your local
 parameter file **before** the first provision. This omits the entire AI module
 and returns empty AI endpoint/deployment/project outputs. The existing-backend
 M1 foundation can then provision without AI quota. Keep other parameters stable
@@ -145,7 +145,7 @@ az login
 azd auth login
 azd env new azure-dev
 azd env set AZURE_LOCATION eastus2
-# For M1 without GPT-5 quota, first add "deployAi": {"value": false}
+# For M1 without model quota, first add "deployAi": {"value": false}
 # under parameters in deploy/azure/azd/main.parameters.json (local edit only).
 azd up
 ```
@@ -202,6 +202,43 @@ Use either azd or the group route consistently. For the remaining commands,
 these through `az deployment group show --name daimon-foundation -g "$RG"
 --query properties.outputs`. The azd route also writes corresponding uppercase
 outputs into local environment state.
+
+## Model selection
+
+Both Bicep entrypoints accept `modelName` (default `gpt-6.1-sol`),
+`modelVersion` (`2026-09-29`), `modelDeploymentName` (defaults to `modelName`),
+`modelSku` (`DataZoneStandard`) and `modelCapacity` (1 quota unit).
+`AZURE_OPENAI_DEPLOYMENT` follows `modelDeploymentName`, including custom aliases.
+These replace the earlier `gpt5*` parameter names; update local parameter files.
+
+As verified against Microsoft's availability table on 2026-10-21,
+Sol is GA. Sol and the cheapest, fastest GPT-6 tier, `gpt-6-luna`
+(version `2026-09-22`), support `GlobalStandard` in all Global regions except
+`northeurope`, and `DataZoneStandard` in US and EU regions. Neither supports
+regional `Standard`. Choose `DataZoneStandard` in `eastus2` (US) or
+`swedencentral` (EU) to keep prompts and responses in that data zone; this
+does not restrict processing to the resource's single region. Both regions
+also support Container Apps dynamic sessions with custom containers.
+See [model availability](https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-models/concepts/models-sold-directly-by-azure)
+and [deployment data processing](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/deployment-types).
+
+For cheap smoke tests, add these entries to your local parameter file's
+`parameters` object (omit `modelDeploymentName` to use `gpt-6-luna`):
+
+```json
+"modelName": { "value": "gpt-6-luna" },
+"modelVersion": { "value": "2026-09-22" },
+"modelSku": { "value": "DataZoneStandard" },
+"modelCapacity": { "value": 1 }
+```
+
+Select that deployment with `daimon selfhosted init --model gpt-6-luna` for
+the smoke-test agent. Configure the matching deployment-to-model mapping and
+verified tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
+`DAIMON_BILLING__SELFHOSTED__MODELS` before running turns. Selfhosted pricing
+is operator-configured, with no built-in model price table; unpriced
+deployments are refused before harness calls. Use rates verified for your
+Azure region, SKU and contract; changing the model default does not supply a tariff.
 
 ## Configure and initialize
 
@@ -332,7 +369,7 @@ nonsecret artifact settings applied only to MCP, using the foundation outputs.
 The azd wrapper exposes the same map as `DAIMON_MCP_ARTIFACTS_ENVIRONMENT`.
 `harnessEnvironment` contains:
 
-- `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (the parameterized GPT-5
+- `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (the parameterized model
   deployment name) and `AZURE_OPENAI_API_VERSION`.
 - `AZURE_CLIENT_ID` for the user-assigned identity and `AZURE_AI_PROJECT_ENDPOINT`.
 
@@ -413,7 +450,7 @@ quote; confirm prices in the selected region before deploying.
 
 ACA can charge less for eligible idle replicas; gateway/scheduler processes
 cannot simply scale to zero. Init-job compute, network egress, hosted-agent
-session compute and GPT-5 tokens are additional usage charges. Capacity on a
+session compute and model tokens are additional usage charges. Capacity on a
 Standard model deployment is quota, not a prepaid token allowance. GlobalStandard
 can route inference outside the resource region; it is not a tenant/region
 residency guarantee. Select a supported SKU consistent with the intended policy.

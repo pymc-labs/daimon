@@ -255,10 +255,18 @@ uv run pytest apps/harness
 The data extra pins `pymc-extras` 0.7 because 0.8 imports symbols absent from
 the locked PyTensor version. A CI import test exercises the combined stack.
 
+Production Azure templates default `AZURE_OPENAI_DEPLOYMENT` to `gpt-6.1-sol`;
+the harness executes the deployment named by each turn request.
+
 The default suite uses a fake adapter and a mocked Azure HTTP transport under
 the real Agents SDK. The live Azure test is skipped unless `AZURE_OPENAI_ENDPOINT`
 and either `AZURE_OPENAI_API_KEY` or `AZURE_CLIENT_ID` are set; it uses
-`AZURE_OPENAI_DEPLOYMENT` (default `gpt-5`) and incurs model usage.
+`AZURE_OPENAI_DEPLOYMENT` (test default `gpt-6-luna`) and incurs model usage.
+The live test refuses any deployment other than `gpt-6-luna` (C12).
+For cheap smoke tests, deploy `gpt-6-luna` version `2026-09-22` and set
+`AZURE_OPENAI_DEPLOYMENT=gpt-6-luna`. The harness uses each request's model
+as its deployment name. See [Azure model selection](../../deploy/azure/README.md#model-selection)
+for SKU, region and billing configuration.
 
 
 MCP environment references must start with `HARNESS_MCP_CRED_`; the sole

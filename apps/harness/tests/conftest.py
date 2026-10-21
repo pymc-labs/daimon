@@ -115,7 +115,7 @@ def turn(mode: str = "hello", *, turn_id: str = "turn-1", key: str = "key-1") ->
         "session_id": "session-1",
         "turn_id": turn_id,
         "idempotency_key": key,
-        "model": "gpt-5",
+        "model": "gpt-6-luna",
         "instructions": "Help",
         "input": [{"type": "text", "text": mode}],
         "mcp_servers": [],

@@ -162,7 +162,7 @@ async def mcp_turn_probe(
                 "id": f"mcp-response-{calls}",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": "completed",
                 "output": output,
                 "usage": {

@@ -32,7 +32,7 @@ BASE = admission().backend_revision
 REVISION = ConfigRevision.create(
     BASE.channel,
     1,
-    resolve_default(BackendConfig(backend="selfhosted", profile=PROFILE, model="gpt-5")),
+    resolve_default(BackendConfig(backend="selfhosted", profile=PROFILE, model="gpt-6-luna")),
 )
 
 
@@ -60,7 +60,7 @@ class Wire:
                     "usage",
                     {
                         "request_id": f"request-{self.posts}",
-                        "model": "gpt-5",
+                        "model": "gpt-6-luna",
                         "input_tokens": 10,
                         "cached_input_tokens": 0,
                         "output_tokens": 5,
@@ -79,7 +79,7 @@ class Wire:
             if self.unmatched_start:
                 events[1] = (
                     "model_request_started",
-                    {"request_id": f"request-{self.posts}", "model": "gpt-5"},
+                    {"request_id": f"request-{self.posts}", "model": "gpt-6-luna"},
                 )
                 events[-1] = ("turn_ended", {"outcome": "interrupted"})
             for kind, data in events:
@@ -158,7 +158,7 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch):
                 ref=ref("agent"),
                 revision=Revision(local=1),
                 created_at=datetime.now(UTC),
-                spec=AgentSpec(name="test", model=ModelRef(provider="selfhosted", id="gpt-5")),
+                spec=AgentSpec(name="test", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
             )
         ),
     )
@@ -192,10 +192,10 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch):
             account_scope_id=str(TENANT),
             session_plan=plan,
             authorization=lambda scope, kind, id_: scope == SCOPE,
-            model="gpt-5",
+            model="gpt-6-luna",
             price=ProviderPrice(
                 provider="selfhosted",
-                model="gpt-5",
+                model="gpt-6-luna",
                 checked_on=date(2026, 1, 1),
                 input=Decimal(2),
                 output=Decimal(10),
@@ -277,7 +277,7 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior
                         type="usage",
                         data=dict(
                             request_id=f"old-{old}",
-                            model="gpt-5",
+                            model="gpt-6-luna",
                             input_tokens=1,
                             cached_input_tokens=0,
                             output_tokens=1,
@@ -314,7 +314,7 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior
     assert wire.posts == 2
     assert observations
     assert len({row["observation"].id for row in observations}) == 2
-    assert all(row["model_id"] == "gpt-5" for row in observations)
+    assert all(row["model_id"] == "gpt-6-luna" for row in observations)
     events = await store.read_events(prepared.session_ref.id)
     assert sum(e.type == "session.turn_ended" for e in events) == 2
 
@@ -332,7 +332,7 @@ async def test_unmatched_start_reaches_actual_recorder_as_pending_unknown(compos
 
     request, wire, _, _ = composed
     billing = SelfhostedBillingSettings(
-        deployments={"gpt-5": "test-model"},
+        deployments={"gpt-6-luna": "test-model"},
         models={
             "test-model": [
                 SelfhostedModelPrice(
@@ -375,7 +375,7 @@ async def test_unmatched_start_reaches_actual_recorder_as_pending_unknown(compos
         binding_id=binding.id,
         session_ref=prepared.session_ref,
         admission_key="inventory-test",
-        deployment="gpt-5",
+        deployment="gpt-6-luna",
         billing=billing,
     )
     wire.unmatched_start = True
@@ -573,7 +573,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         attachment_scope,
         AgentSpec(
             name="test",
-            model=ModelRef(provider="selfhosted", id="gpt-5"),
+            model=ModelRef(provider="selfhosted", id="gpt-6-luna"),
             skills=(SkillRef(id="retained", version="v1"),)
             if scenario == "retained_skills"
             else None,
@@ -649,7 +649,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         ),
     )
     billing = SelfhostedBillingSettings(
-        deployments={"gpt-5": "test-model"},
+        deployments={"gpt-6-luna": "test-model"},
         models={
             "test-model": [
                 SelfhostedModelPrice(
@@ -861,7 +861,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 uuid.UUID(jwt.decode(token, options={"verify_signature": False})["jti"])
             )
             assert token.encode() not in call.content
-            assert body["model"] == "gpt-5"
+            assert body["model"] == "gpt-6-luna"
             if scenario == "retained_skills":
                 skills = {skill["name"]: skill for skill in body["skills"]}
                 assert set(skills) == {"retained", "channel-upload"}
@@ -951,7 +951,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 {
                     **measured,
                     "type": "model_request_started",
-                    "data": {"request_id": "request-1", "model": "gpt-5"},
+                    "data": {"request_id": "request-1", "model": "gpt-6-luna"},
                 },
             ]
             for event in deferred:
@@ -1155,7 +1155,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                         "seq": len(wire.events) + 1,
                         "turn_id": f"prior-{index}",
                         "type": kind,
-                        "data": {"request_id": f"old-{index}", "model": "gpt-5"},
+                        "data": {"request_id": f"old-{index}", "model": "gpt-6-luna"},
                     }
                 )
         floor = len(wire.events)

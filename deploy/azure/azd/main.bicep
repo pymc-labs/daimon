@@ -21,10 +21,13 @@ param vaultPurgeProtection bool = false
 @allowed(['discord', 'teams', 'mcp', 'scheduler'])
 @description('Serving apps to create. Removing an entry does not stop an existing app.')
 param services array = ['discord', 'teams', 'mcp', 'scheduler']
-param gpt5DeploymentName string = 'gpt-5'
-param gpt5Capacity int = 1
-param gpt5Sku string = 'GlobalStandard'
-param gpt5ModelVersion string = '2025-08-07'
+param modelName string = 'gpt-6.1-sol'
+param modelDeploymentName string = modelName
+@minValue(1)
+param modelCapacity int = 1
+@allowed(['DataZoneStandard', 'GlobalStandard'])
+param modelSku string = 'DataZoneStandard'
+param modelVersion string = '2026-09-29'
 @allowed([false])
 param enablePrivateNetworking bool = false
 param appEnvironment object = {}
@@ -54,10 +57,11 @@ module stack '../main.bicep' = {
     chartStorage: checkedChartStorage
     vaultPurgeProtection: vaultPurgeProtection
     services: services
-    gpt5DeploymentName: gpt5DeploymentName
-    gpt5Capacity: gpt5Capacity
-    gpt5Sku: gpt5Sku
-    gpt5ModelVersion: gpt5ModelVersion
+    modelName: modelName
+    modelDeploymentName: modelDeploymentName
+    modelCapacity: modelCapacity
+    modelSku: modelSku
+    modelVersion: modelVersion
     enablePrivateNetworking: enablePrivateNetworking
     appEnvironment: appEnvironment
     serviceEnvironment: serviceEnvironment

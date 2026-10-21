@@ -90,7 +90,7 @@ async def test_sdk_tool_loop_meters_each_request(
                 "id": f"resp_{len(requests)}",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": "completed",
                 "output": output,
                 "usage": {
@@ -139,7 +139,7 @@ async def test_sdk_tool_loop_meters_each_request(
     assert usages == [
         {
             "request_id": usages[i - 1]["request_id"],
-            "model": "gpt-5",
+            "model": "gpt-6-luna",
             "input_tokens": 12,
             "cached_input_tokens": 3,
             "output_tokens": 8,
@@ -163,7 +163,9 @@ async def test_sdk_tool_loop_meters_each_request(
 )
 async def test_live_azure_responses(tmp_path: Path) -> None:
     body = turn()
-    body["model"] = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5")
+    body["model"] = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-6-luna")
+    if body["model"] != "gpt-6-luna":
+        pytest.skip("C12: live tests only permit the gpt-6-luna deployment")
     body["input"] = [{"type": "text", "text": "Reply with the word ready. Do not use tools."}]
     events: list[tuple[str, object]] = []
 
@@ -209,7 +211,7 @@ async def test_sdk_unmeasured_request_never_invents_usage(
                 "id": "missing-usage-request",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": "completed",
                 "output": [
                     {
@@ -277,7 +279,7 @@ async def test_sdk_context_overflow_truncates_history_and_inventories_retry(
                     "id": "tool",
                     "object": "response",
                     "created_at": 1,
-                    "model": "gpt-5",
+                    "model": "gpt-6-luna",
                     "status": "completed",
                     "output": [
                         {
@@ -330,7 +332,7 @@ async def test_sdk_context_overflow_truncates_history_and_inventories_retry(
                 "id": "retry",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": "completed",
                 "output": [
                     {
@@ -431,7 +433,7 @@ async def test_denied_call_retains_reasoning_and_paired_output_in_next_turn(tmp_
                 "id": f"response-{len(requests)}",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": "completed",
                 "output": output,
                 "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
@@ -519,7 +521,7 @@ async def test_noncompleted_response_preserves_usage_and_ends_errored(
                 "id": "truncated-response",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": status,
                 "incomplete_details": {"reason": reason}
                 if status == "incomplete" and reason
@@ -635,7 +637,7 @@ async def test_sdk_cancel_joins_tool_workers_before_terminal_and_session_reuse(
                 "id": f"response{len(calls)}",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": "completed",
                 "output": output,
                 "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},

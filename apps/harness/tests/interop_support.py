@@ -54,7 +54,7 @@ async def driver_session(client: httpx.AsyncClient, *, tools=None, mcp_servers=N
                 system="test instructions",
                 tools=tools,
                 mcp_servers=mcp_servers,
-                model=ModelRef(provider="selfhosted", id="azure-test-deployment"),
+                model=ModelRef(provider="selfhosted", id="gpt-6-luna"),
             ),
         )
     )

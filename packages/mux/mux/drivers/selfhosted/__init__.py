@@ -56,7 +56,7 @@ class SelfHostedDriver:
         )
         self.sessions.events = self.events
         self.usage = SelfHostedUsage(self.events)
-        self.models = SelfHostedModels((deployment or model or "gpt-5",))
+        self.models = SelfHostedModels((deployment or model or "gpt-6.1-sol",))
 
     @property
     def artifacts(self) -> Artifacts:
