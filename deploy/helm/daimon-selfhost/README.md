@@ -86,8 +86,11 @@ one replica and one worker for the PVC's SQLite lease. Never share the HOME PVC
 between replicas. UID ranges, private scratch, tool limits and checkpoint options
 are documented in [the harness README](../../../apps/harness/README.md).
 Default requests for PG + MCP/Teams/scheduler + harness total **650m CPU and
-1920 MiB RAM**; memory limits total **6 GiB** (harness 4 GiB, three host processes
-512 MiB each, PG 512 MiB). This fits a 2-vCPU/8-GiB workload budget; node/system
+1920 MiB RAM**; memory limits total **9 GiB** (harness 4 GiB, three host processes
+1536 MiB each, PG 512 MiB). Hosts allow 1536 MiB for real CLI turns alongside MCP.
+The minimal recipe disables Teams: requests become 550m CPU / 1664 MiB and limits
+7.5 GiB. Requests fit the 2-vCPU/8-GiB pilot, but memory limits are overcommitted
+and are not reservations; concurrent workloads can exhaust node capacity. Node/system
 reservations and the ingress controller still consume capacity. Keep optional
 Discord/Slack off, avoid simultaneous build pods, and test actual PyMC workload
 memory before increasing concurrency. This is a small pilot, with no application HA.
@@ -106,6 +109,17 @@ production; configure and test backups/restore separately. Helm uninstall retain
 StatefulSet PVCs; delete them only after a deliberate data-retention decision.
 
 ## Networking and MCP TLS
+
+Host pods (init, MCP, Teams, scheduler, Discord, Slack) also default-deny egress.
+They allow only cluster DNS and same-release PostgreSQL, MCP and harness pods,
+within the release namespace. Host calls to Anthropic/OpenAI.com are therefore
+blocked by an enforcing CNI as well as the pilot's loopback Anthropic setting.
+An external PostgreSQL deployment additionally requires explicit
+`networkPolicy.hostPostgresCidrs` IPv4 `/32`s, on `postgres.port`; no addresses
+are allowed implicitly. The policy covers init containers too. External
+Teams/Discord/Slack APIs and third-party MCP destinations require separately
+reviewed, narrow policies before enabling those integrations. Avoid broad
+policies: Kubernetes unions egress allowances across matching policies.
 
 NetworkPolicy defaults to deny harness egress except cluster DNS and the MCP
 pods/service port. AOAI/Blob destinations must be explicitly supplied as IPv4
@@ -456,6 +470,27 @@ Equivalent environment `native_config.value` (the CLI defaults session_pool fals
 
 Set that host Secret variable to the harness's bearer. Bind it through
 `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS` to this exact HTTP origin and tenant.
+Supply the credential-free provider grant JSON described in the self-hosting
+guide through an existing Kubernetes Secret with key `runtime.json`:
+
+```sh
+kubectl -n daimon create secret generic daimon-runtime --from-file=runtime.json=/secure/runtime.json
+```
+
+```yaml
+host:
+  runtimeSecret: daimon-runtime
+```
+
+When set, every host process, including CLI invocations in the MCP container,
+receives a read-only directory mount at `/etc/daimon-runtime` and
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE=/etc/daimon-runtime/runtime.json`. The chart
+sets that path once, overriding competing host/service env settings. Only the
+`runtime.json` key is projected; it must contain grants/IDs, never bearer or model
+keys. The harness and PostgreSQL do not receive the runtime mount. Runtime and
+Key Vault CSI mounts compose; enabling one does not disable the other. An empty
+`host.runtimeSecret` adds neither a runtime mount nor an implicit path.
+
 Configure the channel's selfhosted revision/runtime grant and verified billing
 rates as described in [self-hosting](../../../docs/self-hosting.md). Admission
 remains disabled by default (C8). Enable
@@ -478,6 +513,13 @@ bash deploy/helm/daimon-selfhost/tests/kind-smoke.sh
 # The script always deletes its exact kind cluster, including on failure.
 # After investigation, prune only these tags if desired:
 docker image rm daimon-l14:local daimon-harness-l14:local
+```
+
+The render regression suite checks runtime/CSI composition, file path and memory
+limits, default egress destinations, external PG exceptions and the policy switch:
+
+```sh
+uv run python -m unittest discover -s deploy/helm/daimon-selfhost/tests -p test_host_configuration.py
 ```
 
 The script loads images and post-renders only offline fixtures: a 20-second

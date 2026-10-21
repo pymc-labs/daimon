@@ -93,7 +93,11 @@ spec:
             - secretRef: {name: {{ $.Values.secrets.host }}}
           env:
             - {name: PGSSLROOTCERT, value: /etc/ssl/certs/ca-certificates.crt}
-            {{- range $key, $value := mergeOverwrite (deepCopy $.Values.host.env) $svc.env }}
+            {{- $hostEnv := mergeOverwrite (deepCopy $.Values.host.env) $svc.env }}
+            {{- if $.Values.host.runtimeSecret }}
+            {{- $_ := set $hostEnv "DAIMON_TURN__PROVIDER_RUNTIME_FILE" "/etc/daimon-runtime/runtime.json" }}
+            {{- end }}
+            {{- range $key, $value := $hostEnv }}
             - {name: {{ $key }}, value: {{ $value | quote }}}
             {{- end }}
           resources: {{ $.Values.host.resources | toJson }}
@@ -103,8 +107,32 @@ spec:
             httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
             initialDelaySeconds: 5
           {{- end }}
-          {{- include "d.csiMount" $ | nindent 10 }}
-      {{- include "d.csiVolume" $ | nindent 6 }}
+          {{- if or $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
+          volumeMounts:
+            {{- if $.Values.host.runtimeSecret }}
+            - {name: runtime, mountPath: /etc/daimon-runtime, readOnly: true}
+            {{- end }}
+            {{- if $.Values.keyVaultCSI.enabled }}
+            - {name: secrets-store, mountPath: /mnt/secrets-store, readOnly: true}
+            {{- end }}
+          {{- end }}
+      {{- if or $.Values.host.runtimeSecret $.Values.keyVaultCSI.enabled }}
+      volumes:
+        {{- if $.Values.host.runtimeSecret }}
+        - name: runtime
+          secret:
+            secretName: {{ $.Values.host.runtimeSecret }}
+            items: [{key: runtime.json, path: runtime.json}]
+        {{- end }}
+        {{- if $.Values.keyVaultCSI.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ required "keyVaultCSI.secretProviderClass required" $.Values.keyVaultCSI.secretProviderClass }}
+        {{- end }}
+      {{- end }}
 {{- if $svc.port }}
 ---
 apiVersion: v1

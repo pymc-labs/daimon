@@ -26,10 +26,12 @@ services:
   discord: {enabled: false, port: 8081, healthPath: /healthz, env: {}}
   slack: {enabled: false, port: 0, healthPath: "", env: {}}
 host:
+  # Existing Secret with a credential-free provider grant file at key runtime.json.
+  runtimeSecret: ""
   env: {DAIMON_SELFHOSTED__ADMISSION_ENABLED: "false"}
   resources:
     requests: {cpu: 100m, memory: 256Mi}
-    limits: {memory: 512Mi}
+    limits: {memory: 1536Mi}
 harness:
   enabled: true
   # F72: router and pod-per-session are future work. Only multi is implemented.
@@ -74,6 +76,8 @@ networkPolicy:
   # Empty lists deny external HTTPS. Use private endpoint /32s, never broad ranges.
   azureOpenAICidrs: []
   blobCidrs: []
+  # External PG only: explicit IPv4 /32 destinations for the host pods.
+  hostPostgresCidrs: []
   # Federation needs Entra HTTPS in the proxy pod too.
   entraCidrs: []
 keyVaultCSI:

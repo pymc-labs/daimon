@@ -41,7 +41,7 @@ uses Azure OpenAI in the approved US/EU Data Zone. API key is an explicit pilot
 Secret, captured/scrubbed by the harness. Production identity needs the reviewed
 Workload Identity/header-protected proxy. Sessions share a kernel and node:
 trusted users only, no Kata/per-session VM isolation, HA, automated DB backup or
-PITR. Default requests: 650m CPU / 1.875 GiB; memory limits: 6 GiB. AKS also creates
+PITR. Default requests: 650m CPU / 1.875 GiB; host limits: 1536 MiB each (minimal recipe: 7.5 GiB total limits). AKS also creates
 a billable node RG with VM, disks, IP and networking. No production SLA is implied.
 
 **Cost:** allow roughly $100–170/month continuously running, plus tokens, builds
