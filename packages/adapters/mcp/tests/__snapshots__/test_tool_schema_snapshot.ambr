@@ -2812,6 +2812,43 @@
         'type': 'object',
       }),
     }),
+    'get_progress_plans': dict({
+      'description': '''
+        Report whether progress plans are on for a thread or channel, and which tier decided it.
+        <blank line>
+        Scope: ``thread_id`` and ``channel_id`` for a thread; ``channel_id``
+        alone for a channel; neither for the workspace. Reading
+        needs no admin. Read the returned ``explanation`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'thread_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'get_routine': dict({
       'description': '''
         Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
@@ -5662,6 +5699,63 @@
         'type': 'object',
       }),
     }),
+    'set_progress_plans': dict({
+      'description': '''
+        Turn progress plans on or off where you are asked to.
+        <blank line>
+        A progress plan is a short checklist of a longer task's steps on the
+        progress card. Call this when someone asks, for example "turn on
+        progress plans here".
+        <blank line>
+        Scope: ``thread_id`` and ``channel_id`` (this turn's thread and channel
+        ids) for a thread; ``channel_id`` alone for a channel; neither for the
+        workspace. Channel and workspace scope need an admin.
+        <blank line>
+        Modes: ``on``, ``off``, ``disabled`` (lock a channel or workspace so
+        nothing below can turn it on; not valid for a thread), ``inherit``
+        (drop this scope's setting). Read the returned ``note`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'mode': dict({
+            'enum': list([
+              'on',
+              'off',
+              'disabled',
+              'inherit',
+            ]),
+            'type': 'string',
+          }),
+          'thread_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'mode',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_setup_target': dict({
       'description': '''
         Switch this setup conversation to an explicitly selected MA agent identity.
@@ -6772,6 +6866,60 @@
         }),
         'required': list([
           'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'update_plan': dict({
+      'description': '''
+        Show the task's plan as a checklist on the progress card.
+        <blank line>
+        Use it only when this turn's progress_plans block says progress plans
+        are on; otherwise nothing is shown. Send the whole list each time, in
+        order, with at most one step in_progress. Updating the plan is not a
+        reply: carry on with the task afterwards.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'PlanStep': dict({
+            'additionalProperties': False,
+            'description': 'One step of the plan, as the person reads it on the card.',
+            'properties': dict({
+              'status': dict({
+                'enum': list([
+                  'pending',
+                  'in_progress',
+                  'completed',
+                ]),
+                'type': 'string',
+              }),
+              'step': dict({
+                'description': 'A few plain words.',
+                'maxLength': 120,
+                'minLength': 1,
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'step',
+              'status',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'steps': dict({
+            'items': dict({
+              '$ref': '#/$defs/PlanStep',
+            }),
+            'maxItems': 12,
+            'minItems': 1,
+            'type': 'array',
+          }),
+        }),
+        'required': list([
+          'steps',
         ]),
         'type': 'object',
       }),
