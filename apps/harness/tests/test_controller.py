@@ -414,3 +414,46 @@ async def test_certificate_bootstrap_pins_first_key_and_never_queries_api(tmp_pa
         transport=httpx.ASGITransport(app=app), base_url="https://test:8088"
     ) as client:
         assert (await client.post(path, json={"uid": uid, "csr": "first"})).status_code == 404
+
+
+async def test_reaper_uses_sandbox_activity_after_controller_restart():
+    kube = Kube()
+    now = [1000]
+    ctl = controller(kube, warm=0, clock=lambda: now[0])
+    pod = await ctl.acquire("a")
+    await ctl.release(pod)
+    now[0] += 901
+    rebuilt = controller(kube, warm=0, clock=lambda: now[0])
+    active = True
+
+    async def upstream(request):
+        return httpx.Response(200, json={"active": active, "last_activity": 1000})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        rebuilt.client = client
+        await rebuilt.maintain()
+        assert pod["metadata"]["name"] in kube.items
+        active = False
+        await rebuilt.maintain()
+        assert not kube.items
+
+
+async def test_sandbox_activity_retains_sealed_worker_context(tmp_path, monkeypatch):
+    from daimon_harness.service import create_app as service
+
+    from .conftest import FakeModelAdapter
+
+    monkeypatch.setenv("HARNESS_ROLE", "sandbox")
+    app = service(home=tmp_path, token="test", adapter=FakeModelAdapter())
+    async with app.router.lifespan_context(app):
+        app.state.supervisor.contexts["sealed"] = object()
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://test"
+            ) as client:
+                response = await client.get(
+                    "/internal/activity", headers={"Authorization": "Bearer test"}
+                )
+                assert response.json()["active"] is True
+        finally:
+            app.state.supervisor.contexts.clear()

@@ -816,7 +816,8 @@ def create_app(
         @app.get("/internal/activity", dependencies=secured)
         async def pod_activity():
             return {
-                "active": any(not task.done() for task in supervisor.tasks.values()),
+                "active": bool(supervisor.contexts)
+                or any(not task.done() for task in supervisor.tasks.values()),
                 "last_activity": last_activity,
             }
 
