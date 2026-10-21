@@ -2235,3 +2235,28 @@ selfhosted recorder, including unknown observations for unmatched request
 starts. Display conversion uses SDK DTOs for adapter compatibility without
 calling an Anthropic API. Tools and inline skills are assembled under the
 admitted scope, and the host revokes the header-only MCP token in turn cleanup.
+
+With Blob recovery configured, both harness loops depend on Azure Blob Storage
+for turn claims, request inventory and reserved sequence blocks before paid
+model I/O. Journal/history and workspace checkpoints upload asynchronously after
+tool cleanup. Failed write-ahead or reservation commits prevent paid work with
+retryable `durability_unavailable`; failed or degraded workspace snapshots allow
+turns and polling to continue. Storage credentials remain in the service identity.
+
+A degraded snapshot or upload failure queues `checkpoint_warning` for the next
+new turn. The mux driver preserves it as a native event, and core converts it to
+a non-terminal thread notice about possible message/file loss, emitted once per
+session. A local pending marker retains late failures across process restarts;
+a notice not captured in a snapshot can still be lost with a destroyed sandbox.
+
+Recovery authenticates and persists the client cursor, loads remote reservations
+and WAL inventory, restores an empty sandbox, and merges original event identities
+before flushing local pending measurements. It fences new sequences above the
+checkpoint, reservation and cursor, emits covering history gaps, then repairs
+unmatched requests as unknown and unfinished turns as interrupted. A divergent
+journal stays sealed until reconciliation succeeds; cleanup must succeed before
+a terminal or another turn. This ordering preserves I1 (immutable sequences),
+I2 (one usage outcome, preserving measured usage), I3 (one terminal with no later
+turn events), I4 (every claim has an executor or recovery), and I5 (no tool side
+effects after termination). See the harness [recovery order and invariants](https://github.com/pymc-labs/daimon/blob/main/apps/harness/README.md#recovery-order-and-invariants)
+for the complete specification.
