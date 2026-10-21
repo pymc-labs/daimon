@@ -210,10 +210,16 @@ async def test_the_teams_here_card_sees_only_the_place_it_was_typed_in() -> None
         asked_in=asked,
     )
     with (
+        patch(
+            "daimon.core.channel_backend.effective_thread_backend",
+            AsyncMock(return_value="anthropic"),
+        ) as backend,
         patch.object(here, "find_platform_principal", AsyncMock(return_value=None)),
         patch.object(here, "load_here_card", AsyncMock(return_value=card)) as load,
     ):
         await here.show_here(context)
+    backend.assert_awaited_once()
+    assert backend.await_args.kwargs["channel_id"] == channel
     assert load.await_args.kwargs["visible_channel_ids"] == {channel}, (
         "Teams names no other channel the caller may see; if it learned to, replace this record"
     )
