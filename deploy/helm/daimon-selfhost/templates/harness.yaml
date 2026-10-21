@@ -1,0 +1,116 @@
+{{- if .Values.harness.enabled }}
+{{- if ne .Values.harness.sessions.mode "multi" }}{{ fail "Only multi is implemented; pod-per-session needs the F72 router" }}{{ end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "d.name" . }}-harness
+  {{- if .Values.harness.miProxy.enabled }}
+  annotations:
+    azure.workload.identity/client-id: {{ required "miProxy.clientId required" .Values.harness.miProxy.clientId | quote }}
+    azure.workload.identity/tenant-id: {{ required "miProxy.tenantId required" .Values.harness.miProxy.tenantId | quote }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "d.name" . }}-harness}
+spec:
+  type: ClusterIP
+  selector: {app: {{ include "d.name" . }}-harness}
+  ports: [{port: 8088, targetPort: 8088}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: {{ include "d.name" . }}-harness}
+spec:
+  serviceName: {{ include "d.name" . }}-harness
+  replicas: 1
+  selector:
+    matchLabels: {app: {{ include "d.name" . }}-harness}
+  template:
+    metadata:
+      labels:
+        app: {{ include "d.name" . }}-harness
+        {{- if .Values.harness.miProxy.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+      {{- if .Values.harness.miProxy.enabled }}
+      annotations:
+        azure.workload.identity/skip-containers: harness
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "d.name" . }}-harness
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
+      terminationGracePeriodSeconds: 90
+      containers:
+        - name: harness
+          image: {{ include "d.image" (dict "root" . "image" .Values.images.harness) | quote }}
+          imagePullPolicy: {{ .Values.images.harness.pullPolicy }}
+          command: [/usr/bin/tini, --, sh, -ec]
+          args:
+            - mount -o remount,hidepid=2,gid=60002 /proc; chmod 755 /tmp /var/tmp /dev/shm /run/lock; chmod 600 /dev/termination-log; chown 0:0 /home/harness; chmod 711 /home/harness; exec python -m daimon_harness
+          securityContext: {{ .Values.harness.securityContext | toJson }}
+          envFrom:
+            - secretRef: {name: {{ .Values.secrets.harness }}}
+          env:
+            - {name: HARNESS_SESSION_MODE, value: multi}
+            - {name: HARNESS_AUTH_MODE, value: bearer}
+            - {name: AZURE_OPENAI_ENDPOINT, value: {{ .Values.azureOpenAI.endpoint | quote }}}
+            - {name: AZURE_OPENAI_DEPLOYMENT, value: {{ .Values.azureOpenAI.deployment | quote }}}
+            - {name: AZURE_OPENAI_API_VERSION, value: {{ .Values.azureOpenAI.apiVersion | quote }}}
+            {{- if .Values.azureOpenAI.apiKeySecretRef.name }}
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.azureOpenAI.apiKeySecretRef.name }}
+                  key: {{ .Values.azureOpenAI.apiKeySecretRef.key }}
+            {{- end }}
+            {{- if .Values.harness.miProxy.enabled }}
+            - {name: IDENTITY_ENDPOINT, value: "http://127.0.0.1:{{ .Values.harness.miProxy.port }}/MSI/token"}
+            - name: IDENTITY_HEADER
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.harness.miProxy.headerSecret }}, key: IDENTITY_HEADER}
+            {{- end }}
+            {{- range $key, $value := .Values.harness.env }}
+            - {name: {{ $key }}, value: {{ $value | quote }}}
+            {{- end }}
+          ports: [{containerPort: 8088}]
+          readinessProbe:
+            httpGet: {path: /readiness, port: 8088}
+            initialDelaySeconds: 5
+          resources: {{ .Values.harness.resources | toJson }}
+          volumeMounts:
+            - {name: home, mountPath: /home/harness}
+            {{- if .Values.keyVaultCSI.enabled }}
+            - {name: secrets-store, mountPath: /mnt/secrets-store, readOnly: true}
+            {{- end }}
+        {{- if .Values.harness.miProxy.enabled }}
+        - name: mi-proxy
+          image: {{ required "miProxy is a stub: supply a reviewed App Service MI-protocol proxy image" .Values.harness.miProxy.image | quote }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: LISTEN_ADDRESS, value: "127.0.0.1:{{ .Values.harness.miProxy.port }}"}
+            - {name: ALLOWED_RESOURCES, value: "https://cognitiveservices.azure.com,https://storage.azure.com"}
+            - name: IDENTITY_HEADER
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.harness.miProxy.headerSecret }}, key: IDENTITY_HEADER}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 128Mi}
+        {{- end }}
+      {{- include "d.csiVolume" . | nindent 6 }}
+  volumeClaimTemplates:
+    - metadata: {name: home}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if ne .Values.harness.storageClassName nil }}
+        storageClassName: {{ .Values.harness.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests: {storage: {{ .Values.harness.storage }}}
+{{- end }}

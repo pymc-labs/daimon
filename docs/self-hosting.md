@@ -1650,3 +1650,9 @@ Historical TEST tariffs also require the explicit billing opt-in described in
 connections only. Hostname classification is literal/name-based, without DNS
 resolution. No grant permits credentials over non-loopback HTTP. Known cloud
 metadata names and addresses are refused regardless of grants or scheme.
+
+## Kubernetes deployment
+
+The branch-only AKS Helm baseline, including local kind validation, identity
+proxy requirements and PodSecurity exceptions, is documented in
+[`deploy/helm/daimon-selfhost`](../deploy/helm/daimon-selfhost/README.md).

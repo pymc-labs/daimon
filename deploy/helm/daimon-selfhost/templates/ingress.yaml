@@ -1,0 +1,35 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "d.name" . }}
+  annotations: {{ .Values.ingress.annotations | toJson }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls: {{ .Values.ingress.tls | toJson }}
+  {{- end }}
+  rules:
+    {{- if .Values.services.teams.enabled }}
+    - host: {{ .Values.ingress.teamsHost }}
+      http:
+        paths:
+          - path: /api/messages
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "d.name" . }}-teams
+                port: {number: {{ .Values.services.teams.port }}}
+    {{- end }}
+    - host: {{ .Values.ingress.mcpHost }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "d.name" . }}-mcp
+                port: {number: {{ .Values.services.mcp.port }}}
+{{- end }}

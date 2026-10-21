@@ -1,0 +1,77 @@
+{{- $root := . }}
+{{- range $name := list "init" "mcp" "teams" "scheduler" "discord" "slack" }}
+{{- $init := eq $name "init" }}
+{{- $svc := dict "enabled" $.Values.init.enabled "env" dict "port" 0 }}
+{{- if not $init }}{{ $svc = index $.Values.services $name }}{{ end }}
+{{- if and $svc.enabled (or $init $.Values.services.enabled) }}
+---
+apiVersion: {{ ternary "batch/v1" "apps/v1" $init }}
+kind: {{ ternary "Job" "Deployment" $init }}
+metadata:
+  name: {{ include "d.name" $ }}-{{ $name }}{{ if $init }}-{{ $.Release.Revision }}{{ end }}
+spec:
+  {{- if $init }}
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  {{- else }}
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: {{ include "d.name" $ }}-{{ $name }}}
+  {{- end }}
+  template:
+    metadata:
+      labels: {app: {{ include "d.name" $ }}-{{ $name }}}
+    spec:
+      {{- if $init }}
+      restartPolicy: Never
+      {{- end }}
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ $.Values.imagePullSecrets | toJson }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "d.image" (dict "root" $ "image" $.Values.images.host) | quote }}
+          imagePullPolicy: {{ $.Values.images.host.pullPolicy }}
+          {{- if $init }}
+          command: [sh, -ec]
+          args:
+            - >-
+              until python -c 'import asyncio,os; from sqlalchemy.ext.asyncio import create_async_engine; e=create_async_engine(os.environ["DAIMON_DATABASE__URL"]); asyncio.run(e.connect().start())' >/dev/null 2>&1;
+              do sleep 2; done;
+              alembic upgrade head && daimon defaults apply
+          {{- else if eq $name "mcp" }}
+          command: [uvicorn, "daimon.adapters.mcp.server:create_mcp_app", --factory, --host, 0.0.0.0, --port, {{ $svc.port | quote }}]
+          {{- else if eq $name "scheduler" }}
+          command: [daimon-scheduler]
+          {{- else }}
+          command: [python, -m, "daimon.adapters.{{ $name }}"]
+          {{- end }}
+          envFrom:
+            - secretRef: {name: {{ $.Values.secrets.host }}}
+          env:
+            - {name: PGSSLROOTCERT, value: /etc/ssl/certs/ca-certificates.crt}
+            {{- range $key, $value := mergeOverwrite (deepCopy $.Values.host.env) $svc.env }}
+            - {name: {{ $key }}, value: {{ $value | quote }}}
+            {{- end }}
+          resources: {{ $.Values.host.resources | toJson }}
+          {{- if $svc.port }}
+          ports: [{containerPort: {{ $svc.port }}}]
+          readinessProbe:
+            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
+            initialDelaySeconds: 5
+          {{- end }}
+          {{- include "d.csiMount" $ | nindent 10 }}
+      {{- include "d.csiVolume" $ | nindent 6 }}
+{{- if $svc.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "d.name" $ }}-{{ $name }}
+spec:
+  type: ClusterIP
+  selector: {app: {{ include "d.name" $ }}-{{ $name }}}
+  ports: [{port: {{ $svc.port }}, targetPort: {{ $svc.port }}}]
+{{- end }}
+{{- end }}
+{{- end }}
