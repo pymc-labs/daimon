@@ -437,13 +437,21 @@ permission; they cannot relax it. Host inspection pauses still honor automatic
 permissions and saved allow rules, including unattended runs. After a host
 restart, historical approval records recover completed batch members so the
 remaining approvals can still be submitted.
-Locally provisioned skill versions load from the tenant's selfhosted catalog,
-including exact channel grants for bundles retained by another account.
-Selfhosted skill uploads are not yet available; a channel grant without a local
-bundle is skipped, and an agent pin without a local bundle refuses the turn.
-Agent skill pins retain their uploader account and principal when attached, so
-authorized callers of a shared agent load the same retained bytes. This grants
-access only to attached versions, without exposing the uploader's other bundles.
+
+Selfhosted turns support unversioned seeded skills from the configured defaults
+root. Custom skill uploads and channel-library additions have no supported
+selfhosted provisioning path yet: no production CLI or MCP upload route writes
+the selfhosted skill catalog. Existing Anthropic library uploads do not populate
+it. Do not configure custom version pins expecting those uploads to be available.
+
+The internal catalog reader can load already-retained bundles, including exact
+channel grants, but its store API and test-seeded rows are not an upload feature.
+It looks up agent pins in the agent's tenant catalog, never a deployment account's
+catalog. Attached pins carry uploader account and principal provenance; authorized
+shared-agent callers can read only those attached versions. A channel grant
+without retained bytes is skipped, and an agent pin without retained bytes
+refuses the turn. No provider upload or Anthropic fallback fills missing bytes.
+
 Replay and Stop page through long in-turn histories by cursor under their
 existing deadlines, without a fixed 5,000-record ceiling.
 Explicit agent `ask` permissions always require confirmation, even for sandbox

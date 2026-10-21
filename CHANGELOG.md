@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
 
-- Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance for locally provisioned skill versions attached to shared agents.
+- Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance in the internal reader for already-retained skill versions attached to shared agents. This does not provide selfhosted uploads.
 - Reject self-hosted session-pool credentials without pool routing and empty
   transport session IDs; document matching Entra authentication in the harness.
 
@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include async managed-identity transport in the harness image and finish subprocess cleanup when cancellation arrives during launch.
 
 - Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.
-- Load locally provisioned agent and channel skill bundles in selfhosted turns, preserve approval permissions across reconnects, and attach approved tool results to their original tool blocks. Replay and Stop can read past 5,000 journal records within one turn. Selfhosted skill uploads are not yet available.
+- Preserve approval permissions across selfhosted reconnects and attach approved tool results to their original tool blocks. Replay and Stop can read past 5,000 journal records within one turn. Unversioned seeded skills are supported; custom uploads and channel-library additions have no production selfhosted catalog writer. The internal retained-bundle reader requires bytes already stored under the agent's tenant; Anthropic library uploads do not populate that catalog.
 
 - Bound selfhosted Entra audiences to operator-approved origins and tenants. Fixed approval handling through the turn runner, preserved explicit agent confirmation and stored MCP rules, and resumed session history and usage replay from durable cursors.
 
