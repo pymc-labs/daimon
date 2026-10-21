@@ -43,7 +43,7 @@ def scope(tenant: str, account: str | None = None) -> Scope:
 def agent_spec(name: str = "daimon") -> AgentSpec:
     return AgentSpec(
         name=name,
-        model=ModelRef(provider=LOOP.provider, id="gpt-5"),
+        model=ModelRef(provider=LOOP.provider, id="gpt-6-luna"),
         system="Be helpful.",
         mcp_servers=(
             MCPConnection(
@@ -647,7 +647,7 @@ async def test_shared_agent_skill_attachments_keep_uploader_provenance(
     agent = await agents.create(
         alice_scope,
         AgentSpec(
-            name="shared", model=ModelRef(provider="selfhosted", id="gpt-5"), skills=(pinned,)
+            name="shared", model=ModelRef(provider="selfhosted", id="gpt-6-luna"), skills=(pinned,)
         ),
         key="alice-pins",
     )
@@ -739,7 +739,9 @@ async def test_shared_agent_skill_attachments_keep_uploader_provenance(
     unrelated = await agents.create(
         bob_scope,
         AgentSpec(
-            name="unrelated", model=ModelRef(provider="selfhosted", id="gpt-5"), skills=(unpinned,)
+            name="unrelated",
+            model=ModelRef(provider="selfhosted", id="gpt-6-luna"),
+            skills=(unpinned,),
         ),
         key="unowned-pin",
     )
