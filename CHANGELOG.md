@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance in the internal reader for already-retained skill versions attached to shared agents. This does not provide selfhosted uploads.
 - Reject self-hosted session-pool credentials without pool routing and empty
   transport session IDs; document matching Entra authentication in the harness.
+- Preserve measured self-hosted usage recovered from remote write-ahead records and
+  deliver delayed checkpoint warnings on the next turn.
+
 - Self-hosted harnesses durably record paid-work claims before model calls,
   preserve cleanup recovery cursors, and display checkpoint durability notices.
 

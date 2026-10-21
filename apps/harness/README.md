@@ -277,8 +277,9 @@ If write-ahead storage fails, the turn ends with retryable
 `durability_unavailable` before paid work. These small writes use a separate
 worker from asynchronous workspace uploads. Restore loads remote claims newer
 than the checkpoint; a known idempotency key replays an interrupted outcome and
-never repeats tools or model calls. Unresolved request inventory becomes
-`usage_unavailable` for reconciliation.
+never repeats tools or model calls. Measured usage in the remote inventory is
+replayed with its original request ID, model and token counts. Only started
+requests with no usage record become `usage_unavailable` for reconciliation.
 
 Each `model_request_started` is committed locally before its remote write-ahead. After tool workers stop, every terminal turn (including
 cancellation) checkpoints the SQLite journal, history, turn/idempotency inventory
@@ -286,7 +287,9 @@ and `work/` to `sessions/<sandbox_id>/<seq>.tar.zst`. SQLite's backup API includ
 committed WAL data. Upload failures are logged by stage and exception class and
 mark the session not durable until a later successful snapshot. They never seal
 polls, cancellation or later turns. A `checkpoint_warning` notice is emitted once
-per session as a non-terminal native notice. SQLite snapshot capture runs on the
+per session as a non-terminal native notice on the next new turn. A durable
+pending marker retains late upload failures after the completed turn's reader
+closes, including across a local process restart. SQLite snapshot capture runs on the
 journal worker; workspace export, upload and retention run separately with one
 in-flight attempt and one coalesced pending snapshot. Polls and new turns do not
 wait for storage. The manifest caps escaped UTF-8 bytes, records a skip count
@@ -308,8 +311,8 @@ in-flight turns. The driver normalizes this to an authoritative mux history gap
 and reconciles usage. Sequence numbers remain monotonic across lost sandboxes.
 An unfinished restored turn ends as interrupted; every started request without
 usage becomes `usage_unavailable`, preserving unknown usage for reconciliation.
-A completed request whose usage missed the latest checkpoint also stays unknown;
-no zero-token observation is fabricated.
+A completed request whose usage missed both the latest checkpoint and remote
+write-ahead stays unknown; no zero-token observation is fabricated.
 
 Every transport call requires an explicit persisted `after_seq` high-water,
 including cleanup cancellation; the transport never defaults it to zero.

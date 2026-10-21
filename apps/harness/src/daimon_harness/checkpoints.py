@@ -274,16 +274,21 @@ class Checkpoints:
                 remote_seq,
             )
             known = {
-                str(event.data.get("request_id"))
+                (event.type, event.data.get("request_id"))
                 for event in journal.events(session_id)
-                if event.turn_id == request.turn_id and event.type == "model_request_started"
+                if event.turn_id == request.turn_id
+                and (
+                    event.type in {"model_request_started", "usage"}
+                    or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
+                )
             }
             for event in record.inventory:
                 if (
-                    event.type == "model_request_started"
-                    and event.data.get("request_id") not in known
-                ):
+                    event.type in {"model_request_started", "usage"}
+                    or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
+                ) and (event.type, event.data.get("request_id")) not in known:
                     journal.append(request, event.type, event.data)
+                    known.add((event.type, event.data.get("request_id")))
         return journal
 
     def names(self, session_id: str) -> list[tuple[int, str]]:

@@ -42,6 +42,7 @@ class Wire:
         self.turns = {}
         self.posts = 0
         self.unmatched_start = False
+        self.pending_checkpoint_warning = False
 
     def handle(self, request):
         assert request.headers["authorization"] == "Bearer offline"
@@ -84,6 +85,15 @@ class Wire:
                     {"request_id": f"request-{self.posts}", "model": "gpt-6-luna"},
                 )
                 events[-1] = ("turn_ended", {"outcome": "interrupted"})
+            if self.pending_checkpoint_warning:
+                events.insert(
+                    0,
+                    (
+                        "checkpoint_warning",
+                        {"message": "Recent messages and files may be lost after a restart."},
+                    ),
+                )
+                self.pending_checkpoint_warning = False
             for kind, data in events:
                 self.events.append(
                     dict(
@@ -288,6 +298,10 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior
                     )
                 )
 
+        if index == 2:
+            # Upload failure arrives after the original reader closes.
+            wire.pending_checkpoint_warning = True
+
         async def reseed():
             return "question"
 
@@ -311,6 +325,7 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior
         assert f"answer {index}" in str(outcome.state.content)
         assert ("skills unavailable here" in str(outcome.state.content)) == (index == 1)
         assert len(finalized) == index
+        assert ("may be lost after a restart" in str(outcome.state.content)) == (index == 2)
         if index == 2:
             assert "answer 1" not in str(outcome.state.content)
     assert wire.posts == 2

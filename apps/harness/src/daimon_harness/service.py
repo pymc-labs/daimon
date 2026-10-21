@@ -186,16 +186,32 @@ class Supervisor:
         if not self.checkpoint_warned and not any(
             event.type == "checkpoint_warning" for event in self.journal.events(session_id)
         ):
-            requests = [r for r in self.journal.turns() if r.session_id == session_id]
-            if requests:
-                self.journal.append(
-                    requests[-1],
-                    "checkpoint_warning",
-                    {
-                        "message": "Session state is not fully durable",
-                    },
-                )
-                self.checkpoint_warned = True
+            # Uploads can finish after the completed turn's reader has closed.
+            # Keep the notice durable until a new turn can display it.
+            marker = self.journal.root / "checkpoint.notice"
+            with marker.open("w") as output:
+                output.write(session_id)
+                output.flush()
+                os.fsync(output.fileno())
+            sync_directory(self.journal.root)
+
+    def deliver_checkpoint_notice(self, request: TurnRequest) -> None:
+        marker = self.journal.root / "checkpoint.notice"
+        if not marker.exists():
+            return
+        if marker.read_text() != request.session_id:
+            raise ConflictError("session_bound")
+        if not any(
+            event.type == "checkpoint_warning" for event in self.journal.events(request.session_id)
+        ):
+            self.journal.append(
+                request,
+                "checkpoint_warning",
+                {"message": "Recent messages and files may be lost after a restart."},
+            )
+        self.checkpoint_warned = True
+        marker.unlink()
+        sync_directory(self.journal.root)
 
     def durable_append(
         self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]
@@ -451,6 +467,7 @@ class Supervisor:
             self.tasks = {key: task for key, task in self.tasks.items() if not task.done()}
             await self.io(self.journal.sandbox, request.session_id)
             if await self.io(self.journal.claim, request):
+                await self.io(self.deliver_checkpoint_notice, request)
                 self.tasks[request.turn_id] = asyncio.create_task(self.run(request, credentials))
 
     async def stream(self, request: TurnRequest) -> AsyncIterator[str]:

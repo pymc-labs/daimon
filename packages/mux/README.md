@@ -1296,3 +1296,7 @@ sequences after sandbox loss.
 Self-hosted transport calls require an explicit `after_seq` high-water. Both
 direct and invocation transports retain it with session context and optional
 `replay_after_seq`; cleanup calls must supply the persisted cursor too.
+
+Checkpoint warnings queued after a reader closes attach to the next new turn,
+so the host can show the non-terminal notice within that turn. Recovered remote
+usage keeps its original request identity and measured token counts.
