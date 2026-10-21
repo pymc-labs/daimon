@@ -88,6 +88,10 @@ def private_config(directory: Path, url: str, capability: str, model: str) -> No
             "code_mode_host = false",
             "shell_snapshot = false",
             "view_image = false",
+            "[skills]",
+            "include_instructions = false",
+            "[skills.bundled]",
+            "enabled = false",
             "[analytics]",
             "enabled = false",
             "[feedback]",
@@ -367,6 +371,7 @@ class CodexModelAdapter(AzureModelAdapter):
             with tempfile.TemporaryDirectory(prefix="codex-", dir=base) as scratch:
                 directory = Path(scratch)
                 async with relay.serve() as endpoint:
+                    relay.private_paths += (str(directory),)
                     private_config(directory, endpoint, relay.capability, context.request.model)
                     env = {
                         "PATH": os.defpath,

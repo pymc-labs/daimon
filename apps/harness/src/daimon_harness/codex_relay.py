@@ -47,6 +47,11 @@ class ResponsesRelay:
         self.lock = asyncio.Lock()
         self.stopping = False
         self.handlers: set[asyncio.Task[object]] = set()
+        self.model_requests = 0
+        self.private_paths: tuple[str, ...] = (
+            (str(context.state_dir),) if context.state_dir is not None else ()
+        )
+        self.outcomes: dict[str, asyncio.Task[None]] = {}
 
     @asynccontextmanager
     async def serve(self) -> AsyncIterator[str]:
@@ -63,10 +68,29 @@ class ResponsesRelay:
             yield f"http://127.0.0.1:{port}"
         finally:
             self.stopping = True
-            for task in list(self.handlers):
-                task.cancel()
-            await asyncio.gather(*self.handlers, return_exceptions=True)
-            await runner.cleanup()
+
+            async def teardown() -> None:
+                try:
+                    handlers = list(self.handlers)
+                    for task in handlers:
+                        task.cancel()
+                    await asyncio.gather(*handlers, return_exceptions=True)
+                finally:
+                    try:
+                        await runner.cleanup()
+                    finally:
+                        listener.close()
+
+            finalization = asyncio.create_task(teardown())
+            interrupted = False
+            while not finalization.done():
+                try:
+                    await asyncio.shield(finalization)
+                except asyncio.CancelledError:
+                    interrupted = True
+            await finalization
+            if interrupted:
+                raise asyncio.CancelledError
 
     def validate_item(self, item: dict[str, JsonValue]) -> None:
         kind = item.get("type")
@@ -102,7 +126,11 @@ class ResponsesRelay:
         async def commit() -> None:
             await self.context.emit(kind, data)
 
-        task = asyncio.create_task(commit())
+        request_id = str(data["request_id"])
+        task = self.outcomes.get(request_id)
+        if task is None:
+            task = asyncio.create_task(commit())
+            self.outcomes[request_id] = task
         interrupted = False
         while not task.done():
             try:
@@ -112,21 +140,79 @@ class ResponsesRelay:
         await task
         return interrupted
 
+    def clean_paths(self, value: JsonValue) -> JsonValue:
+        if isinstance(value, str):
+            for path in sorted(self.private_paths, key=len, reverse=True):
+                value = value.replace(path, "[private controller]")
+            return value
+        if isinstance(value, list):
+            return [self.clean_paths(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.clean_paths(item) for key, item in value.items()}
+        return value
+
+    def clean_input(self, items: list[JsonValue]) -> list[JsonValue]:
+        result: list[JsonValue] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") in {"system", "developer"}:
+                continue
+            content = item.get("content", "")
+            texts = (
+                [content]
+                if isinstance(content, str)
+                else [part.get("text", "") for part in content if isinstance(part, dict)]
+                if isinstance(content, list)
+                else []
+            )
+            if item.get("role") == "user" and any(
+                text.lstrip().startswith(marker)
+                for text in texts
+                if isinstance(text, str)
+                for marker in ("<skills_instructions>", "<skill>", "<environment_context>")
+            ):
+                continue
+            result.append(self.clean_paths(item))
+        return result
+
     async def forward(self, request: web.Request) -> web.StreamResponse:
-        body = await request.json()
-        # Do not forward Codex's native tools, previous response IDs, storage or
-        # caller-selected deployment. The harness owns all four decisions.
-        body["model"] = self.context.request.model
-        body["tools"] = self.tools
-        body["store"] = False
-        body["stream"] = True
-        body["parallel_tool_calls"] = False
-        body.pop("previous_response_id", None)
-        body.pop("conversation", None)
-        body["input"] = self.history + body.get("input", [])
-        retained = [
-            item for item in body["input"] if item.get("role") not in {"system", "developer"}
-        ]
+        if self.model_requests >= min(self.context.request.limits.max_tool_calls + 2, 128):
+            self.failure = HarnessError("model_request_limit", "Maximum model requests exceeded")
+            raise web.HTTPServiceUnavailable(text="Maximum model requests exceeded")
+        self.model_requests += 1
+        source = cast(dict[str, JsonValue], await request.json())
+        incoming = cast(list[JsonValue], source.get("input", []))
+        items = self.clean_input(self.history + incoming)
+        # Only these Responses fields cross the provider boundary. Never forward
+        # Codex metadata, cache identifiers, storage, background or tier options.
+        body: dict[str, JsonValue] = {
+            "model": self.context.request.model,
+            "input": cast(
+                list[JsonValue],
+                [
+                    {
+                        "role": "developer",
+                        "content": self.context.request.instructions
+                        + "\n\n"
+                        + await self.context.skills(),
+                    }
+                ]
+                + items,
+            ),
+            "tools": cast(list[JsonValue], self.tools),
+            "store": False,
+            "stream": True,
+            "parallel_tool_calls": False,
+            "include": ["reasoning.encrypted_content"],
+        }
+        reasoning = source.get("reasoning")
+        if isinstance(reasoning, dict):
+            body["reasoning"] = {
+                key: value for key, value in reasoning.items() if key in {"effort", "summary"}
+            }
+        body = cast(dict[str, JsonValue], self.clean_paths(body))
+        retained = items
         self.context.model_input = retained
         request_id = str(uuid4())
         reported = False

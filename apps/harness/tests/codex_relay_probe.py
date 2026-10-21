@@ -4,12 +4,14 @@ import asyncio
 import json
 import os
 import shlex
+import shutil
 import sys
 import tempfile
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import httpx
-from daimon_harness.codex_adapter import private_config
+from daimon_harness.codex_adapter import CODEX_VERSION, CodexConnection, private_config
 from daimon_harness.codex_relay import ResponsesRelay
 from daimon_harness.isolation import prepare_service, protect_process
 from daimon_harness.journal import Journal
@@ -45,15 +47,59 @@ async def probe(home: Path) -> None:
         relay = ResponsesRelay(context, [], [], upstream, "https://fake.invalid", headers)
         with tempfile.TemporaryDirectory(dir=home / ".daimon") as scratch:
             directory = Path(scratch)
-            async with relay.serve() as endpoint:
+            async with relay.serve() as endpoint, AsyncExitStack() as cleanup:
                 private_config(directory, endpoint, relay.capability, request.model)
+                binary = shutil.which(os.environ.get("HARNESS_CODEX_BINARY", "codex"))
+                assert binary is not None, "pinned Codex binary required"
+                process = await asyncio.create_subprocess_exec(
+                    binary,
+                    "app-server",
+                    "--listen",
+                    "stdio://",
+                    cwd=scratch,
+                    env={
+                        "PATH": os.defpath,
+                        "HOME": scratch,
+                        "CODEX_HOME": scratch,
+                        "LANG": "C.UTF-8",
+                    },
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                connection = CodexConnection(process, context, {})
+                cleanup.push_async_callback(connection.stop)
+                initialized = await connection.call(
+                    "initialize",
+                    {
+                        "clientInfo": {"name": "daimon_harness", "version": "0.1.0"},
+                        "capabilities": {"experimentalApi": True},
+                    },
+                )
+                assert str(initialized["userAgent"]).startswith(
+                    "daimon_harness/" + CODEX_VERSION + " "
+                )
+                await connection.send({"method": "initialized"})
+                await connection.call(
+                    "thread/start",
+                    {
+                        "model": request.model,
+                        "modelProvider": "harness",
+                        "cwd": scratch,
+                        "ephemeral": True,
+                        "environments": [],
+                        "dynamicTools": [],
+                    },
+                )
                 path = directory / "config.toml"
                 assert path.stat().st_uid == 10000
                 assert path.stat().st_mode & 0o777 == 0o600
                 script = f"""
 import os, urllib.request, urllib.error
 assert os.geteuid() == {uid}
-for path in [{str(path)!r}, '/proc/{os.getpid()}/environ', '/proc/{os.getpid()}/mem']:
+for path in [{str(path)!r}, '/proc/{os.getpid()}/environ', '/proc/{os.getpid()}/mem',
+             '/proc/{process.pid}/environ', '/proc/{process.pid}/mem']:
     try:
         open(path, 'rb').read(1)
         raise AssertionError('tool read private controller state')

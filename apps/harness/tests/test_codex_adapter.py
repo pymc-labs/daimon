@@ -461,3 +461,77 @@ async def test_cancel_during_controller_creation_is_reaped(tmp_path, monkeypatch
         await asyncio.wait_for(task, 5)
     assert processes and all(p.returncode is not None for p in processes)
     assert not list(tmp_path.rglob("config.toml"))
+
+
+@pytest.mark.parametrize("budget", [0, 2])
+async def test_real_codex_repeated_denied_calls_obey_budget(tmp_path, codex_binary, budget):
+    from daimon_harness.service import Supervisor
+
+    adapter = OfflineCodex(lambda _: sse_response([write_call()]))
+    request = TurnRequest.model_validate(
+        {
+            **turn(),
+            "tool_policy": {"write": "deny"},
+            "limits": {"max_tool_calls": budget, "deadline_s": 20},
+        }
+    )
+    supervisor = Supervisor(tmp_path, adapter)
+    try:
+        await supervisor.submit(request)
+        await asyncio.wait_for(supervisor.tasks[request.turn_id], 15)
+        events = supervisor.journal.events(request.session_id)
+        assert events[-1].type == "turn_ended"
+        assert events[-1].data["outcome"] == "errored"
+        assert events[-1].data["error"]["kind"] == "tool_limit"
+        assert adapter.calls == budget + 1
+        assert sum(e.type == "usage" for e in events) == adapter.calls
+        assert not (supervisor.journal.sandbox(request.session_id)[0] / "work/codex.txt").exists()
+    finally:
+        await supervisor.close()
+
+
+async def test_real_codex_has_no_bundled_skills_or_private_prompt(
+    tmp_path, codex_binary, monkeypatch
+):
+    from daimon_harness import codex_relay
+
+    captured = []
+    original = codex_relay.ResponsesRelay.forward
+
+    async def inspect(self, request):
+        source = await request.json()
+        captured.append(source)
+        # Check the controller's raw request before the relay sanitizes it.
+        payload = json.dumps(source)
+        for forbidden in [
+            "skills_instructions",
+            "<skill>",
+            "skill-installer/SKILL.md",
+            "imagegen/SKILL.md",
+        ]:
+            assert forbidden not in payload
+        assert not list(tmp_path.rglob("skills/.system/*/SKILL.md"))
+        return await original(self, request)
+
+    monkeypatch.setattr(codex_relay.ResponsesRelay, "forward", inspect)
+
+    async def emit(*args):
+        pass
+
+    request = TurnRequest.model_validate(
+        {
+            **turn(),
+            "input": [{"type": "text", "text": "Use $imagegen and $skill-installer."}],
+        }
+    )
+    context = TurnContext(request, tmp_path / "sandbox", emit, state_dir=tmp_path / "private")
+
+    def respond(http):
+        payload = http.content.decode()
+        assert str(tmp_path / "private") not in payload
+        assert "<environment_context>" not in payload
+        assert "skills_instructions" not in payload and "<skill>" not in payload
+        return sse_response([assistant()])
+
+    await OfflineCodex(respond).run(context, [])
+    assert captured

@@ -427,8 +427,10 @@ HARNESS_LOOP=agents_sdk uv run pytest apps/harness
 sudo python apps/harness/tests/codex_relay_probe.py
 ```
 
-Tests that exercise codex-rs itself skip when the binary is absent; install the
-pinned binary to make those checks meaningful. The general harness/driver tests
+Tests that exercise codex-rs itself skip when the binary is absent locally.
+CI installs the checksum-verified 0.162.1 binary in the harness test job and
+runs `codex --version` plus the running-controller tool-UID relay probe in the
+image job. The general harness/driver tests
 continue to inject their existing fake adapter. Codex-specific tests additionally
 run the real binary against synthetic Responses SSE and a local HTTPS MCP
 server: tool loops, approvals, denial, supplied results, durable request starts,
@@ -440,16 +442,28 @@ No test needs an Azure resource or real model key. The optional live SDK test
 uses `AZURE_OPENAI_DEPLOYMENT=gpt-6-luna` only and refuses every other value.
 
 Production enablement remains subject to normal review and live Azure protocol
-validation; leave the default on `agents_sdk` meanwhile. A full harness image
-was not built locally during this spike.
+validation; leave the default on `agents_sdk` meanwhile. The image CI job builds the checksum-verified release stage.
+
+Codex bundled skills and skill instruction injection are disabled explicitly.
+The relay removes controller-authored skill/environment messages and private
+controller paths before provider I/O and durable history. Harness-provided
+skills remain available through C3. Denied calls count toward `max_tool_calls`;
+the relay also caps model requests per turn at `min(max_tool_calls + 2, 128)`.
+Only the harness-owned Responses request fields and reasoning effort/summary
+cross the provider boundary. Shutdown joins usage commits before turn end,
+including when cancellation and the deadline overlap.
 
 ### Paid Luna probes
 
-`HARNESS_LIVE_PROBE=openai` is an explicit test-only override for either loop.
+`HARNESS_LIVE_PROBE=openai` with `HARNESS_RUNTIME_MODE=probe` is an explicit
+test-only override for either loop.
 It captures `OPENAI_API_KEY` at startup and uses only
 `https://api.openai.com/v1/responses`. Every probe turn must select `gpt-6-luna`;
 other models are refused before I/O. An OpenAI key alone never selects this
-provider. Leave this variable unset for Azure deployments.
+provider. It also requires `HARNESS_RUNTIME_MODE=probe`; startup refuses the
+override in production mode (the default) or if any `AZURE_*` or `IDENTITY_*`
+configuration is present. Startup logs the selected provider. Leave both probe
+variables unset for Azure deployments.
 
 `tests/live_luna_probe.py` runs the real authenticated harness HTTP service,
 local MCP, service UID 10000 and tool UID 10001. It audits the actual provider

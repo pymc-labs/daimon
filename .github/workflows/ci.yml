@@ -240,6 +240,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-daimon
+      - name: Install pinned Codex controller (harness)
+        if: matrix.suite == 'harness'
+        run: |
+          codex_dir=$(mktemp -d)
+          curl --fail --location --retry 3 \
+            https://github.com/openai/codex/releases/download/rust-v0.162.1/codex-x86_64-unknown-linux-musl.tar.gz \
+            --output "$codex_dir/codex.tar.gz"
+          echo "86f268d81b898f3e144c5ecff2ad2fda2c5802e042d6195b72538fe0fa125057  $codex_dir/codex.tar.gz" | sha256sum --check
+          tar -xzf "$codex_dir/codex.tar.gz" -C "$codex_dir"
+          chmod 755 "$codex_dir/codex-x86_64-unknown-linux-musl"
+          echo "HARNESS_CODEX_BINARY=$codex_dir/codex-x86_64-unknown-linux-musl" >> "$GITHUB_ENV"
+          "$codex_dir/codex-x86_64-unknown-linux-musl" --version | grep -Fx 'codex-cli 0.162.1'
       - name: pytest (${{ matrix.suite }})
         run: >-
           uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal
@@ -341,6 +353,10 @@ jobs:
           tags: daimon-harness:test
       - name: data stack and service imports
         run: docker run --rm daimon-harness:test python -c 'import numpy, pandas, pymc, pymc_marketing, daimon_harness.service'
+      - name: pinned Codex version
+        run: docker run --rm daimon-harness:test codex --version | grep -Fx 'codex-cli 0.162.1'
+      - name: tool UID cannot access the Codex relay
+        run: docker run --rm -i daimon-harness:test python - < apps/harness/tests/codex_relay_probe.py
       - name: isolated tool identities
         run: docker run --rm -i daimon-harness:test python - < apps/harness/tests/image_probe.py
       - name: managed identity startup without an API key

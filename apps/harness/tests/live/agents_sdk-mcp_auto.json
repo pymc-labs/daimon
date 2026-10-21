@@ -9,13 +9,13 @@
   "errors": [],
   "usage_checks": [
     {
-      "request_id": "28597c0d-a9ae-48ea-94fa-dcf80b582e76",
+      "request_id": "c76ad404-a574-43de-b529-81b4ada1711c",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
     },
     {
-      "request_id": "c1fe7aef-7eda-4da2-9790-a2e940ef7ce6",
+      "request_id": "42c4bd46-8322-41e8-b9a2-3308e7f3848e",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
@@ -24,11 +24,11 @@
   "api_observations": [
     {
       "turn_id": "agents_sdk-mcp_auto",
-      "request_id": "28597c0d-a9ae-48ea-94fa-dcf80b582e76",
+      "request_id": "c76ad404-a574-43de-b529-81b4ada1711c",
       "started_seq_before_network": 8,
       "stream": false,
       "http_status": 200,
-      "response_id": "resp_01665861b82785d5016ad85543ce1087d196e339577a54fdf7",
+      "response_id": "resp_05cde334bf630777016ad872f1809887d1a060512e6875aaf0",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 216,
@@ -52,11 +52,11 @@
     },
     {
       "turn_id": "agents_sdk-mcp_auto",
-      "request_id": "c1fe7aef-7eda-4da2-9790-a2e940ef7ce6",
+      "request_id": "42c4bd46-8322-41e8-b9a2-3308e7f3848e",
       "started_seq_before_network": 12,
       "stream": false,
       "http_status": 200,
-      "response_id": "resp_01665861b82785d5016ad85548998887d18755e6e5bba76296",
+      "response_id": "resp_05cde334bf630777016ad872fd14c887d1af37149de3afaa7f",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 309,
@@ -84,7 +84,7 @@
       "seq": 7,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:39.573956Z",
+      "at": "2026-10-21T08:08:17.312578Z",
       "type": "status_running",
       "data": {}
     },
@@ -92,10 +92,10 @@
       "seq": 8,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:39.626744Z",
+      "at": "2026-10-21T08:08:17.363296Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "28597c0d-a9ae-48ea-94fa-dcf80b582e76",
+        "request_id": "c76ad404-a574-43de-b529-81b4ada1711c",
         "model": "gpt-6-luna"
       }
     },
@@ -103,10 +103,10 @@
       "seq": 9,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:44.403519Z",
+      "at": "2026-10-21T08:08:28.887011Z",
       "type": "usage",
       "data": {
-        "request_id": "28597c0d-a9ae-48ea-94fa-dcf80b582e76",
+        "request_id": "c76ad404-a574-43de-b529-81b4ada1711c",
         "model": "gpt-6-luna",
         "input_tokens": 216,
         "cached_input_tokens": 0,
@@ -118,10 +118,10 @@
       "seq": 10,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:44.417890Z",
+      "at": "2026-10-21T08:08:28.892166Z",
       "type": "tool_use",
       "data": {
-        "call_id": "call_3kbIb8y6IUgdhC4OG7JK323B",
+        "call_id": "call_6dTPiuZ14aD5mSAMlROInPld",
         "name": "probe/echo",
         "input": {
           "text": "luna-mcp_auto"
@@ -133,10 +133,10 @@
       "seq": 11,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:44.438121Z",
+      "at": "2026-10-21T08:08:28.904950Z",
       "type": "tool_result",
       "data": {
-        "call_id": "call_3kbIb8y6IUgdhC4OG7JK323B",
+        "call_id": "call_6dTPiuZ14aD5mSAMlROInPld",
         "output": {
           "meta": null,
           "content": [
@@ -159,10 +159,10 @@
       "seq": 12,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:44.443913Z",
+      "at": "2026-10-21T08:08:28.908268Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "c1fe7aef-7eda-4da2-9790-a2e940ef7ce6",
+        "request_id": "42c4bd46-8322-41e8-b9a2-3308e7f3848e",
         "model": "gpt-6-luna"
       }
     },
@@ -170,10 +170,10 @@
       "seq": 13,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:50.351748Z",
+      "at": "2026-10-21T08:08:39.953031Z",
       "type": "usage",
       "data": {
-        "request_id": "c1fe7aef-7eda-4da2-9790-a2e940ef7ce6",
+        "request_id": "42c4bd46-8322-41e8-b9a2-3308e7f3848e",
         "model": "gpt-6-luna",
         "input_tokens": 309,
         "cached_input_tokens": 0,
@@ -185,10 +185,10 @@
       "seq": 14,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:50.356780Z",
+      "at": "2026-10-21T08:08:39.955280Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "6f3dae6a-c65c-4b53-a616-626d349eb3cf",
+        "message_id": "22a9e8ac-bf8b-461b-a6f8-3b611b2acf32",
         "text": "echo:luna-mcp_auto"
       }
     },
@@ -196,10 +196,10 @@
       "seq": 15,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:50.358142Z",
+      "at": "2026-10-21T08:08:39.957187Z",
       "type": "agent_message",
       "data": {
-        "message_id": "6f3dae6a-c65c-4b53-a616-626d349eb3cf",
+        "message_id": "22a9e8ac-bf8b-461b-a6f8-3b611b2acf32",
         "parts": [
           {
             "type": "text",
@@ -212,7 +212,7 @@
       "seq": 16,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-mcp_auto",
-      "at": "2026-10-21T06:01:50.636765Z",
+      "at": "2026-10-21T08:08:40.241206Z",
       "type": "turn_ended",
       "data": {
         "outcome": "completed"

@@ -120,6 +120,7 @@ async def wait_started(server, task):
 async def run_loop(home: Path, output: Path, backend: str, api_key: str, binary: str):
     os.environ["HARNESS_LOOP"] = backend
     os.environ["HARNESS_LIVE_PROBE"] = "openai"
+    os.environ["HARNESS_RUNTIME_MODE"] = "probe"
     os.environ["HARNESS_CODEX_BINARY"] = binary
     os.environ["OPENAI_API_KEY"] = api_key
     os.environ.pop("HARNESS_TEST_MODE", None)

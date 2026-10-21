@@ -308,7 +308,10 @@ details.
 The standalone harness image defaults to the OpenAI Agents SDK against Azure OpenAI.
 `HARNESS_LOOP=codex` opts into the Codex app-server loop using the same harness
 tool policies, UID isolation and Azure credential boundary. The image pins
-Codex 0.162.1. See `apps/harness/README.md` for the experimental backend
+Codex 0.162.1. Bundled controller skills are disabled; harness-provided skills
+still use the normal tool and approval boundary. The OpenAI live-test override
+requires `HARNESS_RUNTIME_MODE=probe` and refuses Azure/managed-identity
+configuration; production defaults to Azure. See `apps/harness/README.md` for the experimental backend
 limitations and offline verification; production enablement requires review.
 Build it from the repository root with
 `docker build -f apps/harness/Dockerfile -t daimon-harness .`. Its dependencies

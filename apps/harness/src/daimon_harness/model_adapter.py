@@ -405,6 +405,13 @@ class AzureModelAdapter:
         if self.live_probe not in {"", "openai"}:
             raise RuntimeError("HARNESS_LIVE_PROBE must be empty or openai")
         if self.live_probe:
+            if os.environ.get("HARNESS_RUNTIME_MODE", "production") != "probe":
+                raise RuntimeError("OpenAI live provider is forbidden in production mode")
+            if any(
+                value and (name.startswith("AZURE_") or name.startswith("IDENTITY_"))
+                for name, value in os.environ.items()
+            ):
+                raise RuntimeError("OpenAI live provider cannot override Azure configuration")
             self.key = os.environ.get("OPENAI_API_KEY")
             if not self.key:
                 raise RuntimeError("OpenAI live probe requires an explicitly supplied API key")

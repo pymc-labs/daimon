@@ -146,11 +146,11 @@ class TurnContext:
                 "executor": "mcp" if mcp else "agent",
             },
         )
-        if self.permission(name) == "deny":
-            return await result("Tool execution denied by policy", True)
         if self.tool_calls > self.request.limits.max_tool_calls:
             await result("Maximum tool calls exceeded", True)
             raise HarnessError("tool_limit", "Maximum tool calls exceeded")
+        if self.permission(name) == "deny":
+            return await result("Tool execution denied by policy", True)
         try:
             if self.permission(name) == "ask":
                 action_id = str(uuid4())

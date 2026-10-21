@@ -312,3 +312,208 @@ async def test_mcp_policy_mapping_keeps_original_server_tool_identity(
             )
             assert policy_names["a__b__echo"] == "a/b__echo"
             assert context.permission(policy_names["a__b__echo"]) == "deny"
+
+
+async def test_responses_field_allowlist(tmp_path):
+    def respond(request):
+        body = json.loads(request.content)
+        assert set(body) == {
+            "model",
+            "input",
+            "tools",
+            "store",
+            "stream",
+            "parallel_tool_calls",
+            "include",
+            "reasoning",
+        }
+        assert body["reasoning"] == {"effort": "low"}
+        return sse_response([assistant()])
+
+    async def emit(*args):
+        pass
+
+    async def headers():
+        return {}
+
+    context = TurnContext(TurnRequest.model_validate(turn()), tmp_path, emit)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as upstream:
+        relay = ResponsesRelay(context, [], [], upstream, "https://fake", headers)
+        async with relay.serve() as endpoint, httpx.AsyncClient() as caller:
+            response = await caller.post(
+                endpoint + "/responses",
+                headers={"Authorization": "Bearer " + relay.capability},
+                json={
+                    "input": [],
+                    "client_metadata": {"private": "value"},
+                    "prompt_cache_key": "untrusted",
+                    "background": True,
+                    "service_tier": "priority",
+                    "conversation": "untrusted",
+                    "previous_response_id": "untrusted",
+                    "max_output_tokens": 1,
+                    "truncation": "auto",
+                    "tool_choice": "required",
+                    "reasoning": {"effort": "low", "untrusted": "value"},
+                },
+            )
+            assert response.status_code == 200
+
+
+async def test_request_cap_bounds_continuations_without_tools(tmp_path):
+    events = []
+
+    async def emit(kind, data):
+        events.append((kind, data))
+
+    async def headers():
+        return {}
+
+    context = TurnContext(
+        TurnRequest.model_validate(
+            {
+                **turn(),
+                "limits": {"max_tool_calls": 0, "deadline_s": 20},
+            }
+        ),
+        tmp_path,
+        emit,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: sse_response([assistant()]))
+    ) as upstream:
+        relay = ResponsesRelay(context, [], [], upstream, "https://fake", headers)
+        async with relay.serve() as endpoint, httpx.AsyncClient() as caller:
+            for expected in [200, 200, 503, 503]:
+                response = await caller.post(
+                    endpoint + "/responses",
+                    headers={"Authorization": "Bearer " + relay.capability},
+                    json={"input": []},
+                )
+                assert response.status_code == expected
+        assert relay.failure.kind == "model_request_limit"
+    assert [kind for kind, _ in events] == ["model_request_started", "usage"] * 2
+
+
+@pytest.mark.parametrize("measured", [False, True])
+async def test_repeated_cancel_during_shutdown_joins_outcome_before_terminal(tmp_path, measured):
+    committing, release, started, shutdown = [asyncio.Event() for _ in range(4)]
+    events = []
+    endpoints = []
+
+    class Waiting(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            started.set()
+            await asyncio.Event().wait()
+            yield b""
+
+    async def emit(kind, data):
+        if kind in {"usage", "error"}:
+            committing.set()
+            await release.wait()
+        events.append((kind, data))
+
+    async def headers():
+        return {}
+
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: (
+                    sse_response([assistant()])
+                    if measured
+                    else httpx.Response(200, stream=Waiting())
+                )
+            )
+        ) as upstream,
+        httpx.AsyncClient() as caller,
+    ):
+        context = TurnContext(TurnRequest.model_validate(turn()), tmp_path, emit)
+        relay = ResponsesRelay(context, [], [], upstream, "https://fake", headers)
+
+        async def owner():
+            try:
+                async with relay.serve() as endpoint:
+                    endpoints.append(endpoint)
+                    started.set() if measured else None
+                    await shutdown.wait()
+            finally:
+                events.append(("turn_ended", {}))
+
+        task = asyncio.create_task(owner())
+        while not endpoints:
+            await asyncio.sleep(0)
+        pending = asyncio.create_task(
+            caller.post(
+                endpoints[0] + "/responses",
+                headers={"Authorization": "Bearer " + relay.capability},
+                json={"input": []},
+            )
+        )
+        if measured:
+            await asyncio.wait_for(committing.wait(), 5)
+        else:
+            await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        await asyncio.wait_for(committing.wait(), 5)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        await asyncio.gather(task, pending, return_exceptions=True)
+        assert not relay.handlers
+        with pytest.raises(httpx.ConnectError):
+            await caller.post(endpoints[0] + "/responses", json={})
+        await asyncio.sleep(0.01)
+    assert [kind for kind, _ in events] == [
+        "model_request_started",
+        "usage" if measured else "error",
+        "turn_ended",
+    ]
+    assert events[0][1]["request_id"] == events[1][1]["request_id"]
+
+
+async def test_outcome_is_idempotent_by_request_id(tmp_path):
+    events = []
+
+    async def emit(kind, data):
+        await asyncio.sleep(0)
+        events.append((kind, data))
+
+    async def headers():
+        return {}
+
+    context = TurnContext(TurnRequest.model_validate(turn()), tmp_path, emit)
+    async with httpx.AsyncClient() as client:
+        relay = ResponsesRelay(context, [], [], client, "https://fake", headers)
+        await asyncio.gather(
+            relay.observation("usage", {"request_id": "one", "input_tokens": 10}),
+            relay.observation("error", {"request_id": "one", "kind": "usage_unavailable"}),
+        )
+    assert events == [("usage", {"request_id": "one", "input_tokens": 10})]
+
+
+async def test_controller_injections_and_private_paths_are_removed(tmp_path):
+    context = TurnContext(
+        TurnRequest.model_validate(turn()),
+        tmp_path,
+        lambda *_: None,
+        state_dir=tmp_path / "private",
+    )
+    async with httpx.AsyncClient() as client:
+        relay = ResponsesRelay(context, [], [], client, "https://fake", lambda: None)
+        scratch = str(context.state_dir / "codex-scratch")
+        relay.private_paths += (scratch,)
+        assert relay.clean_input(
+            [
+                {"role": "developer", "content": "<skills_instructions>catalog"},
+                {"role": "user", "content": [{"type": "input_text", "text": "<skill>injected"}]},
+                {"role": "user", "content": "<environment_context>private"},
+                {"role": "user", "content": "Explain the <skill> tag"},
+                {"type": "function_call_output", "output": scratch + "/config.toml"},
+            ]
+        ) == [
+            {"role": "user", "content": "Explain the <skill> tag"},
+            {"type": "function_call_output", "output": "[private controller]/config.toml"},
+        ]

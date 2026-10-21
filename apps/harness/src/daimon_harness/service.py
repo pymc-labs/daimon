@@ -325,6 +325,15 @@ def create_app(
         raise RuntimeError("HARNESS_LOOP must be agents_sdk or codex")
     selected = adapter or (CodexModelAdapter() if loop == "codex" else AzureModelAdapter())
     supervisor = Supervisor(root, selected, session_mode, auth.token)
+    audit_logger.info(
+        json.dumps(
+            {
+                "event": "harness.model_provider",
+                "loop": loop,
+                "provider": "openai_probe" if getattr(selected, "live_probe", "") else "azure",
+            }
+        )
+    )
     if not test_mode:
         prepare_service(root)
         protect_process()

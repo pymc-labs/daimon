@@ -9,7 +9,7 @@
   "errors": [],
   "usage_checks": [
     {
-      "request_id": "712dc1fe-3551-43fa-995a-d23d88f87a54",
+      "request_id": "b36676b5-7304-46c6-944f-32502e09612b",
       "exactly_one_outcome": true,
       "started_before_network_and_observation": true,
       "provider_counts_match": true
@@ -18,11 +18,11 @@
   "api_observations": [
     {
       "turn_id": "agents_sdk-plain",
-      "request_id": "712dc1fe-3551-43fa-995a-d23d88f87a54",
+      "request_id": "b36676b5-7304-46c6-944f-32502e09612b",
       "started_seq_before_network": 2,
       "stream": false,
       "http_status": 200,
-      "response_id": "resp_01665861b82785d5016ad8554243b887d19a0f735706c40d49",
+      "response_id": "resp_05cde334bf630777016ad872efdbb087d18da6d56f4b5b76bb",
       "provider_model": "gpt-6-luna",
       "raw_usage": {
         "input_tokens": 44,
@@ -50,7 +50,7 @@
       "seq": 1,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-plain",
-      "at": "2026-10-21T06:01:37.546787Z",
+      "at": "2026-10-21T08:08:14.919738Z",
       "type": "status_running",
       "data": {}
     },
@@ -58,10 +58,10 @@
       "seq": 2,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-plain",
-      "at": "2026-10-21T06:01:37.565436Z",
+      "at": "2026-10-21T08:08:14.940855Z",
       "type": "model_request_started",
       "data": {
-        "request_id": "712dc1fe-3551-43fa-995a-d23d88f87a54",
+        "request_id": "b36676b5-7304-46c6-944f-32502e09612b",
         "model": "gpt-6-luna"
       }
     },
@@ -69,10 +69,10 @@
       "seq": 3,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-plain",
-      "at": "2026-10-21T06:01:39.222899Z",
+      "at": "2026-10-21T08:08:16.972039Z",
       "type": "usage",
       "data": {
-        "request_id": "712dc1fe-3551-43fa-995a-d23d88f87a54",
+        "request_id": "b36676b5-7304-46c6-944f-32502e09612b",
         "model": "gpt-6-luna",
         "input_tokens": 44,
         "cached_input_tokens": 0,
@@ -84,10 +84,10 @@
       "seq": 4,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-plain",
-      "at": "2026-10-21T06:01:39.229599Z",
+      "at": "2026-10-21T08:08:16.973690Z",
       "type": "agent_message_delta",
       "data": {
-        "message_id": "3d01558e-9e73-4094-a99c-914b817839d0",
+        "message_id": "e28bf8e7-a28d-4904-a9d6-52cddad07729",
         "text": "Luna streaming works."
       }
     },
@@ -95,10 +95,10 @@
       "seq": 5,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-plain",
-      "at": "2026-10-21T06:01:39.230916Z",
+      "at": "2026-10-21T08:08:16.975555Z",
       "type": "agent_message",
       "data": {
-        "message_id": "3d01558e-9e73-4094-a99c-914b817839d0",
+        "message_id": "e28bf8e7-a28d-4904-a9d6-52cddad07729",
         "parts": [
           {
             "type": "text",
@@ -111,7 +111,7 @@
       "seq": 6,
       "session_id": "luna-live",
       "turn_id": "agents_sdk-plain",
-      "at": "2026-10-21T06:01:39.511502Z",
+      "at": "2026-10-21T08:08:17.258001Z",
       "type": "turn_ended",
       "data": {
         "outcome": "completed"

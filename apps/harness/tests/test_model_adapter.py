@@ -731,6 +731,7 @@ async def test_explicit_openai_probe_gate_refuses_other_models(tmp_path, monkeyp
     from daimon_harness.errors import HarnessError
 
     monkeypatch.setenv("HARNESS_LIVE_PROBE", "openai")
+    monkeypatch.setenv("HARNESS_RUNTIME_MODE", "probe")
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-probe-key")
     adapter = CodexModelAdapter() if adapter_name == "codex" else AzureModelAdapter()
     assert adapter.endpoint == "https://api.openai.com/v1"
@@ -753,3 +754,33 @@ def test_openai_key_does_not_select_probe_provider(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-key-unused-in-production")
     with pytest.raises(RuntimeError, match="managed identity"):
         AzureModelAdapter()
+
+
+@pytest.mark.parametrize("adapter_name", ["codex", "agents_sdk"])
+@pytest.mark.parametrize(
+    "azure_env",
+    [
+        None,
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_FEDERATED_TOKEN_FILE",
+        "IDENTITY_ENDPOINT",
+        "IDENTITY_HEADER",
+    ],
+)
+def test_openai_probe_refused_in_production_or_with_azure(monkeypatch, adapter_name, azure_env):
+    from daimon_harness.codex_adapter import CodexModelAdapter
+
+    monkeypatch.setenv("HARNESS_LIVE_PROBE", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-probe-key")
+    monkeypatch.delenv("HARNESS_RUNTIME_MODE", raising=False)
+    if azure_env:
+        monkeypatch.setenv("HARNESS_RUNTIME_MODE", "probe")
+        monkeypatch.setenv(azure_env, "synthetic-azure-config")
+    adapter = CodexModelAdapter if adapter_name == "codex" else AzureModelAdapter
+    with pytest.raises(
+        RuntimeError, match="production mode|Azure configuration|file-based credentials"
+    ):
+        adapter()

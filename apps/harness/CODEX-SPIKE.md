@@ -17,13 +17,14 @@ tools, and a harness-owned Responses relay. The relay authenticates with the
 captured Azure credential; Codex only has an ephemeral loopback capability.
 All model traffic and test/example deployment names use `gpt-6-luna` (C12).
 Paid OpenAI Responses probes were subsequently authorized by C12.1 and completed
-as described below. No Azure resource or local full-image build was used.
+as described below. No Azure resource was used. The checksum-verified Codex
+image stage was built locally; full-image validation runs in CI.
 
-Offline validation passed with both `HARNESS_LOOP` values: 177 harness tests
+Offline validation passed with both `HARNESS_LOOP` values: 202 harness tests
 passed, 4 skipped (platform/data/live gates). Strict pyright, repository Ruff
 and all 14 import-boundary contracts passed. Additional regression coverage keeps
 original MCP server/tool policy identities and refuses ambiguous function aliases. The standalone UID probe passed
-separately under real service/tool identities.
+separately under real service/tool identities with a running pinned controller.
 
 The real pinned binary completed a file-writing multi-request loop against
 synthetic Responses SSE. Tests exercise the real mux HTTP driver, local HTTPS
@@ -112,10 +113,10 @@ Sources checked:
   base checkout does not contain lane 4's pending remote WAL/checkpoint/sequence
   reservation implementation (C4.5–C4.12). Merge/rebase and test those paths
   before production; the relay's awaited callback is the integration point.
-- **CI/image:** real-binary tests skip without Codex. Install the pin in the
-  harness test job and run the standalone UID probe in a root subprocess/image;
-  the image includes the pin, but was not built here. Full-image CI and dependency
-  attribution/SBOM remain review gates.
+- **CI/image:** the harness test job installs checksum-verified Codex 0.162.1.
+  The image job builds the release stage, checks `codex --version`, and runs the
+  tool-UID relay probe with a running controller. Local tests may still skip
+  when the binary is absent. Dependency attribution/SBOM remains a review gate.
 - **Native tools remain unsupported.** Supporting native exec/patch later would
   require a verified execution-server integration or Codex changes that retain
   harness UID, resource, policy, tool-limit and cleanup guarantees.
@@ -133,9 +134,12 @@ default until the listed review, live and durability gates pass.
 
 ## Live Luna probes
 
+Refreshed after round-1 fixes on 2026-10-21, 08:07–08:09 UTC.
+
 Both loops passed seven scenarios through the real authenticated harness HTTP
 API against the paid OpenAI Responses endpoint, with real service/tool UID
-separation. The override is `HARNESS_LIVE_PROBE=openai`; a key alone never
+separation. The override requires `HARNESS_LIVE_PROBE=openai` and
+`HARNESS_RUNTIME_MODE=probe`, and refuses any Azure/MI configuration; a key alone never
 selects it, and every non-Luna request is refused before I/O. Azure remains the
 production default provider. The key was sourced only in probe shells, captured
 in the service, scrubbed from the environment, and absent from tool execution.
@@ -145,10 +149,10 @@ in the service, scrubbed from the environment, and absent from tool execution.
 | Scenarios passing | 7/7 | 7/7 |
 | Requests | 13 | 13 |
 | Measured / unknown | 12 / 1 cancelled | 12 / 1 cancelled |
-| Measured input tokens | 23,419 | 6,284 |
-| Cached input tokens (subset) | 11,941 | 0 |
-| Measured output tokens | 244 | 284 |
-| Reasoning tokens (subset) | 0 | 42 |
+| Measured input tokens | 6,236 | 6,247 |
+| Cached input tokens (subset) | 0 | 0 |
+| Measured output tokens | 242 | 269 |
+| Reasoning tokens (subset) | 0 | 28 |
 | Plain output deltas | 5 | 1 after response completion |
 | Sequential MCP calls | 3 requests, 2 tool calls | 3 requests, 2 tool calls |
 
@@ -172,7 +176,15 @@ Luna catalog forces code mode/Responses Lite and can elicit native `exec` calls;
 default plugins can spawn a clone that races temporary-directory cleanup. The
 adapter now supplies a minimal per-deployment catalog with direct function tools,
 full Responses and no native shell/patch, disables plugin/tool/host-skill discovery
-and code mode, and kills residual controller process-group members. Cancellation
+and code mode, and kills residual controller process-group members. The original
+round-1 claim did not cover bundled system skills: those remained advertised.
+Round-1 fixes explicitly disable `[skills.bundled]` and skill instructions,
+remove controller skill/environment injections and private paths at the relay,
+and test `$imagegen`/`$skill-installer` against the real binary. Harness-supplied
+C3 skills remain supported. Denied calls now count against `max_tool_calls`,
+and model requests are capped at `min(max_tool_calls + 2, 128)`. Relay request
+fields are allowlisted and usage outcomes are idempotent by request id; shielded
+shutdown finishes all handlers before the terminal event. Cancellation
 also suppresses writes to already closed relay transports. Native calls were
 refused throughout the failed attempts; no native execution was approved.
 
