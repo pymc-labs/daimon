@@ -7,9 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Bind AKS helper phases to a private kubeconfig for the named cluster and verify
+  its API server before workload operations, preventing teardown of another cluster.
+
+- Verify the underlying Azure deployment model before AKS probes or deployment
+  reuse; accept only gpt-5.4-mini and require verified metadata for direct probes.
+
+- Preserve tenant access controls during AKS re-registration. Default the operator
+  model to the configured Azure deployment; refuse mismatched or Sol probe models
+  before network I/O and verify the exact persisted marker through write/read tools.
+
 - Refuse MCP authorization on non-loopback HTTP harness requests before credential refresh or network I/O (C3.9a), even with HTTP consent.
 
 - Add `daimon selfhosted turn` for billed operator turns with persistent threads, enforce selfhosted admission before provider access, and require explicit consent for harness HTTP. MCP credentials require TLS or loopback, with a scoped CA bundle for in-cluster TLS. Reject normalized TEST tariff names at startup unless explicitly enabled, and keep diagnostic logging failures from interrupting metering.
+- Secure both Helm MCP and harness Services with retained CA certificates; fix
+  installer retries, adapter ports, and persisted tool-result verification.
+
+### Fixed
+
+- Verify the Helm harness CA mounts through production startup and post-drop MCP HTTPS calls; migrate saved installer state to the dedicated host harness-token Secret key.
+
+- Reuse existing Azure OpenAI deployments in the AKS recipe with a `gpt-5.4-mini` default; restrict MCP startup capabilities and run recipe operator commands as the application user.
+
+- Serve in-cluster MCP over verified TLS with a chart-generated CA, scoped harness trust and verified host-to-harness HTTPS.
+
+- Harden AKS harness startup, prioritize persistent services, and make the selfhosted chart recipe provision metered CLI turns with restart-persistence regressions.
+
+- Mount an optional selfhosted runtime grant Secret alongside CSI volumes, raise
+  host memory limits for CLI turns, and restrict host egress to approved cluster services.
+
+- Gate Helm init and host processes on PostgreSQL readiness, and host startup on
+  the packaged database migrations, so clean installs can wait for all Jobs and pods.
+
+- Add an AKS Helm baseline with persistent multi-session harness, host services,
+  bundled or external PostgreSQL, private networking policy, ingress and local kind smoke checks.
 
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 

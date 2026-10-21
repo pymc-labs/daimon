@@ -21,6 +21,8 @@ repos:
         exclude: (^|/)__snapshots__/.*\.ambr$
       - id: end-of-file-fixer
       - id: check-yaml
+        # Go templates are validated after rendering by the Helm CI job.
+        exclude: ^deploy/helm/[^/]+/templates/
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files

@@ -1,0 +1,52 @@
+{{- if .Values.postgres.bundled }}
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "d.name" . }}-postgres}
+spec:
+  type: ClusterIP
+  selector: {app: {{ include "d.name" . }}-postgres}
+  ports: [{port: 5432, targetPort: 5432}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: {{ include "d.name" . }}-postgres}
+spec:
+  serviceName: {{ include "d.name" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels: {app: {{ include "d.name" . }}-postgres}
+  template:
+    metadata:
+      labels: {app: {{ include "d.name" . }}-postgres}
+    spec:
+      priorityClassName: {{ include "d.priority" . }}-postgres
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
+      containers:
+        - name: postgres
+          image: {{ include "d.image" (dict "root" . "image" .Values.images.postgres) | quote }}
+          imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
+          env:
+            - {name: POSTGRES_USER, value: {{ .Values.postgres.user | quote }}}
+            - {name: POSTGRES_DB, value: {{ .Values.postgres.database | quote }}}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.postgres.existingSecret }}, key: POSTGRES_PASSWORD}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, {{ .Values.postgres.user | quote }}, -d, {{ .Values.postgres.database | quote }}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if ne .Values.postgres.storageClassName nil }}
+        storageClassName: {{ .Values.postgres.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests: {storage: {{ .Values.postgres.storage }}}
+{{- end }}

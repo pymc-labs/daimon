@@ -1650,3 +1650,41 @@ Historical TEST tariffs also require the explicit billing opt-in described in
 connections only. Hostname classification is literal/name-based, without DNS
 resolution. No grant permits credentials over non-loopback HTTP. Known cloud
 metadata names and addresses are refused regardless of grants or scheme.
+
+## Kubernetes deployment
+
+The branch-only AKS Helm baseline, including local kind validation, identity
+proxy requirements and PodSecurity exceptions, is documented in
+[`deploy/helm/daimon-selfhost`](https://github.com/pymc-labs/daimon/tree/azure-selfhost/deploy/helm/daimon-selfhost).
+
+The AKS chart recipe includes metered CLI tenant/runtime registration, host
+startup/liveness probes, 90-second host shutdown,
+and Postgres/harness priorities. D2s_v6 is a minimum test node; D4s_v6 is recommended
+for production. The harness drops SYS_ADMIN from its bounding set after setup.
+
+MCP in the AKS chart uses HTTPS with a chart-generated CA and a matching Service
+certificate. The harness trusts the read-only `HARNESS_MCP_CA_BUNDLE`; optional
+operator/cert-manager Secrets support managed certificates. The harness C3 hop also
+uses HTTPS with same-release ingress isolation and trusted host CA bundles.
+Explicit TEST tariffs also require the selfhosted `ALLOW_TEST_TARIFFS` opt-in.
+
+The AKS Helm recipe serves both MCP and harness over HTTPS with a generated CA;
+trusted hosts use a combined root bundle, while sandbox MCP trust stays scoped.
+The chart loads host credentials through `envFrom`: the `daimon-host` Secret must
+contain the `DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` key itself. Its value must
+match the harness token; do not place a `secretKeyRef` object in `host.env`.
+
+AKS re-registration preserves tenant access controls and adds the selfhosted
+backend to the existing selections. `SELFHOSTED_MODEL` defaults to
+`AOAI_DEPLOYMENT` (`gpt-5.4-mini` by default). The paid C3 probe refuses model
+mismatches and Sol before harness I/O. Probe execution and bootstrap reuse query
+Azure deployment metadata and accept only an underlying `gpt-5.4-mini` model;
+direct probe execution requires an explicit verified model input. The probe
+requires the second turn to read the
+exact marker written by the first turn through matching tool calls.
+
+AKS helper phases use a fresh private kubeconfig for the named resource group and
+cluster, verify the API server against Azure cluster metadata before workload
+operations, and remove the credentials file on exit. They never use or modify
+`~/.kube/config`; a mismatched server stops teardown before release or namespace
+deletion. The existing installation commands are unchanged.
