@@ -17,6 +17,7 @@ import httpx
 from pydantic import JsonValue, TypeAdapter
 
 from mux.contracts.errors import ProviderErrorCategory
+from mux.drivers.selfhosted.config import HarnessConfig
 from mux.errors import ProviderError
 
 _JSON = TypeAdapter[JsonValue](JsonValue)
@@ -107,12 +108,16 @@ class DirectTransport:
         token: str | None = None,
         token_provider: TokenProvider | None = None,
         session_pool: bool = False,
+        allow_insecure_http: bool = False,
     ) -> None:
         if (token is None) == (token_provider is None) or (token is not None and not token.strip()):
             raise ValueError("exactly one harness token or token provider is required")
         url = httpx.URL(base_url)
-        if not secure_url(base_url) or not url.host or url.userinfo or url.query or url.fragment:
-            raise ValueError("harness URL must use HTTPS except on loopback")
+        HarnessConfig(
+            harness_url=base_url,
+            auth_ref="TRANSPORT_TOKEN",
+            allow_insecure_http=allow_insecure_http,
+        )
         if session_pool and (url.scheme != "https" or token_provider is None):
             raise ValueError("session pools require HTTPS and a refreshing Entra token provider")
         self._client, self._base_url = client, base_url.rstrip("/")

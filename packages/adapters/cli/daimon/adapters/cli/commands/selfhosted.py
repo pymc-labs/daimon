@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID, uuid4
 
 import typer
@@ -21,6 +21,10 @@ from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.adapters.cli.runtime import CliRuntime
+    from daimon.core.turn.run import RunOutcome
 
 selfhosted_app = typer.Typer(help="Manage tenant-owned self-hosted agents and environments.")
 
@@ -208,3 +212,96 @@ def selfhosted_init_command(
         ) from None
     typer.echo(agent_id)
     typer.echo(environment_id)
+
+
+async def operator_turn(
+    rt: CliRuntime, *, tenant_id: UUID, channel: str, thread: str, caller: str, message: str
+) -> RunOutcome:
+    """Use the production channel chokepoints, including their billing recorder."""
+    import sys
+    from datetime import UTC, datetime
+
+    from daimon.adapters.cli.turn_lifecycle import NdjsonLifecycle
+    from daimon.core.billing import load_billing_config
+    from daimon.core.channel_backend import channel_ref, current_backend
+    from daimon.core.turn import admit, bind_session, run_prepared_turn
+    from daimon.core.turn.deps import build_turn_deps
+
+    async with rt.sessionmaker() as db:
+        revision = await current_backend(db, channel_ref(tenant_id, "cli", channel))
+    if revision is None or revision.backend != "selfhosted":
+        raise ValueError("Channel must explicitly select selfhosted")
+    deps = build_turn_deps(
+        rt.settings,
+        rt.anthropic,
+        rt.sessionmaker,
+        deployment_default=rt.deployment_default,
+        resolver_cache=rt.resolver_cache,
+        billing_config=load_billing_config(),
+    )
+    admitted = await admit(
+        deps,
+        tenant_id=tenant_id,
+        platform="cli",
+        external_user_id=caller,
+        channel_id=channel,
+        thread_id=thread,
+        now=datetime.now(UTC),
+    )
+    prepared = await bind_session(
+        deps,
+        admitted,
+        tenant_id=tenant_id,
+        platform="cli",
+        external_user_id=caller,
+        thread_id=thread,
+        session_account_id=admitted.account_id,
+        reuse_existing=True,
+    )
+    lifecycle = NdjsonLifecycle(sys.stdout, prepared.ma_session_id, str(uuid4()))
+
+    async def reseed() -> str:
+        return message
+
+    return await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant_id,
+        platform="cli",
+        thread_id=thread,
+        external_user_id=caller,
+        user_message=message,
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: lifecycle,
+        attended=False,
+    )
+
+
+@selfhosted_app.command("turn")
+def selfhosted_turn_command(
+    tenant_id: Annotated[UUID, typer.Option("--tenant-id")],
+    message: Annotated[str, typer.Option("--message")],
+    channel: Annotated[str, typer.Option("--channel")] = "selfhosted-operator",
+    thread: Annotated[str, typer.Option("--thread")] = "default",
+    caller: Annotated[str, typer.Option("--caller")] = "operator",
+) -> None:
+    """Run a billed, admitted turn; reuse --thread for persistent session files."""
+    from daimon.adapters.cli.runtime import build_runtime
+    from daimon.core.config import load_settings
+
+    async def run() -> RunOutcome:
+        async with build_runtime(load_settings()) as rt:
+            return await operator_turn(
+                rt,
+                tenant_id=tenant_id,
+                channel=channel,
+                thread=thread,
+                caller=caller,
+                message=message,
+            )
+
+    outcome = asyncio.run(run())
+    if outcome.state.error is not None:
+        raise typer.Exit(code=1)

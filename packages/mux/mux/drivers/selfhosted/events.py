@@ -27,6 +27,7 @@ from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
 from mux.contracts.resources import AgentSpec, ProjectionSnapshot
 from mux.contracts.usage import UsageObservation
 from mux.drivers.selfhosted import wire
+from mux.drivers.selfhosted.config import HarnessConfig
 from mux.drivers.selfhosted.context import Context
 from mux.drivers.selfhosted.normalize import normalize, usage
 from mux.drivers.selfhosted.sessions import SelfHostedSessions
@@ -375,7 +376,11 @@ class SelfHostedEvents:
                 raise self._c.unsupported("mcp_server_names_or_credential_references")
             names.add(server.name)
             if (server.headers_env or server.name == "daimon-mcp") and not secure_url(server.url):
-                raise self._c.unsupported("credential_mcp_requires_https")
+                if not (server.name == "daimon-mcp" and server.allow_insecure_http):
+                    raise self._c.unsupported("credential_mcp_requires_https")
+                HarnessConfig(
+                    harness_url=server.url, auth_ref="MCP_REFERENCE", allow_insecure_http=True
+                )
             if (
                 "DAIMON_MCP_AUTHORIZATION" in server.headers_env.values()
                 and server.name != "daimon-mcp"

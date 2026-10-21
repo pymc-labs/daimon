@@ -81,6 +81,7 @@ def validate_harness_auth(config: HarnessConfig, settings: SelfHostedSettings, t
     if (
         (
             config.auth_mode == "bearer_env"
+            and config.auth_ref != "DAIMON_HARNESS_TOKEN"
             and not config.auth_ref.startswith("DAIMON_SELFHOSTED__HARNESS_TOKEN_")
         )
         or binding is None
@@ -491,6 +492,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         base_url=config.harness_url,
                         token_provider=token_provider,
                         session_pool=config.session_pool,
+                        allow_insecure_http=config.allow_insecure_http,
                     )
             # Cleanup and reconciliation need a small independent budget after the host deadline.
             limit = (

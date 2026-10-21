@@ -396,6 +396,42 @@ admission refuses with `selfhosted_admission_disabled`. Enabling it still requir
 usage observations and a configured self-hosted core runtime; it does not select
 a backend for any channel. See [configuration](configuration.md) for the setting.
 
+### Billed operator turns on an explicit selfhosted channel
+
+After provisioning the tenant, calling `daimon selfhosted init`, selecting
+`selfhosted.loop` on its CLI channel and mounting an exact provider runtime
+manifest, run:
+
+```bash
+daimon selfhosted turn --tenant-id "$TENANT_ID" --thread verification \
+  --message 'Use bash to write a small file and read it back.'
+daimon selfhosted turn --tenant-id "$TENANT_ID" --thread verification \
+  --message 'Use bash to read the file from the previous turn.'
+```
+
+The default channel is `selfhosted-operator` and caller is `operator`; override
+with `--channel` and `--caller`. The command uses production channel admission,
+session binding and the prepared-turn usage recorder. It refuses a channel
+without an explicit selfhosted revision. Reusing the thread retains the same
+caller-scoped session. This is a trusted deployment-operator CLI, so access to
+its database credentials must remain restricted to operators.
+
+For private Kubernetes HTTP, `init --allow-insecure-http` must be paired with
+`allow_insecure_http: true` on the exact harness auth binding. The existing
+`DAIMON_HARNESS_TOKEN` Secret variable is also an accepted bearer reference.
+Authenticated HTTP to the built-in Daimon MCP additionally requires its exact
+hostname in `DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`, and on the harness both
+`HARNESS_ALLOW_INSECURE_DAIMON_MCP=true` and the exact
+`HARNESS_DAIMON_MCP_URL`. The host carries explicit HTTP consent on that MCP
+wire record; other credential-bearing MCP servers still require HTTPS.
+These opt-ins send bearer credentials over the private cluster network; use
+TLS when that network is outside the installation's trust boundary.
+
+The Agents SDK adapter emits `harness.azure_usage` receipts with only the
+provider response ID, model and raw usage object. Request/response content and
+credentials are excluded. Capture these alongside C3 usage and database rows
+when verifying billing. See [the AKS first-turn evidence](evidence/aks-first-turn-20261021/README.md).
+
 ## Self-hosted harness runtime
 
 The opt-in `selfhosted.loop` backend runs chat turns through a separately
@@ -442,7 +478,8 @@ Production uses `HarnessConfig.transport="direct"` with a private harness
 endpoint. Direct transport sends authenticated `/v0` requests to `harness_url`.
 The Foundry invocation adapter is retained for future platform validation;
 unsigned gateway identity headers do not authorize harness calls. `bearer_env`
-only accepts operator variables named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
+accepts `DAIMON_HARNESS_TOKEN` or operator variables named
+`DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
 Declare each in `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`, a JSON list of
 `{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY", "origin": "https://harness.example", "tenants": ["TENANT_UUID"]}`.
 Entra mode requires a binding too, with `auth_mode: "entra"` and `name` equal

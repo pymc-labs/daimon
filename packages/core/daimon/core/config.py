@@ -1239,6 +1239,16 @@ class HarnessAuthBinding(McpCredentialBinding):
 
     name: str = Field(min_length=1)
     auth_mode: Literal["bearer_env", "entra"] = "bearer_env"
+    allow_insecure_http: bool = False
+
+    @field_validator("origin")
+    @classmethod
+    def exact_https_origin(cls, value: str) -> str:
+        # Validate the same exact-origin structure; HTTP needs a second opt-in below.
+        if value.startswith("http://"):
+            normalized = McpCredentialBinding.exact_https_origin("https://" + value[7:])
+            return "http://" + normalized[8:]
+        return McpCredentialBinding.exact_https_origin(value)
 
     @model_validator(mode="after")
     def valid_reference(self) -> HarnessAuthBinding:
@@ -1252,9 +1262,16 @@ class HarnessAuthBinding(McpCredentialBinding):
             auth_mode=self.auth_mode,
             auth_ref=self.name,
             session_pool=self.auth_mode == "entra" and self.name == SESSION_POOL_AUDIENCE,
+            allow_insecure_http=self.allow_insecure_http,
         )
-        if self.auth_mode == "bearer_env" and not self.name.startswith(
-            "DAIMON_SELFHOSTED__HARNESS_TOKEN_"
+        if self.origin.startswith("http://") and (
+            not self.allow_insecure_http or self.auth_mode != "bearer_env"
+        ):
+            raise ValueError("HTTP harness binding requires explicit bearer opt-in")
+        if (
+            self.auth_mode == "bearer_env"
+            and self.name != "DAIMON_HARNESS_TOKEN"
+            and not self.name.startswith("DAIMON_SELFHOSTED__HARNESS_TOKEN_")
         ):
             raise ValueError("Harness bearer binding requires an operator token variable")
         return self
@@ -1282,9 +1299,10 @@ class SelfHostedSettings(BaseModel):
     mcp_allowed_http_hosts: tuple[str, ...] = Field(
         default=(),
         description=(
-            "Operator-authorized exact hostnames or IP literals for credential-free HTTP MCP "
-            "connections to private, link-local or metadata destinations. Empty by default. "
-            "Loopback remains allowed; credential-bearing connections still require HTTPS."
+            "Operator-authorized exact hostnames or IP literals for HTTP MCP connections. "
+            "Also opts the built-in Daimon MCP into credential-bearing private HTTP; the "
+            "harness must independently authorize its exact URL. Empty by default. "
+            "Loopback remains allowed; other credential-bearing connections still require HTTPS."
         ),
     )
 

@@ -79,7 +79,7 @@ class _SkillHolder:
     skills: Sequence[MaSkill]
 
 
-def _mcp_url(url: str, *, credential: bool = False) -> str:
+def _mcp_url(url: str, *, credential: bool = False, allowed_http_hosts: Sequence[str] = ()) -> str:
     parsed = urlsplit(url)
     if (
         parsed.scheme not in ("http", "https")
@@ -95,7 +95,12 @@ def _mcp_url(url: str, *, credential: bool = False) -> str:
     loopback = parsed.hostname.lower() == "localhost"
     with suppress(ValueError):
         loopback |= ipaddress.ip_address(parsed.hostname).is_loopback
-    if credential and parsed.scheme != "https" and not loopback:
+    if (
+        credential
+        and parsed.scheme != "https"
+        and not loopback
+        and parsed.hostname.lower() not in allowed_http_hosts
+    ):
         raise ValueError("Credential-bearing MCP connections require HTTPS or loopback")
     return canonical_mcp_url(url)
 
@@ -207,12 +212,18 @@ def build_turn_tools(
     the shared ownership, mount and count rules. Archive corruption/digest/cap
     failures refuse the turn rather than quietly changing requested content.
     """
-    daimon_mcp_url = _mcp_url(daimon_mcp_url, credential=True)
+    daimon_mcp_url = _mcp_url(
+        daimon_mcp_url, credential=True, allowed_http_hosts=mcp_allowed_http_hosts
+    )
     servers = [
         MCPServer(
             name=DAIMON_MCP_SERVER,
             url=daimon_mcp_url,
             headers_env={"Authorization": DAIMON_MCP_AUTH_ENV},
+            allow_insecure_http=(
+                urlsplit(daimon_mcp_url).scheme == "http"
+                and urlsplit(daimon_mcp_url).hostname in mcp_allowed_http_hosts
+            ),
         )
     ]
     bindings = {binding.name: binding for binding in mcp_credential_bindings}

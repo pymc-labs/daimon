@@ -60,6 +60,7 @@ class MCPServer(WireModel):
     name: str
     url: str
     headers_env: dict[str, str] = Field(default_factory=dict)
+    allow_insecure_http: bool = False
 
 
 SKILL_MAX_BYTES = 8 * 1024 * 1024

@@ -1011,9 +1011,10 @@ credential bindings; leave false for shared installations.
 
 `tuple[str, ...]` · optional · default unset
 
-Operator-authorized exact hostnames or IP literals for credential-free HTTP MCP
-connections to private, link-local or metadata destinations. Empty by default. Loopback
-remains allowed; credential-bearing connections still require HTTPS.
+Operator-authorized exact hostnames or IP literals for HTTP MCP connections. Also opts
+the built-in Daimon MCP into credential-bearing private HTTP; the harness must
+independently authorize its exact URL. Empty by default. Loopback remains allowed; other
+credential-bearing connections still require HTTPS.
 
 ### `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`
 

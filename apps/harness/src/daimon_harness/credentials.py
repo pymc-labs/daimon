@@ -100,7 +100,16 @@ def validate_server(server: MCPServer) -> None:
             loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
         except ValueError:
             loopback = parsed.hostname == "localhost"
-        if parsed.scheme != "https" and not loopback:
+        if (
+            parsed.scheme != "https"
+            and not loopback
+            and not (
+                server.name == "daimon-mcp"
+                and server.allow_insecure_http
+                and os.environ.get("HARNESS_ALLOW_INSECURE_DAIMON_MCP") == "true"
+                and server.url == os.environ.get("HARNESS_DAIMON_MCP_URL")
+            )
+        ):
             raise ValueError("credential-bearing MCP servers require HTTPS")
     expected_url = os.environ.get("HARNESS_DAIMON_MCP_URL")
     if server.name == RESERVED_SERVER:

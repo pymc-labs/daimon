@@ -1,0 +1,15 @@
+apiVersion: v1
+data:
+  l15.override: |
+    log
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2026-10-21T11:20:58Z"
+  labels:
+    app.kubernetes.io/managed-by: Eno
+    k8s-app: kube-dns
+    kubernetes.io/cluster-service: "true"
+  name: coredns-custom
+  namespace: kube-system
+  resourceVersion: "9324"
+  uid: 32966343-0591-4154-a359-3097aa11739b

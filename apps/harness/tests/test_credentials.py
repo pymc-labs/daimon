@@ -514,3 +514,23 @@ async def test_sdk_debug_logs_keep_header_filters_and_hide_all_secrets(
     for secret in (key, bearer, harness, operator, client_secret):
         assert secret not in caplog.text
     assert "[redacted]" in caplog.text
+
+
+def test_private_daimon_http_requires_both_explicit_flag_and_exact_url(monkeypatch):
+    from daimon_harness.credentials import validate_server
+    from mux.drivers.selfhosted.wire import MCPServer
+
+    url = "http://coke-daimon-mcp:8765/mcp"
+    server = MCPServer(
+        name="daimon-mcp",
+        url=url,
+        headers_env={"Authorization": VIRTUAL_ENV},
+        allow_insecure_http=True,
+    )
+    monkeypatch.setenv("HARNESS_DAIMON_MCP_URL", url)
+    with pytest.raises(ValueError, match="HTTPS"):
+        validate_server(server)
+    monkeypatch.setenv("HARNESS_ALLOW_INSECURE_DAIMON_MCP", "true")
+    validate_server(server)
+    with pytest.raises(ValueError):
+        validate_server(server.model_copy(update={"url": "http://other:8765/mcp"}))

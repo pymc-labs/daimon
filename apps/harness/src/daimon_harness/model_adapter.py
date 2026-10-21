@@ -120,6 +120,19 @@ class MeteredResponsesModel(OpenAIResponsesModel):
             stream,
             prompt,
         )
+        if isinstance(response, Response):
+            # Provider-edge receipt excludes prompts, outputs and credentials.
+            print(
+                json.dumps(
+                    {
+                        "event": "harness.azure_usage",
+                        "response_id": response.id,
+                        "model": response.model,
+                        "usage": response.usage.model_dump(mode="json") if response.usage else None,
+                    }
+                ),
+                flush=True,
+            )
         # The SDK's ModelResponse conversion drops status and provider errors.
         if isinstance(response, Response) and response.status != "completed":
             status = response.status or "unknown"

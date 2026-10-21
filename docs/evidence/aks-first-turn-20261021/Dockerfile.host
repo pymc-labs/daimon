@@ -1,0 +1,12 @@
+FROM daimonselfhostacr.azurecr.io/daimon:dev-202610211123
+COPY --chown=daimon:daimon packages/core/daimon/core/config.py /app/packages/core/daimon/core/config.py
+COPY --chown=daimon:daimon packages/core/daimon/core/turn/selfhosted_deployment.py /app/packages/core/daimon/core/turn/selfhosted_deployment.py
+COPY --chown=daimon:daimon packages/adapters/cli/daimon/adapters/cli/commands/selfhosted.py /app/packages/adapters/cli/daimon/adapters/cli/commands/selfhosted.py
+COPY --chown=daimon:daimon packages/core/daimon/core/turn/selfhosted_tools.py /app/packages/core/daimon/core/turn/selfhosted_tools.py
+COPY --chown=daimon:daimon packages/mux/mux/drivers/selfhosted/transport.py /app/packages/mux/mux/drivers/selfhosted/transport.py
+COPY --chown=daimon:daimon packages/mux/mux/drivers/selfhosted/events.py /app/packages/mux/mux/drivers/selfhosted/events.py
+COPY --chown=daimon:daimon packages/mux/mux/drivers/selfhosted/wire.py /app/packages/mux/mux/drivers/selfhosted/wire.py
+COPY --chown=daimon:daimon packages/adapters/cli/daimon/adapters/cli/turn_events.py /app/packages/adapters/cli/daimon/adapters/cli/turn_events.py
+COPY --chown=daimon:daimon packages/adapters/cli/daimon/adapters/cli/turn_lifecycle.py /app/packages/adapters/cli/daimon/adapters/cli/turn_lifecycle.py
+COPY --chown=daimon:daimon packages/adapters/cli/daimon/adapters/cli/run/events.py /app/packages/adapters/cli/daimon/adapters/cli/run/events.py
+COPY --chown=daimon:daimon packages/adapters/cli/daimon/adapters/cli/run/lifecycle.py /app/packages/adapters/cli/daimon/adapters/cli/run/lifecycle.py
