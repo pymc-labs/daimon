@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **The "Working on it…" card shows more of the agent's progress.** On Discord, Slack and Teams it always keeps the agent's last three short updates, oldest first; `DAIMON_TURN__STATUS_LOG` now only decides whether an answer keeps its messages apart. Built-in tools add one safe detail to their line: a web search its query, a web fetch the host name, and a file read, write or edit the file's base name; other tools stay name-only. Progress plans, off by default, let the agent keep a short checklist of a longer task's steps on the card. Turn them on with `DAIMON_PROGRESS_PLANS__MODE` or per workspace, channel or thread with `set_progress_plans` (`get_progress_plans` reports why); they follow thread participation's cascade and permissions, `disabled` included, and cover Slack too.
+- **The "Working on it…" card shows more of the agent's progress.** On Discord,
+  Slack and Teams it always keeps the agent's last three short updates, oldest
+  first; `DAIMON_TURN__STATUS_LOG` now only decides whether an answer keeps its
+  messages apart. Built-in tools add one safe detail to their line: a web search
+  its query, a web fetch the host name, a file read, write or edit the file's
+  base name; other tools stay name-only. Progress plans, off by default, let the
+  agent keep a short checklist of a longer task's steps on the card: turn them on
+  with `DAIMON_PROGRESS_PLANS__MODE` or per workspace, channel or thread with
+  `set_progress_plans` (`get_progress_plans` reports why), under thread
+  participation's cascade and permissions, Slack included. The default agent's
+  prompt changes, so existing sessions restart once after the upgrade.
+
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 
 - Isolate self-hosted checkpoint exporters from tool cleanup, retry interrupted exports, and keep sessions sealed when process termination cannot be verified.
