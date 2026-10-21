@@ -4,12 +4,12 @@
 version: v1.1.0
 stepTimeout: 3600
 steps:
-  - build: --build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0 -t {{.Run.Registry}}/daimon:{{.Values.tag}} -f Dockerfile .
+  - build: --build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0@sha256:dbbd5e059e8a07ff7ea6233b213b36aa516b4c53c645f1817a4dd18b83cbea56 -t {{.Run.Registry}}/daimon:{{.Values.tag}} -f Dockerfile .
     env:
       - DOCKER_BUILDKIT=1
   - push:
       - "{{.Run.Registry}}/daimon:{{.Values.tag}}"
-  - build: --build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0 -t {{.Run.Registry}}/daimon-harness:{{.Values.tag}} -f apps/harness/Dockerfile .
+  - build: --build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0@sha256:dbbd5e059e8a07ff7ea6233b213b36aa516b4c53c645f1817a4dd18b83cbea56 -t {{.Run.Registry}}/daimon-harness:{{.Values.tag}} -f apps/harness/Dockerfile .
     env:
       - DOCKER_BUILDKIT=1
   - push:

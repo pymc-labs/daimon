@@ -1693,10 +1693,12 @@ AKS `bootstrap` builds and pushes both images remotely through
 `deploy/helm/daimon-selfhost/scripts/acr-build.yaml`, enabling
 `DOCKER_BUILDKIT=1` for each ACR Tasks build step. This supports the shared
 production Dockerfiles' `COPY --chmod` and `RUN --mount` instructions. The task
-selects `docker/dockerfile:1.7.0` via `BUILDKIT_SYNTAX` to support the harness
+selects `docker/dockerfile:1.7.0@sha256:dbbd5e059e8a07ff7ea6233b213b36aa516b4c53c645f1817a4dd18b83cbea56` via `BUILDKIT_SYNTAX` to support the harness
 `ADD --checksum` too. The
 operator needs Azure CLI with `az acr run` support and permission to run ACR
 Tasks; local Docker/buildx is not required. Bootstrap checks CLI support before
 creating resources, streams run IDs and builder diagnostics, and stops on either
-build/push failure before creating AKS. No local image/cache cleanup is needed.
+build/push failure before creating AKS. After the task returns, bootstrap checks
+both requested image tags in ACR and stops before Postgres import or AKS creation
+if either tag is missing or unreadable. No local image/cache cleanup is needed.
 See Microsoft's [ACR Tasks BuildKit configuration](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-tasks-reference-yaml#build).

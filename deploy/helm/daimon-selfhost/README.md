@@ -299,12 +299,14 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 
 `bootstrap` builds and pushes both production Dockerfiles using
 [`scripts/acr-build.yaml`](scripts/acr-build.yaml), with `DOCKER_BUILDKIT=1` on
-each build step. The task also selects `docker/dockerfile:1.7.0` via `BUILDKIT_SYNTAX` for
+each build step. The task also selects `docker/dockerfile:1.7.0@sha256:dbbd5e059e8a07ff7ea6233b213b36aa516b4c53c645f1817a4dd18b83cbea56` via `BUILDKIT_SYNTAX` for
 the harness `ADD --checksum`. This enables `COPY --chmod` and `RUN --mount`; plain
 `az acr build` uses a legacy builder and a Dockerfile syntax header alone does
 not enable BuildKit. Build logs include the ACR run ID. A missing ACR Tasks CLI
 fails before resource creation; a remote build/push failure stops before AKS
-creation. The remote builder leaves no local image tags or build cache.
+creation. After the task returns, bootstrap also verifies that both requested
+image tags exist in ACR; a missing or unreadable image stops before Postgres
+import and AKS creation. The remote builder leaves no local image tags or build cache.
 
 `bootstrap` runs the following commands in order (do not repeat them after the
 wrapper already succeeded):
@@ -314,6 +316,9 @@ az group create -n "$RG" -l "$LOCATION" -o none
 az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
 az acr run -r "$ACR" -f deploy/helm/daimon-selfhost/scripts/acr-build.yaml \
   --set "tag=$TAG" --timeout 7200 .
+for image in "daimon:$TAG" "daimon-harness:$TAG"; do
+  az acr repository show -n "$ACR" --image "$image" -o none || exit 1
+done
 az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
 az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
   --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \

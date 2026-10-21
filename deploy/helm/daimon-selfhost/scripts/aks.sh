@@ -71,6 +71,14 @@ bootstrap)
     echo 'ACR Tasks BuildKit build/push failed; inspect the run ID above. The remote builder must support DOCKER_BUILDKIT=1; AKS has not been created.' >&2
     exit 1
   }
+  # A detached/interrupted client may return before a remote push is available.
+  # Confirm BOTH requested tags before any downstream provisioning.
+  for image in "daimon:$TAG" "daimon-harness:$TAG"; do
+    az acr repository show -n "$ACR" --image "$image" -o none || {
+      echo "Required ACR image $image is missing or unreadable; stopping before Postgres import and AKS creation. Check the ACR run above." >&2
+      exit 1
+    }
+  done
   az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
   az acr repository show -n "$ACR" --image postgres:18-alpine --query digest -o tsv > "$AKS_STATE/postgres-digest"
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \

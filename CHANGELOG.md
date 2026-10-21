@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Pin the AKS ACR Tasks Dockerfile frontend by digest and verify both pushed image
+  tags before importing Postgres or creating AKS, stopping if either is unavailable.
+
 - Fix AKS bootstrap image builds with explicit BuildKit-enabled ACR Tasks for
   both production Dockerfiles; check Azure CLI support early and stop before
   cluster creation if either build or push fails, with streamed run diagnostics.

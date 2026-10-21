@@ -30,7 +30,7 @@ class AksBuildkitTests(unittest.TestCase):
             build, push = steps[index * 2 : index * 2 + 2]
             self.assertEqual(
                 build["build"],
-                f"--build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0 -t {image} -f {dockerfile} .",
+                f"--build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0@sha256:dbbd5e059e8a07ff7ea6233b213b36aa516b4c53c645f1817a4dd18b83cbea56 -t {image} -f {dockerfile} .",
             )
             self.assertIn("DOCKER_BUILDKIT=1", build["env"])
             self.assertEqual(push["push"], [image])
@@ -55,6 +55,11 @@ if args[:2] == ['acr', 'run']:
     if '--help' in args:
         sys.exit(1 if os.environ['MODE'] == 'missing' else 0)
     sys.exit(1 if os.environ['MODE'] == 'failed' else 0)
+if args[:3] == ['acr', 'repository', 'show']:
+    image = args[args.index('--image') + 1]
+    if ((os.environ['MODE'] == 'missing-host' and image.startswith('daimon:'))
+        or (os.environ['MODE'] == 'missing-harness' and image.startswith('daimon-harness:'))):
+        sys.exit(1)
 if args[:2] == ['aks', 'create']:
     sys.exit(73)  # Proof of ordering; never call a live cluster.
 """)
@@ -93,6 +98,24 @@ if args[:2] == ['aks', 'create']:
         self.assertIn("ACR Tasks BuildKit build/push failed", result.stderr)
         self.assertFalse(any(c[:2] in (["aks", "create"], ["acr", "import"]) for c in calls))
 
+    def test_missing_image_after_successful_task_stops_before_import_and_cluster(self):
+        for mode, missing_image in (
+            ("missing-host", "daimon:buildtest-14"),
+            ("missing-harness", "daimon-harness:buildtest-14"),
+        ):
+            with self.subTest(mode=mode):
+                result, calls = self.run_bootstrap(mode)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"Required ACR image {missing_image} is missing or unreadable", result.stderr
+                )
+                self.assertTrue(any(c[:2] == ["acr", "run"] and "--help" not in c for c in calls))
+                self.assertFalse(
+                    any(c[:2] in (["aks", "create"], ["acr", "import"]) for c in calls)
+                )
+                checks = [c for c in calls if c[:3] == ["acr", "repository", "show"]]
+                self.assertEqual(checks[-1][checks[-1].index("--image") + 1], missing_image)
+
     def test_successful_remote_push_precedes_cluster_creation(self):
         result, calls = self.run_bootstrap("success")
         self.assertEqual(result.returncode, 73)
@@ -104,7 +127,13 @@ if args[:2] == ['aks', 'create']:
         self.assertNotIn("--no-wait", build)
         self.assertNotIn("--no-logs", build)
         cluster = next(c for c in calls if c[:2] == ["aks", "create"])
-        self.assertLess(calls.index(build), calls.index(cluster))
+        imported = next(c for c in calls if c[:2] == ["acr", "import"])
+        for image in ("daimon:buildtest-14", "daimon-harness:buildtest-14"):
+            check = next(c for c in calls if c[:3] == ["acr", "repository", "show"] and image in c)
+            self.assertEqual(check[check.index("-n") + 1], "offline")
+            self.assertLess(calls.index(build), calls.index(check))
+            self.assertLess(calls.index(check), calls.index(imported))
+        self.assertLess(calls.index(imported), calls.index(cluster))
         self.assertFalse(any(c[:2] == ["acr", "build"] for c in calls))
 
 
