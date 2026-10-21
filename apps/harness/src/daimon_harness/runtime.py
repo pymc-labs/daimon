@@ -67,6 +67,20 @@ class TurnContext:
         default_factory=set[asyncio.Task[asyncio.subprocess.Process]], repr=False
     )
     stopping: bool = False
+    verifiers: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]], repr=False)
+
+    async def verify_processes(self) -> None:
+        # Shield the actual thread future: timeout/cancellation is not evidence
+        # that the thread stopped signalling this UID.
+        task = asyncio.create_task(asyncio.to_thread(self.stop_processes))
+        self.verifiers.add(task)
+        task.add_done_callback(self.verifiers.discard)
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        await asyncio.wait_for(asyncio.shield(task), timeout=VERIFY_WAIT_TIMEOUT)
+
+    async def join_verifiers(self) -> None:
+        while self.verifiers:
+            await asyncio.shield(asyncio.gather(*self.verifiers, return_exceptions=True))
 
     def __post_init__(self) -> None:
         tool_identity(self.home, self.tool_uid)
@@ -119,7 +133,7 @@ class TurnContext:
             _, pending = await asyncio.wait(workers, timeout=CLEANUP_WAIT_TIMEOUT)
         else:
             pending = set()
-        await asyncio.wait_for(asyncio.to_thread(self.stop_processes), timeout=VERIFY_WAIT_TIMEOUT)
+        await self.verify_processes()
         if pending:
             _, pending = await asyncio.wait(pending, timeout=5)
         if pending:
@@ -260,9 +274,7 @@ class TurnContext:
             child = await asyncio.wait_for(asyncio.shield(spawn), timeout=CLEANUP_WAIT_TIMEOUT)
             self.process_groups.add(child.pid)
             try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(self.stop_processes), timeout=VERIFY_WAIT_TIMEOUT
-                )
+                await self.verify_processes()
             finally:
                 transport = cast(
                     asyncio.SubprocessTransport,

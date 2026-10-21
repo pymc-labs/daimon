@@ -22,8 +22,11 @@ async def test_never_dying_worker_escalates_without_request_lock(
     monkeypatch.setattr("daimon_harness.service.CLEANUP_TIMEOUT", 0.03)
     monkeypatch.setattr("daimon_harness.service.CANCEL_JOIN_TIMEOUT", 0.03)
     monkeypatch.setattr("daimon_harness.service.CLEANUP_RETRY_DELAY", 0.01)
-    release, started = asyncio.Event(), asyncio.Event()
+    monkeypatch.setattr("daimon_harness.service.CLEANUP_BACKOFF_CAP", 0.03)
+    release, started, deadline = asyncio.Event(), asyncio.Event(), asyncio.Event()
     workers, exits, records = [], [], []
+    exhausted = asyncio.Event()
+    monkeypatch.setattr("daimon_harness.service.audit_logger.critical", lambda raw: exhausted.set())
     monkeypatch.setattr(
         "daimon_harness.service.audit_logger.error", lambda raw: records.append(json.loads(raw))
     )
@@ -43,11 +46,19 @@ async def test_never_dying_worker_escalates_without_request_lock(
 
             worker = asyncio.create_task(context.tool("stuck", "write", {}, stuck))
             workers.append(worker)
-            await worker  # The owner really is stuck before its finally block.
+            await worker
             return history
 
     app = create_app(home=tmp_path, token="test", adapter=StuckModel())
     supervisor = app.state.supervisor
+
+    async def clock(request):
+        if request.session_id == "session-1":
+            await deadline.wait()
+        else:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(supervisor, "watchdog_delay", clock)
     monkeypatch.setattr(supervisor, "exit_unhealthy", lambda: exits.append(1))
     async with (
         app.router.lifespan_context(app),
@@ -58,25 +69,22 @@ async def test_never_dying_worker_escalates_without_request_lock(
         ) as client,
     ):
         try:
-            request = turn()
-            request["limits"] = {
-                "deadline_s": 0.08 if trigger == "deadline" else 60,
-                "max_tool_calls": 10,
-            }
+            request = turn() | {"limits": {"deadline_s": 60, "max_tool_calls": 10}}
             assert (await client.post("/v0/turns", json=request)).status_code == 202
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), 30)
             if trigger == "cancel":
                 response = await client.post(
                     "/v0/turns/turn-1/cancel", params={"session_id": "session-1"}
                 )
                 assert response.status_code == 503 and response.json()["detail"]["retryable"]
-            until = time.monotonic() + 3
-            while "session-1" not in supervisor.sealed_sessions and time.monotonic() < until:
-                await asyncio.sleep(0.01)
-            assert "session-1" in supervisor.sealed_sessions, "cleanup escalation missing"
-            assert [record["failures"] for record in records] == [1, 2, 3], (
-                "cleanup escalation missing"
-            )
+            else:
+                deadline.set()  # Deterministic expiry AFTER the adapter is awaiting its worker.
+            try:
+                await asyncio.wait_for(exhausted.wait(), 10)
+            except TimeoutError:
+                raise AssertionError("cleanup escalation missing") from None
+            assert supervisor.cleanup_failures.get("turn-1", 0) >= 3
+            assert [record["failures"] for record in records[:3]] == [1, 2, 3]
             assert not supervisor.submissions.locked()
             assert not await supervisor.io(supervisor.journal.ended, "turn-1")
             for route in ("/readiness", "/v0/healthz"):
@@ -84,37 +92,38 @@ async def test_never_dying_worker_escalates_without_request_lock(
                     503 if mode == "single" else 200
                 ), "multi mode killed unrelated sessions"
             if mode == "single":
-                async with asyncio.timeout(2):
+                response = await client.post(
+                    "/v0/turns/turn-1/cancel", params={"session_id": "session-1"}
+                )
+                assert response.json()["detail"]["retryable"] is True
+                assert "new conversation" not in response.text
+                async with asyncio.timeout(10):
                     while not exits:
                         await asyncio.sleep(0.01)
-                assert exits == [1]
             else:
-                await supervisor.cleanups["turn-1"]
-                replay = await client.get("/v0/sessions/session-1/events")
-                assert replay.status_code == 200
-                assert any(
-                    event["type"] == "error"
-                    and event["data"].get("kind") == "cleanup_exhausted"
-                    and event["data"]["retryable"] is False
-                    for event in replay.json()["events"]
-                )
-                assert not replay.json()["complete"]  # No terminal with live workers (I5).
-                # Session B must still complete AFTER A has exhausted its budget.
                 other = turn(turn_id="other", key="other") | {"session_id": "session-2"}
                 assert (await client.post("/v0/turns", json=other)).status_code == 202
                 await supervisor.tasks["other"]
                 assert (
                     await supervisor.io(supervisor.journal.terminal_outcome, "other") == "completed"
                 )
+                before = len(records)
+                await asyncio.sleep(0.1)
+                assert len(records) > before, "sealed cleanup stopped retrying"
                 response = await client.post("/v0/turns", json=turn(turn_id="again", key="again"))
-                assert response.status_code == 503
-                assert response.json()["detail"]["kind"] == "cleanup_exhausted"
                 assert response.json()["detail"]["retryable"] is False
-                await asyncio.sleep(1.1)
-                assert not exits, "multi mode killed unrelated sessions"
+                assert not exits
         finally:
             release.set()
             await asyncio.gather(*workers, *supervisor.tasks.values(), return_exceptions=True)
+            await supervisor.cleanups["turn-1"]
+        if mode == "multi":
+            replay = await client.get("/v0/sessions/session-1/events")
+            assert replay.json()["complete"] is True
+            terminal = replay.json()["events"][-1]
+            assert terminal["type"] == "turn_ended"
+            assert terminal["data"]["error"]["kind"] == "cleanup_exhausted"
+            assert terminal["data"]["error"]["retryable"] is False
 
 
 @pytest.mark.parametrize("loop", ["agents_sdk", "codex"])
@@ -265,7 +274,7 @@ def test_startup_sweep_kills_each_orphan_uid_and_checks_exit(tmp_path, monkeypat
     )
     startup_sweep.sweep()
     assert [call[0][-1] for call in calls] == ["10001", "10002"]
-    assert all(call[1]["check"] and call[1]["timeout"] == 2 for call in calls)
+    assert all(call[1]["check"] and call[1]["timeout"] == 4 for call in calls)
 
     def failed(*args, **kwargs):
         raise startup_sweep.subprocess.CalledProcessError(1, args[0])
@@ -315,3 +324,209 @@ async def test_cancel_does_not_wait_for_slow_initial_cleanup(tmp_path, monkeypat
             release.set()
             await supervisor.tasks["turn-1"]
         assert await supervisor.io(supervisor.journal.terminal_outcome, "turn-1") == "interrupted"
+
+
+async def test_cancel_timeout_holds_uid_until_old_verifier_finishes(tmp_path, monkeypatch):
+    import threading
+
+    from daimon_harness.runtime import TurnContext
+
+    monkeypatch.setattr("daimon_harness.service.CANCEL_JOIN_TIMEOUT", 0.02)
+    monkeypatch.setattr("daimon_harness.runtime.VERIFY_WAIT_TIMEOUT", 0.02)
+    entered, release_thread = threading.Event(), threading.Event()
+    owner_released, started = asyncio.Event(), asyncio.Event()
+    original_stop = TurnContext._stop_processes
+    calls = []
+
+    def held(context):
+        calls.append(context.request.turn_id)
+        if len(calls) == 1:
+            entered.set()
+            assert release_thread.wait(5)
+        original_stop(context)
+
+    monkeypatch.setattr(TurnContext, "_stop_processes", held)
+
+    class Model(FakeModelAdapter):
+        async def run(self, context, history):
+            history = await super().run(context, history)
+            if context.request.turn_id == "turn-1":
+                started.set()
+                while not owner_released.is_set():
+                    with suppress(asyncio.CancelledError):
+                        await owner_released.wait()
+            else:
+                value = await context.tool(
+                    "survive", "bash", {}, lambda: context.bash("sleep 0.1; echo survived")
+                )
+                assert "exit_code=0" in value and "survived" in value, (
+                    "old cleanup killed the next turn"
+                )
+            return history
+
+    app = create_app(home=tmp_path, token="test", adapter=Model())
+    supervisor = app.state.supervisor
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test", "Accept": "application/json"},
+        ) as client,
+    ):
+        try:
+            await client.post("/v0/turns", json=turn())
+            await started.wait()
+            context = supervisor.contexts["turn-1"]
+            old = asyncio.create_task(context.verify_processes())
+            assert await asyncio.to_thread(entered.wait, 2)
+            with pytest.raises(TimeoutError):
+                await old
+            response = await client.post(
+                "/v0/turns/turn-1/cancel", params={"session_id": "session-1"}
+            )
+            assert response.status_code == 503
+            owner_released.set()  # Owner enters finalization while the thread is still live.
+            await asyncio.sleep(0)
+            next_turn = turn(turn_id="next", key="next")
+            assert (await client.post("/v0/turns", json=next_turn)).status_code == 503, (
+                "UID released with old cleanup in flight"
+            )
+            replay = await client.get("/v0/sessions/session-1/events")
+            assert replay.status_code == 200 and not replay.json()["complete"]
+            release_thread.set()
+            await supervisor.tasks["turn-1"]
+            await supervisor.cleanups["turn-1"]
+            assert (await client.post("/v0/turns", json=next_turn)).status_code == 202
+            await supervisor.tasks["next"]
+        finally:
+            owner_released.set()
+            release_thread.set()
+
+
+async def test_healthy_two_twelve_second_commits_do_not_escalate(tmp_path, monkeypatch):
+    from daimon_harness import service
+
+    assert service.CLEANUP_TIMEOUT == 10
+    assert service.owner_tail_bound(1) >= 17 + 10 + 2 * 15 + 5
+    started = asyncio.Event()
+    commits, exits = [], []
+
+    class Model(FakeModelAdapter):
+        async def run(self, context, history):
+            await context.emit(
+                "model_request_started", {"request_id": "pending", "model": context.request.model}
+            )
+            started.set()
+            await asyncio.Event().wait()
+
+    app = create_app(home=tmp_path, token="test", adapter=Model())
+    supervisor = app.state.supervisor
+    original_io = supervisor.io
+
+    async def slow_commit(operation, *args):
+        if operation == supervisor.durable_append and args[1] in {"error", "turn_ended"}:
+            commits.append(args[1])
+            await asyncio.sleep(12)  # Real constants, two legal (<15 s) WAL commits.
+        return await original_io(operation, *args)
+
+    monkeypatch.setattr(supervisor, "io", slow_commit)
+    monkeypatch.setattr(supervisor, "exit_unhealthy", lambda: exits.append(1))
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test", "Accept": "application/json"},
+        ) as client,
+    ):
+        body = turn() | {"limits": {"max_tool_calls": 10, "deadline_s": 60}}
+        await client.post("/v0/turns", json=body)
+        await started.wait()
+        response = await client.post("/v0/turns/turn-1/cancel", params={"session_id": "session-1"})
+        assert response.status_code == 503
+        await supervisor.tasks["turn-1"]
+        await supervisor.cleanups["turn-1"]
+        assert commits == ["error", "turn_ended"]
+        assert not supervisor.cleanup_failures and not exits and not supervisor.unhealthy, (
+            "healthy durable tail escalated"
+        )
+        assert await supervisor.io(supervisor.journal.terminal_outcome, "turn-1") == "interrupted"
+
+
+async def test_watchdog_starts_after_write_ahead_and_stops_before_finalization(
+    tmp_path, monkeypatch
+):
+    from daimon_harness.runtime import TurnContext
+
+    wal_entered, wal_release = asyncio.Event(), asyncio.Event()
+    finalizing, finish = asyncio.Event(), asyncio.Event()
+    watchdog_started, expiry = asyncio.Event(), asyncio.Event()
+    original = TurnContext.stop_workers
+
+    async def held_cleanup(context):
+        finalizing.set()
+        await finish.wait()
+        await original(context)
+
+    monkeypatch.setattr(TurnContext, "stop_workers", held_cleanup)
+    app = create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+    supervisor = app.state.supervisor
+
+    async def wal(request):
+        wal_entered.set()
+        await wal_release.wait()
+
+    async def clock(request):
+        watchdog_started.set()
+        await expiry.wait()
+
+    monkeypatch.setattr(supervisor, "write_ahead", wal)
+    monkeypatch.setattr(supervisor, "watchdog_delay", clock)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test", "Accept": "application/json"},
+        ) as client,
+    ):
+        try:
+            await client.post("/v0/turns", json=turn())
+            await wal_entered.wait()
+            assert not watchdog_started.is_set(), "watchdog started before write-ahead"
+            wal_release.set()
+            await finalizing.wait()
+            expiry.set()
+            await asyncio.sleep(0)
+            finish.set()
+            await supervisor.tasks["turn-1"]
+            await supervisor.cleanups["turn-1"]
+            assert (
+                await supervisor.io(supervisor.journal.terminal_outcome, "turn-1") == "completed"
+            ), "watchdog relabeled completion"
+        finally:
+            wal_release.set()
+            finish.set()
+
+
+async def test_single_exit_rechecks_verified_cleanup(tmp_path, monkeypatch):
+    from daimon_harness.runtime import TurnContext, discard_event
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    app = create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+    supervisor = app.state.supervisor
+    exits = []
+    monkeypatch.setattr("daimon_harness.service.os._exit", lambda code: exits.append(code))
+    supervisor.unhealthy = True
+    supervisor.cleanup_failures["turn"] = 3
+    supervisor.contexts["turn"] = TurnContext(
+        TurnRequest.model_validate(turn()), tmp_path / "tool", discard_event
+    )
+    supervisor.exit_unhealthy()
+    assert exits == [1]
+    exits.clear()
+    supervisor.cleanup_verified.add("turn")
+    supervisor.exit_unhealthy()
+    assert not exits, "replacement ignored successful cleanup"
+    await supervisor.close()

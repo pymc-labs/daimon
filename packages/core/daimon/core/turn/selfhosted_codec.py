@@ -26,6 +26,7 @@ from mux.contracts.events import (
     ImagePart,
     RequiredAction,
     RequiresActionPayload,
+    SessionErrorPayload,
     StatusRunningPayload,
     TextPart,
     ToolResultPayload,
@@ -101,6 +102,17 @@ def display_event(event: Event, *, session_id: str) -> DisplayEvent | None:
         )
     payload = event.typed_payload()
     timestamp = event.occurred_at or event.observed_at
+    if isinstance(payload, SessionErrorPayload) and payload.native_code == "cleanup_exhausted":
+        return BetaManagedAgentsAgentMessageEvent.model_validate(
+            {
+                "id": "selfhosted:cleanup-exhausted:" + session_id,
+                "type": "agent.message",
+                "processed_at": timestamp,
+                "content": [
+                    {"type": "text", "text": "Tool cleanup failed. Start a new conversation."}
+                ],
+            }
+        )
     if isinstance(payload, UserMessagePayload):
         if any(not isinstance(part, TextPart | ImagePart) for part in payload.content):
             raise UnsupportedCapability(("host_input_content",), PROFILE)

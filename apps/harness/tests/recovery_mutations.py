@@ -68,6 +68,11 @@ for number in range(1, 16):
             "                if workers_stopped:\n",
             "                if True:\n",
         )
+        change(
+            "service.py",
+            "        for turn_id, cleanup in self.cleanups.items():",
+            "        for turn_id, cleanup in []:",
+        )
     elif number in {7, 14}:
         if number == 14:
             change(
@@ -149,7 +154,7 @@ for number in range(1, 16):
             "            workspace_report = {}",
         )
     elif number == 11:
-        change("service.py", "if failures >= CLEANUP_FAILURE_LIMIT:", "if False:")
+        change("service.py", "if failures == CLEANUP_FAILURE_LIMIT:", "if False:")
     elif number == 12:
         change("service.py", 'cancelled=terminal == "interrupted"', "cancelled=True")
     elif number == 13:
@@ -157,7 +162,9 @@ for number in range(1, 16):
         change("service.py", "            supervisor.start_cleanup(turn_id)", "            pass")
     elif number == 15:
         change(
-            "service.py", 'self.unhealthy = self.session_mode == "single"', "self.unhealthy = True"
+            "service.py",
+            'if self.session_mode == "single":\n                        self.unhealthy = True',
+            "if True:\n                        self.unhealthy = True",
         )
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:

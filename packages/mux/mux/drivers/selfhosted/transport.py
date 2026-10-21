@@ -56,9 +56,26 @@ class Transport(Protocol):
     ) -> JsonValue: ...
 
 
+def terminal_cleanup_error(response: httpx.Response) -> bool:
+    if response.status_code != 503:
+        return False
+    try:
+        body = _JSON.validate_python(response.json())
+        detail = body.get("detail") if isinstance(body, dict) else None
+        return (
+            isinstance(detail, dict)
+            and detail.get("kind") == "cleanup_exhausted"
+            and detail.get("retryable") is False
+        )
+    except (ValueError, AttributeError):
+        return False
+
+
 def checked(response: httpx.Response) -> None:
     if response.is_success:
         return
+    if terminal_cleanup_error(response):
+        raise ProviderError("upstream", retryable=False, native_code="cleanup_exhausted")
     categories: dict[int, ProviderErrorCategory] = {
         400: "invalid_request",
         401: "auth",
@@ -177,7 +194,12 @@ class DirectTransport:
                         headers=headers,
                         follow_redirects=False,
                     )
-                if replay and response.status_code in (429, 502, 503, 504) and attempt < 5:
+                if (
+                    replay
+                    and response.status_code in (429, 502, 503, 504)
+                    and not terminal_cleanup_error(response)
+                    and attempt < 5
+                ):
                     delay = retry_delay(response, attempt)
                     remaining = (
                         (deadline - datetime.now(UTC)).total_seconds()

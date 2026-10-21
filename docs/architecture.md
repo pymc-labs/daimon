@@ -2259,16 +2259,22 @@ restoring a degraded snapshot rebuilds its notice from the workspace manifest.
 A warning about an entirely failed upload can still be lost if its local marker
 was not captured before sandbox destruction.
 
-Cancellation and deadlines have an independent watchdog, including when the
-adapter awaits a worker that suppresses cancellation. Cleanup verification is
-serialized per tool UID. After three bounded failures, single-session mode
-fails health/readiness and exits for platform replacement. Multi-session mode
-keeps serving other sessions and seals only the failed session with a structured,
-non-retryable `cleanup_exhausted` error; the caller must create a new session.
-The retained context prevents a terminal while local workers can still act.
-Verifier priority (where permitted) and a longer helper budget reduce false
-failures under CPU contention; per-session cgroup CPU limits remain the resource
-isolation fix (G3).
+One cleanup coordinator owns each turn's worker termination and verifier joins.
+A timed-out async caller does not release a verifier thread or the session's tool
+UID. Admission remains blocked until every cleanup operation finishes. The
+watchdog starts after write-ahead at the adapter deadline boundary; its grace
+includes bounded bash cleanup, worker cleanup, pending remote WAL commits and a
+scheduling margin. A healthy owner doing durable commits is not a cleanup failure.
+
+Three failed bounded rounds request replacement in single mode, with retryable
+errors and a final check before process exit. In multi mode only the affected
+conversation is sealed; reclamation continues with capped backoff. Once workers
+stop, the turn commits an errored `cleanup_exhausted` terminal and the driver
+stops polling. Core displays “Tool cleanup failed. Start a new conversation.”
+Other sessions remain available. A never-dying process retains its UID and
+context until pod restart. Verifier priority requires CAP_SYS_NICE, which the AKS
+security context may not grant. Per-session cgroup CPU limits (G3) and per-call
+process isolation for parallel bash commands (F78) remain the resource limits.
 
 Recovery authenticates and persists the client cursor, loads remote reservations
 and WAL inventory, restores an empty sandbox, and merges original event identities

@@ -23,7 +23,7 @@ def sweep() -> None:
         subprocess.run(
             [sys.executable, "-I", str(Path(__file__).with_name("kill_uid.py")), str(uid)],
             check=True,
-            timeout=2,
+            timeout=4,
             env={},
         )
 

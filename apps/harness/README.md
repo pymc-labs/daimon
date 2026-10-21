@@ -792,8 +792,8 @@ emits events after a terminal; disabling the divergence seal makes a mid-process
 commit rollback replace the host's measured outcome with unknown. Mutation 2
 asserts HTTP acceptance, a terminal in the host's poll, and successful admission
 of the following turn, rather than inspecting executor ownership. The original
-source remains untouched. Mutation 6 discards the failed executor’s context,
-treating task completion as recovery permission; it fails with a clear I5
+source remains untouched. Mutation 6 discards the failed executor’s context and its independent cleanup
+lease, treating task completion as recovery permission; it fails with a clear I5
 assertion on the host poll. The generator includes cleanup failure with live
 workers, plus an explicit trace; a separate regression uses real cleanup timeouts.
 Mutation 7 runs the production image overlap probe (Docker and a cached harness
@@ -821,30 +821,14 @@ use HTTPS or loopback HTTP when `X-Daimon-MCP-Authorization` is present. Generic
 MCP credentials are refused by the driver before any I/O. AKS uses HTTPS for
 both hops with the chart CA.
 
-Cleanup retries run outside the request lock. A retained failed context returns
-structured retryable `503 workers_active` immediately; other sessions in multi
-mode can continue. Open SSE readers receive cleanup-pending keepalives until
-recovery or sandbox replacement. Each cleanup attempt has a ten-second ceiling;
-subprocess creation, pipe drainage and file-helper reaping have two-second waits.
-Three consecutive background cleanup failures emit structured
-`harness.cleanup_failed` / `harness.cleanup_exhausted` logs, fail health and
-readiness, and exit with status 1 after one second **in single mode only**.
-In multi mode only the failed session is sealed with non-retryable
-`cleanup_exhausted`; other sessions and readiness stay available. This is a
-terminal session error, not a `turn_ended` claim while local workers still live.
-The caller must create a new session. A deadline watchdog starts cleanup even
-when an adapter awaits a cancellation-resistant worker; a timed-out cancel
-also starts independent cleanup. The owner remaining active counts as failure.
-Verification is serialized per tool UID, including across timed-out async
-callers, with a four-second helper budget and optional elevated nice priority.
-Per-session cgroup CPU limits (G3) remain the resource isolation fix. Retries
-run independently of client traffic. In single mode the platform must replace
-the sandbox so the host can restore its last durable checkpoint.
-Before startup recovery or serving, a bounded trusted helper enumerates orphaned
-tool UIDs, kills their processes, and verifies termination; any failure refuses
-startup. The final `/proc` mount must allow the verifier's reserved group 60002
-when hidepid is enabled, including in single mode. A zombie process leader with
-live threads still counts as alive.
+Cleanup runs outside the request lock under one coordinator per turn. Session
+admission remains sealed until the owner and every verifier operation finish,
+including threads whose async callers timed out. Three failed bounded rounds
+request replacement only in single mode. Multi mode seals the affected
+conversation, keeps reclaiming with backoff, and commits a visible terminal error
+once workers stop. Other sessions stay available. The state machine below defines
+the transitions and timers. Startup orphan verification uses a four-second helper
+budget; the final procfs mount must exempt reserved verifier group 60002.
 
 I5 covers local workers. Cancellation cannot recall a request already accepted
 by a remote MCP server; its remote side effects can finish after the terminal.
@@ -867,3 +851,53 @@ per-UID verifier lock (production image paired cleanups), and restore multi-mode
 process-wide failure. Each must fail its regression. Cached-image probes run
 20 paired bash cleanups with zero failures and a multi-mode isolation regression
 under production service/tool identities. No model is called.
+
+### Cleanup and seal state machine (round 2)
+
+Each claimed turn owns one cleanup coordinator. The session's tool UID remains
+leased to that turn until the owner and every cleanup operation have finished,
+including verifier threads whose async caller timed out. Admission checks this
+lease independently of whether the owner has committed a terminal or dropped its
+context. No old cleanup may signal a UID after it is reused by a later turn.
+Reads remain available while a healthy active owner drains; the lease blocks
+admission, not event replay. Failed cleanup retains the retryable 503 boundary.
+
+States and transitions:
+
+- **ACTIVE:** the adapter runs under its deadline. Start its watchdog only after
+  write-ahead and immediately before entering the adapter deadline. A cancel,
+  adapter return, deadline, or watchdog transitions to **DRAINING**.
+- **DRAINING:** stop accepting tools and run one coordinator that cancels workers,
+  kills/verifies the UID, and joins every outstanding verifier operation. The
+  owner and watchdog share this operation; they never launch competing cleanup
+  rounds. Successful worker verification is not a cleanup failure merely because
+  the owner is still committing history, usage, or its terminal. A failed bounded
+  cleanup round counts once, followed by backoff. Three failed rounds transition
+  to **REPLACING** (single mode) or **SEALED** (multi mode).
+- **REPLACING:** refuse new work with a retryable replacement error, fail readiness,
+  and request platform replacement. Before exiting, recheck that cleanup is still
+  exhausted. Do not tell single-mode callers to abandon a restorable session.
+- **SEALED:** keep other sessions and readiness available; refuse new work in this
+  session with a non-retryable `cleanup_exhausted` error. Continue reclamation with
+  capped exponential backoff, without further escalation or process exit. A
+  transient verifier failure can therefore heal. A never-dying process retains
+  its UID and context until pod restart; multi mode cannot reclaim that UID safely.
+- **RECLAIMED:** workers are stopped and all cleanup operations have joined. For
+  a sealed multi-mode turn, resolve unmatched usage inventory and commit exactly
+  one `turn_ended` (`errored`, `cleanup_exhausted`, `retryable:false`), with a visible
+  “Start a new conversation” message. The real driver stops polling on this
+  terminal and core displays the error. The failed conversation remains sealed.
+  For ordinary completion, the owner commits its original outcome. Release the
+  lease only after the owner and coordinator finish; only an unsealed session
+  can admit another turn.
+
+Timers derive from the legal tail: a remote WAL operation is bounded at 15 s,
+maximum bash cleanup is 17 s, supervisor worker cleanup is 10 s, and each
+unmatched request plus the terminal can require a separate 15 s commit. Allow
+that sum plus a scheduling margin for the owner's durable tail. Count a cleanup
+failure per bounded cleanup round, never once per second while an otherwise
+healthy owner commits. Watchdog cancellation cannot change an outcome already
+chosen for finalization. Startup orphan verification uses the same four-second
+helper budget as runtime cleanup. Per-session CPU limits (G3) remain necessary;
+nice priority cannot help on AKS without CAP_SYS_NICE. Parallel bash commands
+sharing a UID still need per-call process isolation (F78).
