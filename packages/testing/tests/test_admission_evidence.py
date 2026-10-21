@@ -9,7 +9,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -249,12 +249,18 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
             user=object(),
             # Merged #839 (7fa0ddf392481c6067f66f0128ba8bb02af3e411): constructor default.
             _ingress_clock=None,
-            runtime=SimpleNamespace(turn_deps=deps, settings=SimpleNamespace(discord=None)),
+            runtime=SimpleNamespace(
+                turn_deps=deps,
+                sessionmaker=deps.sessionmaker,
+                settings=SimpleNamespace(discord=None),
+            ),
             _wait_for_orphan_recovery=AsyncMock(),
             # The default protected-channel signal is a platform reaction, never a native send.
             _signal_protected_channel=AsyncMock(),
         ),
     )
+
+    bot._orchestrate_observed_guarded = MethodType(DaimonBot._orchestrate_observed_guarded, bot)  # pyright: ignore[reportPrivateUsage]
 
     async def invoke(observer: AdmissionObserver) -> None:
         async def observed(*args: Any, **kwargs: Any) -> object:

@@ -16,6 +16,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import (
@@ -45,6 +46,7 @@ from daimon.core.stores.identity import (
     get_teams_principal_for_account,
 )
 from daimon.core.stores.platform_names import get_user_names
+from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from daimon.core.stores.thread_agent_bindings import get_binding
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -512,8 +514,16 @@ async def load_here_card(
     mcp_urls: set[str] = set()
     grants: tuple[McpOAuthGrantRow, ...] = ()
     if roster.answering is not None:
-        ma_agent = await get_setup_agent(
-            anthropic, tenant_id=tenant_id, ma_agent_id=roster.answering.ma_agent_id
+        ma_agent = (
+            next(
+                agent
+                for agent in await list_live_agent_facts(session, tenant_id=tenant_id)
+                if agent.id == roster.answering.ma_agent_id
+            )
+            if anthropic_disabled()
+            else await get_setup_agent(
+                anthropic, tenant_id=tenant_id, ma_agent_id=roster.answering.ma_agent_id
+            )
         )
         details = await load_agent_details(
             session,

@@ -46,7 +46,9 @@ and Teams; the self-hosted harness can deliver files through Daimon's MCP tools.
 Self-hosted MCP credentials refuse Anthropic-specific management operations
 before any provider request; provider-neutral tools remain available. Channel
 authorization resolves their execution identity from tenant-scoped local agent
-records, including agent rules. Cosmetic Slack identity lookup is skipped.
+records, including agent rules. Isolation views, timer lists, current-place cards
+and tenant summaries use the same live local records and retain channel
+visibility boundaries. Cosmetic Slack identity lookup is skipped.
 Adapter turns and continuation dispatch inherit the same Anthropic prohibition.
 Timers and task continuations check self-hosted targets in local records and
 require an installed self-hosted runtime; an unavailable runtime produces a

@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Sequence
 
 from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -26,6 +27,7 @@ from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ConfigTier, DeploymentDefault, ScopeContext
 from daimon.core.stores import scoped_config_read
 from daimon.core.stores.domain import Platform
+from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -138,11 +140,12 @@ async def load_roster(
     thread reports its own responder rather than the parent channel's.
     `viewer` leaves out the agents an isolated channel hides from the caller.
     """
-    agents = [
-        agent
-        for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
-        if viewer is None or viewer.sees_agent(agent)
-    ]
+    available = (
+        await list_live_agent_facts(session, tenant_id=tenant_id)
+        if anthropic_disabled()
+        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    )
+    agents = [agent for agent in available if viewer is None or viewer.sees_agent(agent)]
     answering_name: str | None = None
     answering_tier: ConfigTier | None = None
     if channel_id is not None:

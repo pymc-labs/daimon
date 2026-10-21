@@ -24,6 +24,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.channel_environments import load_hidden_environment_names
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import skill_owner_candidates
@@ -42,6 +43,7 @@ from daimon.core.rule_views import (
     render_binding_refusal,
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from fastmcp.exceptions import ToolError
 
@@ -198,7 +200,11 @@ async def _load_view(
     if not any_own_readers(policy) and not restrict_to_location:
         return OPEN_VIEW
     if agents is None:
-        agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+        if auth.anthropic_disabled or anthropic_disabled():
+            async with runtime.session_factory() as session:
+                agents = await list_live_agent_facts(session, tenant_id=auth.tenant_id)
+        else:
+            agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     if auth.agent_id is not None:
         location_channel_id = None
         location_thread_id = None

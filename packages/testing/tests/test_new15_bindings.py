@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -559,10 +559,16 @@ async def setup_join(
         SimpleNamespace(
             user=object(),
             _ingress_clock=None,
-            runtime=SimpleNamespace(turn_deps=deps, settings=SimpleNamespace(discord=None)),
+            runtime=SimpleNamespace(
+                turn_deps=deps,
+                sessionmaker=deps.sessionmaker,
+                settings=SimpleNamespace(discord=None),
+            ),
             _wait_for_orphan_recovery=AsyncMock(),
         ),
     )
+
+    bot._orchestrate_observed_guarded = MethodType(DaimonBot._orchestrate_observed_guarded, bot)  # pyright: ignore[reportPrivateUsage]
 
     async def denial(text: str, observer: AdmissionObserver) -> None:
         assert text == "QA budget 2: reply with only TINY-AGAIN. No tools."

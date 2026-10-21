@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core._models import (
     Account,
     SelfHostedAgentRecord,
@@ -19,6 +20,7 @@ from daimon.core._models import (
     SelfHostedResourceOperation,
     Tenant,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.privacy_session_deletes import lock_account
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
@@ -45,6 +47,51 @@ from ulid import ULID
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 Row = SelfHostedAgentRecord | SelfHostedEnvironmentRecord
+
+
+async def list_live_agent_facts(
+    session: AsyncSession, *, tenant_id: UUID
+) -> list[BetaManagedAgentsAgent]:
+    """Local policy facts in the shape used by routing and isolation readers.
+
+    Include every live record, without a page limit. Reserved metadata comes
+    from the row's tenant and configured name, never caller-supplied aliases.
+    These facts contain no provider-managed tools or skills.
+    """
+    rows = await session.scalars(
+        select(SelfHostedAgentRecord).where(
+            SelfHostedAgentRecord.tenant_id == tenant_id,
+            SelfHostedAgentRecord.archived_at.is_(None),
+        )
+    )
+    facts: list[BetaManagedAgentsAgent] = []
+    for row in rows:
+        spec = AgentSpec.model_validate(row.spec)
+        facts.append(
+            BetaManagedAgentsAgent.model_validate(
+                {
+                    "id": row.id,
+                    "type": "agent",
+                    "name": spec.name,
+                    "version": row.revision,
+                    "model": {"id": spec.model.id},
+                    "system": spec.system,
+                    "description": spec.description,
+                    "metadata": {
+                        **dict(spec.metadata or {}),
+                        MA_METADATA_KEY_NAME: spec.name,
+                        MA_METADATA_KEY_TENANT: str(tenant_id),
+                    },
+                    "tools": [],
+                    "mcp_servers": [],
+                    "skills": [],
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                    "archived_at": None,
+                }
+            )
+        )
+    return facts
 
 
 async def cleanup_expired_receipts(

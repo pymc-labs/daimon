@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
+### Fixed
+
+- Self-hosted MCP timer lists, current-place cards and tenant summaries resolve agent isolation from live tenant-owned records without Anthropic requests. Hidden-channel names and timer notes remain private.
+
+- Self-hosted channels skip Anthropic thread naming, organic participation, cosmetic responder lookups and session-file sweeps. Their MCP credentials block Anthropic-specific operations while keeping message and file posting available under agent rules. Timers and task continuations resolve local targets, and unavailable follow-up runtimes or handovers refuse without provider calls. Unsupported scheduled routines stop before provider resolution.
 
 - Join harness tool workers before completing cancellation or accepting another turn, and retain reasoning alongside tool calls during context-overflow recovery.
 
