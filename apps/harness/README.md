@@ -852,7 +852,7 @@ process-wide failure. Each must fail its regression. Cached-image probes run
 20 paired bash cleanups with zero failures and a multi-mode isolation regression
 under production service/tool identities. No model is called.
 
-### Cleanup and seal state machine (round 2)
+### Cleanup and seal state machine (round 3 fixes)
 
 Each claimed turn owns one cleanup coordinator. The session's tool UID remains
 leased to that turn until the owner and every cleanup operation have finished,
@@ -871,7 +871,11 @@ States and transitions:
   kills/verifies the UID, and joins every outstanding verifier operation. The
   owner and watchdog share this operation; they never launch competing cleanup
   rounds. Successful worker verification is not a cleanup failure merely because
-  the owner is still committing history, usage, or its terminal. A failed bounded
+  the owner is still committing history, usage, or its terminal. After worker
+  verification, release owner finalization and supervise the owner itself for
+  the derived durable-tail grace, even if the first cleanup round succeeded.
+  Exceeding this grace transitions directly to **REPLACING** or **SEALED**;
+  never join a cancellation-resistant owner without a timeout. A failed bounded
   cleanup round counts once, followed by backoff. Three failed rounds transition
   to **REPLACING** (single mode) or **SEALED** (multi mode).
 - **REPLACING:** refuse new work with a retryable replacement error, fail readiness,
@@ -887,9 +891,15 @@ States and transitions:
   one `turn_ended` (`errored`, `cleanup_exhausted`, `retryable:false`), with a visible
   “Start a new conversation” message. The real driver stops polling on this
   terminal and core displays the error. The failed conversation remains sealed.
-  For ordinary completion, the owner commits its original outcome. Release the
-  lease only after the owner and coordinator finish; only an unsealed session
-  can admit another turn.
+  A stuck adapter outside a tool worker can therefore receive this terminal
+  while its owner still runs: tools are disabled and the conversation stays sealed.
+  Single mode requests process replacement even if worker verification succeeded
+  when the owner exceeded its grace. For ordinary completion, the owner commits
+  its original outcome. Release the lease only after the owner and coordinator
+  finish; only an unsealed session can admit another turn. Retire per-turn cleanup results (including exception
+  tracebacks), coordinator/session/verification records, and failed owner tasks
+  only after both owner and coordinator finish and the context is released. A
+  stalled owner retains its records until it exits or its process is replaced.
 
 Timers derive from the legal tail: a remote WAL operation is bounded at 15 s,
 maximum bash cleanup is 17 s, supervisor worker cleanup is 10 s, and each

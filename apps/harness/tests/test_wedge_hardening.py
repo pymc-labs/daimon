@@ -399,6 +399,7 @@ async def test_cancel_timeout_holds_uid_until_old_verifier_finishes(tmp_path, mo
             await supervisor.cleanups["turn-1"]
             assert (await client.post("/v0/turns", json=next_turn)).status_code == 202
             await supervisor.tasks["next"]
+            assert await supervisor.io(supervisor.journal.terminal_outcome, "next") == "completed"
         finally:
             owner_released.set()
             release_thread.set()
@@ -530,3 +531,171 @@ async def test_single_exit_rechecks_verified_cleanup(tmp_path, monkeypatch):
     supervisor.exit_unhealthy()
     assert not exits, "replacement ignored successful cleanup"
     await supervisor.close()
+
+
+@pytest.mark.parametrize("mode", ["single", "multi"])
+@pytest.mark.parametrize("trigger", ["cancel", "deadline"])
+@pytest.mark.parametrize("transient_failure", [False, True])
+async def test_owner_outside_worker_has_bounded_supervision(
+    tmp_path, monkeypatch, mode, trigger, transient_failure
+):
+    from daimon_harness import service
+    from daimon_harness.runtime import TurnContext
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    monkeypatch.setenv("HARNESS_SESSION_MODE", mode)
+    monkeypatch.setattr(service, "CANCEL_JOIN_TIMEOUT", 0.01)
+    monkeypatch.setattr(service, "CLEANUP_RETRY_DELAY", 0.01)
+    monkeypatch.setattr(service, "owner_tail_bound", lambda pending: 0.05)
+    started, release, deadline = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    exits = []
+    monkeypatch.setattr(service.os, "_exit", lambda code: exits.append(code))
+    original_stop = TurnContext.stop_workers
+    failed = False
+
+    async def stop(context):
+        nonlocal failed
+        if transient_failure and not failed:
+            failed = True
+            raise TimeoutError("transient verification failure")
+        await original_stop(context)
+
+    monkeypatch.setattr(TurnContext, "stop_workers", stop)
+
+    class Model(FakeModelAdapter):
+        async def run(self, context, history):
+            history = await super().run(context, history)
+            started.set()
+            while not release.is_set():
+                with suppress(asyncio.CancelledError):
+                    await release.wait()  # Deliberately outside context.tool().
+            return history
+
+    app = create_app(home=tmp_path, token="test", adapter=Model())
+    supervisor = app.state.supervisor
+
+    async def clock(request):
+        if request.session_id == "session-1":
+            await deadline.wait()
+        else:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(supervisor, "watchdog_delay", clock)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test", "Accept": "application/json"},
+        ) as client,
+    ):
+        try:
+            body = turn() | {"limits": {"deadline_s": 60, "max_tool_calls": 10}}
+            assert (await client.post("/v0/turns", json=body)).status_code == 202
+            await asyncio.wait_for(started.wait(), 5)
+            owner = supervisor.tasks["turn-1"]
+            context = supervisor.contexts["turn-1"]
+            assert not context.workers
+            if trigger == "cancel":
+                assert (
+                    await client.post("/v0/turns/turn-1/cancel", params={"session_id": "session-1"})
+                ).status_code == 503
+            else:
+                deadline.set()
+            async with asyncio.timeout(2):
+                while "turn-1" not in supervisor.cleanups:
+                    await asyncio.sleep(0)
+                await asyncio.shield(supervisor.cleanups["turn-1"])
+            assert not owner.done(), "fixture failed to retain a cancellation-resistant owner"
+            assert "turn-1" in supervisor.cleanup_verified
+            if mode == "multi":
+                events = await supervisor.io(supervisor.journal.events, "session-1")
+                terminals = [event for event in events if event.type == "turn_ended"]
+                assert len(terminals) == 1
+                assert terminals[0].data == {
+                    "outcome": "errored",
+                    "error": supervisor.cleanup_error(),
+                }
+                blocked = await client.post(
+                    "/v0/turns", json=turn(turn_id="blocked", key="blocked")
+                )
+                assert blocked.status_code == 503
+                assert blocked.json()["detail"]["retryable"] is False
+                supervisor.adapter = FakeModelAdapter()
+                next_request = TurnRequest.model_validate(
+                    turn(turn_id="next", key="next") | {"session_id": "session-2"}
+                )
+                await supervisor.submit(next_request)
+                await supervisor.tasks["next"]
+                assert (
+                    await supervisor.io(supervisor.journal.terminal_outcome, "next") == "completed"
+                )
+            else:
+                assert supervisor.unhealthy
+                supervisor.exit_unhealthy()
+                assert exits == [1], "verified workers masked a wedged owner at exit"
+                assert not await supervisor.io(supervisor.journal.ended, "turn-1")
+        finally:
+            release.set()
+            await asyncio.gather(owner, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert not supervisor.cleanup_results
+            assert not supervisor.owner_stalled
+            assert not supervisor.unhealthy
+    if mode == "single":
+        # Replacement reopens the same durable session, without the stuck owner.
+        replacement = service.Supervisor(tmp_path, FakeModelAdapter())
+        try:
+            await replacement.submit(TurnRequest.model_validate(turn(turn_id="next", key="next")))
+            await replacement.tasks["next"]
+            assert await replacement.io(replacement.journal.terminal_outcome, "next") == "completed"
+        finally:
+            await replacement.close()
+
+
+async def test_recovered_cleanup_records_release_contexts(tmp_path, monkeypatch):
+    import gc
+    import weakref
+
+    from daimon_harness import service
+    from daimon_harness.runtime import TurnContext
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    monkeypatch.setattr(service, "CLEANUP_RETRY_DELAY", 0.01)
+    refs = []
+    failed = set()
+    original = TurnContext.stop_workers
+
+    class Model(FakeModelAdapter):
+        async def run(self, context, history):
+            refs.append(weakref.ref(context))
+            return await super().run(context, history)
+
+    async def stop(context):
+        if context.request.turn_id not in failed:
+            failed.add(context.request.turn_id)
+            raise TimeoutError("transient verification failure")
+        await original(context)
+
+    monkeypatch.setattr(TurnContext, "stop_workers", stop)
+    supervisor = service.Supervisor(tmp_path, Model())
+    try:
+        for index in range(3):
+            request = TurnRequest.model_validate(
+                turn(turn_id=f"failed-{index}", key=f"key-{index}")
+                | {"instructions": "x" * 1000000}
+            )
+            await supervisor.submit(request)
+            await asyncio.gather(supervisor.tasks[request.turn_id], return_exceptions=True)
+            await supervisor.cleanups[request.turn_id]
+            await asyncio.sleep(0)  # Run task-done retirement callbacks.
+            assert not supervisor.contexts
+            assert not supervisor.cleanup_results
+            assert not supervisor.cleanups
+            assert not supervisor.cleanup_sessions
+            assert not supervisor.cleanup_verified
+            assert not supervisor.tasks
+        gc.collect()
+        assert len(refs) == 3 and all(ref() is None for ref in refs)
+    finally:
+        await supervisor.close()
