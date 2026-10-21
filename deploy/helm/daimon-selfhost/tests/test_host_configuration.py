@@ -17,6 +17,41 @@ import yaml
 CHART = Path(__file__).resolve().parents[1]
 
 
+def add_kube_stub_support(path):
+    """Teach an offline CLI stub the real credential and server-verification flow."""
+    shebang, source = path.read_text().split("\n", 1)
+    if "python" not in shebang:
+        source = (
+            "import subprocess\nraise SystemExit(subprocess.run(['bash', '-c', "
+            + repr(source)
+            + ", sys.argv[0], *sys.argv[1:]]).returncode)\n"
+        )
+    prefix = r"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+name = Path(sys.argv[0]).name
+credentials = name == 'az' and args[:2] == ['aks', 'get-credentials']
+metadata = name == 'az' and args[:2] == ['aks', 'show'] and '-o' in args and args[args.index('-o')+1] == 'json'
+context = name == 'kubectl' and args[:2] == ['config', 'view']
+if credentials or metadata or context:
+    state = Path(os.environ['AKS_STATE'])
+    with (state/'kube-calls.jsonl').open('a') as output:
+        output.write(json.dumps({'tool':name, 'args':args, 'config':os.environ.get('KUBECONFIG'), 'helm_server':os.environ.get('HELM_KUBEAPISERVER'), 'helm_context':os.environ.get('HELM_KUBECONTEXT')})+'\n')
+    if credentials:
+        if os.environ.get('CREDENTIAL_EXIT'):
+            sys.exit(1)
+        target = Path(args[args.index('--file')+1])
+        target.write_text(json.dumps({'server':os.environ.get('CREDENTIAL_SERVER','https://pilot.example.invalid')}))
+    elif metadata:
+        print(os.environ.get('AKS_METADATA', '{"fqdn":"pilot.example.invalid"}'))
+    else:
+        print(json.loads(Path(os.environ['KUBECONFIG']).read_text())['server'])
+    sys.exit(0)
+"""
+    path.write_text(prefix + source)
+
+
 def render(*values):
     command = ["helm", "template", "coke", str(CHART)]
     for value in values:
@@ -480,6 +515,7 @@ if name == 'az' and 'properties.endpoint' in sys.argv:
 elif name == 'az' and 'key1' in sys.argv:
     print('offline-placeholder')
 """)
+            add_kube_stub_support(stub)
             stub.chmod(0o755)
             for name in ("az", "kubectl", "helm"):
                 (state / name).symlink_to(stub)
@@ -557,6 +593,7 @@ elif 'properties.endpoint' in args:
 elif 'key1' in args:
     print('offline-placeholder')
 """)
+                add_kube_stub_support(stub)
                 stub.chmod(0o755)
                 for name in ("kubectl", "helm"):
                     (state / name).symlink_to(stub)
@@ -616,6 +653,140 @@ elif 'key1' in args:
                     self.assertIn("gpt-5.4-mini", aoai_creates[1])
                 if missing:
                     self.assertIn("missing or cannot read deployment", result.stderr)
+
+
+class AksClusterBindingTests(unittest.TestCase):
+    def run_cluster_command(self, command, overrides=None):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            home = state / "home"
+            (home / ".kube").mkdir(parents=True)
+            ambient = home / ".kube/config"
+            original = "foreign cluster sentinel\n"
+            ambient.write_text(original)
+            stub = state / "stub"
+            stub.write_text(r"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+name, args = Path(sys.argv[0]).name, sys.argv[1:]
+with (Path(os.environ['AKS_STATE'])/'operations.jsonl').open('a') as output:
+    output.write(json.dumps({'tool':name,'args':args,'config':os.environ.get('KUBECONFIG'), 'helm_server':os.environ.get('HELM_KUBEAPISERVER'), 'helm_context':os.environ.get('HELM_KUBECONTEXT')})+'\n')
+if name == 'az' and '--query' in args and args[args.index('--query')+1] == 'nodeResourceGroup':
+    print('pilot-node-rg')
+elif name == 'az' and args[:2] == ['group','exists']:
+    print('false')
+""")
+            add_kube_stub_support(stub)
+            stub.chmod(0o755)
+            for name in ("az", "kubectl", "helm"):
+                (state / name).symlink_to(stub)
+            env = dict(
+                os.environ,
+                HOME=str(home),
+                KUBECONFIG=str(ambient),
+                HELM_KUBEAPISERVER="https://foreign.example.invalid",
+                HELM_KUBECONTEXT="foreign-context",
+                PATH=str(state) + os.pathsep + os.environ["PATH"],
+                AKS_STATE=directory,
+                AOAI_DEPLOYMENT="gpt-5.4-mini",
+                SELFHOSTED_MODEL="gpt-5.4-mini",
+            )
+            env.update({key: "offline" for key in ("RG", "LOCATION", "ACR", "AKS", "AOAI", "TAG")})
+            env.update(overrides or {})
+            # Probe's model lookup must succeed before the independent cluster check.
+            source = stub.read_text().replace(
+                "if name == 'az' and '--query' in args",
+                "if name == 'az' and 'properties.model.name' in args:\n    print('gpt-5.4-mini')\n"
+                "elif name == 'az' and '--query' in args",
+            )
+            stub.write_text(source)
+            result = subprocess.run(
+                ["bash", str(CHART / "scripts/aks.sh"), command],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            kube_calls = [
+                json.loads(line) for line in (state / "kube-calls.jsonl").read_text().splitlines()
+            ]
+            operations_path = state / "operations.jsonl"
+            operations = (
+                [json.loads(line) for line in operations_path.read_text().splitlines()]
+                if operations_path.exists()
+                else []
+            )
+            self.assertEqual(ambient.read_text(), original)
+            self.assertEqual(list((home / ".kube").iterdir()), [ambient])
+            config = Path(kube_calls[0]["config"])
+            self.assertNotEqual(config, ambient)
+            self.assertEqual(config.parent.parent, state)
+            self.assertFalse(config.parent.exists(), "temporary credentials must be removed")
+            credentials = kube_calls[0]["args"]
+            self.assertEqual(credentials[:2], ["aks", "get-credentials"])
+            self.assertEqual(credentials[credentials.index("--file") + 1], str(config))
+            self.assertEqual(credentials[credentials.index("-g") + 1], "offline")
+            self.assertEqual(credentials[credentials.index("-n") + 1], "offline")
+            self.assertTrue(all(c["config"] == str(config) for c in kube_calls))
+            self.assertTrue(
+                all(
+                    c["config"] == str(config)
+                    or (c["tool"] == "az" and "properties.model.name" in c["args"])
+                    for c in operations
+                )
+            )
+            for operation in operations:
+                if operation["tool"] == "helm":
+                    self.assertIsNone(operation["helm_server"])
+                    self.assertIsNone(operation["helm_context"])
+            return result, operations
+
+    def test_every_cluster_command_refuses_a_foreign_api_server(self):
+        for command in (
+            "install",
+            "register",
+            "turn",
+            "probe",
+            "egress-start",
+            "egress-check",
+            "teardown",
+        ):
+            with self.subTest(command=command):
+                result, operations = self.run_cluster_command(
+                    command, {"CREDENTIAL_SERVER": "https://foreign.example.invalid"}
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("API server does not match", result.stderr)
+                # Probe's read-only model metadata lookup is permitted; no workload call is.
+                self.assertTrue(
+                    all(
+                        c["tool"] == "az" and "properties.model.name" in c["args"]
+                        for c in operations
+                    )
+                )
+
+    def test_teardown_accepts_only_verified_public_private_or_portal_server(self):
+        for field in ("fqdn", "privateFqdn", "azurePortalFqdn"):
+            with self.subTest(field=field):
+                result, operations = self.run_cluster_command(
+                    "teardown", {"AKS_METADATA": json.dumps({field: "pilot.example.invalid"})}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(operations[0]["tool"], "helm")
+                self.assertEqual(operations[0]["args"][:2], ["uninstall", "coke"])
+                self.assertEqual(operations[1]["tool"], "kubectl")
+                self.assertEqual(operations[1]["args"][:3], ["delete", "namespace", "daimon"])
+                self.assertTrue(any(c["args"][:2] == ["aks", "delete"] for c in operations))
+
+    def test_teardown_refuses_missing_metadata_insecure_server_and_credential_failure(self):
+        for overrides in (
+            {"AKS_METADATA": "{}"},
+            {"CREDENTIAL_SERVER": "http://pilot.example.invalid"},
+            {"CREDENTIAL_EXIT": "1"},
+        ):
+            with self.subTest(overrides=overrides):
+                result, operations = self.run_cluster_command("teardown", overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(operations, [])
 
 
 class LiveProbeTests(unittest.TestCase):
@@ -716,6 +887,8 @@ class LiveProbeTests(unittest.TestCase):
             kubectl.chmod(0o755)
             az = root / "az"
             az.write_text('#!/bin/sh\nprintf "gpt-5.4-mini\\n"\n')
+            add_kube_stub_support(az)
+            add_kube_stub_support(kubectl)
             az.chmod(0o755)
             env = dict(
                 os.environ,
@@ -746,6 +919,8 @@ class LiveProbeTests(unittest.TestCase):
             az.chmod(0o755)
             kubectl = root / "kubectl"
             kubectl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$AKS_STATE/kubectl-call"\n')
+            add_kube_stub_support(az)
+            add_kube_stub_support(kubectl)
             kubectl.chmod(0o755)
             for underlying, az_exit in (
                 ("gpt-6.1-sol", "0"),

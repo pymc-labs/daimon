@@ -1682,3 +1682,9 @@ Azure deployment metadata and accept only an underlying `gpt-5.4-mini` model;
 direct probe execution requires an explicit verified model input. The probe
 requires the second turn to read the
 exact marker written by the first turn through matching tool calls.
+
+AKS helper phases use a fresh private kubeconfig for the named resource group and
+cluster, verify the API server against Azure cluster metadata before workload
+operations, and remove the credentials file on exit. They never use or modify
+`~/.kube/config`; a mismatched server stops teardown before release or namespace
+deletion. The existing installation commands are unchanged.

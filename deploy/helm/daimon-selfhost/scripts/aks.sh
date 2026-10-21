@@ -22,6 +22,36 @@ verify_aoai_model() {
   fi
   export AOAI_VERIFIED_MODEL
 }
+bind_aks() {
+  # A fresh, private file prevents inherited contexts or stale cluster credentials.
+  kube_state=$(mktemp -d "$AKS_STATE/kubeconfig.XXXXXX")
+  trap 'rm -r -- "$kube_state"' EXIT
+  export KUBECONFIG="$kube_state/config"
+  unset HELM_KUBEAPISERVER HELM_KUBECONTEXT
+  az aks get-credentials -g "$RG" -n "$AKS" --file "$KUBECONFIG" --overwrite-existing -o none
+  [[ -s "$KUBECONFIG" ]] || { echo 'AKS credentials file is missing or empty' >&2; exit 1; }
+  metadata=$(az aks show -g "$RG" -n "$AKS" \
+    --query '{fqdn:fqdn,privateFqdn:privateFqdn,azurePortalFqdn:azurePortalFqdn}' -o json)
+  server=$(kubectl config view --minify -o 'jsonpath={.clusters[0].cluster.server}')
+  python3 - "$metadata" "$server" <<'PYVERIFY'
+import json
+import sys
+from urllib.parse import urlsplit
+try:
+    hosts = {v.lower() for v in json.loads(sys.argv[1]).values() if isinstance(v, str) and v}
+    server = urlsplit(sys.argv[2])
+    valid = (server.scheme == 'https' and server.hostname in hosts
+             and server.port in (None, 443) and server.username is None and server.password is None
+             and server.path in ('', '/') and not server.query and not server.fragment)
+except (ValueError, AttributeError):
+    valid = False
+if not valid:
+    raise SystemExit('Refusing cluster operation: kubeconfig API server does not match the target AKS')
+PYVERIFY
+}
+case ${1:-} in
+install|register|turn|egress-start|egress-check|teardown) bind_aks ;;
+esac
 case ${1:-} in
 bootstrap)
   az group create -n "$RG" -l "$LOCATION" -o none
@@ -46,7 +76,6 @@ bootstrap)
   fi
   ;;
 install)
-  az aks get-credentials -g "$RG" -n "$AKS" --overwrite-existing -o none
   kubectl create namespace daimon --dry-run=client -o yaml | kubectl apply -f -
   # Explicit pilot admission exception. Obtain IT approval before running.
   kubectl label namespace daimon pod-security.kubernetes.io/enforce=privileged --overwrite
@@ -143,6 +172,7 @@ probe)
     exit 1
   fi
   verify_aoai_model
+  bind_aks
   kubectl -n daimon exec -i deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env AOAI_VERIFIED_MODEL="$AOAI_VERIFIED_MODEL" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
   ;;
 egress-start)

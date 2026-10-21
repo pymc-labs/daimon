@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Bind AKS helper phases to a private kubeconfig for the named cluster and verify
+  its API server before workload operations, preventing teardown of another cluster.
+
 - Verify the underlying Azure deployment model before AKS probes or deployment
   reuse; accept only gpt-5.4-mini and require verified metadata for direct probes.
 

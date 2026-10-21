@@ -234,6 +234,18 @@ Use this section as the operator recipe. The accompanying
 all Azure commands below are for the operator, and have not been executed by this
 lane. Nothing is scored as live-validated merely because a command is documented.
 
+Every helper phase that uses Helm or kubectl fetches credentials for exactly
+`$RG/$AKS` into a fresh private kubeconfig under `AKS_STATE`, exports it to child
+processes, and removes it on exit. The helper never reads or changes
+`~/.kube/config` or uses an inherited `KUBECONFIG`. It verifies the current API
+server against the target cluster's Azure `fqdn`, `privateFqdn` or
+`azurePortalFqdn` before workload operations, including teardown. Credential or
+server verification failures stop the phase before Helm/kubectl mutations.
+The operator commands in `INSTALL-COKE.md` are unchanged. For manual kubectl or
+Helm commands shown below, fetch a separate private kubeconfig explicitly with
+`az aks get-credentials -g "$RG" -n "$AKS" --file "$KUBECONFIG"`; set
+`KUBECONFIG` to a file in your own `mktemp -d` directory first.
+
 Prerequisites: Azure CLI authenticated to the target subscription; `kubectl`,
 Helm 3.19+, Python 3, git; checkout of the reviewed `azure-selfhost` branch; a
 dedicated RG containing only its budget and, optionally, the existing AOAI account
@@ -478,13 +490,9 @@ removed. An incomplete deletion is a failed teardown, not a passing result.
 bash deploy/helm/daimon-selfhost/scripts/aks.sh teardown
 ```
 
-Underlying destructive commands:
-
-```sh
-helm uninstall coke -n daimon --ignore-not-found
-kubectl delete namespace daimon --wait=true --ignore-not-found
-az aks delete -g "$RG" -n "$AKS" --yes -o none
-```
+The helper verifies its dedicated kubeconfig's API server before uninstalling
+the release, deleting the namespace or deleting AKS. Use the `teardown` helper
+above so the target check runs before any destructive command.
 
 Retaining built images and model quota avoids rebuilds and model provisioning on
 the timed path. In the same shell, start the clock before re-creating AKS, run the
