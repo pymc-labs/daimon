@@ -134,6 +134,8 @@ class Supervisor:
         self.cleanups: dict[str, asyncio.Task[None]] = {}
         self.cleanup_failures: dict[str, int] = {}
         self.unhealthy = False
+        self.sealed_sessions: set[str] = set()
+        self.watchdogs: set[asyncio.Task[None]] = set()
 
     def attach_durability(self) -> None:
         if self.checkpoints is not None:
@@ -272,8 +274,19 @@ class Supervisor:
         return None
 
     def start_cleanup(self, turn_id: str) -> None:
+        context = self.contexts.get(turn_id)
+        if context is not None and context.request.session_id in self.sealed_sessions:
+            return
         if turn_id not in self.cleanups or self.cleanups[turn_id].done():
             self.cleanups[turn_id] = asyncio.create_task(self.retry_cleanup(turn_id))
+
+    async def watch_turn(self, request: TurnRequest) -> None:
+        # asyncio.timeout cannot interrupt an adapter that suppresses cancellation.
+        await asyncio.sleep(request.limits.deadline_s + CLEANUP_TIMEOUT)
+        owner = self.tasks.get(request.turn_id)
+        if owner is not None and not owner.done():
+            owner.cancel()
+            self.start_cleanup(request.turn_id)
 
     async def retry_cleanup(self, turn_id: str) -> None:
         # Own retries independently of client traffic and the admission lock.
@@ -287,7 +300,11 @@ class Supervisor:
             try:
                 async with asyncio.timeout(CLEANUP_TIMEOUT):
                     await context.stop_workers()
+                if owner is not None and not owner.done():
+                    raise TimeoutError("turn owner still active")
             except Exception as exc:
+                if turn_id not in self.contexts:
+                    return
                 failures = self.cleanup_failures.get(turn_id, 0) + 1
                 self.cleanup_failures[turn_id] = failures
                 audit_logger.error(
@@ -302,19 +319,34 @@ class Supervisor:
                     )
                 )
                 if failures >= CLEANUP_FAILURE_LIMIT:
-                    self.unhealthy = True
+                    self.unhealthy = self.session_mode == "single"
                     audit_logger.critical(
                         json.dumps(
                             {
                                 "event": "harness.cleanup_exhausted",
                                 "turn_id": turn_id,
+                                "session_id": context.request.session_id,
+                                "mode": self.session_mode,
                                 "failures": failures,
                             }
                         )
                     )
                     # Give readiness probes a chance to observe the failed state;
                     # hard exit also handles uninterruptible tasks during shutdown.
-                    asyncio.get_running_loop().call_later(1.0, self.exit_unhealthy)
+                    if self.session_mode == "single":
+                        asyncio.get_running_loop().call_later(1.0, self.exit_unhealthy)
+                    else:
+                        await self.io(
+                            self.journal.append,
+                            context.request,
+                            "error",
+                            {
+                                "kind": "cleanup_exhausted",
+                                "message": "Session cleanup exhausted; create a new session",
+                                "retryable": False,
+                            },
+                        )
+                    self.sealed_sessions.add(context.request.session_id)
                     self.changed.set()
                     return
                 await asyncio.sleep(CLEANUP_RETRY_DELAY)
@@ -327,6 +359,8 @@ class Supervisor:
         os._exit(1)
 
     async def cleanup_failed_turns(self, session_id: str | None = None) -> None:
+        if session_id in self.sealed_sessions:
+            raise HarnessError("cleanup_exhausted", "Session sealed; create a new session")
         if self.unhealthy:
             raise HarnessError("workers_active", "Sandbox cleanup exhausted; replacement required")
         for turn_id, context in list(self.contexts.items()):
@@ -499,6 +533,9 @@ class Supervisor:
             ) from None
 
     async def run(self, request: TurnRequest, credentials: dict[str, str]) -> None:
+        watchdog = asyncio.create_task(self.watch_turn(request))
+        self.watchdogs.add(watchdog)
+        watchdog.add_done_callback(self.watchdogs.discard)
         credentials = self.secrets | credentials
         usage_count = 0
         failure: dict[str, JsonValue] | None = None
@@ -624,6 +661,7 @@ class Supervisor:
                         outcome = "interrupted"
                 await finalization
             finally:
+                watchdog.cancel()
                 credentials.clear()
                 # Retain the context until worker cleanup succeeds (I5).
                 if workers_stopped:
@@ -661,6 +699,15 @@ class Supervisor:
             try:
                 await self.ensure_session(request.session_id)
             except HarnessError as exc:
+                if exc.kind == "cleanup_exhausted":
+                    events = await self.io(self.journal.events, request.session_id, after)
+                    for event in events:
+                        if event.turn_id == request.turn_id:
+                            yield (
+                                f"id: {event.seq}\nevent: {event.type}\n"
+                                f"data: {event.model_dump_json()}\n\n"
+                            )
+                    return
                 if exc.kind != "workers_active":
                     raise
                 # An SSE response cannot change its HTTP status after headers.
@@ -694,6 +741,8 @@ class Supervisor:
             for task in done:
                 if not task.cancelled():
                     task.exception()
+        for watchdog in self.watchdogs:
+            watchdog.cancel()
         for cleanup in self.cleanups.values():
             cleanup.cancel()
         if self.cleanups:
@@ -911,7 +960,13 @@ def create_app(
         assert isinstance(exc, HarnessError)
         return JSONResponse(
             status_code=503,
-            content={"detail": {"kind": exc.kind, "message": str(exc), "retryable": True}},
+            content={
+                "detail": {
+                    "kind": exc.kind,
+                    "message": str(exc),
+                    "retryable": exc.kind != "cleanup_exhausted",
+                }
+            },
         )
 
     app.add_exception_handler(HarnessError, durability_error)
@@ -971,6 +1026,7 @@ def create_app(
             task.cancel()
         done, _ = await asyncio.wait({task}, timeout=CANCEL_JOIN_TIMEOUT)
         if not done:
+            supervisor.start_cleanup(turn_id)
             raise HarnessError("workers_active", "Tool cleanup pending; retry cancellation")
         if not task.cancelled():
             task.exception()
@@ -989,7 +1045,14 @@ def create_app(
             raise HTTPException(status_code=409, detail="session_mismatch")
         try:
             identifier(session_id)
-            await supervisor.ensure_session(session_id, after_seq)
+            try:
+                await supervisor.ensure_session(session_id, after_seq)
+            except HarnessError as exc:
+                if exc.kind != "cleanup_exhausted":
+                    raise
+                # Replay the terminal session error without repairing the live
+                # claim or accepting further work for this sealed session.
+                await supervisor.io(supervisor.journal.record_cursor, session_id, after_seq)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="Invalid session identifier") from exc
         if supervisor.session_mode == "single":

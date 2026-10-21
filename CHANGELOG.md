@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add an AKS Helm baseline with persistent multi-session harness, host services,
   bundled or external PostgreSQL, private networking policy, ingress and local kind smoke checks.
+- Bound self-hosted cancellation and deadline cleanup even when an adapter hangs;
+  serialize cleanup per tool identity. Exhausted single-session sandboxes fail
+  readiness and exit; multi-session harnesses seal only the affected session.
+  Restore degraded-checkpoint warnings and derive cancel success from the terminal.
 
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 

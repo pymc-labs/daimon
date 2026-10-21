@@ -2255,7 +2255,20 @@ A degraded snapshot or upload failure queues `checkpoint_warning` for the next
 new turn. The mux driver preserves it as a native event, and core converts it to
 a non-terminal thread notice about possible message/file loss, emitted once per
 session. A local pending marker retains late failures across process restarts;
-a notice not captured in a snapshot can still be lost with a destroyed sandbox.
+restoring a degraded snapshot rebuilds its notice from the workspace manifest.
+A warning about an entirely failed upload can still be lost if its local marker
+was not captured before sandbox destruction.
+
+Cancellation and deadlines have an independent watchdog, including when the
+adapter awaits a worker that suppresses cancellation. Cleanup verification is
+serialized per tool UID. After three bounded failures, single-session mode
+fails health/readiness and exits for platform replacement. Multi-session mode
+keeps serving other sessions and seals only the failed session with a structured,
+non-retryable `cleanup_exhausted` error; the caller must create a new session.
+The retained context prevents a terminal while local workers can still act.
+Verifier priority (where permitted) and a longer helper budget reduce false
+failures under CPU contention; per-session cgroup CPU limits remain the resource
+isolation fix (G3).
 
 Recovery authenticates and persists the client cursor, loads remote reservations
 and WAL inventory, restores an empty sandbox, and merges original event identities

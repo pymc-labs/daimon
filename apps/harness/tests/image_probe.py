@@ -256,6 +256,97 @@ async def main() -> None:
         context.write("file.txt", name)
         contexts.append(context)
     first = contexts[0]
+    # Real service/tool UID regression: the same UID's verifiers must never
+    # overlap, including cleanup initiated by independent tool workers.
+    original_run = subprocess.run
+
+    def held_verifier(command, **kwargs):
+        if len(command) == 4 and str(command[2]).endswith("/kill_uid.py"):
+            # Hold AFTER UID drop: without serialization both protected helpers
+            # coexist as the tool's real UID and kill(-1) kills the other helper.
+            program = (
+                "import runpy,sys,time; n=runpy.run_path(sys.argv[1]); "
+                "n['isolate_verifier'](int(sys.argv[2])); time.sleep(0.1); "
+                "sys.exit(n['kill_uid']())"
+            )
+            command = [command[0], "-I", "-c", program, command[2], command[3]]
+        return original_run(command, **kwargs)
+
+    subprocess.run = held_verifier
+    try:
+        for _ in range(20):
+            pair = await asyncio.gather(first.bash("true"), first.bash("true"))
+            assert all("exit_code=0" in result for result in pair), "paired cleanup failed"
+    finally:
+        subprocess.run = original_run
+    print("paired_cleanup_20_pairs_verified", flush=True)
+    if mode == "multi":
+        # Use the service regression with production UID switching and procfs.
+        # Only inject the adapter: retain the real TurnContext cleanup path.
+        from daimon_harness import service
+        from daimon_harness.service import Supervisor
+
+        class ProbeAdapter:
+            async def run(self, context, history):
+                if context.request.session_id == "wedged":
+                    await context.tool("busy", "bash", {}, lambda: context.bash("sleep 120"))
+                await context.emit(
+                    "usage",
+                    {
+                        "request_id": context.request.turn_id,
+                        "model": "gpt-6-luna",
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "reasoning_tokens": 0,
+                    },
+                )
+                return []
+
+        old_timeout, old_delay = service.CLEANUP_TIMEOUT, service.CLEANUP_RETRY_DELAY
+        service.CLEANUP_TIMEOUT, service.CLEANUP_RETRY_DELAY = 0.05, 0.01
+        isolated = Supervisor(home / "isolation-probe", ProbeAdapter(), "multi")
+        blocked = asyncio.Event()
+        original_stop = TurnContext.stop_workers
+
+        async def blocked_stop(context):
+            if context.request.session_id == "wedged" and not blocked.is_set():
+                raise TimeoutError("injected persistent verifier failure")
+            await original_stop(context)
+
+        TurnContext.stop_workers = blocked_stop
+        try:
+            request = first.request.model_copy(
+                update={"session_id": "wedged", "turn_id": "wedged", "idempotency_key": "wedged"},
+                deep=True,
+            )
+            request.limits.deadline_s = 0.1
+            await isolated.submit(request)
+            async with asyncio.timeout(5):
+                while "wedged" not in isolated.sealed_sessions:
+                    await asyncio.sleep(0.01)
+            assert not isolated.unhealthy, "multi mode killed unrelated sessions"
+            service.CLEANUP_TIMEOUT = old_timeout
+            await asyncio.gather(isolated.tasks["wedged"], return_exceptions=True)
+            other = request.model_copy(
+                update={
+                    "session_id": "serving",
+                    "turn_id": "serving",
+                    "idempotency_key": "serving",
+                },
+                deep=True,
+            )
+            other.limits.deadline_s = 5
+            await isolated.submit(other)
+            await isolated.tasks["serving"]
+            assert await isolated.io(isolated.journal.terminal_outcome, "serving") == "completed"
+            print("multi_mode_isolation_verified", flush=True)
+        finally:
+            blocked.set()
+            TurnContext.stop_workers = original_stop
+            service.CLEANUP_TIMEOUT, service.CLEANUP_RETRY_DELAY = old_timeout, old_delay
+            await isolated.close()
+
     if os.environ.get("HARNESS_PROBE_PID_BURN") == "1":
         await asyncio.to_thread(
             subprocess.run,

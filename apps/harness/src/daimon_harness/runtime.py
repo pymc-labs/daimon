@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -33,6 +34,9 @@ from .isolation import can_switch_uid, tool_identity
 from .journal import identifier
 
 CLEANUP_WAIT_TIMEOUT = 2.0
+VERIFY_WAIT_TIMEOUT = 9.0
+_uid_locks: dict[int, threading.Lock] = {}
+_uid_locks_guard = threading.Lock()
 
 
 async def discard_event(kind: EventType, data: dict[str, JsonValue]) -> None:
@@ -115,9 +119,7 @@ class TurnContext:
             _, pending = await asyncio.wait(workers, timeout=CLEANUP_WAIT_TIMEOUT)
         else:
             pending = set()
-        await asyncio.wait_for(
-            asyncio.to_thread(self.stop_processes), timeout=CLEANUP_WAIT_TIMEOUT + 1
-        )
+        await asyncio.wait_for(asyncio.to_thread(self.stop_processes), timeout=VERIFY_WAIT_TIMEOUT)
         if pending:
             _, pending = await asyncio.wait(pending, timeout=5)
         if pending:
@@ -259,7 +261,7 @@ class TurnContext:
             self.process_groups.add(child.pid)
             try:
                 await asyncio.wait_for(
-                    asyncio.to_thread(self.stop_processes), timeout=CLEANUP_WAIT_TIMEOUT + 1
+                    asyncio.to_thread(self.stop_processes), timeout=VERIFY_WAIT_TIMEOUT
                 )
             finally:
                 transport = cast(
@@ -310,6 +312,18 @@ class TurnContext:
         return f"exit_code={process.returncode}\n{marker}{tail.decode(errors='replace')}"
 
     def stop_processes(self) -> None:
+        # Timed-out to_thread callers may still own a verifier. Serialize the
+        # actual thread operation, not just its cancellable async caller.
+        with _uid_locks_guard:
+            lock = _uid_locks.setdefault(self.tool_uid, threading.Lock())
+        if not lock.acquire(timeout=4):
+            raise TimeoutError("tool UID cleanup busy")
+        try:
+            self._stop_processes()
+        finally:
+            lock.release()
+
+    def _stop_processes(self) -> None:
         if can_switch_uid():
             # Trusted bootstrap drops all root UIDs/caps before broadcasting as
             # the session's real UID; protected effective UID prevents ptrace.
@@ -328,7 +342,7 @@ class TurnContext:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=2,
+                timeout=4,
                 check=True,
             )
         else:

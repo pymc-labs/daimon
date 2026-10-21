@@ -13,14 +13,17 @@ from daimon_harness.service import create_app
 from .conftest import FakeModelAdapter, turn
 
 
-async def test_never_dying_worker_escalates_without_request_lock(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_SESSION_MODE", "multi")
+@pytest.mark.parametrize("mode", ["single", "multi"])
+@pytest.mark.parametrize("trigger", ["cancel", "deadline"])
+async def test_never_dying_worker_escalates_without_request_lock(
+    tmp_path, monkeypatch, mode, trigger
+):
+    monkeypatch.setenv("HARNESS_SESSION_MODE", mode)
     monkeypatch.setattr("daimon_harness.service.CLEANUP_TIMEOUT", 0.03)
+    monkeypatch.setattr("daimon_harness.service.CANCEL_JOIN_TIMEOUT", 0.03)
     monkeypatch.setattr("daimon_harness.service.CLEANUP_RETRY_DELAY", 0.01)
-    release = asyncio.Event()
-    workers = []
-    exits = []
-    records = []
+    release, started = asyncio.Event(), asyncio.Event()
+    workers, exits, records = [], [], []
     monkeypatch.setattr(
         "daimon_harness.service.audit_logger.error", lambda raw: records.append(json.loads(raw))
     )
@@ -30,7 +33,6 @@ async def test_never_dying_worker_escalates_without_request_lock(tmp_path, monke
             history = await super().run(context, history)
             if context.request.session_id != "session-1":
                 return history
-            started = asyncio.Event()
 
             async def stuck():
                 started.set()
@@ -39,8 +41,9 @@ async def test_never_dying_worker_escalates_without_request_lock(tmp_path, monke
                         await release.wait()
                 return "released"
 
-            workers.append(asyncio.create_task(context.tool("stuck", "write", {}, stuck)))
-            await started.wait()
+            worker = asyncio.create_task(context.tool("stuck", "write", {}, stuck))
+            workers.append(worker)
+            await worker  # The owner really is stuck before its finally block.
             return history
 
     app = create_app(home=tmp_path, token="test", adapter=StuckModel())
@@ -55,37 +58,63 @@ async def test_never_dying_worker_escalates_without_request_lock(tmp_path, monke
         ) as client,
     ):
         try:
-            assert (await client.post("/v0/turns", json=turn())).status_code == 202
-            await asyncio.gather(supervisor.tasks["turn-1"], return_exceptions=True)
-            # A slow cleanup is running, but neither this session's 503 nor an
-            # unrelated session's admission can wait on it or hold the lock.
-            before = time.monotonic()
-            response = await client.post(
-                "/v0/turns/turn-1/cancel", params={"session_id": "session-1"}
-            )
-            assert response.status_code == 503 and response.json()["detail"]["retryable"]
-            assert time.monotonic() - before < 0.1
-            assert not supervisor.submissions.locked()
-            other = turn(turn_id="other", key="other") | {"session_id": "session-2"}
-            assert (await client.post("/v0/turns", json=other)).status_code == 202
-            await supervisor.tasks["other"]
-            deadline = time.monotonic() + 2
-            while not supervisor.unhealthy and time.monotonic() < deadline:
+            request = turn()
+            request["limits"] = {
+                "deadline_s": 0.08 if trigger == "deadline" else 60,
+                "max_tool_calls": 10,
+            }
+            assert (await client.post("/v0/turns", json=request)).status_code == 202
+            await asyncio.wait_for(started.wait(), 2)
+            if trigger == "cancel":
+                response = await client.post(
+                    "/v0/turns/turn-1/cancel", params={"session_id": "session-1"}
+                )
+                assert response.status_code == 503 and response.json()["detail"]["retryable"]
+            until = time.monotonic() + 3
+            while "session-1" not in supervisor.sealed_sessions and time.monotonic() < until:
                 await asyncio.sleep(0.01)
-            assert supervisor.unhealthy, "cleanup escalation missing"
+            assert "session-1" in supervisor.sealed_sessions, "cleanup escalation missing"
             assert [record["failures"] for record in records] == [1, 2, 3], (
                 "cleanup escalation missing"
             )
-            for route in ("/readiness", "/v0/healthz"):
-                assert (await client.get(route)).status_code == 503
+            assert not supervisor.submissions.locked()
             assert not await supervisor.io(supervisor.journal.ended, "turn-1")
-            async with asyncio.timeout(2):
-                while not exits:
-                    await asyncio.sleep(0.01)
-            assert exits == [1]
+            for route in ("/readiness", "/v0/healthz"):
+                assert (await client.get(route)).status_code == (
+                    503 if mode == "single" else 200
+                ), "multi mode killed unrelated sessions"
+            if mode == "single":
+                async with asyncio.timeout(2):
+                    while not exits:
+                        await asyncio.sleep(0.01)
+                assert exits == [1]
+            else:
+                await supervisor.cleanups["turn-1"]
+                replay = await client.get("/v0/sessions/session-1/events")
+                assert replay.status_code == 200
+                assert any(
+                    event["type"] == "error"
+                    and event["data"].get("kind") == "cleanup_exhausted"
+                    and event["data"]["retryable"] is False
+                    for event in replay.json()["events"]
+                )
+                assert not replay.json()["complete"]  # No terminal with live workers (I5).
+                # Session B must still complete AFTER A has exhausted its budget.
+                other = turn(turn_id="other", key="other") | {"session_id": "session-2"}
+                assert (await client.post("/v0/turns", json=other)).status_code == 202
+                await supervisor.tasks["other"]
+                assert (
+                    await supervisor.io(supervisor.journal.terminal_outcome, "other") == "completed"
+                )
+                response = await client.post("/v0/turns", json=turn(turn_id="again", key="again"))
+                assert response.status_code == 503
+                assert response.json()["detail"]["kind"] == "cleanup_exhausted"
+                assert response.json()["detail"]["retryable"] is False
+                await asyncio.sleep(1.1)
+                assert not exits, "multi mode killed unrelated sessions"
         finally:
             release.set()
-            await asyncio.gather(*workers, return_exceptions=True)
+            await asyncio.gather(*workers, *supervisor.tasks.values(), return_exceptions=True)
 
 
 @pytest.mark.parametrize("loop", ["agents_sdk", "codex"])

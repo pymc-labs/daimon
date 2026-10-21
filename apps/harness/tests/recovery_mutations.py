@@ -1,4 +1,4 @@
-"""Run twelve recovery mutations on isolated source copies (never edit the checkout).
+"""Run fifteen recovery mutations on isolated source copies (never edit the checkout).
 
 Usage: uv run python apps/harness/tests/recovery_mutations.py <empty scratch directory>
 Run from the repository root; each property-test failure is retained in scratch.
@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in range(1, 13):
+for number in range(1, 16):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -68,12 +68,19 @@ for number in range(1, 13):
             "                if workers_stopped:\n",
             "                if True:\n",
         )
-    elif number == 7:
-        change(
-            "checkpoints.py",
-            "command.extend((str(user), str(EXPORT_UID)))",
-            "command.extend((str(user), str(user)))",
-        )
+    elif number in {7, 14}:
+        if number == 14:
+            change(
+                "runtime.py",
+                "lock = _uid_locks.setdefault(self.tool_uid, threading.Lock())",
+                "lock = threading.Lock()",
+            )
+        else:
+            change(
+                "checkpoints.py",
+                "command.extend((str(user), str(EXPORT_UID)))",
+                "command.extend((str(user), str(user)))",
+            )
         # UID switching is essential to this mutation. Run the same production
         # overlap probe as CI in a cached image, with the mutated package copied in.
         image = os.environ.get("HARNESS_MUTATION_IMAGE", "daimon-harness:l4-hardening")
@@ -99,7 +106,7 @@ for number in range(1, 13):
                 ("apps/harness/tests/image_probe.py", "/probe.py"),
             ):
                 subprocess.run(["docker", "cp", local, f"{container}:{remote}"], check=True)
-            with (root / "mutation-7.log").open("w") as output:
+            with (root / f"mutation-{number}.log").open("w") as output:
                 subprocess.run(
                     ["docker", "start", "-a", container], stdout=output, stderr=subprocess.STDOUT
                 )
@@ -108,12 +115,13 @@ for number in range(1, 13):
                     ["docker", "inspect", "--format", "{{.State.ExitCode}}", container], text=True
                 )
             )
-            print(f"mutation 7: production image exit {code}", flush=True)
+            print(f"mutation {number}: production image exit {code}", flush=True)
             assert code == 1
             assert (
                 "exporter killed by tool cleanup (checkpoint data loss)"
-                in (root / "mutation-7.log").read_text()
-            )
+                if number == 7
+                else "CalledProcessError"
+            ) in (root / f"mutation-{number}.log").read_text()
         finally:
             subprocess.run(["docker", "rm", "-f", container], check=True, stdout=subprocess.DEVNULL)
         continue
@@ -144,6 +152,13 @@ for number in range(1, 13):
         change("service.py", "if failures >= CLEANUP_FAILURE_LIMIT:", "if False:")
     elif number == 12:
         change("service.py", 'cancelled=terminal == "interrupted"', "cancelled=True")
+    elif number == 13:
+        change("service.py", "            self.start_cleanup(request.turn_id)", "            pass")
+        change("service.py", "            supervisor.start_cleanup(turn_id)", "            pass")
+    elif number == 15:
+        change(
+            "service.py", 'self.unhealthy = self.session_mode == "single"', "self.unhealthy = True"
+        )
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:
         result = subprocess.run(
@@ -156,6 +171,8 @@ for number in range(1, 13):
                     10: "apps/harness/tests/test_checkpoints.py::test_degraded_fifo_warning_survives_destroyed_home",
                     11: "apps/harness/tests/test_wedge_hardening.py::test_never_dying_worker_escalates_without_request_lock",
                     12: "apps/harness/tests/test_wedge_hardening.py::test_cancel_terminal_race_stress",
+                    13: "apps/harness/tests/test_wedge_hardening.py::test_never_dying_worker_escalates_without_request_lock",
+                    15: "apps/harness/tests/test_wedge_hardening.py::test_never_dying_worker_escalates_without_request_lock",
                 }.get(
                     number,
                     "apps/harness/tests/test_sequence_ratchet.py::test_sequence_ratchet_random_interleavings",
@@ -182,5 +199,7 @@ for number in range(1, 13):
         10: "restored degraded checkpoint lost warning",
         11: "cleanup escalation missing",
         12: "cancel acknowledged a completed turn",
+        13: "cleanup escalation missing",
+        15: "multi mode killed unrelated sessions",
     }
     assert expected[number] in (root / f"mutation-{number}.log").read_text()

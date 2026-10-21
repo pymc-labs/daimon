@@ -69,7 +69,7 @@ def present_pids() -> list[int]:
     return [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdecimal()]
 
 
-def kill_uid(timeout: float = 0.2) -> int:
+def kill_uid(timeout: float = 1.0) -> int:
     deadline = time.monotonic() + timeout
     own_pid = os.getpid()
     try:
@@ -103,6 +103,10 @@ def isolate_verifier(tool_uid: int) -> None:
     """Keep the proc exemption out of reach of tool-UID ptrace attackers."""
     if not 10001 <= tool_uid <= 60000:
         raise ValueError("invalid tool UID")
+    # Prefer the trusted verifier over CPU-bound tools where CAP_SYS_NICE is
+    # available. The longer helper budget also works without that capability.
+    with suppress(PermissionError):
+        os.nice(-10)
     os.setgroups([PROC_VERIFY_GID])
     os.setresgid(tool_uid, tool_uid, tool_uid)
     # Signal permission uses real OR effective UID. The real tool UID lets this

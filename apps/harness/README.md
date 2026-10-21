@@ -775,7 +775,7 @@ and host-visible completion/admission after warning failures. A separate regress
 boundary for warning delivery. Remote uploads extend a measurement-only oracle;
 they never advance the simulated host's event cursor.
 
-Reproduce the twelve isolated mutation checks from the repository root:
+Reproduce the fifteen isolated mutation checks from the repository root:
 
 ```sh
 scratch=$(mktemp -d)
@@ -828,9 +828,18 @@ recovery or sandbox replacement. Each cleanup attempt has a ten-second ceiling;
 subprocess creation, pipe drainage and file-helper reaping have two-second waits.
 Three consecutive background cleanup failures emit structured
 `harness.cleanup_failed` / `harness.cleanup_exhausted` logs, fail health and
-readiness, and exit with status 1 after one second. Retries run independently of
-client traffic, so requests cannot postpone replacement. The pool must replace
-the sandbox, allowing the host to restore its last durable checkpoint.
+readiness, and exit with status 1 after one second **in single mode only**.
+In multi mode only the failed session is sealed with non-retryable
+`cleanup_exhausted`; other sessions and readiness stay available. This is a
+terminal session error, not a `turn_ended` claim while local workers still live.
+The caller must create a new session. A deadline watchdog starts cleanup even
+when an adapter awaits a cancellation-resistant worker; a timed-out cancel
+also starts independent cleanup. The owner remaining active counts as failure.
+Verification is serialized per tool UID, including across timed-out async
+callers, with a four-second helper budget and optional elevated nice priority.
+Per-session cgroup CPU limits (G3) remain the resource isolation fix. Retries
+run independently of client traffic. In single mode the platform must replace
+the sandbox so the host can restore its last durable checkpoint.
 Before startup recovery or serving, a bounded trusted helper enumerates orphaned
 tool UIDs, kills their processes, and verifies termination; any failure refuses
 startup. The final `/proc` mount must allow the verifier's reserved group 60002
@@ -852,3 +861,9 @@ cancel success and must fail the terminal race stress test under both loops.
 returning retryable 503 if cleanup is still pending. Already sealed sessions
 return 503 immediately. Success derives from the committed terminal;
 a cancel racing with a committed completion returns `cancelled:false`.
+
+Mutations 13–15 remove the active-owner watchdog/cancel escalation, remove the
+per-UID verifier lock (production image paired cleanups), and restore multi-mode
+process-wide failure. Each must fail its regression. Cached-image probes run
+20 paired bash cleanups with zero failures and a multi-mode isolation regression
+under production service/tool identities. No model is called.
