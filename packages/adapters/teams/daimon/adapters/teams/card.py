@@ -2,7 +2,8 @@
 
 The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
-elapsed time, the turn's tool lines, the last few draft lines, and a Stop button.
+elapsed time, the agent's plan when progress plans are on, the turn's tool lines,
+the last few draft lines, and a Stop button.
 The answer replaces the card as Extended Markdown messages: a card TextBlock
 renders no code blocks or math, a message does. A card follows it with the
 summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
@@ -25,12 +26,14 @@ from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
 from daimon.core.teams_markdown import escape_dollars
 from daimon.core.turn.notices import TerminationNotice, fit_notice
+from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
     draft_log,
     format_draft,
     format_duration,
     format_headline,
+    format_plan_lines,
     format_tool_lines,
     has_running_tool,
     roll_draft,
@@ -73,6 +76,8 @@ class CardState:
     started_at: float
     is_working: bool = False
     tool_lines: tuple[str, ...] = ()
+    plan_lines: tuple[str, ...] = ()
+    """The agent's latest progress plan as a checklist; empty unless progress plans are on."""
     draft: str | None = None
     """The latest draft line."""
     earlier_drafts: tuple[str, ...] = ()
@@ -103,10 +108,22 @@ def on_draft(state: CardState, text: str) -> CardState:
 
 
 def on_activity(state: CardState, turn: TurnState) -> CardState:
-    """Fold the turn's tool calls into the card: Working while one runs, else Thinking."""
-    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
-    lines = tuple(scrub_other_platforms(line, "teams") for line in lines)
-    return dataclasses.replace(state, is_working=has_running_tool(turn.content), tool_lines=lines)
+    """Fold the turn's tool calls into the card: Working while one runs, else Thinking.
+
+    With progress plans on for the turn, the latest plan update becomes the
+    checklist and leaves the tool lines.
+    """
+    plan_shown = progress_plans_shown()
+    lines = format_tool_lines(
+        turn.content, finished_ids=turn.finished_tool_ids, plan_shown=plan_shown
+    )
+    plan = format_plan_lines(turn.content) if plan_shown else ()
+    return dataclasses.replace(
+        state,
+        is_working=has_running_tool(turn.content),
+        tool_lines=tuple(scrub_other_platforms(line, "teams") for line in lines),
+        plan_lines=tuple(scrub_other_platforms(line, "teams") for line in plan),
+    )
 
 
 def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
@@ -138,6 +155,9 @@ def live_card(state: CardState, *, now: float, cancel_key: str) -> AdaptiveCard:
             is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: word
         )
     body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
+    if state.plan_lines:
+        # One paragraph per step, as for the draft lines below.
+        body.append(TextBlock(text="\n\n".join(state.plan_lines), wrap=True))
     if state.tool_lines:
         lines = "\n\n".join(state.tool_lines)
         body.append(TextBlock(text="Details", size="Small", wrap=True))

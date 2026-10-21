@@ -317,7 +317,6 @@ def _agent_message(event_id: str, text: str) -> Any:
     )
 
 
-@pytest.mark.usefixtures("status_log_on")
 async def test_status_lines_show_as_a_running_log_on_the_card() -> None:
     sender, clock = FakeSender(), Clock()
     lifecycle = await _posted(sender, clock)
@@ -329,19 +328,6 @@ async def test_status_lines_show_as_a_running_log_on_the_card() -> None:
     body = _card_body(sender, -1)
     draft = next(block for block in body if block.get("isSubtle") and block.get("size") != "Small")
     assert draft["text"] == "🔍 step 2\n\n🔍 step 3\n\n🔍 step 4", "last three, one paragraph each"
-
-
-async def test_by_default_the_card_shows_only_the_latest_line() -> None:
-    sender, clock = FakeSender(), Clock()
-    lifecycle = await _posted(sender, clock)
-    for number in range(1, 4):
-        await lifecycle.on_sse_event(_agent_message(f"evt_{number}", f"🔍 step {number}"))
-    clock.now += 65
-    await lifecycle.on_render(TurnState())
-
-    body = _card_body(sender, -1)
-    draft = next(block for block in body if block.get("isSubtle") and block.get("size") != "Small")
-    assert draft["text"] == "🔍 step 3"
 
 
 async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
