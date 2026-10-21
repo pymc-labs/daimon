@@ -146,6 +146,8 @@ class HarnessConfig(BaseModel):
                 raise ValueError("bearer_env auth_ref must be an environment variable name")
         else:
             _url(self.auth_ref, audience=True)
+        if self.auth_ref == SESSION_POOL_AUDIENCE and not self.session_pool:
+            raise ValueError("the dynamic sessions audience requires session_pool=true")
         if self.session_pool and (
             self.transport != "direct"
             or self.auth_mode != "entra"

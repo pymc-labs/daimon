@@ -151,3 +151,45 @@ def test_pool_configuration_roundtrip_and_explicit_token_provider():
         DirectTransport(
             httpx.AsyncClient(), base_url="https://pool.example", token="static", session_pool=True
         )
+
+
+def test_pool_audience_requires_explicit_pool_routing():
+    with pytest.raises(ValueError, match="requires session_pool"):
+        HarnessConfig(
+            harness_url="https://pool.example",
+            auth_mode="entra",
+            auth_ref="https://dynamicsessions.io",
+        )
+
+
+@pytest.mark.parametrize("session_id", ["", " ", "\t"])
+@pytest.mark.parametrize("mode", ["direct", "pool", "foundry"])
+async def test_empty_session_is_refused_before_token_or_http(session_id, mode):
+    from mux.drivers.selfhosted.transport import FoundryInvocationsTransport
+
+    calls = []
+
+    async def token():
+        calls.append("token")
+        return "token"
+
+    def respond(request):
+        calls.append("http")
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        transport = (
+            FoundryInvocationsTransport(
+                client, project_endpoint="https://project", agent_name="agent", token_provider=token
+            )
+            if mode == "foundry"
+            else DirectTransport(
+                client,
+                base_url="https://harness",
+                token_provider=token,
+                session_pool=mode == "pool",
+            )
+        )
+        with pytest.raises(ValueError, match="session id"):
+            await transport.request("GET", "/v0/sessions/s/events", session_id=session_id)
+    assert calls == []

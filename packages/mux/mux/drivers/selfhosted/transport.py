@@ -196,6 +196,8 @@ class DirectTransport:
         mcp_authorization: str | None = None,
         deadline: datetime | None = None,
     ) -> JsonValue:
+        if not session_id.strip():
+            raise ValueError("session id is required")
         parsed = urlsplit(path)
         if parsed.scheme or parsed.netloc or parsed.fragment or not parsed.path.startswith("/v0/"):
             raise ValueError("direct transport requires an absolute C3 path")
@@ -246,6 +248,8 @@ class FoundryInvocationsTransport(DirectTransport):
         mcp_authorization: str | None = None,
         deadline: datetime | None = None,
     ) -> JsonValue:
+        if not session_id.strip():
+            raise ValueError("session id is required")
         parsed = urlsplit(path)
         turn = method == "POST" and parsed.path == "/v0/turns"
         if mcp_authorization is not None and not turn:

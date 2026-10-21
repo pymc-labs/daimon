@@ -232,7 +232,14 @@ The host requires `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS` to bind audience
 `https://dynamicsessions.io` to the exact pool endpoint origin and tenant. An
 unbound audience or different origin is refused before acquiring a token.
 
-Pool authorization does not replace harness caller authentication. Verify live
+Pool authorization does not replace harness caller authentication. Configure the
+container with `HARNESS_AUTH_MODE=entra`,
+`HARNESS_ENTRA_AUDIENCE=https://dynamicsessions.io`, the pool tenant in
+`HARNESS_ENTRA_TENANT_ID`, and the host principal's object or app ID in
+`HARNESS_ALLOWED_CALLERS`. The pool bearer is an Entra token for that audience;
+a harness left in shared-secret bearer mode will reject it with 401. The host
+refuses this audience unless `session_pool=true`, and transports refuse empty
+session IDs before sending a request. Verify live
 that `Authorization` and `X-Daimon-*` reach the container before enabling
 admission. If forwarding fails, keep admission disabled until the verified
 per-session authentication alternative is implemented. Each sandbox is ephemeral:

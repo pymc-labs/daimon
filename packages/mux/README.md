@@ -1270,3 +1270,7 @@ The usage adapter also exposes `reconcile_turn` for host readers, filtering by
 root turn before applying host bounds, so prior session observations do not
 consume the current turn's usage budget. MCP approval display preserves the
 qualified server/tool identity.
+
+The dynamic-session pool audience requires `session_pool=true`; transport
+requests require a nonempty session ID. The pool container must independently
+validate Entra tokens for that audience and allowlist the invoking host principal.
