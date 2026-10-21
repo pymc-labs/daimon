@@ -1315,3 +1315,12 @@ gap. Lower cursors cannot lower it, and `replay_after_seq` remains read-only.
 Selfhosted production profile defaults to `gpt-6.1-sol`. All harness tests,
 interop and live test deployments use `gpt-6-luna`; production defaults are
 asserted as strings only and are never sent to a model in tests.
+
+Private-cluster HTTP requires explicit consent. `DirectTransport` accepts
+`allow_insecure_http=True` only for private destinations validated by
+`HarnessConfig`; HTTPS remains the default. MCP requests carry
+`MCPServer.allow_insecure_http` only when true, preserving compatibility with
+older strict harness request models for ordinary HTTPS turns. Credential-bearing
+HTTP additionally requires an exact operator host grant in the host and the
+harness's independent exact-URL consent. Restrict these grants to trusted
+in-cluster services.

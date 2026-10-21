@@ -72,16 +72,17 @@ class EntraTokenProvider:
 
 def validate_harness_auth(config: HarnessConfig, settings: SelfHostedSettings, tenant: str) -> None:
     """Validate origin, audience and tenant before resolving any credential."""
+    from daimon.core.config import HarnessAuthBinding
+
     bindings = {
         (binding.auth_mode, binding.name): binding for binding in settings.harness_auth_bindings
     }
     binding = bindings.get((config.auth_mode, config.auth_ref))
     parsed = urlsplit(config.project_endpoint or config.harness_url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
+    origin = HarnessAuthBinding.exact_https_origin(f"{parsed.scheme}://{parsed.netloc}")
     if (
         (
             config.auth_mode == "bearer_env"
-            and config.auth_ref != "DAIMON_HARNESS_TOKEN"
             and not config.auth_ref.startswith("DAIMON_SELFHOSTED__HARNESS_TOKEN_")
         )
         or binding is None

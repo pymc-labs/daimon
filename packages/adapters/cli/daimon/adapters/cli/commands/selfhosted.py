@@ -222,6 +222,7 @@ async def operator_turn(
     from datetime import UTC, datetime
 
     from daimon.adapters.cli.turn_lifecycle import NdjsonLifecycle
+    from daimon.core.anthropic_guard import guard_selfhosted_channel
     from daimon.core.billing import load_billing_config
     from daimon.core.channel_backend import channel_ref, current_backend
     from daimon.core.turn import admit, bind_session, run_prepared_turn
@@ -239,44 +240,55 @@ async def operator_turn(
         resolver_cache=rt.resolver_cache,
         billing_config=load_billing_config(),
     )
-    admitted = await admit(
-        deps,
+    async with guard_selfhosted_channel(
+        rt.sessionmaker,
         tenant_id=tenant_id,
         platform="cli",
-        external_user_id=caller,
         channel_id=channel,
         thread_id=thread,
-        now=datetime.now(UTC),
-    )
-    prepared = await bind_session(
-        deps,
-        admitted,
-        tenant_id=tenant_id,
-        platform="cli",
-        external_user_id=caller,
-        thread_id=thread,
-        session_account_id=admitted.account_id,
-        reuse_existing=True,
-    )
-    lifecycle = NdjsonLifecycle(sys.stdout, prepared.ma_session_id, str(uuid4()))
+        caller_id=caller,
+        force=True,
+    ):
+        admitted = await admit(
+            deps,
+            tenant_id=tenant_id,
+            platform="cli",
+            external_user_id=caller,
+            channel_id=channel,
+            thread_id=thread,
+            now=datetime.now(UTC),
+        )
+        if admitted.backend_revision is None or admitted.backend_revision.backend != "selfhosted":
+            raise ValueError("Admission must select selfhosted")
+        prepared = await bind_session(
+            deps,
+            admitted,
+            tenant_id=tenant_id,
+            platform="cli",
+            external_user_id=caller,
+            thread_id=thread,
+            session_account_id=admitted.account_id,
+            reuse_existing=True,
+        )
+        lifecycle = NdjsonLifecycle(sys.stdout, prepared.ma_session_id, str(uuid4()))
 
-    async def reseed() -> str:
-        return message
+        async def reseed() -> str:
+            return message
 
-    return await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant_id,
-        platform="cli",
-        thread_id=thread,
-        external_user_id=caller,
-        user_message=message,
-        lifecycle=lifecycle,
-        cancel=asyncio.Event(),
-        reseed_user_message=reseed,
-        recovery_lifecycle=lambda cancel: lifecycle,
-        attended=False,
-    )
+        return await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform="cli",
+            thread_id=thread,
+            external_user_id=caller,
+            user_message=message,
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: lifecycle,
+            attended=False,
+        )
 
 
 @selfhosted_app.command("turn")

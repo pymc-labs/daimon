@@ -1,5 +1,0 @@
-NAME                                    READY   STATUS    RESTARTS   AGE     IP             NODE                                NOMINATED NODE   READINESS GATES
-coke-daimon-harness-0                   1/1     Running   0          20m     10.244.0.217   aks-nodepool1-35821998-vmss000000   <none>           <none>
-coke-daimon-mcp-6f49bcb4c5-xz4bv        1/1     Running   0          7m17s   10.244.0.35    aks-nodepool1-35821998-vmss000000   <none>           <none>
-coke-daimon-postgres-0                  1/1     Running   0          28m     10.244.0.23    aks-nodepool1-35821998-vmss000000   <none>           <none>
-coke-daimon-scheduler-b7f4b8d86-j85pq   1/1     Running   0          7m18s   10.244.0.234   aks-nodepool1-35821998-vmss000000   <none>           <none>

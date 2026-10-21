@@ -741,3 +741,43 @@ async def test_bad_row_is_flagged_without_hiding_other_pending_rows(sessions):
     assert len(page.rows) == 2 and page.invalid_rows == 1
     assert {row.reason for row in page.rows} == {"invalid_observation", "usage_unknown"}
     assert next(row for row in page.rows if row.reason == "invalid_observation").session_id is None
+
+
+@pytest.mark.parametrize("test_model,test_deployment", [(True, False), (False, True), (True, True)])
+def test_test_tariffs_require_explicit_startup_consent(monkeypatch, test_model, test_deployment):
+    from daimon.core.config import load_settings
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv(
+        "DAIMON_DATABASE__URL", "postgresql+asyncpg://localhost/daimon_test_nc_tariffs"
+    )
+    model = "gpt-6-luna-TEST" if test_model else "gpt-6-luna"
+    deployment = "luna-TEST" if test_deployment else "luna"
+    import json
+
+    monkeypatch.setenv(
+        "DAIMON_BILLING__SELFHOSTED__MODELS",
+        json.dumps(
+            {
+                model: [
+                    {
+                        "effective_from": "2026-10-21",
+                        "input": 1,
+                        "output": 2,
+                        "cache_read": 0,
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS", json.dumps({deployment: model}))
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS", "false")
+    with pytest.raises(ValidationError, match="ALLOW_TEST_TARIFFS"):
+        load_settings(_env_file=None)
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS", "true")
+    with capture_logs() as logs:
+        settings = load_settings(_env_file=None)
+    assert settings.billing.selfhosted.allow_test_tariffs
+    assert any(
+        row["log_level"] == "warning" and "TEST TARIFFS ENABLED" in row["event"] for row in logs
+    )

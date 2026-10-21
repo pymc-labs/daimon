@@ -1012,9 +1012,10 @@ credential bindings; leave false for shared installations.
 `tuple[str, ...]` · optional · default unset
 
 Operator-authorized exact hostnames or IP literals for HTTP MCP connections. Also opts
-the built-in Daimon MCP into credential-bearing private HTTP; the harness must
-independently authorize its exact URL. Empty by default. Loopback remains allowed; other
-credential-bearing connections still require HTTPS.
+the built-in Daimon MCP into credential-bearing in-cluster HTTP; only private
+destinations qualify and the harness must independently authorize its exact URL. Empty
+by default. Loopback remains allowed; other credential-bearing connections still require
+HTTPS.
 
 ### `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`
 
@@ -1167,6 +1168,14 @@ secrets. Keep both separate.
 
 Multiplier applied to raw Anthropic usage cost before billing the tenant. 1.0 = pass-
 through.
+
+### `DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS`
+
+`bool` · optional · default `False`
+
+Allow selfhosted model or deployment identities ending in -TEST. For explicit test
+installations only; startup refuses these tariffs by default and logs a warning when
+enabled.
 
 ### `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S`
 

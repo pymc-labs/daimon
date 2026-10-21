@@ -15,7 +15,6 @@ nav:
   - Home: README.md
   - Architecture: architecture.md
   - Self-hosting: self-hosting.md
-  - AKS first-turn evidence: evidence/aks-first-turn-20261021/README.md
   - Configuration: configuration.md
   - MCP tools: mcp-tools.md
   - Permissions: permissions.md

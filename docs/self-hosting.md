@@ -417,8 +417,8 @@ caller-scoped session. This is a trusted deployment-operator CLI, so access to
 its database credentials must remain restricted to operators.
 
 For private Kubernetes HTTP, `init --allow-insecure-http` must be paired with
-`allow_insecure_http: true` on the exact harness auth binding. The existing
-`DAIMON_HARNESS_TOKEN` Secret variable is also an accepted bearer reference.
+`allow_insecure_http: true` on the exact harness auth binding. Select an
+operator variable named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*` through `auth_ref`.
 Authenticated HTTP to the built-in Daimon MCP additionally requires its exact
 hostname in `DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`, and on the harness both
 `HARNESS_ALLOW_INSECURE_DAIMON_MCP=true` and the exact
@@ -430,7 +430,7 @@ TLS when that network is outside the installation's trust boundary.
 The Agents SDK adapter emits `harness.azure_usage` receipts with only the
 provider response ID, model and raw usage object. Request/response content and
 credentials are excluded. Capture these alongside C3 usage and database rows
-when verifying billing. See [the AKS first-turn evidence](evidence/aks-first-turn-20261021/README.md).
+when verifying billing.
 
 ## Self-hosted harness runtime
 
@@ -478,7 +478,7 @@ Production uses `HarnessConfig.transport="direct"` with a private harness
 endpoint. Direct transport sends authenticated `/v0` requests to `harness_url`.
 The Foundry invocation adapter is retained for future platform validation;
 unsigned gateway identity headers do not authorize harness calls. `bearer_env`
-accepts `DAIMON_HARNESS_TOKEN` or operator variables named
+accepts operator variables named
 `DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
 Declare each in `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`, a JSON list of
 `{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY", "origin": "https://harness.example", "tenants": ["TENANT_UUID"]}`.
@@ -1616,3 +1616,13 @@ Harness process cleanup enumerates present `/proc` PIDs, including after PID wra
 If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;
 only that helper receives the exemption group. Multi-session harness mode requires
 `hidepid=2,gid=60002`. Ordinary tool processes do not receive the exemption.
+
+Harness bearer references use operator variables named
+`DAIMON_SELFHOSTED__HARNESS_TOKEN_*`, selected through the environment's
+`auth_ref` and an exact origin/tenant binding. Chart Secret key names do not
+change this rule. Private HTTP credentials require explicit grants: set
+`allow_insecure_http` on the harness environment and its auth binding. For the
+built-in MCP JWT, list only trusted in-cluster hosts in
+`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`; the harness independently requires
+its exact URL grant and HTTP consent. Listing a host authorizes credentials over
+plaintext HTTP, so restrict network access to those cluster services.

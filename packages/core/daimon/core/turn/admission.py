@@ -549,6 +549,14 @@ async def admit_impl(
                 raise AdmissionDenied(reason="backend_unsupported") from error
     mark("config")
 
+    # Refuse a forced selfhosted adapter's effective selection before provider I/O.
+    from daimon.core.anthropic_guard import anthropic_disabled
+
+    if anthropic_disabled() and (
+        backend_revision is None or backend_revision.backend != LOOP.provider
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+
     # --- Missing config check (before any MA call) ---
     if config.agent_name is None or config.environment_name is None:
         missing: tuple[Literal["agent", "environment"], ...]

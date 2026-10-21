@@ -1246,8 +1246,13 @@ class HarnessAuthBinding(McpCredentialBinding):
     def exact_https_origin(cls, value: str) -> str:
         # Validate the same exact-origin structure; HTTP needs a second opt-in below.
         if value.startswith("http://"):
-            normalized = McpCredentialBinding.exact_https_origin("https://" + value[7:])
-            return "http://" + normalized[8:]
+            # Validate structure without borrowing HTTPS's default port.
+            McpCredentialBinding.exact_https_origin("https://" + value[7:])
+            parsed = urlsplit(value)
+            host = parsed.hostname
+            assert host is not None
+            host = f"[{host}]" if ":" in host else host.lower()
+            return f"http://{host}" + (f":{parsed.port}" if parsed.port not in (None, 80) else "")
         return McpCredentialBinding.exact_https_origin(value)
 
     @model_validator(mode="after")
@@ -1268,10 +1273,8 @@ class HarnessAuthBinding(McpCredentialBinding):
             not self.allow_insecure_http or self.auth_mode != "bearer_env"
         ):
             raise ValueError("HTTP harness binding requires explicit bearer opt-in")
-        if (
-            self.auth_mode == "bearer_env"
-            and self.name != "DAIMON_HARNESS_TOKEN"
-            and not self.name.startswith("DAIMON_SELFHOSTED__HARNESS_TOKEN_")
+        if self.auth_mode == "bearer_env" and not self.name.startswith(
+            "DAIMON_SELFHOSTED__HARNESS_TOKEN_"
         ):
             raise ValueError("Harness bearer binding requires an operator token variable")
         return self
@@ -1300,8 +1303,9 @@ class SelfHostedSettings(BaseModel):
         default=(),
         description=(
             "Operator-authorized exact hostnames or IP literals for HTTP MCP connections. "
-            "Also opts the built-in Daimon MCP into credential-bearing private HTTP; the "
-            "harness must independently authorize its exact URL. Empty by default. "
+            "Also opts the built-in Daimon MCP into credential-bearing in-cluster HTTP; "
+            "only private destinations qualify and the harness must independently authorize "
+            "its exact URL. Empty by default. "
             "Loopback remains allowed; other credential-bearing connections still require HTTPS."
         ),
     )
@@ -1493,6 +1497,15 @@ class SelfhostedBillingSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    allow_test_tariffs: bool = Field(
+        default=False,
+        description=(
+            "Allow selfhosted model or deployment identities ending in -TEST. "
+            "For explicit test installations only; startup refuses these tariffs by default "
+            "and logs a warning when enabled."
+        ),
+    )
+
     admission_clock_skew_s: float = Field(
         default=5,
         ge=0,
@@ -1543,6 +1556,20 @@ class SelfhostedBillingSettings(BaseModel):
                 raise ValueError("deployments must map to a priced underlying model")
             if deployment in self.models and deployment != model:
                 raise ValueError("deployment alias cannot shadow another model")
+        test_names = sorted(
+            name for name in {*self.models, *self.deployments} if name.endswith("-TEST")
+        )
+        if test_names and not self.allow_test_tariffs:
+            raise ValueError(
+                "TEST tariffs require DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS=true"
+            )
+        if self.allow_test_tariffs:
+            import structlog
+
+            structlog.get_logger(__name__).warning(
+                "SELFHOSTED TEST TARIFFS ENABLED: rates are not production prices",
+                test_identities=test_names,
+            )
         return self
 
 

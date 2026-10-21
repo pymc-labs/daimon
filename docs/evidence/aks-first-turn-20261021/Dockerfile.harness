@@ -1,4 +1,0 @@
-FROM daimonselfhostacr.azurecr.io/daimon-harness:dev-202610211123
-COPY apps/harness/src/daimon_harness/credentials.py /opt/venv/lib/python3.12/site-packages/daimon_harness/credentials.py
-COPY apps/harness/src/daimon_harness/model_adapter.py /opt/venv/lib/python3.12/site-packages/daimon_harness/model_adapter.py
-COPY packages/mux/mux/drivers/selfhosted/wire.py /opt/venv/lib/python3.12/site-packages/mux/drivers/selfhosted/wire.py

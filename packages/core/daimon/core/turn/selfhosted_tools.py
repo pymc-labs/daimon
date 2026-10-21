@@ -102,6 +102,12 @@ def _mcp_url(url: str, *, credential: bool = False, allowed_http_hosts: Sequence
         and parsed.hostname.lower() not in allowed_http_hosts
     ):
         raise ValueError("Credential-bearing MCP connections require HTTPS or loopback")
+    if credential and parsed.scheme == "http" and not loopback:
+        from mux.drivers.selfhosted.config import HarnessConfig
+
+        # The grant is explicit and must also classify as a private destination
+        # under the same URL rules used for the cluster harness endpoint.
+        HarnessConfig(harness_url=url, auth_ref="mcp", allow_insecure_http=True)
     return canonical_mcp_url(url)
 
 

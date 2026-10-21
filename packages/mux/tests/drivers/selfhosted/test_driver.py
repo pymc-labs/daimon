@@ -1008,7 +1008,7 @@ async def test_bearer_transport_only_allows_plain_http_on_loopback(url, allowed)
         if allowed:
             DirectTransport(client, base_url=url, token="token")
         else:
-            with pytest.raises(ValueError, match="HTTPS"):
+            with pytest.raises(ValueError, match="HTTPS|allow_insecure_http"):
                 DirectTransport(client, base_url=url, token="token")
 
 
