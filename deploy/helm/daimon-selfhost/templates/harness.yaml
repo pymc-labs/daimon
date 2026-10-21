@@ -42,6 +42,7 @@ spec:
       serviceAccountName: {{ include "d.name" . }}-harness
       automountServiceAccountToken: false
       imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
+      priorityClassName: {{ include "d.name" . }}-harness
       terminationGracePeriodSeconds: 90
       containers:
         - name: harness
@@ -49,7 +50,7 @@ spec:
           imagePullPolicy: {{ .Values.images.harness.pullPolicy }}
           command: [/usr/bin/tini, --, sh, -ec]
           args:
-            - mount -o remount,hidepid=2,gid=60002 /proc; chmod 755 /tmp /var/tmp /dev/shm /run/lock; chmod 600 /dev/termination-log; chown 0:0 /home/harness; chmod 711 /home/harness; exec python -m daimon_harness
+            - mount -o remount,hidepid=2,gid=60002 /proc; chmod 755 /tmp /var/tmp /dev/shm /run/lock; chmod 600 /dev/termination-log; chown 0:0 /home/harness; chmod 711 /home/harness; exec setpriv --bounding-set=-sys_admin,-setpcap -- python -m daimon_harness
           securityContext: {{ .Values.harness.securityContext | toJson }}
           envFrom:
             - secretRef: {name: {{ .Values.secrets.harness }}}

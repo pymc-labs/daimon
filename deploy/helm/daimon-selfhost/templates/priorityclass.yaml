@@ -1,0 +1,11 @@
+{{- range $name, $value := dict "postgres" 20000 "harness" 10000 }}
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "d.name" $ }}-{{ $name }}
+value: {{ $value }}
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Keep Daimon {{ $name }} ahead of ordinary host pods; system pods retain precedence."
+{{- end }}

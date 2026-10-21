@@ -143,6 +143,65 @@ class HostConfigurationTests(unittest.TestCase):
                     "networkPolicy.hostPostgresCidrs={" + cidr + "}",
                 )
 
+    def test_shutdown_health_and_priorities(self):
+        resources = render()
+        priorities = {
+            r["metadata"]["name"]: r["value"] for r in resources if r["kind"] == "PriorityClass"
+        }
+        self.assertGreater(priorities["coke-daimon-postgres"], priorities["coke-daimon-harness"])
+        self.assertGreater(priorities["coke-daimon-harness"], 0)
+        for resource in hosts(resources):
+            pod = resource["spec"]["template"]["spec"]
+            self.assertEqual(pod["terminationGracePeriodSeconds"], 90)
+            if resource["kind"] == "Deployment":
+                container = pod["containers"][0]
+                self.assertEqual(
+                    container["livenessProbe"]["httpGet"], container["readinessProbe"]["httpGet"]
+                )
+                self.assertGreaterEqual(
+                    container["startupProbe"]["failureThreshold"]
+                    * container["startupProbe"]["periodSeconds"],
+                    300,
+                )
+        for resource in resources:
+            if resource["kind"] == "StatefulSet":
+                pod = resource["spec"]["template"]["spec"]
+                self.assertIn(pod["priorityClassName"], priorities)
+                if resource["metadata"]["name"].endswith("-harness"):
+                    container = pod["containers"][0]
+                    self.assertEqual(
+                        container["securityContext"]["seccompProfile"]["type"], "RuntimeDefault"
+                    )
+                    self.assertIn(
+                        "exec setpriv --bounding-set=-sys_admin,-setpcap --", container["args"][0]
+                    )
+
+    def test_teams_graph_routes_and_acr_postgres(self):
+        resources = render("ingress.enabled=true", "images.registry=fixture.azurecr.io")
+        ingress = next(r for r in resources if r["kind"] == "Ingress")
+        paths = ingress["spec"]["rules"][0]["http"]["paths"]
+        self.assertEqual(
+            {p["path"] for p in paths},
+            {"/api/messages", "/api/graph/notifications", "/api/graph/lifecycle"},
+        )
+        for path in paths:
+            self.assertEqual(path["backend"]["service"]["name"], "coke-daimon-teams")
+            self.assertEqual(path["pathType"], "Exact")
+        postgres = next(
+            r
+            for r in resources
+            if r["kind"] == "StatefulSet" and r["metadata"]["name"].endswith("-postgres")
+        )
+        self.assertEqual(
+            postgres["spec"]["template"]["spec"]["containers"][0]["image"],
+            "fixture.azurecr.io/postgres:18-alpine",
+        )
+        for host in hosts(resources):
+            self.assertEqual(
+                host["spec"]["template"]["spec"]["initContainers"][0]["image"],
+                "fixture.azurecr.io/postgres:18-alpine",
+            )
+
     def test_policy_switch_disables_both_policies(self):
         self.assertFalse(
             any(r["kind"] == "NetworkPolicy" for r in render("networkPolicy.enabled=false"))

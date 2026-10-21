@@ -26,6 +26,7 @@ spec:
       {{- if $init }}
       restartPolicy: Never
       {{- end }}
+      terminationGracePeriodSeconds: 90
       automountServiceAccountToken: false
       imagePullSecrets: {{ $.Values.imagePullSecrets | toJson }}
       initContainers:
@@ -37,7 +38,7 @@ spec:
             - >-
               echo 'Waiting for PostgreSQL to accept connections';
               timeout {{ $.Values.postgres.waitTimeoutSeconds }} sh -ec
-              'until pg_isready -q -t 2; do sleep 2; done';
+              'until pg_isready -t 2; do sleep 2; done';
               echo 'PostgreSQL accepts connections'
           env:
             {{- if $.Values.postgres.bundled }}
@@ -65,14 +66,14 @@ spec:
             - >-
               echo 'Waiting for the packaged Alembic heads';
               timeout {{ $.Values.init.activeDeadlineSeconds }} sh -ec
-              'until alembic current --check-heads >/dev/null 2>&1; do sleep 2; done';
+              'until alembic current --check-heads; do sleep 2; done';
               echo 'Database schema is current'
           envFrom:
             - secretRef: {name: {{ $.Values.secrets.host }}}
           env:
             - {name: PGSSLROOTCERT, value: /etc/ssl/certs/ca-certificates.crt}
           resources:
-            requests: {cpu: 100m, memory: 128Mi}
+            requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 512Mi}
           {{- include "d.csiMount" $ | nindent 10 }}
         {{- end }}
@@ -103,6 +104,15 @@ spec:
           resources: {{ $.Values.host.resources | toJson }}
           {{- if $svc.port }}
           ports: [{containerPort: {{ $svc.port }}}]
+          startupProbe:
+            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           readinessProbe:
             httpGet: {path: {{ $svc.healthPath }}, port: {{ $svc.port }}}
             initialDelaySeconds: 5

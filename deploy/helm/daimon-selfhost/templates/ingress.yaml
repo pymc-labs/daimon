@@ -16,12 +16,14 @@ spec:
     - host: {{ .Values.ingress.teamsHost }}
       http:
         paths:
-          - path: /api/messages
+          {{- range $path := list "/api/messages" "/api/graph/notifications" "/api/graph/lifecycle" }}
+          - path: {{ $path }}
             pathType: Exact
             backend:
               service:
-                name: {{ include "d.name" . }}-teams
-                port: {number: {{ .Values.services.teams.port }}}
+                name: {{ include "d.name" $ }}-teams
+                port: {number: {{ $.Values.services.teams.port }}}
+          {{- end }}
     {{- end }}
     - host: {{ .Values.ingress.mcpHost }}
       http:

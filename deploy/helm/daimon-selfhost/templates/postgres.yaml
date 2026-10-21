@@ -19,6 +19,7 @@ spec:
     metadata:
       labels: {app: {{ include "d.name" . }}-postgres}
     spec:
+      priorityClassName: {{ include "d.name" . }}-postgres
       automountServiceAccountToken: false
       imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
       containers:
@@ -36,7 +37,7 @@ spec:
             exec:
               command: [pg_isready, -U, {{ .Values.postgres.user | quote }}, -d, {{ .Values.postgres.database | quote }}]
           resources:
-            requests: {cpu: 100m, memory: 128Mi}
+            requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 512Mi}
           volumeMounts: [{name: data, mountPath: /var/lib/postgresql}]
   volumeClaimTemplates:

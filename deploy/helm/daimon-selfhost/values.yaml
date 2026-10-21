@@ -30,7 +30,7 @@ host:
   runtimeSecret: ""
   env: {DAIMON_SELFHOSTED__ADMISSION_ENABLED: "false"}
   resources:
-    requests: {cpu: 100m, memory: 256Mi}
+    requests: {cpu: 50m, memory: 256Mi}
     limits: {memory: 1536Mi}
 harness:
   enabled: true
@@ -40,14 +40,14 @@ harness:
   storageClassName: null
   env: {}
   resources:
-    requests: {cpu: 250m, memory: 1Gi}
+    requests: {cpu: 100m, memory: 768Mi}
     limits: {memory: 4Gi}
   securityContext:
     runAsUser: 0
     capabilities:
       drop: [ALL]
-      add: [SYS_ADMIN, DAC_OVERRIDE, FOWNER, CHOWN, KILL, SETGID, SETUID]
-    seccompProfile: {type: Unconfined}
+      add: [SETPCAP, SYS_ADMIN, DAC_OVERRIDE, FOWNER, CHOWN, KILL, SETGID, SETUID]
+    seccompProfile: {type: RuntimeDefault}
     appArmorProfile: {type: Unconfined}
   # Stub only: requires a reviewed App Service MI-protocol proxy image.
   miProxy:

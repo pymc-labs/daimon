@@ -1656,3 +1656,8 @@ metadata names and addresses are refused regardless of grants or scheme.
 The branch-only AKS Helm baseline, including local kind validation, identity
 proxy requirements and PodSecurity exceptions, is documented in
 [`deploy/helm/daimon-selfhost`](https://github.com/pymc-labs/daimon/tree/azure-selfhost/deploy/helm/daimon-selfhost).
+
+The AKS chart recipe includes metered CLI tenant/runtime registration (requires the
+in-cluster HTTP support), host startup/liveness probes, 90-second host shutdown,
+and Postgres/harness priorities. D2s_v6 is a minimum test node; D4s_v6 is recommended
+for production. The harness drops SYS_ADMIN from its bounding set after setup.

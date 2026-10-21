@@ -17,7 +17,7 @@ bootstrap)
   az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
   az acr repository show -n "$ACR" --image postgres:18-alpine --query digest -o tsv > "$AKS_STATE/postgres-digest"
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
-    --network-plugin azure --network-policy azure --attach-acr "$ACR" \
+    --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
     --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
   az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
     --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
@@ -77,12 +77,20 @@ PY
     kubectl -n daimon create secret generic "daimon-${pair%:*}" \
       --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   done
-  helm install coke "$chart" -n daimon -f "$AKS_STATE/aks-values.json" \
+  helm upgrade --install coke "$chart" -n daimon -f "$AKS_STATE/aks-values.json" \
     --wait --wait-for-jobs --timeout 15m
   kubectl -n daimon rollout status statefulset/coke-daimon-harness --timeout=300s
   kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
   kubectl -n daimon exec deployment/coke-daimon-mcp -- python -c \
     'import urllib.request; assert urllib.request.urlopen("http://localhost:8765/healthz").status == 200; print("MCP healthy")'
+  ;;
+register)
+  bash "$chart/scripts/register.sh"
+  ;;
+turn)
+  tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$AKS_STATE/registration.json")
+  kubectl -n daimon exec deployment/coke-daimon-mcp -- daimon selfhosted turn \
+    --tenant-id "$tenant" --thread aks-proof --message "${MESSAGE:?export MESSAGE}"
   ;;
 probe)
   kubectl -n daimon exec -i deployment/coke-daimon-mcp -- python - < "$chart/scripts/live-c3.py"
@@ -114,14 +122,17 @@ PY
   # Negative probe runs AFTER the evidence snapshot to avoid polluting its window.
   denied_ip=$(kubectl -n daimon exec coke-daimon-harness-0 -- python -c \
     'import socket; print(socket.gethostbyname("api.anthropic.com"))')
-  probe="egress-proof-$(date +%s)"
-  kubectl -n daimon debug pod/coke-daimon-harness-0 --image=curlimages/curl:8.16.0 \
-    --container="$probe" --attach=false -- curl --noproxy '*' --connect-timeout 5 --max-time 10 \
-    --resolve "api.anthropic.com:443:$denied_ip" -sS -o /dev/null https://api.anthropic.com
-  kubectl -n daimon wait pod/coke-daimon-harness-0 --timeout=90s \
-    --for="jsonpath={.status.ephemeralContainerStatuses[?(@.name=='$probe')].state.terminated.exitCode}=28"
-  kubectl -n daimon logs coke-daimon-harness-0 -c "$probe"
-  echo 'curl in the harness pod network timed out as required; no TLS/auth failure accepted'
+  host_pod=$(kubectl -n daimon get pods -l app=coke-daimon-mcp -o jsonpath='{.items[0].metadata.name}')
+  for pod in coke-daimon-harness-0 "$host_pod"; do
+    probe="egress-proof-$(date +%s)"
+    kubectl -n daimon debug "pod/$pod" --image=curlimages/curl:8.16.0 \
+      --container="$probe" --attach=false -- curl --noproxy '*' --connect-timeout 5 --max-time 10 \
+      --resolve "api.anthropic.com:443:$denied_ip" -sS -o /dev/null https://api.anthropic.com
+    kubectl -n daimon wait "pod/$pod" --timeout=90s \
+      --for="jsonpath={.status.ephemeralContainerStatuses[?(@.name=='$probe')].state.terminated.exitCode}=28"
+    kubectl -n daimon logs "$pod" -c "$probe"
+    echo "curl in $pod timed out; no TLS/auth failure accepted"
+  done
   ;;
 teardown)
   # Destructive pilot reset: delete app, all namespace PVCs, and AKS/node RG.
@@ -137,7 +148,7 @@ teardown)
 reinstall)
   # Keep ACR images, AOAI deployment and protected operator state; no rebuild/quota wait.
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
-    --network-plugin azure --network-policy azure --attach-acr "$ACR" \
+    --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
     --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
   bash "$chart/scripts/aks.sh" install
   ;;
@@ -145,5 +156,5 @@ remove)
   # Deletes the budget too. Check RG is dedicated before selecting this action.
   az group delete -n "$RG" --yes -o none
   ;;
-*) echo 'Usage: aks.sh bootstrap|install|probe|egress-start|egress-check|teardown|reinstall|remove' >&2; exit 2 ;;
+*) echo 'Usage: aks.sh bootstrap|install|register|turn|probe|egress-start|egress-check|teardown|reinstall|remove' >&2; exit 2 ;;
 esac

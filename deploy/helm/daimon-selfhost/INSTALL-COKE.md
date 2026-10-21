@@ -1,22 +1,20 @@
 # Daimon on Azure — Coke IT pilot
 
-**Scope:** ACR Basic, one-node AKS (`Standard_D2s_v6`, 2 vCPU / 8 GiB), Azure
-OpenAI. PostgreSQL and persistent agent workspaces run in AKS. No ACA, Key Vault,
-Blob or PostgreSQL Flexible Server. Follow the [full recipe](README.md#aks-recipe--empty-resource-group-to-a-running-pilot)
-for checks and recovery; scripts execute its commands without printing secrets.
+**Scope:** ACR Basic, one-node AKS, Azure OpenAI. PostgreSQL and workspaces run
+in AKS; no ACA, Key Vault, Blob or Flexible Server. D2s_v6 is the minimum test
+size; Standard_D4s_v6 is recommended for production. Follow the [recipe](README.md#aks-recipe--empty-resource-group-to-a-running-pilot).
 
-**Before starting:** dedicated RG and budget alerts; Azure CLI login, git checkout,
-Helm, kubectl and Python 3. Deployer: RG Owner, or Contributor plus role-assignment
-rights for ACR attachment. Subscription admin must register ContainerService,
-ContainerRegistry, CognitiveServices, Compute, Network and Storage providers.
-Confirm Dsv6 quota/capacity and **Luna DataZoneStandard quota** in `eastus2` (US)
-or an approved EU Data Zone region. Sol quota is needed for later production.
-Approve the harness PodSecurity exception and cluster-admin DNS/probe operations.
-An existing Bot/Entra app, HTTPS ingress and tenant approval are separate prerequisites
-for Teams; the initial CLI/harness pilot disables Teams.
+**Prerequisites:** dedicated RG/budget; Azure CLI login, Helm, kubectl, Python 3;
+reviewed checkout containing PR #1276 for in-cluster HTTP. RG Owner, or Contributor
+plus ACR role-assignment rights. Subscription admin registers ContainerService,
+ContainerRegistry, CognitiveServices, Compute, Network and Storage. Confirm Dsv6
+capacity and **Luna DataZoneStandard quota** in eastus2 or an approved EU region;
+Sol quota is needed for production. Approve the harness PodSecurity exception and
+cluster-admin DNS/probes. Teams additionally needs Bot/Entra credentials, tenant
+approval and HTTPS ingress; initially disabled. AOAI **disable local auth** policy
+blocks this API-key path: a reviewed MI proxy is then required before installation.
 
-**Install from the reviewed repository root** (replace globally unique names):
-
+**Install** from the reviewed repository root; replace globally unique names:
 ```sh
 export RG=daimon-selfhost LOCATION=eastus2
 export ACR=daimoncoke12345 AKS=daimon-coke AOAI=daimon-coke-12345
@@ -24,39 +22,39 @@ export TAG=$(git rev-parse HEAD)
 export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 bash deploy/helm/daimon-selfhost/scripts/aks.sh install
+export SELFHOSTED_MODEL=gpt-6-luna
+export SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh register
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
-bash deploy/helm/daimon-selfhost/scripts/aks.sh probe
+export MESSAGE='Use bash to print the working directory, then write azure-proof.txt containing PERSISTED. Confirm success.'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
+export MESSAGE='Read azure-proof.txt from the previous turn and report its exact contents.'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 ```
 
-`bootstrap` builds both images in ACR, mirrors PG, creates Azure-policy AKS with
-ACR attachment, and deploys Luna. `install` creates Kubernetes Secrets and uses one Helm wait for PG, migrations
-and all serving pods. The Postgres image is explicitly imported into ACR. `probe` makes paid Luna-only C3 tool/file turns; it is **not**
-a CLI/Teams ledger test. Register the tenant/channel/runtime grant in the recipe
-before testing the actual Daimon entry point. Keep `AKS_STATE` private: it contains
-operator keys. DNS logs and the blocked Anthropic curl provide egress evidence.
+Builds/mirrors precede overlay-network AKS and Luna deployment. Install waits for
+PG/migrations/pods; registration funds a tenant and sets channel/runtime/billing.
+Rates above are explicit **TEST rates**, not Azure prices; replace for production.
+Keep `AKS_STATE` private. Egress proof checks DNS and blocked curls in both pods.
 
-**Security:** application data/workspaces stay in the tenant's cluster; inference
-uses Azure OpenAI in the approved US/EU Data Zone. API key is an explicit pilot
-Secret, captured/scrubbed by the harness. Production identity needs the reviewed
-Workload Identity/header-protected proxy. Sessions share a kernel and node:
-trusted users only, no Kata/per-session VM isolation, HA, automated DB backup or
-PITR. Default requests: 650m CPU / 1.875 GiB; host limits: 1536 MiB each (minimal recipe: 7.5 GiB total limits). AKS also creates
-a billable node RG with VM, disks, IP and networking. No production SLA is implied.
+**Security:** data/workspaces stay in the tenant cluster; inference uses Azure
+OpenAI's approved US/EU Data Zone. Pilot keys use Kubernetes Secrets; production
+needs the reviewed MI proxy. Shared kernel/node: trusted users only; no per-session
+VM isolation, HA, automatic DB backup or PITR. Minimal requests: 250m / 1408 MiB;
+observed D2 allocatable: 1900m / 5.66 GiB. Memory limits overcommit; bound concurrency.
 
-**Cost:** allow roughly $100–170/month continuously running, plus tokens, builds
-and egress; unverified planning range, confirm region/contract prices in the recipe.
+**Cost:** $100–170/month pilot planning allowance, plus tokens/builds/egress;
+unverified: confirm region/contract prices. AKS also creates a billable node RG.
 
-**Remove / reinstall:** these pilot resets destroy DB, ledger and workspace data.
-Teardown deletes AKS/PVCs and keeps billable ACR and AOAI; reinstall reuses them,
-targeting <30 minutes to the first real application reply (not yet measured).
-
+**Reset/remove:** destroys DB/ledger/workspaces. Teardown retains billable ACR/AOAI;
+reinstall reuses them, targeting <30 minutes to a real reply (not measured here).
 ```sh
 bash deploy/helm/daimon-selfhost/scripts/aks.sh teardown
 time bash deploy/helm/daimon-selfhost/scripts/aks.sh reinstall
+bash deploy/helm/daimon-selfhost/scripts/aks.sh register
+export MESSAGE='Reply only: REINSTALLED.'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
 bash deploy/helm/daimon-selfhost/scripts/aks.sh remove
 rm -r "$AKS_STATE"
 ```
-
-Use `remove` only for complete removal: it deletes the dedicated RG and budget.
-Verify node RG/disks are gone. Retain backups first; never publish operator state.

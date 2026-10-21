@@ -5,7 +5,7 @@ optional Discord/Slack), one persistent multi-session harness and bundled
 PostgreSQL 18. Set `postgres.bundled=false` and `postgres.host` to the Flexible Server hostname
 for an external PostgreSQL database.
 All Services are ClusterIP. One optional Ingress routes separate MCP and Teams
-hostnames, including Teams `/api/messages`; it never publishes the harness or PG.
+hostnames, including Teams `/api/messages`, `/api/graph/notifications` and `/api/graph/lifecycle`; it never publishes the harness or PG.
 
 The chart is a self-hosting baseline on `azure-selfhost`, under the merge hold.
 It creates no Azure resources. **Workload Identity token brokering is a stub**:
@@ -54,7 +54,9 @@ azureOpenAI:
     key: AZURE_OPENAI_API_KEY
 ```
 
-Create `daimon-aoai` separately from a protected env file. The chart injects only
+Create `daimon-aoai` separately from a protected env file. Tenants enforcing Azure OpenAI **disable local auth** cannot use the key path:
+`keys list`/key inference fails; a reviewed MI proxy is required before install.
+The chart injects only
 `AZURE_OPENAI_API_KEY` from that Secret; the harness captures and scrubs it.
 `apiKeySecretRef.name` is empty by default. This explicit M2 option can run before
 the MI proxy exists; Workload Identity with the header-protected proxy remains
@@ -69,37 +71,43 @@ then remounts `/proc` with `hidepid=2,gid=60002`, then changes
 shared scratch directories to 0755, exactly as the CI image probe does. It needs
 `SYS_ADMIN` during entry and `DAC_OVERRIDE` for the root startup scan of
 otherwise unreadable system directories (matching the CI Docker capability set).
-`FOWNER` permits chmod after chown during HOME/journal preparation. All three are dropped by the existing service startup. The existing harness startup changes to UID 10000 and
-retains only CHOWN/KILL/SETUID/SETGID; **SYS_ADMIN is absent from the running service
-and tools**. The entrypoint also restricts Kubernetes `/dev/termination-log` to 0600 so it
-cannot become a tool-readable mounted file. The pod requests only those seven
-capabilities, rather than privileged
-container mode. Unconfined seccomp and AppArmor permit the mount; this is incompatible
-with Baseline/Restricted PodSecurity and usual AKS Azure Policy restrictions.
+`FOWNER` permits chmod after chown during HOME/journal preparation. After the
+remount, `setpriv --bounding-set=-sys_admin,-setpcap` permanently removes SYS_ADMIN from
+the service's bounding set, including later root helper execs. Harness startup
+changes to UID 10000 and retains only CHOWN/KILL/SETUID/SETGID; tools run with no
+capabilities. Kubernetes `/dev/termination-log` is restricted to 0600.
+SETPCAP is granted only to perform this bounding-set drop and removes itself too.
+The pod requests eight capabilities for startup rather than privileged mode.
+Seccomp is RuntimeDefault; AppArmor is Unconfined for the remount. This remains
+incompatible with Baseline/Restricted PodSecurity and usual AKS Azure Policy.
 Use a dedicated namespace/node pool with an explicitly reviewed admission exception.
 The chart never labels a production namespace privileged automatically. Do not
 set `allowPrivilegeEscalation=false`: UID helpers require the service capabilities.
 Do not relax isolation checks to make a restricted pod start.
 
-Multi mode shares one kernel across sessions and is for a trusted tenant. Keep
+Multi mode shares one kernel across sessions and is for a trusted tenant.
+User namespaces remain kernel attack surface under RuntimeDefault; this does not
+provide a per-session VM security boundary. Keep
 one replica and one worker for the PVC's SQLite lease. Never share the HOME PVC
 between replicas. UID ranges, private scratch, tool limits and checkpoint options
 are documented in [the harness README](../../../apps/harness/README.md).
-Default requests for PG + MCP/Teams/scheduler + harness total **650m CPU and
-1920 MiB RAM**; memory limits total **9 GiB** (harness 4 GiB, three host processes
-1536 MiB each, PG 512 MiB). Hosts allow 1536 MiB for real CLI turns alongside MCP.
-The minimal recipe disables Teams: requests become 550m CPU / 1664 MiB and limits
-7.5 GiB. Requests fit the 2-vCPU/8-GiB pilot, but memory limits are overcommitted
-and are not reservations; concurrent workloads can exhaust node capacity. Node/system
-reservations and the ingress controller still consume capacity. Keep optional
-Discord/Slack off, avoid simultaneous build pods, and test actual PyMC workload
-memory before increasing concurrency. This is a small pilot, with no application HA.
-AKS system node pools do not support B-series VMs; the requested B2ms-class
-**resource budget is not a supported AKS SKU promise**. The lead must select an
-accepted system-pool VM size/count. Microsoft's system-pool and quota pages give
-different minimum sizing details; validate the target AKS API/subscription before
-provisioning. See [AKS SKU constraints](https://learn.microsoft.com/en-us/azure/aks/quotas-skus-regions)
-and [system pools](https://learn.microsoft.com/en-us/azure/aks/use-system-pools).
+Default steady-state requests for PG + MCP/Teams/scheduler + harness total
+**300m CPU / 1664 MiB RAM**. With Teams disabled: **250m / 1408 MiB**.
+The init Job adds 50m / 256 MiB temporarily. Host migration init containers request
+50m / 128 MiB; Kubernetes schedules each pod against its larger effective request.
+Memory limits remain 9 GiB with Teams, 7.5 GiB without (harness 4 GiB, each host
+1536 MiB, PG 512 MiB), allowing CLI work alongside MCP but overcommitting a small
+node. Concurrency and PyMC workloads must be measured and bounded.
+
+**Standard_D2s_v6 is the minimum test size; Standard_D4s_v6 is the production
+recommendation.** The observed D2s_v6 node had **1900m CPU / 5.66 GiB allocatable**,
+less than its advertised 2 vCPU / 8 GiB. System pods and any ingress controller
+consume that allocatable budget. Release-scoped PriorityClasses rank Postgres
+(20000), then harness (10000), above ordinary host pods (0); system-critical pods
+can still preempt them. These priorities reduce application contention, not
+hardware or memory-pressure risk. Keep optional gateways off on D2s_v6 and avoid
+simultaneous build pods. This single-node pilot has no application HA. AKS system
+pools reject B-series; validate quota and SKU availability in the target subscription.
 
 The PVC survives pod replacement; configure backups and retention. Optional Blob
 checkpoint variables go in `harness.env` and use the header-protected identity;
@@ -236,7 +244,7 @@ az acr build -r "$ACR" -t "daimon:$TAG" . --no-logs -o none
 az acr build -r "$ACR" -t "daimon-harness:$TAG" -f apps/harness/Dockerfile . --no-logs -o none
 az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
 az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
-  --network-plugin azure --network-policy azure --attach-acr "$ACR" \
+  --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
   --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
 az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
   --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
@@ -278,7 +286,7 @@ for pair in postgres:pg host:host harness:harness aoai:aoai; do
   kubectl -n daimon create secret generic "daimon-${pair%:*}" \
     --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 done
-helm install coke deploy/helm/daimon-selfhost -n daimon -f "$AKS_STATE/aks-values.json" \
+helm upgrade --install coke deploy/helm/daimon-selfhost -n daimon -f "$AKS_STATE/aks-values.json" \
   --wait --wait-for-jobs --timeout 15m
 kubectl -n daimon rollout status statefulset/coke-daimon-harness --timeout=300s
 kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
@@ -415,7 +423,9 @@ lane; capacity, image pulls, RBAC propagation and application setup may exceed i
 ```sh
 date -u +%Y-%m-%dT%H:%M:%SZ > "$AKS_STATE/reinstall-start"
 time bash deploy/helm/daimon-selfhost/scripts/aks.sh reinstall
-# Re-register tenant/channel/runtime grant; send the first real Daimon turn.
+bash deploy/helm/daimon-selfhost/scripts/aks.sh register
+export MESSAGE='Reply only: REINSTALLED.'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
 date -u +%Y-%m-%dT%H:%M:%SZ > "$AKS_STATE/reinstall-first-reply"
 ```
 
@@ -443,66 +453,68 @@ control-plane tier has no SLA and does not make node resources free. Sources:
 [VM pricing](https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/),
 [ACR pricing](https://azure.microsoft.com/en-us/pricing/details/container-registry/).
 
-## Register the selfhosted environment
+## Register and run a real selfhosted turn
 
-For release `coke`, execute from a host pod (or a one-off host-image Job with the
-host Secret). Tenant must already exist. This makes no Anthropic/model calls:
+**Dependency: build the host and harness with PR #1276's reviewed head (or a
+branch containing it).** Private in-cluster HTTP requires its explicit origin and
+MCP-consent propagation. Before it lands on `azure-selfhost`, use an integration
+checkout containing both PRs for `bootstrap`; chart-only #1273 images are insufficient.
+These commands use release `coke`, CLI caller `operator`, channel
+`selfhosted-operator`, and persistent CLI thread `aks-proof`.
 
-```sh
-daimon selfhosted init --tenant-id '<tenant-uuid>' \
-  --harness-url http://coke-daimon-harness:8088 --allow-insecure-http \
-  --auth-mode bearer_env --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY \
-  --model gpt-6-luna
-```
-
-Equivalent environment `native_config.value` (the CLI defaults session_pool false):
-
-```json
-{
-  "harness_url": "http://coke-daimon-harness:8088",
-  "allow_insecure_http": true,
-  "auth_mode": "bearer_env",
-  "auth_ref": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY",
-  "transport": "direct",
-  "session_pool": false
-}
-```
-
-Set that host Secret variable to the harness's bearer. Bind it through
-`DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS` to this exact HTTP origin and tenant.
-Supply the credential-free provider grant JSON described in the self-hosting
-guide through an existing Kubernetes Secret with key `runtime.json`:
+The following is an explicit **TEST tariff**, not a quote of Azure's prices.
+For production, replace the accounting name/rates/date with your verified contract
+rates. Infrastructure is explicitly zero here and funded separately. Registration
+creates a tenant with $2 signup credit and the default scoped agent/environment,
+an access policy permitting selfhosted (the schema also requires Anthropic), and the selfhosted channel configuration revision.
+It runs `daimon selfhosted init --allow-insecure-http`, then writes the resulting
+agent/environment IDs and configuration digest into the provider grant Secret.
+It makes no model calls. Retain these exports for reinstall:
 
 ```sh
-kubectl -n daimon create secret generic daimon-runtime --from-file=runtime.json=/secure/runtime.json
+export SELFHOSTED_MODEL=gpt-6-luna
+export SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh register
+bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
+export MESSAGE='Use bash to print the working directory, then write azure-proof.txt containing PERSISTED. Confirm success.'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
+export MESSAGE='Read azure-proof.txt from the previous turn and report its exact contents.'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
+bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 ```
 
-```yaml
-host:
-  runtimeSecret: daimon-runtime
-```
+`register` is implemented in [`scripts/register.sh`](scripts/register.sh) and
+[`scripts/provision.py`](scripts/provision.py), the lane-15 production setup flow.
+It sets `DAIMON_TURN__PATH=mux`, channel backends and selfhosted admission on;
+sets billing `DEPLOYMENTS` and `MODELS`; and binds the host Secret's
+`DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` to the exact
+`http://coke-daimon-harness:8088` origin and created tenant with
+`allow_insecure_http=true`. The same Secret token is used by the harness.
+It explicitly allows credential-bearing MCP only at the internal
+`http://coke-daimon-mcp:8765/mcp` URL on both host and harness boundaries.
+This consent is only appropriate inside the operator's trusted cluster network.
 
-When set, every host process, including CLI invocations in the MCP container,
-receives a read-only directory mount at `/etc/daimon-runtime` and
-`DAIMON_TURN__PROVIDER_RUNTIME_FILE=/etc/daimon-runtime/runtime.json`. The chart
-sets that path once, overriding competing host/service env settings. Only the
-`runtime.json` key is projected; it must contain grants/IDs, never bearer or model
-keys. The harness and PostgreSQL do not receive the runtime mount. Runtime and
-Key Vault CSI mounts compose; enabling one does not disable the other. An empty
-`host.runtimeSecret` adds neither a runtime mount nor an implicit path.
+`host.runtimeSecret=daimon-runtime` mounts only `runtime.json` read-only at
+`/etc/daimon-runtime/runtime.json` and sets `DAIMON_TURN__PROVIDER_RUNTIME_FILE`.
+The manifest contains IDs/grants, never bearer or model keys. Runtime and CSI
+mounts compose. Registration applies the Secret and upgrades the release, then
+restarts MCP/scheduler so cached grants refresh. Admission defaults off in the
+chart; registration enables it only after the records and grant are present.
 
-Configure the channel's selfhosted revision/runtime grant and verified billing
-rates as described in [self-hosting](../../../docs/self-hosting.md). Admission
-remains disabled by default (C8). Enable
-`host.env.DAIMON_SELFHOSTED__ADMISSION_ENABLED=true` only after these gates and live
-usage/reconciliation checks pass. Production agent registration uses Sol; tests
-always explicitly select Luna. Never put credentials in the registration JSON.
+`turn` uses #1276's `admit → bind_session → run_prepared_turn` CLI path with real
+billing and no exemption. Save its NDJSON (usage IDs and session IDs), the harness
+provider receipts and matching Postgres usage/ledger rows for independent token
+reconciliation. The direct `probe` helper is an optional paid C3 diagnostic and
+does not replace these two application turns. No real inference is performed by
+this lane's local tests. Sol remains the production model; all smoke turns use Luna.
 
 ## Local validation
 
 Linux amd64, Docker, uv, Python 3 and curl are required. Binaries are pinned and
 SHA256-verified against the upstream release checksum files, installed in
-`~/.local/bin`. No Azure credentials or resources are used:
+`~/.local/bin`. Build from an integration checkout containing #1276 as described
+above; the smoke test exercises its CLI/HTTP path. No Azure credentials or resources
+are used:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -516,7 +528,8 @@ docker image rm daimon-l14:local daimon-harness-l14:local
 ```
 
 The render regression suite checks runtime/CSI composition, file path and memory
-limits, default egress destinations, external PG exceptions and the policy switch:
+limits, probes/grace period, priorities, Graph routes, ACR Postgres paths,
+default egress destinations, external PG exceptions and the policy switch:
 
 ```sh
 uv run python -m unittest discover -s deploy/helm/daimon-selfhost/tests -p test_host_configuration.py
@@ -527,8 +540,10 @@ Postgres startup delay and the fake harness adapter. It installs PG, the init
 Job and all host processes together with `--wait --wait-for-jobs`, asserts revision
 one is deployed with no main-container restarts, and verifies all serving pods
 Ready, MCP health, authenticated C3 health, unauthorized rejection, two sessions,
-tool writes, fake usage, event polling, idempotency and replay after pod replacement. It verifies the multi-mode
-proc/scratch checks, service UID 10000, SYS_ADMIN removal and unprivileged tool UID.
+tool writes, fake usage, event polling, idempotency and replay after pod replacement.
+It saves the original events in the MCP pod, compares GET replay before any POST,
+checks execution counts, and uses new turns to read the previously written file. It verifies the multi-mode
+proc/scratch checks, service UID 10000, SYS_ADMIN bounding-set removal and unprivileged tool UID.
 The fixture uses `HARNESS_TEST_MODE=1` because this lab's container runtime injects
 readable synthetic DMI identity files into kind pods; that is a deliberate
 credential-file-scan bypass in an offline fake fixture, never chart configuration.
