@@ -143,7 +143,7 @@ def test_checkpoint_warning_displays_one_stable_nonterminal_notice():
     value = event("native.selfhosted.checkpoint_warning", {"message": "not durable"})
     (notice,) = display_batch(value, session_id="session")
     assert notice.type == "agent.message"
-    assert notice.content[0].text == "Session state is not fully durable"
+    assert notice.content[0].text == "Recent messages and files may be lost after a restart."
     replay = value.model_copy(update={"id": "later-warning", "turn_id": "later-turn"})
     (repeated,) = display_batch(replay, session_id="session")
     assert repeated.id == notice.id  # Existing display reducers replace by id.

@@ -1050,6 +1050,8 @@ async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoi
         await client.post("/v0/turns", json=turn())
         await supervisor.tasks["turn-1"]
         await supervisor.flush_checkpoints()
+        checkpoint_names = {name for name in blobs.blobs if name.endswith(".tar.zst")}
+        assert checkpoint_names
         blobs.fail = True  # Full checkpoints fail; small write-ahead records still commit.
         body = turn("tool", turn_id="paid", key="paid")
         await client.post("/v0/turns", json=body)
@@ -1058,7 +1060,10 @@ async def test_remote_write_ahead_prevents_resend_of_a_turn_missing_its_checkpoi
         assert model.calls == 2
         workspace, _ = supervisor.journal.sandbox("session-1")
         assert (workspace / "work/result.txt").read_text() == "durable"
+        assert supervisor.journal.ended("paid")
+        assert {name for name in blobs.blobs if name.endswith(".tar.zst")} == checkpoint_names
         seq = supervisor.journal.latest_seq("session-1")
+    shutil.rmtree(tmp_path / "old")
     blobs.fail = False
     fresh = FakeModelAdapter()
     async with harness(tmp_path / "new", blobs, fresh) as (supervisor, client):
@@ -1112,6 +1117,7 @@ async def test_cleanup_cancel_transport_carries_the_persisted_high_water(tmp_pat
     journal.append(request, "status_running", {})
     journal.append(request, "model_request_started", {"request_id": "lost", "model": "test"})
     Checkpoints(blobs).save(journal, "session-1")
+    assert journal.latest_seq("session-1") == 2
     journal.close()
     async with harness(tmp_path / "new", blobs) as (_, client):
         client.params = {}

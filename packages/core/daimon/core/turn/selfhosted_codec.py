@@ -91,7 +91,12 @@ def display_event(event: Event, *, session_id: str) -> DisplayEvent | None:
                 "id": "selfhosted:checkpoint-warning:" + session_id,
                 "type": "agent.message",
                 "processed_at": event.occurred_at or event.observed_at,
-                "content": [{"type": "text", "text": "Session state is not fully durable"}],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Recent messages and files may be lost after a restart.",
+                    }
+                ],
             }
         )
     payload = event.typed_payload()
