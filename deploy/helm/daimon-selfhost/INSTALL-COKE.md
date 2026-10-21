@@ -5,7 +5,7 @@
 **Before starting:** use a DEDICATED Daimon resource group and budget, never a shared
 AOAI group. Reuse AOAI only if already in this dedicated group; otherwise create new.
 The helper cannot reuse AOAI from another group. Removal deletes everything in `RG`.
-Azure CLI must support `az acr run`; subscription policy must allow ACR Tasks.
+Azure CLI must support az acr run; subscription policy must allow ACR Tasks.
 Helm 3.19+, kubectl, Python 3 and git are required; no local Docker/buildx is needed.
 RG Owner, or Contributor plus ACR role-assignment rights; cluster-admin is required.
 A subscription admin registers **Microsoft.ContainerService, Microsoft.ContainerRegistry,
@@ -19,13 +19,13 @@ Inference stays in that US/EU zone, not necessarily one region. AOAI local auth 
 ```sh
 export RG=daimon-selfhost LOCATION=eastus2
 export ACR=daimoncoke12345 AKS=daimon-coke AOAI=daimon-coke-12345
-export AOAI_DEPLOYMENT=gpt-5.4-mini; export TAG=$(git rev-parse HEAD)
+export AOAI_DEPLOYMENT=gpt-5.4-mini
 export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 bash deploy/helm/daimon-selfhost/scripts/aks.sh install
 bash deploy/helm/daimon-selfhost/scripts/aks.sh probe
 ```
-Bootstrap uploads source to ACR Tasks; remote BuildKit builds/pushes both images
+Bootstrap saves its image tag in `AKS_STATE`; uploads source to ACR Tasks. Remote BuildKit builds/pushes both images
 (build timeout: 2 hours), mirrors PostgreSQL, creates AKS/network/disks/public IP
 and AOAI if absent. Build pulls pinned Docker Hub frontend **docker/dockerfile:1.7.0**.
 Helm installs Secrets, TLS, policies, PVCs; waits for migrations/Ready pods. **Probe
