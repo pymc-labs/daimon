@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from daimon_harness.journal import Journal
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 from mux.drivers.selfhosted.wire import TurnRequest
 
@@ -147,6 +147,41 @@ OPERATIONS = st.lists(
     max_examples=100, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
 )
 @given(trace=OPERATIONS)
+@example(
+    trace=[
+        ("turn", 59, 1),
+        ("checkpoint", 72, 1),
+        ("action", 12, 1),
+        ("action", 32, 1),
+        ("poll", 49, 2),
+        ("checkpoint", 36, 0),
+        ("action", 13, 1),
+        ("turn", 12, 2),
+        ("turn", 6, 0),
+        ("crash", 1, 0),
+        ("concurrent", 34, 2),
+        ("cancel", 63, 0),
+        ("poll", 71, 2),
+        ("checkpoint", 40, 0),
+        ("turn", 66, 1),
+        ("poll", 61, 0),
+        ("turn", 50, 1),
+        ("restore", 43, 2),
+        ("restore", 46, 2),
+        ("turn", 44, 2),
+        ("turn", 24, 0),
+        ("concurrent", 18, 2),
+        ("concurrent", 3, 2),
+        ("cancel", 7, 2),
+        ("concurrent", 33, 0),
+        ("concurrent", 28, 0),
+        ("cancel", 71, 2),
+        ("crash", 76, 1),
+        ("action", 12, 1),
+        ("cancel", 40, 0),
+        ("crash", 5, 1),
+    ]
+)
 async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trace):
     # Clients retain their observed high-water across sandbox destruction. Cursors
     # on ordinary requests may be stale, or arbitrarily ahead of the server.
@@ -171,8 +206,10 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
         manager = harness(root / str(generation), blobs, ControlledModel())
         supervisor, client = await manager.__aenter__()
 
-        def remember():
-            for event in supervisor.journal.events(SESSION):
+        # All SQLite access uses the same serial worker as production requests.
+        # Direct event-loop reads can race connection setup and transaction state.
+        async def remember():
+            for event in await supervisor.io(supervisor.journal.events, SESSION):
                 assert assigned.setdefault(event.seq, event) == event, "sequence reused"
                 if event.type != "history_gap":
                     turns[event.turn_id] = max(turns.get(event.turn_id, 0), event.seq)
@@ -189,15 +226,15 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                         c.pending for c in supervisor.contexts.values()
                     ):
                         await asyncio.sleep(0.001)
-            remember()
+            await remember()
 
         async def poll(cursor, replay=0):
             response = await client.get(
                 EVENTS, params={"after_seq": cursor, "replay_after_seq": replay}
             )
             assert response.status_code == 200, response.text
-            assert supervisor.journal.client_cursor(SESSION) >= cursor
-            remember()
+            assert await supervisor.io(supervisor.journal.client_cursor, SESSION) >= cursor
+            await remember()
             return response.json()["events"]
 
         try:
@@ -206,14 +243,14 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
             await client.post("/v0/turns", json=turn(turn_id="seed", key="seed"))
             await supervisor.tasks["seed"]
             await supervisor.flush_checkpoints()
-            remember()
+            await remember()
             for operation, cursor, which in trace:
                 if operation in {"restore", "crash"}:
-                    remember()
+                    await remember()
                     generation += 1
                     home = root / str(generation)
                     if operation == "crash":
-                        clone_local(supervisor.journal, home)
+                        await supervisor.io(clone_local, supervisor.journal, home)
                     # Freeze remote state at the crash, before task finalizers
                     # and shutdown uploads can change the old process's store.
                     remote = MemoryBlobs()
@@ -237,7 +274,7 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                         "/v0/turns", params={"after_seq": cursor}, json=request
                     )
                     assert result.status_code in {202, 409}
-                    assert supervisor.journal.client_cursor(SESSION) >= cursor
+                    assert await supervisor.io(supervisor.journal.client_cursor, SESSION) >= cursor
                     await settled()
                 elif operation == "poll":
                     response = await poll(cursor, min(cursor, clients[which]))
@@ -256,7 +293,9 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                         ),
                     )
                     assert all(result.status_code == 200 for result in results)
-                    assert supervisor.journal.client_cursor(SESSION) >= max(cursor, clients[which])
+                    assert await supervisor.io(supervisor.journal.client_cursor, SESSION) >= max(
+                        cursor, clients[which]
+                    )
                     await settled()
                 else:
                     active = next(
@@ -276,9 +315,9 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                             json={"action_id": action_id, "decision": "allow"},
                         )
                         assert result.status_code in {200, 404}
-                    assert supervisor.journal.client_cursor(SESSION) >= cursor
+                    assert await supervisor.io(supervisor.journal.client_cursor, SESSION) >= cursor
                     await settled()
-                remember()
+                await remember()
             # Each client's complete replay must contain the turn's terminal,
             # or an authoritative gap covering the last record lost for it.
             for turn_id, task in list(supervisor.tasks.items()):
