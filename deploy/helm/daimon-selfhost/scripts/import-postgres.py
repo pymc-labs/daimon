@@ -1,9 +1,11 @@
 """Import the reviewed Postgres index and verify its AKS platform before provisioning."""
 
+import contextlib
 import json
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -11,22 +13,43 @@ from pathlib import Path
 
 DIGEST = "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
 TAG = "18-alpine"
+DEFAULT_BUDGET_SECONDS = 900
+DEFAULT_ATTEMPT_SECONDS = 180
+MAX_BACKOFF_SECONDS = 60
 SOURCES = ("public.ecr.aws/docker/library/postgres", "docker.io/library/postgres")
 
 
+def kill_process_group(process):
+    # Each CLI gets its own POSIX session, including children inheriting its pipes.
+    # A stalled process may ignore SIGTERM; kill the entire group and reap az.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.communicate()
+
+
 def azure(*args, deadline=None):
-    remaining = None if deadline is None else deadline - time.monotonic()
-    if remaining is not None and remaining <= 0:
+    cap = float(os.environ.get("POSTGRES_IMPORT_ATTEMPT_SECONDS", str(DEFAULT_ATTEMPT_SECONDS)))
+    if not 0 < cap <= 86400:
+        raise ValueError("POSTGRES_IMPORT_ATTEMPT_SECONDS must be between 0 and 86400")
+    call_deadline = time.monotonic() + cap
+    if deadline is not None:
+        call_deadline = min(call_deadline, deadline)
+    if call_deadline <= time.monotonic():
         raise TimeoutError("Postgres import budget exhausted; stopping before AKS creation")
+    command = ["az", *args]
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
+    )
     try:
-        return subprocess.run(
-            ["az", *args], capture_output=True, text=True, check=False, timeout=remaining
-        )
+        stdout, stderr = process.communicate(timeout=max(0, call_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        # TimeoutExpired includes argv, which can contain the Docker Hub token.
-        raise TimeoutError(
-            "Postgres import command timed out; stopping before AKS creation"
-        ) from None
+        kill_process_group(process)
+        # Do not expose TimeoutExpired/argv, which can contain the Docker Hub token.
+        return subprocess.CompletedProcess(command, 124, "", "Azure CLI attempt timed out")
+    except BaseException:
+        kill_process_group(process)
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def sanitized_excerpt(message):
@@ -129,9 +152,9 @@ def main():
     if not re.fullmatch(r"[a-z0-9]+(?:[._/-][a-z0-9]+)*", repository):
         raise ValueError("Invalid POSTGRES_IMPORT_REPOSITORY")
     delay = int(os.environ.get("POSTGRES_IMPORT_RETRY_SECONDS", "5"))
-    if not 0 <= delay <= 60:
+    if not 0 <= delay <= MAX_BACKOFF_SECONDS:
         raise ValueError("POSTGRES_IMPORT_RETRY_SECONDS must be between 0 and 60")
-    budget = float(os.environ.get("POSTGRES_IMPORT_BUDGET_SECONDS", "900"))
+    budget = float(os.environ.get("POSTGRES_IMPORT_BUDGET_SECONDS", str(DEFAULT_BUDGET_SECONDS)))
     if not 0 < budget <= 86400:
         raise ValueError("POSTGRES_IMPORT_BUDGET_SECONDS must be between 0 and 86400")
     username, token = os.environ.get("DOCKERHUB_USERNAME"), os.environ.get("DOCKERHUB_TOKEN")
@@ -181,8 +204,8 @@ def main():
             if remaining <= 0:
                 raise TimeoutError("Postgres import budget exhausted; stopping before AKS creation")
             # Alternate sources throughout the shared budget. Jitter prevents synchronized retries.
-            time.sleep(min(remaining, 60, random.uniform(0.8, 1.2) * backoff))
-            backoff = min(60, backoff * 2)
+            time.sleep(min(remaining, MAX_BACKOFF_SECONDS, random.uniform(0.8, 1.2) * backoff))
+            backoff = min(MAX_BACKOFF_SECONDS, backoff * 2)
         else:
             raise TimeoutError("Postgres import budget exhausted; stopping before AKS creation")
     (state / "postgres-digest").write_text(DIGEST + "\n")

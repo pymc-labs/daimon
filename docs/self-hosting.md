@@ -1718,7 +1718,11 @@ AKS bootstrap imports Postgres by the reviewed index digest
 through `deploy/helm/daimon-selfhost/scripts/import-postgres.py`. It tries
 `public.ecr.aws/docker/library/postgres` before `docker.io/library/postgres`,
 alternating sources across a shared 15-minute budget (configurable with
-`POSTGRES_IMPORT_BUDGET_SECONDS`). Exponential backoff starts at 5 seconds,
+`POSTGRES_IMPORT_BUDGET_SECONDS`). Each CLI call is capped at 180 seconds via
+`POSTGRES_IMPORT_ATTEMPT_SECONDS`, bounded by remaining total time. A timeout
+kills the local CLI and its process group, reaps the CLI, and retries the next
+source while the budget remains. The helpers require Linux/WSL process groups.
+Exponential backoff starts at 5 seconds,
 adds ±20% jitter and is capped at 60 seconds and the remaining budget. Each
 failed attempt emits its source, attempt number and a sanitized one-line error. The helper checks the index digest and fetches the referenced
 Linux/amd64 manifest from ACR; a partial index is repaired with `--force`.

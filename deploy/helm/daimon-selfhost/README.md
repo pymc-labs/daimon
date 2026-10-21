@@ -361,7 +361,12 @@ from `public.ecr.aws/docker/library/postgres` first, then `docker.io/library/pos
 as fallback, alternating between the two until success or the shared time budget
 expires. Both sources use the exact digest, rather than a moving upstream tag.
 `POSTGRES_IMPORT_BUDGET_SECONDS` defaults to 900 (15 minutes), including import
-commands, verification and sleeps. Retries use exponential backoff starting at
+commands, verification and sleeps. Each CLI call is also capped at
+`POSTGRES_IMPORT_ATTEMPT_SECONDS` (default 180 seconds), never exceeding the
+remaining total budget. A stalled attempt is retryable: the helper kills its
+local CLI process group, reaps the CLI, and moves to the next source while time
+remains. Run these helpers on Linux or WSL for POSIX process-group cleanup.
+Retries use exponential backoff starting at
 5 seconds, jittered by ±20% and capped at 60 seconds and the remaining budget.
 Public mirrors can also rate-limit; the budget accommodates several minutes of
 429/5xx failures. Each failed attempt reports its source, attempt number and a
