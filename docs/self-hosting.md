@@ -434,6 +434,8 @@ Replay applies the same explicit agent permissions as live delivery. Approval
 cards and tool results share the tool call identity; confirmations retain the
 harness action identity. Retained skill versions load from the tenant's local
 selfhosted catalog, including exact channel grants uploaded by another account.
+Replay and Stop page through long in-turn histories by cursor under their
+existing deadlines, without a fixed 5,000-record ceiling.
 Explicit agent `ask` permissions always require confirmation, even for sandbox
 writes or tools the host otherwise permits. Daimon proxy calls use the underlying
 tool's host safety and confirmation rules; neutral calls run with default settings.

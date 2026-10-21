@@ -96,6 +96,19 @@ class Wire:
         return httpx.Response(202, json={"accepted": True, "turn_id": body["turn_id"]})
 
 
+def append_message_deltas(wire, count):
+    template = wire.events[0]
+    for _ in range(count):
+        wire.events.append(
+            {
+                **template,
+                "seq": len(wire.events) + 1,
+                "type": "agent_message_delta",
+                "data": {"message_id": "long-message", "text": "x"},
+            }
+        )
+
+
 class Resources:
     def __init__(self, value):
         self.value = value
@@ -1297,7 +1310,10 @@ async def test_batched_host_approvals_submit_independent_idempotent_actions(comp
     ]
 
 
-async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(composed, monkeypatch):
+@pytest.mark.parametrize("delta_count", [0, 5100])
+async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(
+    composed, monkeypatch, delta_count
+):
     from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
@@ -1312,6 +1328,7 @@ async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(comp
     )
     root = wire.events[0]["turn_id"]
     wire.events.pop()
+    append_message_deltas(wire, delta_count)
     cancellations, recorded, released = [], [], []
     original = wire.handle
 
@@ -1359,10 +1376,80 @@ async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(comp
         persistence=Persistence(),
         root_turn_id=root,
     )
-    stopped = await io.interrupt(timeout_s=2)
+    stopped = await io.interrupt(timeout_s=10)
     assert stopped.stopped and stopped.outcome == "interrupted"
     assert len(cancellations) == 1
     assert released == [(stopped.receipt_operation_id, prepared.session_ref)]
+
+
+async def test_replay_pages_past_five_thousand_records_in_one_turn(composed, monkeypatch):
+    from daimon.core.turn.reducers import apply
+    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from daimon.core.turn.state import TextBlock, TurnState
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    request, wire, _, _ = composed
+    prepared = await prepare_selfhosted(request)
+    receipt = await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        (UserMessage(content=(TextPart(text="question"),)),),
+        key="long-replay",
+    )
+    message, ended = wire.events[-2:]
+    wire.events[:] = wire.events[:2]
+    append_message_deltas(wire, 5100)
+    wire.events.extend(
+        [
+            {**message, "seq": len(wire.events) + 1},
+            {**ended, "seq": len(wire.events) + 2},
+        ]
+    )
+    cursors, recorded = [], []
+    original = prepared.backend.events.list
+
+    async def list_events(scope, session, *, page):
+        if page.order == "asc":
+            cursors.append(int(page.cursor or "0"))
+        return await original(scope, session, page=page)
+
+    monkeypatch.setattr(prepared.backend.events, "list", list_events)
+
+    class Persistence:
+        async def record(self, session, event, *, source_key=None):
+            recorded.append(event.sequence)
+
+    async def baseline(session, roots, after):
+        return (), True, 0
+
+    io = SelfHostedTurnIO(
+        prepared.backend,
+        SCOPE,
+        prepared.session_ref,
+        persistence=Persistence(),
+        root_turn_id=receipt.turn_id,
+        baseline_loader=baseline,
+    )
+    replayed = await io.replay(timeout_s=10)
+    state = TurnState()
+    for display in replayed:
+        state = apply(state, display)
+    assert [block.text for block in state.content if isinstance(block, TextBlock)] == ["answer 1"]
+    assert state.stop_reason is not None and state.stop_reason.type == "end_turn"
+    assert cursors == list(range(0, 5101, 100))
+    assert recorded == list(range(1, len(wire.events) + 1))
+
+    async def stalled_page(scope, session, *, page):
+        result = await original(scope, session, page=page)
+        return result.model_copy(update={"next_cursor": page.cursor})
+
+    from mux.errors import ProviderError
+
+    monkeypatch.setattr(prepared.backend.events, "list", stalled_page)
+    with pytest.raises(ProviderError) as caught:
+        await io.replay(timeout_s=10)
+    assert caught.value.native_code == "host_history_cursor"
 
 
 @pytest.mark.parametrize("explicit", [False, True])

@@ -46,7 +46,6 @@ from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
 _INPUTS = TypeAdapter(list[dict[str, JsonValue]])
-_PAGE_BOUND = 50
 _BUFFER_BOUND = 1000
 
 
@@ -249,8 +248,10 @@ class SelfHostedTurnIO:
     async def _history(self) -> list[Event]:
         values: list[Event] = []
         cursor: str | None = str(self._after)
-        seen: set[str] = set()
-        for _ in range(_PAGE_BOUND):
+        seen: set[str] = {cursor}
+        # A single model turn can exceed thousands of journal records. Advance
+        # by cursor until exhausted; replay/interrupt own the wall-clock bound.
+        while True:
             page = await _edge(
                 self._backend.events.list(
                     self._scope,
@@ -267,7 +268,6 @@ class SelfHostedTurnIO:
             if not cursor or cursor in seen:
                 raise ProviderError("upstream", retryable=False, native_code="host_history_cursor")
             seen.add(cursor)
-        raise ProviderError("upstream", retryable=False, native_code="host_history_bound")
 
     async def _baseline(self) -> None:
         if self._prior_roots is None:
