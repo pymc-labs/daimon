@@ -4,6 +4,7 @@ on:
     paths:
       - deploy/helm/**
       - .github/workflows/helm.yml
+      - tests/check-install-kit.sh
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,6 +28,8 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           install -m755 linux-amd64/helm "$HOME/.local/bin/helm"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Check one-page install kit commands against recipe
+        run: bash tests/check-install-kit.sh
       - name: Lint and render chart variants
         run: bash deploy/helm/daimon-selfhost/tests/chart-check.sh
       - name: Test bootstrap, runtime grants and host egress policy
