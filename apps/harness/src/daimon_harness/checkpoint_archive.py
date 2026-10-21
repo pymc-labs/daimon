@@ -40,7 +40,7 @@ def export_work(root: Path, output: BinaryIO) -> None:
             info = os.stat(name, dir_fd=directory, follow_symlinks=False)
             path = prefix + name
             member = tarfile.TarInfo(path)
-            member.mode = 0o700 if stat.S_ISDIR(info.st_mode) else 0o600
+            member.mode = 0o700 if stat.S_ISDIR(info.st_mode) else 0o600 | (info.st_mode & 0o100)
             member.mtime = int(info.st_mtime)
             if stat.S_ISDIR(info.st_mode):
                 child = os.open(
@@ -111,7 +111,7 @@ def restore_work(source: BinaryIO, target: Path) -> None:
                 with path.open("xb") as output:
                     while chunk := content.read(1024 * 1024):
                         output.write(chunk)
-                path.chmod(0o600)
+                path.chmod(0o600 | (member.mode & 0o100))
 
 
 if __name__ == "__main__":

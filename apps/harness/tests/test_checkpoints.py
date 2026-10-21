@@ -73,6 +73,9 @@ async def test_restore_after_sandbox_destruction_continues_seq_history_and_idemp
     async with harness(home, blobs) as (supervisor, client):
         assert (await client.post("/v0/turns", json=turn("tool"))).status_code == 202
         await supervisor.tasks["turn-1"]
+        workspace, _ = supervisor.journal.sandbox("session-1")
+        (workspace / "work/result.txt").chmod(0o700)
+        await supervisor.io(supervisor.checkpoint, "session-1")
         before = (await client.get("/v0/sessions/session-1/events")).json()
         history = supervisor.journal.history("session-1")
         seq = before["events"][-1]["seq"]
@@ -84,6 +87,7 @@ async def test_restore_after_sandbox_destruction_continues_seq_history_and_idemp
         assert (await client.get("/v0/sessions/session-1/events")).json() == before
         workspace, _ = supervisor.journal.sandbox("session-1")
         assert (workspace / "work/result.txt").read_text() == "durable"
+        assert (workspace / "work/result.txt").stat().st_mode & 0o777 == 0o700
         assert supervisor.journal.history("session-1") == history
         assert (await client.post("/v0/turns", json=turn("tool"))).status_code == 202
         assert model.calls == 0
