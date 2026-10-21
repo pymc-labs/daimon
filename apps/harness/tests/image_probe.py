@@ -1,10 +1,14 @@
 """Standalone root-image probe, run in CI without Azure credentials."""
 
 import asyncio
+import hashlib
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,7 +70,56 @@ async def checkpoint_probe(home: Path) -> None:
     )
     assert "home =" in context.read(".venv/pyvenv.cfg")
     old.append(request, "turn_ended", {"outcome": "completed"})
-    report = checkpoints.save(old, "probe")
+    # Block the exporter on its stdout pipe after it has read workspace data.
+    # Then run a real tool command and its UID-wide cleanup concurrently.
+    assert (
+        await context.bash(
+            "python -c 'from pathlib import Path; "
+            'Path("overlap.bin").write_bytes(bytes(range(256)) * 1024)' + "'"
+        )
+        == "exit_code=0\n"
+    )
+    snapshot = checkpoints.capture(old, "probe")
+    ready, release = threading.Event(), threading.Event()
+    exporter_pids = []
+    original_run = subprocess.run
+
+    def overlapping_export(command, **kwargs):
+        if "checkpoint_archive.py" not in str(command):
+            return original_run(command, **kwargs)
+        destination = kwargs.pop("stdout")
+        kwargs.pop("check")
+        timeout = kwargs.pop("timeout")
+        with subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0, **kwargs) as process:
+            exporter_pids.append(process.pid)
+            assert process.stdout is not None
+            prefix = process.stdout.read(512)
+            assert prefix, "exporter did not produce workspace bytes"
+            process.send_signal(signal.SIGSTOP)
+            ready.set()
+            try:
+                assert release.wait(15), "overlap cleanup never completed"
+            finally:
+                with suppress(ProcessLookupError):
+                    process.send_signal(signal.SIGCONT)
+            remaining, errors = process.communicate(timeout=timeout)
+            assert process.returncode == 0, "exporter killed by tool cleanup (checkpoint data loss)"
+            destination.write(prefix + remaining)
+            return subprocess.CompletedProcess(command, process.returncode, stderr=errors)
+
+    with patch("subprocess.run", overlapping_export):
+        export = asyncio.create_task(asyncio.to_thread(checkpoints.upload, snapshot))
+        try:
+            assert await asyncio.to_thread(ready.wait, 10), "export did not overlap cleanup"
+            output = await context.bash(
+                f"if kill -TERM {exporter_pids[0]} 2>/dev/null; then echo exporter-signalable; "
+                "else echo exporter-protected; fi"
+            )
+        finally:
+            release.set()
+            report = await export
+        assert "exporter-protected" in output, "tool can signal checkpoint exporter"
+    print("checkpoint_export_overlap_verified", flush=True)
     assert report["degraded"] is True
     assert report["skipped_count"] >= 3, report
     # A normal venv and special entries must not prevent later snapshots.
@@ -86,6 +139,8 @@ async def checkpoint_probe(home: Path) -> None:
         request, sandbox, discard_event, tool_uid=uid, state_dir=restored.session("probe")
     )
     assert await context.bash("cat result; ./run") == "exit_code=0\npersistedexecutable\n"
+    expected = hashlib.sha256(bytes(range(256)) * 1024).hexdigest()
+    assert await context.bash("sha256sum overlap.bin") == f"exit_code=0\n{expected}  overlap.bin\n"
     modes = await context.bash("stat -c '%a' run result; test ! -e pipe && echo skipped")
     assert modes == "exit_code=0\n700\n600\nskipped\n", modes
     events = restored.events("probe")

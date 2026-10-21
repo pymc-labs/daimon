@@ -1913,3 +1913,55 @@ async def test_failed_restore_reopen_and_cursor_are_retryable(tmp_path, monkeypa
         response = await client.post("/v0/turns", json=turn())
         assert response.status_code == 202
         await supervisor.tasks["turn-1"]
+
+
+@pytest.mark.parametrize("failure", ["killed", "timeout"])
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_interrupted_export_is_retried_without_publishing_partial_archive(
+    tmp_path, monkeypatch, failure, persistent
+):
+    import subprocess
+
+    from daimon_harness import checkpoints
+    from daimon_harness.journal import Journal
+
+    blobs = MemoryBlobs()
+    original_run = checkpoints.subprocess.run
+    attempts = 0
+
+    def interrupted(command, **kwargs):
+        nonlocal attempts
+        if "checkpoint_archive.py" in str(command):
+            attempts += 1
+            if persistent or attempts == 1:
+                kwargs["stdout"].write(b"partial workspace archive")
+                assert not any(name.endswith(".tar.zst") for name in blobs.blobs)
+                if failure == "killed":
+                    raise subprocess.CalledProcessError(-9, command)
+                raise subprocess.TimeoutExpired(command, 60)
+        return original_run(command, **kwargs)
+
+    async with harness(tmp_path / "home", blobs) as (supervisor, client):
+        with monkeypatch.context() as patch:
+            patch.setattr(checkpoints.subprocess, "run", interrupted)
+            assert (await client.post("/v0/turns", json=turn("tool"))).status_code == 202
+            await supervisor.tasks["turn-1"]
+            await supervisor.flush_checkpoints()
+            assert attempts == 2
+            if persistent:
+                assert supervisor.checkpoint_pending == "session-1"
+                assert (supervisor.journal.root / "checkpoint.pending").exists()
+                assert not any(name.endswith(".tar.zst") for name in blobs.blobs)
+        if persistent:
+            # No further turn or operator action is needed to retry the export.
+            assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
+            await supervisor.flush_checkpoints()
+        assert supervisor.checkpoint_pending is None
+        assert not (supervisor.journal.root / "checkpoint.pending").exists()
+        assert any(name.endswith(".tar.zst") for name in blobs.blobs)
+        restored = supervisor.checkpoints.restore(Journal(tmp_path / "restored"), "session-1")
+        try:
+            sandbox, _ = restored.sandbox("session-1")
+            assert (sandbox / "work/result.txt").read_text() == "durable"
+        finally:
+            restored.close()

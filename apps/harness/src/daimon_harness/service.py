@@ -162,6 +162,12 @@ class Supervisor:
         if self.checkpoint_task is None or self.checkpoint_task.done():
             self.checkpoint_task = asyncio.create_task(self.checkpoint_loop())
 
+    def retry_pending_checkpoint(self, session_id: str) -> None:
+        if self.checkpoint_pending == session_id and (
+            self.checkpoint_task is None or self.checkpoint_task.done()
+        ):
+            self.schedule_checkpoint(session_id)
+
     async def checkpoint(self, session_id: str) -> None:
         self.schedule_checkpoint(session_id)
         await self.flush_checkpoints()
@@ -343,6 +349,7 @@ class Supervisor:
             try:
                 await self.cleanup_failed_turns()
                 await self.io(self.prepare_session, session_id, after_seq)
+                self.retry_pending_checkpoint(session_id)
             except ConflictError:
                 raise HTTPException(status_code=409, detail="session_bound") from None
             except ValueError:
@@ -562,6 +569,7 @@ class Supervisor:
         async with self.submissions:
             await self.cleanup_failed_turns()
             await self.io(self.prepare_session, request.session_id, after_seq)
+            self.retry_pending_checkpoint(request.session_id)
             if self.session_mode == "single":
                 await self.io(self.journal.bind_session, request.session_id)
             if await self.io(self.journal.is_replay, request):

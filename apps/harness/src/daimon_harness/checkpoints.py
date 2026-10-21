@@ -25,7 +25,7 @@ from mux.drivers.selfhosted.transport import sandbox_id
 from mux.drivers.selfhosted.wire import Event, TurnRequest
 from pydantic import BaseModel, ConfigDict, Field
 
-from .checkpoint_archive import MAX_BYTES, LimitedReader, restore_work
+from .checkpoint_archive import EXPORT_UID, MAX_BYTES, LimitedReader, restore_work
 from .identity import CapturedIdentity
 from .isolation import tool_identity, validate_credential_sources
 from .journal import MAX_CURSOR, Journal, identifier
@@ -442,24 +442,37 @@ class Checkpoints:
                 (stage / "work.tar").open("wb") as output,
                 (stage / "file.stage").open("w+b") as staged,
             ):
-                exported = subprocess.run(
-                    [
-                        sys.executable,
-                        "-I",
-                        str(Path(__file__).with_name("checkpoint_archive.py")),
-                        str(sandbox / "work"),
-                        str(staged.fileno()),
-                    ],
-                    stdout=output,
-                    pass_fds=(staged.fileno(),),
-                    stderr=subprocess.PIPE,
-                    check=True,
-                    timeout=60,
-                    user=user,
-                    group=group,
-                    extra_groups=groups,
-                    env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
-                )
+                command = [
+                    sys.executable,
+                    "-I",
+                    str(Path(__file__).with_name("checkpoint_archive.py")),
+                    str(sandbox / "work"),
+                    str(staged.fileno()),
+                ]
+                if user is not None:
+                    command.extend((str(user), str(EXPORT_UID)))
+                exported = None
+                for attempt in range(2):
+                    try:
+                        output.seek(0)
+                        output.truncate()
+                        exported = subprocess.run(
+                            command,
+                            stdout=output,
+                            pass_fds=(staged.fileno(),),
+                            stderr=subprocess.PIPE,
+                            check=True,
+                            timeout=60,
+                            user=0 if user is not None else None,
+                            group=0 if group is not None else None,
+                            extra_groups=groups,
+                            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+                        )
+                        break
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                        if attempt:
+                            raise
+            assert exported is not None
             report = json.loads(exported.stderr)
             files = ("turns.sqlite3", "journal.sqlite3", "work.tar")
             if (

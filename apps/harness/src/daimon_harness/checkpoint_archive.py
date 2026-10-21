@@ -1,7 +1,8 @@
-"""Bounded, link-free workspace archives, also run under the session tool UID."""
+"""Bounded, link-free workspace archives, exported with a separate process identity."""
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import stat
@@ -11,10 +12,49 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, cast
 
+EXPORT_UID = 60001  # Outside the entire session tool-UID range.
+
 MAX_BYTES = 512 * 1024 * 1024
 MAX_ENTRIES = 50_000
 MAX_DEPTH = 32
 MAX_REPORT_BYTES = 32 * 1024
+
+
+def isolate_exporter(tool_uid: int, export_uid: int) -> None:
+    """Distinct signal/ptrace identity; filesystem access stays that of the tool."""
+    library = ctypes.CDLL(None, use_errno=True)
+
+    class Header(ctypes.Structure):
+        _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+
+    class Data(ctypes.Structure):
+        _fields_ = [
+            ("effective", ctypes.c_uint32),
+            ("permitted", ctypes.c_uint32),
+            ("inheritable", ctypes.c_uint32),
+        ]
+
+    def checked(result: int) -> None:
+        if result != 0:
+            raise OSError(ctypes.get_errno(), "cannot isolate checkpoint exporter")
+
+    # The service's CAP_SETUID launches this tiny, trusted bootstrap as root.
+    # Drop all privilege before opening any workspace path or parsing file data.
+    checked(library.prctl(8, 1, 0, 0, 0))  # PR_SET_KEEPCAPS
+    os.setgroups([])
+    os.setresgid(tool_uid, tool_uid, tool_uid)
+    os.setresuid(export_uid, export_uid, export_uid)
+    header, data = Header(0x20080522, 0), (Data * 2)()
+    data[0].effective = data[0].permitted = 1 << 7  # CAP_SETUID only
+    checked(library.capset(ctypes.byref(header), data))
+    library.setfsuid(tool_uid)
+    if library.setfsuid(-1) != tool_uid:
+        raise RuntimeError("checkpoint exporter filesystem identity unavailable")
+    data[0].effective = data[0].permitted = 0
+    checked(library.capset(ctypes.byref(header), data))
+    checked(library.prctl(8, 0, 0, 0, 0))
+    checked(library.prctl(4, 0, 0, 0, 0))  # PR_SET_DUMPABLE
+    checked(library.prctl(38, 1, 0, 0, 0))  # PR_SET_NO_NEW_PRIVS
 
 
 def valid_name(name: str) -> bool:
@@ -186,6 +226,8 @@ def restore_work(source: BinaryIO, target: Path) -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 4:
+        isolate_exporter(int(sys.argv[3]), int(sys.argv[4]))
     if len(sys.argv) > 2:
         with os.fdopen(int(sys.argv[2]), "w+b") as staged:
             report = export_work(Path(sys.argv[1]), sys.stdout.buffer, staged)

@@ -262,8 +262,8 @@ container separately; the harness never creates cloud resources. Azure Blob
 The service captures `ManagedIdentityCredential` before scrubbing the identity
 environment. It requires the header-protected `IDENTITY_ENDPOINT` and
 `IDENTITY_HEADER`; it never falls back to IMDS, workload identity files, account
-keys or connection strings. The workspace exporter runs as the tool UID with
-an empty environment; only the service can access the archive, journal and
+keys or connection strings. The workspace exporter uses a dedicated signal identity with
+a minimal environment; only the service can access the archive, journal and
 storage client. If the live pool exposes only a tool-reachable session identity,
 keep admission disabled until a host-minted, per-session SAS carrier exists.
 Live authentication and identity isolation still require deployment verification.
@@ -299,6 +299,29 @@ barriers. The manifest caps escaped UTF-8 bytes, records a skip count
 and bounded sample, and shares workspace name validation with restore. Combined
 archive limits degrade to journals only. Export staging stays service-owned on
 the session filesystem. Old snapshots are pruned only after a successful upload.
+
+In production the exporter has a dedicated real/effective/saved UID (60001,
+outside the session tool range). Its filesystem UID and group are the session's
+tool identity, so it can read exactly the same workspace files and cannot read
+service secrets, journals or Blob credentials. A small trusted bootstrap starts
+with UID 0 using the service's existing CAP_SETUID, sets these identities, then
+clears every capability, disables dumpability and sets no-new-privileges before
+opening workspace data. Its environment contains only PATH/LANG; only pre-opened
+archive/staging descriptors cross the service-owned snapshot boundary. The tool
+cannot signal or ptrace the exporter, and tool-UID cleanup cannot kill it. No
+filesystem bypass capability or broader file permissions are granted.
+
+An exporter killed or timed out is retried once immediately with its partial
+output truncated. No checkpoint is published until export exits successfully.
+Persistent failure keeps the durable pending marker; the next authenticated
+request schedules another background attempt without delaying the request.
+
+Cleanup verifies individual namespace PIDs after SIGKILL; a live or unverifiable
+signalable process at the deadline makes `kill_uid` fail, preserving the I5 seal.
+It probes PID numbers up to `/proc/sys/kernel/ns_last_pid` instead of relying on
+`kill(-1, 0)` (which can report success for inaccessible UIDs) or proc directory
+visibility (which hidepid can restrict). Verified zombies cannot write and are
+left for their parent/tini to reap. An incomplete scan fails closed.
 
 An authenticated first turn, poll, action or cancel restores the latest snapshot
 when local state is empty. An interrupted restore retries before serving.
@@ -714,16 +737,17 @@ and host-visible completion/admission after warning failures. A separate regress
 boundary for warning delivery. Remote uploads extend a measurement-only oracle;
 they never advance the simulated host's event cursor.
 
-Reproduce the six isolated mutation checks from the repository root:
+Reproduce the seven isolated mutation checks from the repository root:
 
 ```sh
 scratch=$(mktemp -d)
-uv run python apps/harness/tests/recovery_mutations.py "$scratch"
+HARNESS_MUTATION_IMAGE=daimon-harness:l4-hardening \
+  uv run python apps/harness/tests/recovery_mutations.py "$scratch"
 ```
 
 The script reverts each fix separately in copied source, using the same Hypothesis
 property (seed 7, including explicit regression traces). Expected pytest exit: 1
-for all six. Restoring startup repair before WAL reconciliation loses measured
+for mutations 1–6. Restoring startup repair before WAL reconciliation loses measured
 usage; restoring submit-owned warning delivery strands a claim; removing pending
 measured-response persistence loses measured usage; removing terminal WAL records
 emits events after a terminal; disabling the divergence seal makes a mid-process
@@ -734,6 +758,11 @@ source remains untouched. Mutation 6 discards the failed executor’s context,
 treating task completion as recovery permission; it fails with a clear I5
 assertion on the host poll. The generator includes cleanup failure with live
 workers, plus an explicit trace; a separate regression uses real cleanup timeouts.
+Mutation 7 runs the production image overlap probe (Docker and a cached harness
+image are required). It restores the exporter to the tool UID and must exit 1
+with `exporter killed by tool cleanup (checkpoint data loss)`. The normal probe
+suspends export after workspace bytes reach its pipe, overlaps a tool command and
+UID cleanup, resumes export, and verifies the restored files and modes.
 
 Cursors and generated events share the driver's `0..2**53` wire range. An
 unseen cursor must leave space for a gap and a 1024-event reservation, or the

@@ -1,18 +1,56 @@
-"""Run as the tool UID to kill descendants without relying on procfs."""
+"""Run as the tool UID; verify termination even when procfs hides descendants."""
 
 import os
 import signal
 import time
+from pathlib import Path
 
-# Some kernels return success for kill(-1) even when only inaccessible UIDs
-# remain. Bound retries as well as the parent's helper wait; never enumerate
-# procfs, whose hidepid policy deliberately hides these processes from service.
-deadline = time.monotonic() + 0.2
-while True:
+
+def terminated(pid: int) -> bool:
     try:
-        os.kill(-1, signal.SIGKILL)
-    except ProcessLookupError:
-        break
-    if time.monotonic() >= deadline:
-        break
-    time.sleep(0.01)
+        # A zombie is dead and cannot finish a pending syscall. Its parent
+        # (or tini) owns reaping; signal 0 alone cannot distinguish it.
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        return state in {"Z", "X"}
+    except FileNotFoundError:
+        return True
+    except (OSError, IndexError):
+        return False  # Hidden/non-dumpable live tasks are never dismissed.
+
+
+def kill_uid(timeout: float = 0.2) -> int:
+    deadline = time.monotonic() + timeout
+    own_pid = os.getpid()
+    while True:
+        try:
+            os.kill(-1, signal.SIGKILL)
+        except ProcessLookupError:
+            return 0
+        # kill(-1, 0) can return success with only inaccessible UIDs present.
+        # Probe individual namespace PIDs instead. Unlike /proc enumeration,
+        # this also finds our non-dumpable descendants under hidepid=2.
+        try:
+            high = int(Path("/proc/sys/kernel/ns_last_pid").read_text())
+        except (OSError, ValueError):
+            return 1
+        remaining = False
+        for pid in range(2, high + 1):
+            if pid == own_pid:
+                continue
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                pass
+            else:
+                remaining = remaining or not terminated(pid)
+            if pid % 256 == 0 and time.monotonic() >= deadline:
+                return 1  # Incomplete verification is not success.
+        if not remaining:
+            return 0
+        if time.monotonic() >= deadline:
+            return 1
+        time.sleep(0.01)
+
+
+if __name__ == "__main__":
+    raise SystemExit(kill_uid())

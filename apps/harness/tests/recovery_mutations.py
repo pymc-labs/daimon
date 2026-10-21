@@ -1,4 +1,4 @@
-"""Run six recovery mutations on isolated source copies (never edit the checkout).
+"""Run seven recovery mutations on isolated source copies (never edit the checkout).
 
 Usage: uv run python apps/harness/tests/recovery_mutations.py <empty scratch directory>
 Run from the repository root; each property-test failure is retained in scratch.
@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in range(1, 7):
+for number in range(1, 8):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -62,12 +62,60 @@ for number in range(1, 7):
             "    def mark_diverged(self) -> None:\n        self.diverged = True",
             "    def mark_diverged(self) -> None:\n        self.diverged = False",
         )
-    else:
+    elif number == 6:
         change(
             "service.py",
             "                if workers_stopped:\n",
             "                if True:\n",
         )
+    else:
+        change(
+            "checkpoints.py",
+            "command.extend((str(user), str(EXPORT_UID)))",
+            "command.extend((str(user), str(user)))",
+        )
+        # UID switching is essential to this mutation. Run the same production
+        # overlap probe as CI in a cached image, with the mutated package copied in.
+        image = os.environ.get("HARNESS_MUTATION_IMAGE", "daimon-harness:l4-hardening")
+        container = subprocess.check_output(
+            [
+                "docker",
+                "create",
+                "--init",
+                "--entrypoint",
+                "/bin/bash",
+                image,
+                "-c",
+                "uv pip install --python /opt/venv/bin/python azure-storage-blob==12.31.0 "
+                "zstandard==0.25.0 && exec /opt/venv/bin/python /probe.py",
+            ],
+            text=True,
+        ).strip()
+        try:
+            for local, remote in (
+                (str(target) + "/.", "/opt/venv/lib/python3.12/site-packages/daimon_harness/"),
+                ("packages/mux/mux/.", "/opt/venv/lib/python3.12/site-packages/mux/"),
+                ("apps/harness/tests/image_probe.py", "/probe.py"),
+            ):
+                subprocess.run(["docker", "cp", local, f"{container}:{remote}"], check=True)
+            with (root / "mutation-7.log").open("w") as output:
+                subprocess.run(
+                    ["docker", "start", "-a", container], stdout=output, stderr=subprocess.STDOUT
+                )
+            code = int(
+                subprocess.check_output(
+                    ["docker", "inspect", "--format", "{{.State.ExitCode}}", container], text=True
+                )
+            )
+            print(f"mutation 7: production image exit {code}", flush=True)
+            assert code == 1
+            assert (
+                "exporter killed by tool cleanup (checkpoint data loss)"
+                in (root / "mutation-7.log").read_text()
+            )
+        finally:
+            subprocess.run(["docker", "rm", "-f", container], check=True, stdout=subprocess.DEVNULL)
+        continue
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:
         result = subprocess.run(
