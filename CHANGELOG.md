@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Require the queued ACR run's authoritative `Succeeded` status before image
+  checks or AKS provisioning, with bounded polling and unique default build tags
+  retained in operator state for later install/reinstall commands.
+
+- Pin the AKS ACR Tasks Dockerfile frontend by digest and verify both pushed image
+  tags before importing Postgres or creating AKS, stopping if either is unavailable.
+
+- Fix AKS bootstrap image builds with explicit BuildKit-enabled ACR Tasks for
+  both production Dockerfiles; check Azure CLI support early and stop before
+  cluster creation if either build or push fails, with streamed run diagnostics.
+
 - Bind AKS helper phases to a private kubeconfig for the named cluster and verify
   its API server before workload operations, preventing teardown of another cluster.
 

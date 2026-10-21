@@ -5,9 +5,20 @@ umask 077
 cd "$(git rev-parse --show-toplevel)"
 chart=deploy/helm/daimon-selfhost
 : "${RG:?export RG}" "${LOCATION:?export LOCATION}" "${ACR:?export ACR}"
-: "${AKS:?export AKS}" "${AOAI:?export AOAI}" "${TAG:?export TAG}"
+: "${AKS:?export AKS}" "${AOAI:?export AOAI}"
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
+if [[ -z ${TAG:-} ]]; then
+  if [[ ${1:-} == bootstrap ]]; then
+    TAG="$(git rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S%N)"
+  elif [[ -s "$AKS_STATE/image-tag" ]]; then
+    TAG=$(cat "$AKS_STATE/image-tag")
+  else
+    echo 'export TAG or retain AKS_STATE/image-tag from a successful bootstrap' >&2
+    exit 1
+  fi
+fi
+export TAG
 export AOAI_DEPLOYMENT=${AOAI_DEPLOYMENT:-gpt-5.4-mini}
 export SELFHOSTED_MODEL=${SELFHOSTED_MODEL:-$AOAI_DEPLOYMENT}
 verify_aoai_model() {
@@ -54,10 +65,17 @@ install|register|turn|egress-start|egress-check|teardown) bind_aks ;;
 esac
 case ${1:-} in
 bootstrap)
+  command -v az >/dev/null 2>&1 || {
+    echo 'bootstrap requires Azure CLI (az) with ACR Tasks support; install it and az login first' >&2
+    exit 1
+  }
+  az acr run --help >/dev/null 2>&1 || {
+    echo 'bootstrap requires Azure CLI with az acr run (ACR Tasks); update Azure CLI' >&2
+    exit 1
+  }
   az group create -n "$RG" -l "$LOCATION" -o none
   az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
-  az acr build -r "$ACR" -t "daimon:$TAG" . --no-logs -o none
-  az acr build -r "$ACR" -t "daimon-harness:$TAG" -f apps/harness/Dockerfile . --no-logs -o none
+  bash "$chart/scripts/build-images.sh"
   az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
   az acr repository show -n "$ACR" --image postgres:18-alpine --query digest -o tsv > "$AKS_STATE/postgres-digest"
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
