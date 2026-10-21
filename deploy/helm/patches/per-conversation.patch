@@ -1,9 +1,9 @@
 diff --git a/deploy/helm/daimon-selfhost/templates/controller.yaml b/deploy/helm/daimon-selfhost/templates/controller.yaml
 new file mode 100644
-index 0000000..c5a311f
+index 0000000..c83801b
 --- /dev/null
 +++ b/deploy/helm/daimon-selfhost/templates/controller.yaml
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,151 @@
 +{{- if and .Values.harness.enabled (eq .Values.harness.mode "perConversation") }}
 +{{- if or .Values.harness.miProxy.enabled .Values.keyVaultCSI.enabled }}{{ fail "perConversation uses k8s Secrets; MI proxy and Key Vault are not supported" }}{{ end }}
 +{{- if not .Values.harness.perConversation.allowInsecureHTTP }}{{ fail "perConversation requires explicit allowInsecureHTTP consent until F76 TLS lands" }}{{ end }}
@@ -100,9 +100,10 @@ index 0000000..c5a311f
 +    metadata:
 +      labels: {app: {{ $name }}}
 +      annotations:
-+        checksum/template: {{ toJson .Values.harness | sha256sum }}
++        checksum/template: {{ toJson .Values | sha256sum }}
 +    spec:
 +      serviceAccountName: {{ $name }}-controller
++      imagePullSecrets: {{ .Values.imagePullSecrets | toJson }}
 +      securityContext: {runAsUser: 10000, runAsGroup: 10000, fsGroup: 10000, seccompProfile: {type: RuntimeDefault}}
 +      containers:
 +        - name: controller
