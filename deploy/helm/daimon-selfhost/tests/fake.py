@@ -3,13 +3,23 @@
 import os
 from pathlib import Path
 
-from daimon_harness.isolation import prepare_service, protect_process, validate_session_mode
+from daimon_harness.isolation import validate_credential_files
+from daimon_harness.model_adapter import bound_mcp_http_client
 from daimon_harness.service import create_app as service_create_app
 
 
 class FakeModelAdapter:
     async def run(self, context, history):
+        assert os.geteuid() == 10000
+        assert not os.environ.get("HARNESS_TEST_MODE")
+        async with bound_mcp_http_client() as client:
+            response = await client.get(
+                os.environ["HARNESS_DAIMON_MCP_URL"].removesuffix("/mcp") + "/healthz"
+            )
+            assert response.status_code == 200
+        print("F80: service MCP client read CA after production UID drop", flush=True)
         counter = Path.home() / "executions"
+        counter.touch(mode=0o600, exist_ok=True)
         with counter.open("a") as output:
             output.write(context.request.turn_id + "\n")
         request_id = "fake-" + context.request.turn_id
@@ -46,19 +56,17 @@ class FakeModelAdapter:
         return [*history, {"role": "assistant", "content": "done"}]
 
 
-# The host runtime injects readable synthetic DMI bind mounts into kind pods.
-# Use the documented offline mode for credential-file scanning only; explicitly
-# verify multi isolation and apply the production privilege drop/protection.
+# Replace inference only; all production startup checks and privilege changes run.
 def create_app():
     # The production Uvicorn command loads SSL before invoking this factory.
     key = Path("/etc/daimon/harness-tls/tls.key")
     assert key.stat().st_uid == 0 and key.stat().st_mode & 0o777 == 0o400
-    token = os.environ.pop("HARNESS_TOKEN")
-    validate_session_mode()
-    os.environ["HARNESS_TEST_MODE"] = "1"
-    app = service_create_app(token=token, adapter=FakeModelAdapter())
-    prepare_service(Path.home())
-    protect_process()
+    assert not os.environ.get("HARNESS_TEST_MODE"), "production startup required"
+    ca = Path(os.environ["HARNESS_MCP_CA_BUNDLE"])
+    validate_credential_files(roots=(key.parent, ca.parent), home=Path.home())
+    print("F80: production credential-file scan accepts chart CA/TLS mounts", flush=True)
+    app = service_create_app(adapter=FakeModelAdapter())
+    assert ca.read_bytes(), "service cannot read chart CA after UID drop"
     assert os.geteuid() == 10000
     try:
         key.read_bytes()

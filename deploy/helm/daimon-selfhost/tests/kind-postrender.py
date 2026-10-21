@@ -24,6 +24,13 @@ for resource in resources:
             container["args"][0].replace("daimon_harness.service:create_app", "fake:create_app")
         ]
         container["env"].append(dict(name="PYTHONPATH", value="/validation"))
+        # The lab OCI hook injects host DMI files before PID 1 starts. Mask
+        # them afterward, while the chart's startup SYS_ADMIN is still held;
+        # the unchanged production scanner then examines the actual mounts.
+        container["args"][0] = (
+            "mount -t tmpfs -o ro,mode=0700 lab-dmi /sys/devices/virtual/dmi/id; "
+            + container["args"][0]
+        )
         container["volumeMounts"].append(
             dict(name="offline", mountPath="/validation", readOnly=True)
         )

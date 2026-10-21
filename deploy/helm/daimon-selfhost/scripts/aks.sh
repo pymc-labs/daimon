@@ -69,6 +69,15 @@ if not (p/'pg.env').exists():
         'DAIMON_CRYPTO__KEYS='+base64.urlsafe_b64encode(os.urandom(32)).decode()+'\n'
         'DAIMON_MCP__PUBLIC_URL=https://mcp.example.invalid\n'
         'DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY='+token+'\n')
+# Upgrade saved operator state too: envFrom requires the dedicated variable to
+# be an actual daimon-host Secret key, not a Helm value or secretKeyRef mapping.
+host_env = p/'host.env'
+if not any(line.startswith('DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY=')
+           for line in host_env.read_text().splitlines()):
+    harness_token = next(line.split('=', 1)[1] for line in (p/'harness.env').read_text().splitlines()
+                         if line.startswith('HARNESS_TOKEN='))
+    with host_env.open('a') as output:
+        output.write('\nDAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY='+harness_token+'\n')
 (p/'aoai.env').write_text('AZURE_OPENAI_API_KEY='+key+'\n')
 host = urlsplit(endpoint).hostname
 ips = sorted({r[4][0]+'/32' for r in socket.getaddrinfo(host,443,socket.AF_INET)})

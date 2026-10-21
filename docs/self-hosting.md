@@ -1670,3 +1670,6 @@ Explicit TEST tariffs also require the selfhosted `ALLOW_TEST_TARIFFS` opt-in.
 
 The AKS Helm recipe serves both MCP and harness over HTTPS with a generated CA;
 trusted hosts use a combined root bundle, while sandbox MCP trust stays scoped.
+The chart loads host credentials through `envFrom`: the `daimon-host` Secret must
+contain the `DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` key itself. Its value must
+match the harness token; do not place a `secretKeyRef` object in `host.env`.

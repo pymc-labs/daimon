@@ -6,6 +6,10 @@ chart=deploy/helm/daimon-selfhost
 scratch=$(mktemp -d)
 cluster=${KIND_CLUSTER_NAME:-daimon-l14-$(date +%s)-$$}
 cleanup() {
+  result=$?
+  if [[ $result != 0 ]]; then
+    kubectl -n daimon logs smoke-daimon-harness-0 --tail=100 || true
+  fi
   kind delete cluster --name "$cluster"
   rm -r "$scratch"
 }
@@ -71,7 +75,10 @@ RENDER
 chmod +x "$scratch/postrender"
 # One fresh release, all hosts and Job together; PG intentionally starts late.
 helm install smoke "$chart" -n daimon -f "$scratch/local.yaml" \
-  --post-renderer "$scratch/postrender" --wait --wait-for-jobs --timeout 15m
+  --post-renderer "$scratch/postrender" --wait --wait-for-jobs --timeout "${SMOKE_TIMEOUT:-15m}"
+kubectl -n daimon logs smoke-daimon-harness-0 | grep -F 'F80: production credential-file scan accepts chart CA/TLS mounts'
+kubectl -n daimon get secret daimon-host -o json | python3 -c \
+  'import json,sys; assert "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY" in json.load(sys.stdin)["data"]; print("FU4: dedicated harness token key exists in daimon-host Secret")'
 kubectl -n daimon wait --for=condition=complete job/smoke-daimon-init-1 --timeout=5s
 helm status smoke -n daimon -o json | python3 -c \
   'import json,sys; s=json.load(sys.stdin); assert s["version"] == 1 and s["info"]["status"] == "deployed"; print("First install: revision 1 deployed")'
@@ -141,6 +148,8 @@ print('Metered CLI turn returned verified lifecycle events')
 PYTURN
 done
 kubectl -n daimon exec -i deploy/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python - < "$chart/tests/verify-ledger.py"
+kubectl -n daimon logs smoke-daimon-harness-0 | grep -F 'F80: production credential-file scan accepts chart CA/TLS mounts'
+kubectl -n daimon logs smoke-daimon-harness-0 | grep -F 'F80: service MCP client read CA after production UID drop'
 # kindnet (kind default) does not enforce NetworkPolicy. Do not claim enforcement.
 echo 'NetworkPolicy enforcement NOT tested: kindnet CNI; requires Calico/Cilium/AKS policy engine'
 kubectl apply --server-side --dry-run=server --force-conflicts -n daimon -f "$scratch/rendered.yaml" >/dev/null

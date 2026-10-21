@@ -460,6 +460,9 @@ class HostConfigurationTests(unittest.TestCase):
             }
             (state / "aks-values.json").write_text(json.dumps(original))
             (state / "runtime.json").write_text("[]")
+            (state / "pg.env").write_text("POSTGRES_PASSWORD=offline-placeholder\n")
+            (state / "harness.env").write_text("HARNESS_TOKEN=offline-placeholder\n")
+            (state / "host.env").write_text("DAIMON_HARNESS_TOKEN=offline-placeholder\n")
             stub = state / "stub"
             stub.write_text("""#!/usr/bin/env python3
 import json, os, sys
@@ -493,6 +496,10 @@ elif name == 'az' and 'key1' in sys.argv:
                 env=env,
                 check=True,
                 capture_output=True,
+            )
+            self.assertIn(
+                "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY=offline-placeholder",
+                (state / "host.env").read_text().splitlines(),
             )
             values = json.loads((state / "aks-values.json").read_text())
             for key, value in original["host"].items():

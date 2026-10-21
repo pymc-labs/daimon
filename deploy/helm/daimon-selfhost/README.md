@@ -550,7 +550,11 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 It sets `DAIMON_TURN__PATH=mux`, channel backends and selfhosted admission on;
 sets billing `DEPLOYMENTS`, `MODELS` and explicit `ALLOW_TEST_TARIFFS`; and binds the host Secret's
 `DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` to the exact
-`https://coke-daimon-harness:8088` origin and created tenant. The same Secret token is used by the harness.
+`https://coke-daimon-harness:8088` origin and created tenant. The same token is used by the harness. `daimon-host` must contain an actual key
+named `DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY`; host pods load it with `envFrom`.
+Do not put the value in Helm values or substitute a `secretKeyRef` object inside
+`host.env` (it accepts string values). The installer adds this key to saved
+legacy `host.env` state from the retained harness token without printing it.
 It configures credential-bearing MCP at the internal
 `https://coke-daimon-mcp:8765/mcp` URL on host and harness, with the chart CA.
 Registration sets the advertised MCP resource URL to this internal address;
@@ -613,11 +617,17 @@ completes. Both Services use real HTTPS; MCP is checked through the harness
 client as UID 10000, and both endpoints reject clients without the chart CA.
 The test checks that Helm upgrade retains the CA. It verifies the multi-mode
 proc/scratch checks, service UID 10000, SYS_ADMIN bounding-set removal and unprivileged tool UID.
-The fixture uses `HARNESS_TEST_MODE=1` because this lab's container runtime injects
-readable synthetic DMI identity files into kind pods; that is a deliberate
-credential-file-scan bypass in an offline fake fixture, never chart configuration.
-It explicitly applies the production privilege-drop/protection helpers. Production
-AKS must pass all startup checks without this mode. It runs kubeconform when
+Only inference is replaced. The fixture invokes the production app factory with
+no test mode: credential-source/file scans, multi-session validation, UID drop
+and process protection all run. F80 checks the CA/TLS mounts with the production
+credential-file validator, then makes MCP HTTPS calls through the production
+client from the actual service UID 10000 after the drop. The CA remains unreadable
+to tool UIDs. This development runtime injects host DMI identity files into nested
+kind pods. The offline post-renderer masks only `/sys/devices/virtual/dmi/id`
+with an empty read-only mount after the lab OCI hook runs, before dropping startup
+SYS_ADMIN. It does not skip or filter the production scanner,
+and the chart CA/TLS mounts remain present and scanned. The smoke requires both F80 receipts before and after registration.
+It runs kubeconform when
 available and API server dry-run schema validation. kindnet, kind's default CNI,
 does **not enforce NetworkPolicy**; the script reports that gap explicitly.
 For enforcement tests use a Calico/Cilium kind cluster or AKS: verify DNS and MCP
