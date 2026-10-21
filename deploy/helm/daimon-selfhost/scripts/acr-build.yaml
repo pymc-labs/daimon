@@ -1,0 +1,16 @@
+# ACR Tasks requires explicit BuildKit opt-in; a Dockerfile syntax header alone
+# does not switch the Docker builder. Keep both production Dockerfiles unchanged.
+# Select a frontend supporting the harness ADD --checksum as well.
+version: v1.1.0
+stepTimeout: 3600
+steps:
+  - build: --build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0 -t {{.Run.Registry}}/daimon:{{.Values.tag}} -f Dockerfile .
+    env:
+      - DOCKER_BUILDKIT=1
+  - push:
+      - "{{.Run.Registry}}/daimon:{{.Values.tag}}"
+  - build: --build-arg BUILDKIT_SYNTAX=docker/dockerfile:1.7.0 -t {{.Run.Registry}}/daimon-harness:{{.Values.tag}} -f apps/harness/Dockerfile .
+    env:
+      - DOCKER_BUILDKIT=1
+  - push:
+      - "{{.Run.Registry}}/daimon-harness:{{.Values.tag}}"

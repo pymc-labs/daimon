@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix AKS bootstrap image builds with explicit BuildKit-enabled ACR Tasks for
+  both production Dockerfiles; check Azure CLI support early and stop before
+  cluster creation if either build or push fails, with streamed run diagnostics.
+
 - Bind AKS helper phases to a private kubeconfig for the named cluster and verify
   its API server before workload operations, preventing teardown of another cluster.
 

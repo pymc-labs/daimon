@@ -1688,3 +1688,15 @@ cluster, verify the API server against Azure cluster metadata before workload
 operations, and remove the credentials file on exit. They never use or modify
 `~/.kube/config`; a mismatched server stops teardown before release or namespace
 deletion. The existing installation commands are unchanged.
+
+AKS `bootstrap` builds and pushes both images remotely through
+`deploy/helm/daimon-selfhost/scripts/acr-build.yaml`, enabling
+`DOCKER_BUILDKIT=1` for each ACR Tasks build step. This supports the shared
+production Dockerfiles' `COPY --chmod` and `RUN --mount` instructions. The task
+selects `docker/dockerfile:1.7.0` via `BUILDKIT_SYNTAX` to support the harness
+`ADD --checksum` too. The
+operator needs Azure CLI with `az acr run` support and permission to run ACR
+Tasks; local Docker/buildx is not required. Bootstrap checks CLI support before
+creating resources, streams run IDs and builder diagnostics, and stops on either
+build/push failure before creating AKS. No local image/cache cleanup is needed.
+See Microsoft's [ACR Tasks BuildKit configuration](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-tasks-reference-yaml#build).

@@ -54,10 +54,23 @@ install|register|turn|egress-start|egress-check|teardown) bind_aks ;;
 esac
 case ${1:-} in
 bootstrap)
+  command -v az >/dev/null 2>&1 || {
+    echo 'bootstrap requires Azure CLI (az) with ACR Tasks support; install it and az login first' >&2
+    exit 1
+  }
+  az acr run --help >/dev/null 2>&1 || {
+    echo 'bootstrap requires Azure CLI with az acr run (ACR Tasks); update Azure CLI' >&2
+    exit 1
+  }
   az group create -n "$RG" -l "$LOCATION" -o none
   az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
-  az acr build -r "$ACR" -t "daimon:$TAG" . --no-logs -o none
-  az acr build -r "$ACR" -t "daimon-harness:$TAG" -f apps/harness/Dockerfile . --no-logs -o none
+  # Stream remote builder diagnostics and wait for BOTH pushes before AKS creation.
+  # Do not use --no-logs: operators need the run ID and first failing step.
+  az acr run -r "$ACR" -f "$chart/scripts/acr-build.yaml" \
+    --set "tag=$TAG" --timeout 7200 . || {
+    echo 'ACR Tasks BuildKit build/push failed; inspect the run ID above. The remote builder must support DOCKER_BUILDKIT=1; AKS has not been created.' >&2
+    exit 1
+  }
   az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
   az acr repository show -n "$ACR" --image postgres:18-alpine --query digest -o tsv > "$AKS_STATE/postgres-digest"
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \

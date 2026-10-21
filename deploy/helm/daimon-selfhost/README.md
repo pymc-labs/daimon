@@ -249,7 +249,9 @@ Helm commands shown below, fetch a separate private kubeconfig explicitly with
 Prerequisites: Azure CLI authenticated to the target subscription; `kubectl`,
 Helm 3.19+, Python 3, git; checkout of the reviewed `azure-selfhost` branch; a
 dedicated RG containing only its budget and, optionally, the existing AOAI account
-and deployment. The deployer needs RG Contributor
+and deployment. Azure CLI must support `az acr run`; bootstrap checks this before
+creating resources. Images build remotely with the ACR Tasks BuildKit builder;
+local Docker/buildx is not required for bootstrap. The deployer needs RG Contributor
 plus permission to create role assignments (`attach-acr`); RG Owner covers both.
 Subscription admins must pre-register `Microsoft.ContainerService`,
 `Microsoft.ContainerRegistry`, `Microsoft.CognitiveServices`, `Microsoft.Compute`,
@@ -295,14 +297,23 @@ export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 ```
 
+`bootstrap` builds and pushes both production Dockerfiles using
+[`scripts/acr-build.yaml`](scripts/acr-build.yaml), with `DOCKER_BUILDKIT=1` on
+each build step. The task also selects `docker/dockerfile:1.7.0` via `BUILDKIT_SYNTAX` for
+the harness `ADD --checksum`. This enables `COPY --chmod` and `RUN --mount`; plain
+`az acr build` uses a legacy builder and a Dockerfile syntax header alone does
+not enable BuildKit. Build logs include the ACR run ID. A missing ACR Tasks CLI
+fails before resource creation; a remote build/push failure stops before AKS
+creation. The remote builder leaves no local image tags or build cache.
+
 `bootstrap` runs the following commands in order (do not repeat them after the
 wrapper already succeeded):
 
 ```sh
 az group create -n "$RG" -l "$LOCATION" -o none
 az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
-az acr build -r "$ACR" -t "daimon:$TAG" . --no-logs -o none
-az acr build -r "$ACR" -t "daimon-harness:$TAG" -f apps/harness/Dockerfile . --no-logs -o none
+az acr run -r "$ACR" -f deploy/helm/daimon-selfhost/scripts/acr-build.yaml \
+  --set "tag=$TAG" --timeout 7200 .
 az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
 az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
   --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
@@ -619,7 +630,7 @@ limits, probes/grace period, priorities, Graph routes, ACR Postgres paths,
 default egress destinations, external PG exceptions and the policy switch:
 
 ```sh
-uv run python -m unittest discover -s deploy/helm/daimon-selfhost/tests -p test_host_configuration.py
+uv run python -m unittest discover -s deploy/helm/daimon-selfhost/tests -p 'test_*.py'
 ```
 
 The script loads images and post-renders only offline fixtures: a 20-second
