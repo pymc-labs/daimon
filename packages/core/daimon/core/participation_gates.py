@@ -21,7 +21,7 @@ from typing import Final, Protocol
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, is_over_cap
-from daimon.core.channel_backend import is_selfhosted_channel
+from daimon.core.channel_backend import is_selfhosted_turn
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
@@ -138,8 +138,13 @@ class ParticipationGates:
         async with self._sessionmaker() as session:
             # Participation is optional; never send a self-hosted conversation
             # to the Anthropic classifier or its agent-rule lookup.
-            if await is_selfhosted_channel(
-                session, tenant_id=tenant_id, platform=self._platform, channel_id=channel_id
+            if await is_selfhosted_turn(
+                session,
+                tenant_id=tenant_id,
+                platform=self._platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                caller_id=caller_id,
             ):
                 log.info("thread_participation.skipped", reason="selfhosted", thread_id=thread_id)
                 return False

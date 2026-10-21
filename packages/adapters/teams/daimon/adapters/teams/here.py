@@ -19,6 +19,7 @@ from daimon.adapters.teams.billing_panel import plain_name
 from daimon.adapters.teams.card_actions import heading
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.agent_details import GitHubDeploymentFacts
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import (
     HereCard,
@@ -54,7 +55,17 @@ async def _load(context: CommandContext) -> HereCard:
     # A plain 1:1 chat is its own thread; only a post or a setup conversation is one.
     thread_id = asked.thread_id if asked.thread_id != asked.channel_id else None
     public_url = runtime.settings.mcp.public_url
-    async with runtime.sessionmaker() as session:
+    async with (
+        guard_selfhosted_channel(
+            runtime.sessionmaker,
+            tenant_id=context.tenant_id,
+            platform="teams",
+            channel_id=asked.channel_id,
+            thread_id=thread_id,
+            caller_id=asked.user_id,
+        ),
+        runtime.sessionmaker() as session,
+    ):
         principal = await find_platform_principal(
             session, tenant_id=context.tenant_id, platform="teams", external_id=asked.user_id
         )

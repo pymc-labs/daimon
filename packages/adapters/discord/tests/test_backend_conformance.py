@@ -464,3 +464,29 @@ async def test_actual_fixture_refuses_ambient_sdk_settings(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://n7-poison.invalid")
     with pytest.raises(AmbientSDKConfigurationError):
         await setup(db_session, db_session_factory)
+
+
+async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    app, dispatch, wire = await setup(db_session, db_session_factory)
+    app.runtime = dataclasses.replace(
+        app.runtime, turn_deps=dataclasses.replace(app.runtime.turn_deps, turn_path="mux")
+    )
+    try:
+        first = await dispatch(THREAD, USER)
+        async with db_session_factory.begin() as session:
+            await set_channel_backend(
+                session,
+                channel_ref(tenant_id_from(first), "discord", CHANNEL),
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+            )
+        second = await dispatch(THREAD, USER)
+        assert second.reused
+        assert second.ma_session_id == first.ma_session_id
+        assert revision_of(second) == revision_of(first)
+        assert wire.stream_hits == [first.ma_session_id, first.ma_session_id]
+        await persisted(db_session_factory, second, THREAD)
+    finally:
+        await app.runtime.anthropic.close()

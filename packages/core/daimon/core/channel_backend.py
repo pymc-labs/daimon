@@ -24,7 +24,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import partial
 from typing import Literal, Protocol, cast, get_args
 
@@ -52,6 +52,8 @@ from daimon.core.stores.domain import (
     CompatibilityPreview,
     TenantBackendPolicy,
 )
+from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.thread_sessions import get_thread_session_at
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.admission import admit
 from mux.contracts.config import (
@@ -61,7 +63,7 @@ from mux.contracts.config import (
     ResolvedBackend,
     resolve_default,
 )
-from mux.contracts.ids import PROVIDERS, ChannelRef, ModelRef, Provider
+from mux.contracts.ids import PROVIDERS, ChannelRef, ModelRef, Provider, ThreadRef
 from mux.contracts.profile import SUPPORTED, Capability, Profile
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, ScopeViolation, UnsupportedCapability
@@ -73,6 +75,7 @@ from mux.profiles import (
     runnable_selection,
     shared_threads_available,
 )
+from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ConfigRevisionConflict
 from pydantic import JsonValue
@@ -105,6 +108,75 @@ async def is_selfhosted_channel(
     """Whether this channel forbids auxiliary Anthropic calls, even while admission is off."""
     revision = await current_backend(session, channel_ref(tenant_id, platform, channel_id))
     return revision is not None and revision.backend == "selfhosted"
+
+
+async def is_selfhosted_turn(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_id: str | None = None,
+    caller_id: str | None = None,
+) -> bool:
+    """Honor the retained shared/caller binding before the current channel selection.
+
+    Slot order and legacy-session fallback match admission. Only local facts
+    are read, so deciding whether provider access is allowed cannot itself
+    send conversation content to a provider.
+    """
+    channel = channel_ref(tenant_id, platform, channel_id)
+    latest, ever_shared = await current_backend_and_sharing(session, channel)
+    if thread_id is not None:
+        principal = (
+            await find_platform_principal(
+                session, tenant_id=tenant_id, platform=platform, external_id=caller_id
+            )
+            if caller_id is not None
+            else None
+        )
+        thread = ThreadRef(channel=channel, thread_id=thread_id)
+        slots = [Slot(thread=thread)] if ever_shared else []
+        if principal is not None:
+            slots.append(Slot(thread=thread, account_id=str(principal.account_id)))
+        for slot in slots:
+            binding = await mux_state.get_binding(session, slot)
+            if binding is None:
+                continue
+            if binding.thread != slot.thread or binding.legacy_account_id != slot.account_id:
+                raise ScopeViolation(binding.id, "selected binding differs from authorized thread")
+            retained, _, _ = await resolve_turn_backend(
+                session, channel, None, enabled=True, retained_revision=binding.config_revision
+            )
+            if binding.config_revision == 0:
+                default = resolve_default(BackendConfig())
+                if (binding.provider, binding.profile) != (default.backend, default.profile):
+                    raise BackendUnsupported("retained_default_mismatch")
+                return False
+            if retained is None or (
+                retained.channel != channel
+                or retained.local != binding.config_revision
+                or retained.backend != binding.provider
+                or retained.profile != binding.profile
+            ):
+                raise BackendUnsupported("retained_binding_mismatch")
+            return retained.backend == "selfhosted"
+        if principal is not None:
+            previous = await get_thread_session_at(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                account_id=principal.account_id,
+                at=datetime.now(UTC),
+            )
+            if previous is not None:
+                if previous.channel_id not in (None, channel_id):
+                    raise ScopeViolation(
+                        previous.ma_session_id, "session history differs from authorized channel"
+                    )
+                return False
+    return latest is not None and latest.backend == "selfhosted"
 
 
 async def current_backend_and_sharing(

@@ -1374,6 +1374,8 @@ class TeamsApp:
             tenant_id=tenant_id,
             platform="teams",
             channel_id=inbound.channel_id,
+            thread_id=inbound.thread_id if inbound.kind != "dm" else None,
+            caller_id=inbound.user_id,
             force=False,
         ):
             return await self._run_turn_observed_guarded(

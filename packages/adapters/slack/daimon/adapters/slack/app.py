@@ -1996,6 +1996,8 @@ class SlackApp:
             tenant_id=tenant_id,
             platform="slack",
             channel_id=channel,
+            thread_id=thread_id,
+            caller_id=str(event.get("user") or ""),
             force=False,
         ):
             return await self._run_thread_turn_observed_guarded(

@@ -20,6 +20,7 @@ from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import mux_state
 from daimon.core.thread_participation import ParticipationMode, ResolvedParticipation
 from daimon.testing.db import (  # noqa: F401
     db_clean,
@@ -32,8 +33,10 @@ from daimon.testing.db import (
 from daimon.testing.db import (
     db_session_factory as db_session_factory,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from mux.contracts.config import BackendConfig
+from mux.contracts.ids import ThreadRef
+from mux.contracts.resources import ProviderBinding
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -42,8 +45,9 @@ class NoAnthropic:
         raise AssertionError(f"selfhosted flow accessed Anthropic.{name}")
 
 
+@pytest.mark.parametrize("switched", [False, True], ids=["current", "retained_after_switch"])
 async def test_selfhosted_discord_and_teams_followed_threads_stay_mention_only(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], switched: bool
 ) -> None:
     client = cast(AsyncAnthropic, NoAnthropic())
     settings = ThreadParticipationSettings(mode=ParticipationMode.ON, quiet_seconds=0.01)
@@ -51,11 +55,38 @@ async def test_selfhosted_discord_and_teams_followed_threads_stay_mention_only(
     for platform in ("discord", "teams"):
         tenant = await make_tenant(db_session, platform=platform, workspace_id=platform)
         tenants[platform] = tenant
-        await set_channel_backend(
+        channel = channel_ref(tenant.id, platform, "4200")
+        original = await set_channel_backend(
             db_session,
-            channel_ref(tenant.id, platform, "4200"),
+            channel,
             BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
         )
+        if switched:
+            account = await make_account(db_session, tenant=tenant)
+            await make_platform_principal(
+                db_session,
+                platform=platform,
+                external_id="2" if platform == "discord" else "user",
+                tenant=tenant,
+                account=account,
+            )
+            await mux_state.put_binding(
+                db_session,
+                ProviderBinding(
+                    id=f"{platform}-selfhosted",
+                    thread=ThreadRef(
+                        channel=channel, thread_id="4242" if platform == "discord" else "thread"
+                    ),
+                    provider=original.backend,
+                    profile=original.profile,
+                    native_refs={},
+                    generation=1,
+                    config_revision=original.local,
+                    legacy_account_id=str(account.id),
+                ),
+                expected_generation=0,
+            )
+            await set_channel_backend(db_session, channel, BackendConfig())
     await db_session.commit()
 
     participant = ThreadParticipant(
@@ -278,6 +309,7 @@ async def test_selfhosted_adapter_turn_enters_guard_before_dispatch(
         app._orchestrate_observed_guarded = AsyncMock(side_effect=probe)
         message = MagicMock(spec=discord.Message)
         message.channel = SimpleNamespace(id=4200)
+        message.author = SimpleNamespace(id=111)
         await DaimonBot._orchestrate_observed(app, message, "guild", tenant.id)
         app._orchestrate_observed_guarded.assert_awaited_once()
     elif platform == "slack":
@@ -296,6 +328,9 @@ async def test_selfhosted_adapter_turn_enters_guard_before_dispatch(
         app._run_turn_observed_guarded = AsyncMock(side_effect=probe)
         inbound = MagicMock(spec=TeamsInbound)
         inbound.channel_id = "4200"
+        inbound.kind = "channel"
+        inbound.thread_id = "4242"
+        inbound.user_id = "111"
         await TeamsApp._run_turn_observed(
             app,
             inbound,

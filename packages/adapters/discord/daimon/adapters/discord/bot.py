@@ -4632,6 +4632,10 @@ class DaimonBot(commands.Bot):
                 if isinstance(message.channel, discord.Thread)
                 else message.channel.id
             ),
+            thread_id=str(message.channel.id)
+            if isinstance(message.channel, discord.Thread)
+            else None,
+            caller_id=str(message.author.id),
             force=False,
         ):
             return await self._orchestrate_observed_guarded(
