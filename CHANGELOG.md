@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Import the pinned AKS Postgres image from ECR Public with Docker Hub fallback,
+  bounded transient retries, and Linux/amd64 child-manifest verification. Repair
+  partial imports, skip complete images, and refuse mismatched digests before AKS creation.
+
 - Require the queued ACR run's authoritative `Succeeded` status before image
   checks or AKS provisioning, with bounded polling and unique default build tags
   retained in operator state for later install/reinstall commands.

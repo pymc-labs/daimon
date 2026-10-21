@@ -69,8 +69,22 @@ if args[:3] == ['acr', 'task', 'show-run']:
         print('Running' if count == 0 else 'Succeeded')
     else:
         print(mode.removeprefix('status-') if mode.startswith('status-') else 'Succeeded')
+if args[:2] == ['acr', 'import']:
+    (Path(os.environ['AKS_STATE']) / 'pg-imported').touch()
+if args[:3] == ['acr', 'manifest', 'show']:
+    name = args[args.index('-n') + 1]
+    if name.endswith('@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873'):
+        print(json.dumps({'manifests': [{'digest': 'sha256:' + 'a' * 64,
+              'platform': {'os': 'linux', 'architecture': 'amd64'}}]}))
+    else:
+        print(json.dumps({'config': {'digest': 'sha256:' + 'b' * 64}, 'layers': []}))
 if args[:3] == ['acr', 'repository', 'show']:
     image = args[args.index('--image') + 1]
+    if image == 'postgres:18-alpine':
+        if not (Path(os.environ['AKS_STATE']) / 'pg-imported').exists():
+            sys.exit(1)
+        print('sha256:' + '0' * 64 if os.environ['MODE'] == 'pg-mismatch'
+              else 'sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873')
     if ((os.environ['MODE'] == 'missing-host' and image.startswith('daimon:'))
         or (os.environ['MODE'] == 'missing-harness' and image.startswith('daimon-harness:'))):
         sys.exit(1)
@@ -107,7 +121,7 @@ if args[:2] == ['aks', 'create']:
                     build[build.index("--set") + 1].removeprefix("tag="),
                 )
                 self.assertEqual((state / "acr-run-id").read_text().strip(), "offline-run")
-            else:
+            elif mode != "pg-mismatch":
                 self.assertFalse((state / "image-tag").exists())
             return result, calls
 
@@ -190,6 +204,13 @@ if args[:2] == ['aks', 'create']:
             generated.append(build[build.index("--set") + 1])
         self.assertNotEqual(*generated)
         self.assertTrue(all(value.startswith("tag=") for value in generated))
+
+    def test_postgres_digest_mismatch_stops_before_cluster_creation(self):
+        result, calls = self.run_bootstrap("pg-mismatch")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Postgres digest mismatch", result.stderr)
+        self.assertTrue(any(c[:2] == ["acr", "import"] for c in calls))
+        self.assertFalse(any(c[:2] == ["aks", "create"] for c in calls))
 
     def test_successful_remote_push_precedes_cluster_creation(self):
         result, calls = self.run_bootstrap("success")

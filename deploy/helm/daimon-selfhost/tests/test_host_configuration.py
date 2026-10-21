@@ -581,7 +581,16 @@ from unittest.mock import patch
 args = sys.argv[1:]
 with open(os.environ['STUB_LOG'], 'a') as output:
     output.write(json.dumps(args) + '\\n')
-if args[:2] == ['acr', 'run'] and '--no-wait' in args:
+if args[:3] == ['acr', 'repository', 'show'] and 'postgres:18-alpine' in args:
+    print('sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873')
+elif args[:3] == ['acr', 'manifest', 'show']:
+    name = args[args.index('-n') + 1]
+    if name.endswith('@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873'):
+        print(json.dumps({'manifests': [{'digest': 'sha256:' + 'a' * 64,
+              'platform': {'os': 'linux', 'architecture': 'amd64'}}]}))
+    else:
+        print(json.dumps({'config': {'digest': 'sha256:' + 'b' * 64}, 'layers': []}))
+elif args[:2] == ['acr', 'run'] and '--no-wait' in args:
     print('WARNING: Queued a run with ID: offline-run', file=sys.stderr)
 elif args[:3] == ['acr', 'task', 'show-run']:
     print('Succeeded')

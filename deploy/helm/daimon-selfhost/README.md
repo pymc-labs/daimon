@@ -330,7 +330,7 @@ az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
 # The helper below includes run polling, both image checks and tag persistence.
 export TAG=${TAG:-$(cat "$AKS_STATE/image-tag")}
 bash deploy/helm/daimon-selfhost/scripts/build-images.sh
-az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
+python3 deploy/helm/daimon-selfhost/scripts/import-postgres.py
 az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
   --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
   --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
@@ -353,10 +353,30 @@ fi
 
 **Mandatory Postgres image step:** `images.registry` prefixes **all three**
 images, including PostgreSQL and its new readiness init containers. The
-`az acr import` above must complete before Helm: without it, AKS attempts
-`<acr>.azurecr.io/postgres:18-alpine` and enters ImagePullBackOff. To repair an
-existing registry, run that same import command; host/harness builds do not
-create the Postgres repository. The helper verifies the imported image exists.
+[`scripts/import-postgres.py`](scripts/import-postgres.py) must complete before
+AKS creation: without it, AKS attempts `<acr>.azurecr.io/postgres:18-alpine` and
+enters ImagePullBackOff. The importer copies the reviewed index
+`sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873`
+from `public.ecr.aws/docker/library/postgres` first, then `docker.io/library/postgres`
+as fallback. Both sources use the exact digest, rather than a moving upstream tag.
+Each source has at most three attempts; 429/5xx failures and incomplete imports
+use 5- then 10-second backoff. Public mirrors can also rate-limit.
+
+A tag resolving alone is insufficient: the helper verifies the pinned index,
+its Linux/amd64 descriptor and the actual referenced child manifest in ACR.
+An incomplete import is retried with `--force`; a digest mismatch is refused.
+Already-complete pinned images skip import. Exhaustion stops before AKS creation;
+only verified success writes `AKS_STATE/postgres-digest`. To repair a partial
+registry, rerun this same helper with `ACR` and `AKS_STATE` set. Host/harness builds
+do not create the Postgres repository. Azure CLI must support `az acr manifest show`.
+ACR needs access to both public sources during import; these are build-time
+sources, not additional pod egress allowances. No new credentials are needed.
+
+For an isolated import check, set `POSTGRES_IMPORT_REPOSITORY` to a throwaway
+repository name when running the helper directly. Bootstrap always imports into
+`postgres` so Helm uses the verified image.
+`POSTGRES_IMPORT_RETRY_SECONDS` optionally sets the initial retry delay (0–60,
+default 5); the second delay is twice that value.
 
 ACR builds the current checkout remotely. It contains no `.env` or credentials;
 review `.dockerignore` before building. No registry password is generated;

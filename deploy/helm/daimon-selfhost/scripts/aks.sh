@@ -76,8 +76,7 @@ bootstrap)
   az group create -n "$RG" -l "$LOCATION" -o none
   az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
   bash "$chart/scripts/build-images.sh"
-  az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
-  az acr repository show -n "$ACR" --image postgres:18-alpine --query digest -o tsv > "$AKS_STATE/postgres-digest"
+  POSTGRES_IMPORT_REPOSITORY=postgres python3 "$chart/scripts/import-postgres.py"
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
     --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
     --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
