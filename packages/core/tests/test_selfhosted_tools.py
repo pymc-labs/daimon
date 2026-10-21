@@ -328,7 +328,9 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
                 ref=agent,
                 revision=Revision(local=1),
                 created_at=NOW,
-                spec=AgentSpec(name="agent", model=ModelRef(provider="selfhosted", id="gpt-5")),
+                spec=AgentSpec(
+                    name="agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna")
+                ),
             )
 
     agents = cast(Agents, TenantAgents())
@@ -968,7 +970,7 @@ async def test_selfhosted_pins_need_explicit_retention_in_the_agent_tenant(
         agent = await SelfHostedAgents(db_session_factory).create(
             scope,
             AgentSpec(
-                name="agent", model=ModelRef(provider="selfhosted", id="gpt-5"), skills=(pin,)
+                name="agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna"), skills=(pin,)
             ),
             key="pinned-agent",
         )
