@@ -58,7 +58,7 @@ async def test_handover_and_timer_use_retained_backend_after_channel_switch(
         agent_name="research",
     )
     channel = channel_ref(tenant.id, platform, "channel")
-    local = BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5")
+    local = BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
     if shared:
         await set_channel_backend(db_session, channel, BackendConfig(thread_mode="shared"))
     original = await set_channel_backend(

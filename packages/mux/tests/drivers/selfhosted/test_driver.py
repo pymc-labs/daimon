@@ -170,7 +170,7 @@ async def setup(client, harness, **options):
             Agent,
             AgentSpec(
                 name="test",
-                model=ModelRef(provider="selfhosted", id="gpt-5"),
+                model=ModelRef(provider="selfhosted", id="gpt-6-luna"),
                 system="test instructions",
             ),
         ),
@@ -191,6 +191,7 @@ async def setup(client, harness, **options):
         if harness.foundry
         else DirectTransport(client, base_url="https://harness", token="test-token")
     )
+    options.setdefault("deployment", "gpt-6-luna")
     driver = SelfHostedDriver(
         transport,
         account_scope_id="tenant",
@@ -366,10 +367,10 @@ async def test_models_only_admit_configured_deployment():
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
         driver, _ = await setup(client, fake)
         assert (
-            await driver.models.validate(SCOPE, ModelRef(provider="selfhosted", id="gpt-5"))
+            await driver.models.validate(SCOPE, ModelRef(provider="selfhosted", id="gpt-6-luna"))
         ).admitted
         assert not (
-            await driver.models.validate(SCOPE, ModelRef(provider="openai", id="gpt-5"))
+            await driver.models.validate(SCOPE, ModelRef(provider="openai", id="gpt-6-luna"))
         ).admitted
         assert not (
             await driver.models.validate(SCOPE, ModelRef(provider="selfhosted", id="unknown"))
@@ -382,7 +383,7 @@ async def test_unmatched_request_start_remains_pending_then_measured_revision_su
         driver, session = await setup(client, fake)
         await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
         fake.events = fake.events[:1]
-        fake.emit("model_request_started", {"request_id": "request-1", "model": "gpt-5"})
+        fake.emit("model_request_started", {"request_id": "request-1", "model": "gpt-6-luna"})
         pending = await driver.usage.reconcile(SCOPE, session.ref)
         assert len(pending) == 1
         assert pending[0].completeness == "unknown"
@@ -391,7 +392,7 @@ async def test_unmatched_request_start_remains_pending_then_measured_revision_su
             "usage",
             dict(
                 request_id="request-1",
-                model="gpt-5",
+                model="gpt-6-luna",
                 input_tokens=12,
                 cached_input_tokens=0,
                 output_tokens=3,
@@ -414,7 +415,7 @@ async def test_terminal_unmatched_request_start_is_unknown_without_invented_toke
         driver, session = await setup(client, fake)
         await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
         fake.events = fake.events[:1]
-        fake.emit("model_request_started", {"request_id": "crash-window", "model": "gpt-5"})
+        fake.emit("model_request_started", {"request_id": "crash-window", "model": "gpt-6-luna"})
         fake.finish("interrupted")
         assert (await driver.events.reconcile(SCOPE, session.ref)).state == "idle"
         pending = await driver.usage.reconcile(SCOPE, session.ref)
@@ -443,7 +444,7 @@ async def test_real_driver_passes_existing_mux_conformance_probes(fixture_id):
                 "usage",
                 dict(
                     request_id="request-1",
-                    model="gpt-5",
+                    model="gpt-6-luna",
                     input_tokens=10,
                     cached_input_tokens=0,
                     output_tokens=5,
@@ -674,7 +675,7 @@ async def test_accepted_turn_with_lost_ack_replays_without_second_execution_or_c
 
 @pytest.mark.parametrize(
     "override, deployment, expected",
-    [(None, None, "tenant-gpt5"), ("other", "other", "other"), (None, "wrong", None)],
+    [(None, None, "gpt-6-luna"), ("gpt-6-luna", "gpt-6-luna", "gpt-6-luna"), (None, "wrong", None)],
 )
 async def test_agent_deployment_is_honored_and_environment_mismatch_refuses(
     override, deployment, expected
@@ -688,7 +689,12 @@ async def test_agent_deployment_is_honored_and_environment_mismatch_refuses(
         resources.value = resources.value.model_copy(
             update={
                 "spec": resources.value.spec.model_copy(
-                    update={"model": ModelRef(provider="selfhosted", id="tenant-gpt5")}
+                    update={
+                        "model": ModelRef(
+                            provider="selfhosted",
+                            id="agent-deployment" if override else "gpt-6-luna",
+                        )
+                    }
                 )
             }
         )

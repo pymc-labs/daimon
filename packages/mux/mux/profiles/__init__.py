@@ -194,7 +194,7 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
         profiles=(CONVERSATION_ONLY.profile_id,),
     ),
     "selfhosted": BackendSelection(
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6.1-sol"),
         ("per_caller",),
     ),
     "gemini": BackendSelection(

@@ -43,7 +43,7 @@ async def test_here_command_resolves_local_card_without_anthropic(
     await set_channel_backend(
         db_session,
         channel_ref(tenant.id, platform, "4200"),
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
     )
     await db_session.commit()
     await SelfHostedAgents(db_session_factory).create(
@@ -53,7 +53,7 @@ async def test_here_command_resolves_local_card_without_anthropic(
             principal_id="test",
             authorization_id="test",
         ),
-        AgentSpec(name="Local Researcher", model=ModelRef(provider="selfhosted", id="gpt-5")),
+        AgentSpec(name="Local Researcher", model=ModelRef(provider="selfhosted", id="gpt-6-luna")),
         key="agent",
     )
     runtime = SimpleNamespace(

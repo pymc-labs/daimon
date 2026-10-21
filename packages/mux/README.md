@@ -1140,8 +1140,10 @@ for independently provisioned immutable GCS directories, verifying the complete
 scope, version and every retained file digest without making storage writes.
 
 The opt-in `selfhosted.loop` profile uses per-caller threads and selects
-`gpt-5` by default; an environment may use another deployment name. It is
-non-core. Steer, multiagent, vaults, memory stores, workspace export/import and
+`gpt-6.1-sol` by default; an environment may use another deployment name. It is
+non-core. Azure deployments can select `gpt-6-luna` for cheap smoke tests;
+see the [model parameters and region guidance](../../deploy/azure/README.md#model-selection).
+Steer, multiagent, vaults, memory stores, workspace export/import and
 native skill versions are explicitly unsupported.
 
 The self-hosted driver's `SelfHostedDriver` takes injected `Agents` and

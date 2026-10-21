@@ -566,7 +566,7 @@ async def test_selfhosted_handover_click_refuses_before_anthropic(
     await set_channel_backend(
         db_session,
         channel_ref(tenant.id, platform, "channel"),
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
     )
     await db_session.commit()
     result = await switch_thread_on_request(

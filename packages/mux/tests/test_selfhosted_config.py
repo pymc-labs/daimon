@@ -10,7 +10,7 @@ from mux.profiles.selfhosted import LOOP
 
 
 def spec_for(vector):
-    agent = {"name": "agent", "model": ModelRef(provider=LOOP.provider, id="gpt-5")}
+    agent = {"name": "agent", "model": ModelRef(provider=LOOP.provider, id="gpt-6-luna")}
     environment = {
         "name": "environment",
         "execution": "self_hosted",
@@ -73,7 +73,7 @@ def spec_for(vector):
         agent["metadata"] = {"api_key": "secret-marker"}
     elif vector == "model_options":
         agent["model"] = ModelRef(
-            provider=LOOP.provider, id="gpt-5", options={"access_token": "secret-marker"}
+            provider=LOOP.provider, id="gpt-6-luna", options={"access_token": "secret-marker"}
         )
     else:
         raise AssertionError(vector)
@@ -156,7 +156,7 @@ def test_mcp_credentials_require_operator_scoped_environment_names(credential_re
     spec = AgentSpec.model_validate(
         {
             "name": "agent",
-            "model": {"provider": LOOP.provider, "id": "gpt-5"},
+            "model": {"provider": LOOP.provider, "id": "gpt-6-luna"},
             "mcp_servers": [
                 {
                     "name": "tools",
@@ -183,7 +183,7 @@ def test_credentialed_mcp_requires_https_except_loopback(url, allowed):
     spec = AgentSpec.model_validate(
         {
             "name": "agent",
-            "model": {"provider": LOOP.provider, "id": "gpt-5"},
+            "model": {"provider": LOOP.provider, "id": "gpt-6-luna"},
             "mcp_servers": [
                 {"name": "tools", "url": url, "credential_ref": "HARNESS_MCP_CRED_TOOLS"}
             ],
@@ -234,7 +234,7 @@ def test_free_text_fields_accept_harmless_credential_prose(prose):
             name=prose,
             description=prose,
             system=prose,
-            model=ModelRef(provider=LOOP.provider, id="gpt-5"),
+            model=ModelRef(provider=LOOP.provider, id="gpt-6-luna"),
         )
     )
     validate_resource_spec(
@@ -382,7 +382,7 @@ def test_persisted_mcp_policy_has_closed_permission_schema(policy, valid):
 
     spec = AgentSpec(
         name="agent",
-        model=ModelRef(provider=LOOP.provider, id="gpt-5"),
+        model=ModelRef(provider=LOOP.provider, id="gpt-6-luna"),
         mcp_servers=(
             MCPConnection(name="tools", url="https://tools.example/mcp", tool_policy=policy),
         ),

@@ -120,7 +120,9 @@ def selfhosted_init_command(
             help="Postgres connection URL.",
         ),
     ],
-    model: Annotated[str, typer.Option("--model", help="Azure model deployment name.")] = "gpt-5",
+    model: Annotated[
+        str, typer.Option("--model", help="Azure model deployment name.")
+    ] = "gpt-6.1-sol",
     name: Annotated[str, typer.Option("--name")] = "daimon",
     environment_name: Annotated[str, typer.Option("--environment-name")] = "default",
     auth_mode: Annotated[

@@ -295,7 +295,7 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
             ChannelRef(tenant_id=str(tenant_id), platform="slack", channel_id=channel),
             1,
             resolve_default(
-                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5")
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
             ),
         )
         return replace(original, backend_revision=revision, backend_revision_origin="channel")

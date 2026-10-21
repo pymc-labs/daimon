@@ -1004,7 +1004,7 @@ async def test_account_purge_removes_selfhosted_receipts_and_keeps_shared_resour
         )
         await agents.create(
             caller,
-            AgentSpec(name=name, model=ModelRef(provider=LOOP.provider, id="gpt-5")),
+            AgentSpec(name=name, model=ModelRef(provider=LOOP.provider, id="gpt-6-luna")),
             key="create",
         )
     preview = await collect_purge_preview(sm=db_session_factory, account_id=first.id)

@@ -328,7 +328,9 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
                 ref=agent,
                 revision=Revision(local=1),
                 created_at=NOW,
-                spec=AgentSpec(name="agent", model=ModelRef(provider="selfhosted", id="gpt-5")),
+                spec=AgentSpec(
+                    name="agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna")
+                ),
             )
 
     agents = cast(Agents, TenantAgents())
@@ -929,3 +931,63 @@ def test_explicit_custom_builtin_named_seed_loads(tmp_path: Path, name: str) -> 
         build(refs=refs, bundles=load_seeded_turn_skill_bundles(tmp_path, refs)).skills[0].name
         == name
     )
+
+
+@pytest.mark.parametrize("retained", [False, True])
+async def test_selfhosted_pins_need_explicit_retention_in_the_agent_tenant(
+    db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path, retained: bool
+) -> None:
+    from daimon.core.anthropic_guard import without_anthropic
+    from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+    from daimon.testing.factories import make_account, make_tenant
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+    scope = Scope(
+        tenant_id=str(tenant.id),
+        account_id=str(account.id),
+        principal_id="caller",
+        authorization_id="admitted",
+    )
+    catalog = PostgresNeutralCatalog(
+        db_session_factory, provider="selfhosted", account_scope_id=scope.tenant_id
+    )
+    pin = SkillRef(id="retained", version="v1")
+    source = bundle("retained", **{"asset.bin": b"\xff\x00"})
+    with without_anthropic():
+        if retained:
+            # Explicit test seeding: this store API is not a production upload route.
+            await catalog.put_skill(
+                scope,
+                skill_id=pin.id,
+                version=pin.version,
+                agent_name="agent",
+                display_title="retained",
+                bundle=source,
+            )
+        agent = await SelfHostedAgents(db_session_factory).create(
+            scope,
+            AgentSpec(
+                name="agent", model=ModelRef(provider="selfhosted", id="gpt-6-luna"), skills=(pin,)
+            ),
+            key="pinned-agent",
+        )
+        loaded = await load_turn_skill_bundles(
+            tmp_path, (pin,), scope=scope, catalog=catalog, agent=agent
+        )
+        if retained:
+            assert loaded == {(pin.id, pin.version): source}
+            assert build(refs=(pin,), bundles=loaded).skills[0].name == "retained"
+        else:
+            assert loaded == {}
+            with pytest.raises(SkillIngestError, match="no local bundle"):
+                build(refs=(pin,), bundles=loaded)
+        deployment_catalog = PostgresNeutralCatalog(
+            db_session_factory, provider="selfhosted", account_scope_id="deployment-account"
+        )
+        with pytest.raises(ScopeViolation, match="admitted skill catalog"):
+            await load_turn_skill_bundles(
+                tmp_path, (pin,), scope=scope, catalog=deployment_catalog, agent=agent
+            )

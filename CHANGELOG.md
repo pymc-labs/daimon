@@ -11,12 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
 
-- Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance for locally provisioned skill versions attached to shared agents.
+- Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance in the internal reader for already-retained skill versions attached to shared agents. This does not provide selfhosted uploads.
 - Reject self-hosted session-pool credentials without pool routing and empty
   transport session IDs; document matching Entra authentication in the harness.
 
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
+
+- Discord MCP posts from self-hosted agents use their local name and avatar when agent identity is enabled, without an Anthropic lookup.
 
 - Scheduled routines refuse thread destinations with an unknown parent channel and check retained thread backends before resolving Anthropic agents.
 
@@ -36,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include async managed-identity transport in the harness image and finish subprocess cleanup when cancellation arrives during launch.
 
 - Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.
-- Load locally provisioned agent and channel skill bundles in selfhosted turns, preserve approval permissions across reconnects, and attach approved tool results to their original tool blocks. Replay and Stop can read past 5,000 journal records within one turn. Selfhosted skill uploads are not yet available.
+- Preserve approval permissions across selfhosted reconnects and attach approved tool results to their original tool blocks. Replay and Stop can read past 5,000 journal records within one turn. Unversioned seeded skills are supported; custom uploads and channel-library additions have no production selfhosted catalog writer. The internal retained-bundle reader requires bytes already stored under the agent's tenant; Anthropic library uploads do not populate that catalog.
 
 - Bound selfhosted Entra audiences to operator-approved origins and tenants. Fixed approval handling through the turn runner, preserved explicit agent confirmation and stored MCP rules, and resumed session history and usage replay from durable cursors.
 
@@ -58,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A standalone Azure OpenAI harness runs local agent tools, MCP connections and skills, with durable event replay, approval decisions and cancellation. It supports direct HTTP and Foundry invocation envelopes; deployment details are in `apps/harness/README.md`.
 
 ### Changed
+
+- Reject crossed known Azure model/deployment aliases regardless of letter case.
+
+- Derive Azure model versions from Sol/Luna selection, expose azd model selection, verify Luna-only live probes against response models, and allow manual judge model overrides.
+
+- Parameterize Azure model deployments with a `gpt-6.1-sol` default and DataZoneStandard SKU; document `gpt-6-luna` smoke tests and align selfhosted profile, driver and CLI defaults.
 
 - Hardened harness tool processes, caller authorization and MCP credential scoping; cache binary skill bundles and honor per-tool approval policies.
 

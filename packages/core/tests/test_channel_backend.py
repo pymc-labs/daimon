@@ -272,7 +272,9 @@ def test_selfhosted_admission_is_disabled_by_default_or_explicit_switch(
         pytest.raises(BackendUnsupported, match="selfhosted_admission_disabled"),
     ):
         check_backend(
-            _revision(BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"))
+            _revision(
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
+            )
         )
 
     assert records[-1]["event"] == "turn.backend_unsupported"
@@ -282,7 +284,9 @@ def test_selfhosted_admission_is_disabled_by_default_or_explicit_switch(
 def test_selfhosted_admission_enabled_preserves_required_usage_capability(monkeypatch):
     monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
     admitted = check_backend(
-        _revision(BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"))
+        _revision(
+            BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
+        )
     )
     assert admitted.provider == "selfhosted"
     assert "usage_observations" in admitted.satisfied
@@ -300,5 +304,7 @@ def test_selfhosted_admission_enabled_refuses_missing_usage_capability(monkeypat
     monkeypatch.setattr(channel_backend, "get_profile", lambda name: unmetered)
     with pytest.raises(BackendUnsupported, match="usage_observations"):
         check_backend(
-            _revision(BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"))
+            _revision(
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
+            )
         )

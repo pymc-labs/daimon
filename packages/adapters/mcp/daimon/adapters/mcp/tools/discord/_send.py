@@ -38,7 +38,10 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _require_discord_channel_writable,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.agent_identity import identity_enabled_for, resolve_agent_identity
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
+from daimon.core.mux_backend import resource_scope
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -165,20 +168,29 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
         identity = None
         if actor_id is not None and identity_enabled_for(runtime.settings, "discord", guild_id):
             try:
-                key = (auth.tenant_id, actor_id)
-                cached = _actor_names.get(key)
-                if cached is not None and cached[1] > time.monotonic():
-                    actor_name = cached[0]
+                if auth.anthropic_disabled or anthropic_disabled():
+                    local_actor = await SelfHostedAgents(
+                        runtime.session_factory
+                    ).find_by_derived_uuid(resource_scope(tenant_id=str(auth.tenant_id)), actor_id)
+                    actor_name = local_actor.spec.name if local_actor is not None else None
                 else:
-                    actor = await find_agent_by_derived_uuid_cached(
-                        runtime.client,
-                        runtime.resolver_cache,
-                        tenant_id=auth.tenant_id,
-                        agent_id=actor_id,
-                    )
-                    actor_name = actor.name if actor is not None else None
-                    if actor_name is not None:
-                        _actor_names[key] = (actor_name, time.monotonic() + _ACTOR_NAME_TTL_SECONDS)
+                    key = (auth.tenant_id, actor_id)
+                    cached = _actor_names.get(key)
+                    if cached is not None and cached[1] > time.monotonic():
+                        actor_name = cached[0]
+                    else:
+                        actor = await find_agent_by_derived_uuid_cached(
+                            runtime.client,
+                            runtime.resolver_cache,
+                            tenant_id=auth.tenant_id,
+                            agent_id=actor_id,
+                        )
+                        actor_name = actor.name if actor is not None else None
+                        if actor_name is not None:
+                            _actor_names[key] = (
+                                actor_name,
+                                time.monotonic() + _ACTOR_NAME_TTL_SECONDS,
+                            )
                 if actor_name is not None:
                     async with runtime.session_factory.begin() as identity_session:
                         identity = await resolve_agent_identity(

@@ -443,3 +443,185 @@ def test_chart_storage_guard_controls_defaults_and_role_assignments(
             "fail('S3 artifact secret mappings are incompatible with chartStorage=azure_blob; "
             "set chartStorage=''external''.')"
         ) in validator["output"]["value"]
+
+
+def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) -> None:
+    names = ("modelName", "modelVersion", "modelDeploymentName", "modelSku", "modelCapacity")
+    for entrypoint, module_name in (("main.bicep", "ai"), ("azd/main.bicep", "daimon")):
+        template = templates[entrypoint]
+        params = template["parameters"]
+        assert not any(name.startswith("gpt5") for name in params)
+        assert params["modelName"]["defaultValue"] == "gpt-6.1-sol"
+        assert params["modelVersion"]["defaultValue"] == (
+            "[__bicep.defaultModelVersion(parameters('modelName'))]"
+        )
+        assert params["modelDeploymentName"]["defaultValue"] == "[parameters('modelName')]"
+        assert params["modelSku"]["defaultValue"] == "DataZoneStandard"
+        assert params["modelSku"]["allowedValues"] == ["DataZoneStandard", "GlobalStandard"]
+        assert params["modelCapacity"]["defaultValue"] == 1
+        assert params["modelCapacity"]["minValue"] == 1
+        module = next(r for r in template["resources"] if r["name"] == module_name)
+        for name in names:
+            expected = (
+                "[variables('checkedModelDeploymentName')]"
+                if name == "modelDeploymentName"
+                else f"[parameters('{name}')]"
+            )
+            assert module["properties"]["parameters"][name]["value"] == expected
+    deployment = next(
+        r
+        for r in templates["modules/ai.bicep"]["resources"]
+        if r["type"] == "Microsoft.CognitiveServices/accounts/deployments"
+    )
+    assert deployment["properties"]["model"] == {
+        "format": "OpenAI",
+        "name": "[parameters('modelName')]",
+        "version": "[parameters('modelVersion')]",
+    }
+    assert "parameters('modelDeploymentName')" in deployment["name"]
+    assert deployment["sku"] == {
+        "name": "[parameters('modelSku')]",
+        "capacity": "[parameters('modelCapacity')]",
+    }
+    assert (
+        templates["main.bicep"]["outputs"]["harnessEnvironment"]["value"]["AZURE_OPENAI_DEPLOYMENT"]
+        == "[if(parameters('deployAi'), variables('checkedModelDeploymentName'), '')]"
+    )
+
+
+def test_bicep_production_model_defaults_agree(templates: dict[str, dict]) -> None:
+    from mux.profiles import backend_selection
+
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        assert templates[entrypoint]["parameters"]["modelName"]["defaultValue"] == (
+            backend_selection("selfhosted").model
+        )
+
+
+@pytest.mark.parametrize(
+    "model,version",
+    [("gpt-6.1-sol", "2026-09-29"), ("gpt-6-luna", "2026-09-22"), ("custom-model", "")],
+)
+def test_default_model_versions_evaluate_offline(templates, tmp_path, model, version):
+    source = tmp_path / "models.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/models.bicep", tmp_path)
+    source.write_text(
+        f"using none\nimport {{ knownModelVersion }} from '{relative}'\n"
+        f"param version = knownModelVersion('{model}')\n"
+    )
+    target = tmp_path / "models.json"
+    result = subprocess.run(
+        ["bicep", "build-params", str(source), "--outfile", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["parameters"]["version"]["value"] == version
+
+
+def test_azd_model_name_uses_env_with_sol_default():
+    parameters = json.loads((ROOT / "deploy/azure/azd/main.parameters.json").read_text())
+    assert parameters["parameters"]["modelName"]["value"] == "${AZURE_MODEL_NAME=gpt-6.1-sol}"
+    # Leave the version unset so the production mapping follows a Luna selection.
+    assert "modelVersion" not in parameters["parameters"]
+
+
+@pytest.mark.parametrize(
+    "model,deployment,valid",
+    [
+        ("gpt-6.1-sol", "gpt-6-luna", False),
+        ("gpt-6.1-sol", "GPT-6-Luna", False),
+        ("gpt-6-luna", "GPT-6.1-SOL", False),
+        ("GPT-6.1-SOL", "gpt-6-luna", False),
+        ("gpt-6-luna", "GPT-6-Luna", True),
+        ("gpt-6-luna", "gpt-6.1-sol", False),
+        ("another-model", "gpt-6-luna", False),
+        ("gpt-6-luna", "gpt-6-luna", True),
+        ("gpt-6.1-sol", "gpt-6.1-sol", True),
+        ("gpt-6-luna", "custom-smoke-alias", True),
+    ],
+)
+def test_model_alias_guard_offline(templates, tmp_path, model, deployment, valid):
+    source = tmp_path / "alias.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/models.bicep", tmp_path)
+    source.write_text(
+        f"using none\nimport {{ isValidModelDeploymentName }} from '{relative}'\n"
+        f"param valid = isValidModelDeploymentName('{model}', '{deployment}')\n"
+    )
+    target = tmp_path / "alias.json"
+    result = subprocess.run(
+        ["bicep", "build-params", str(source), "--outfile", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["parameters"]["valid"]["value"] is valid
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        template = templates[entrypoint]
+        assert template["variables"]["checkedModelDeploymentName"] == (
+            "[__bicep.validateModelDeploymentName(parameters('modelName'), "
+            "parameters('modelDeploymentName'))]"
+        )
+        validator = next(
+            definition
+            for group in template["functions"]
+            for name, definition in group["members"].items()
+            if name == "validateModelDeploymentName"
+        )
+        assert "isValidModelDeploymentName(" in validator["output"]["value"]
+        assert "fail('modelDeploymentName is a reserved model name" in validator["output"]["value"]
+
+
+@pytest.mark.parametrize("entrypoint", ["main.bicep", "azd/main.bicep"])
+@pytest.mark.parametrize(
+    "model,deployment,error",
+    [
+        ("gpt-6.1-sol", "gpt-6-luna", "reserved model name and must equal modelName"),
+        ("gpt-6.1-sol", "GPT-6-Luna", "reserved model name and must equal modelName"),
+        ("gpt-6-luna", "GPT-6.1-SOL", "reserved model name and must equal modelName"),
+        ("gpt-6-luna", "custom-smoke-alias", None),
+        ("unknown-model", "custom-smoke-alias", "No default version for modelName"),
+    ],
+)
+def test_model_guards_fire_in_deployment_snapshots(
+    templates, tmp_path, entrypoint, model, deployment, error
+):
+    # The local deployment engine evaluates fail(), unlike build-params. All
+    # identities/passwords are synthetic; snapshot performs no Azure deployment.
+    source = tmp_path / "guard.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure" / entrypoint, tmp_path)
+    source.write_text(
+        f"using '{relative}'\n"
+        "param location = 'eastus2'\n"
+        "param postgresAdministratorPassword = 'SnapshotOnlyPassword123'\n"
+        f"param modelName = '{model}'\n"
+        f"param modelDeploymentName = '{deployment}'\n"
+        + ("param environmentName = 'offline'\n" if entrypoint.startswith("azd/") else "")
+    )
+    result = subprocess.run(
+        [
+            "bicep",
+            "snapshot",
+            str(source),
+            "--mode",
+            "overwrite",
+            "--tenant-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--subscription-id",
+            "00000000-0000-0000-0000-000000000002",
+            "--location",
+            "eastus2",
+        ]
+        + ([] if entrypoint.startswith("azd/") else ["--resource-group", "rg-offline-test"]),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    diagnostics = result.stdout + result.stderr
+    if error is None:
+        assert result.returncode == 0, diagnostics
+    else:
+        assert result.returncode != 0, (
+            "Invalid model configuration unexpectedly deployed in snapshot"
+        )
+        assert error in diagnostics

@@ -10,8 +10,10 @@ The repository includes Bicep templates in `deploy/azure/` and a root `azure.yam
 for Azure Developer CLI. They provision a Container Apps environment, Discord,
 Teams, MCP and scheduler apps, a manual migration/seeding job, Burstable
 PostgreSQL, RBAC Key Vault, a private Blob container, ACR, Log Analytics and an
-optional Azure OpenAI GPT-5 deployment with a Foundry project. The services
-array selects which adapters run; MCP receives the selected platform settings.
+optional Azure OpenAI model deployment with a Foundry project. Known model names
+used as deployment aliases must match their underlying model regardless of
+letter case. The services array selects which adapters run; MCP receives the
+selected platform settings.
 Service secrets use Key Vault references through managed identity.
 
 Deployment is staged: foundation, image publication and successful init, then
@@ -38,7 +40,6 @@ with a new active record.
 daimon selfhosted init \
   --tenant-id <tenant-uuid> \
   --harness-url https://harness.example \
-  --model gpt-5 \
   --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY
 ```
 
@@ -373,6 +374,10 @@ The opt-in `selfhosted.loop` backend runs chat turns through a separately
 operated `daimon-harness/0` service. Set `DAIMON_TURN__PATH=mux` and enable
 channel backends and `DAIMON_SELFHOSTED__ADMISSION_ENABLED=true`, then select
 the selfhosted agent/environment for the channel.
+The `selfhosted.loop` profile and `daimon selfhosted init` default to the Azure
+deployment name `gpt-6.1-sol`; pass `--model` for another deployment. Azure
+templates parameterize model name, version, deployment name, SKU and capacity;
+see the [Azure deployment guide](https://github.com/pymc-labs/daimon/blob/main/deploy/azure/README.md) for Luna smoke tests.
 Each caller gets a separate persistent harness session. Steer, shared sessions,
 workers, session transfer, memory stores and workspace export/import are not
 supported. Admission refuses policies the harness cannot enforce.
@@ -437,13 +442,21 @@ permission; they cannot relax it. Host inspection pauses still honor automatic
 permissions and saved allow rules, including unattended runs. After a host
 restart, historical approval records recover completed batch members so the
 remaining approvals can still be submitted.
-Locally provisioned skill versions load from the tenant's selfhosted catalog,
-including exact channel grants for bundles retained by another account.
-Selfhosted skill uploads are not yet available; a channel grant without a local
-bundle is skipped, and an agent pin without a local bundle refuses the turn.
-Agent skill pins retain their uploader account and principal when attached, so
-authorized callers of a shared agent load the same retained bytes. This grants
-access only to attached versions, without exposing the uploader's other bundles.
+
+Selfhosted turns support unversioned seeded skills from the configured defaults
+root. Custom skill uploads and channel-library additions have no supported
+selfhosted provisioning path yet: no production CLI or MCP upload route writes
+the selfhosted skill catalog. Existing Anthropic library uploads do not populate
+it. Do not configure custom version pins expecting those uploads to be available.
+
+The internal catalog reader can load already-retained bundles, including exact
+channel grants, but its store API and test-seeded rows are not an upload feature.
+It looks up agent pins in the agent's tenant catalog, never a deployment account's
+catalog. Attached pins carry uploader account and principal provenance; authorized
+shared-agent callers can read only those attached versions. A channel grant
+without retained bytes is skipped, and an agent pin without retained bytes
+refuses the turn. No provider upload or Anthropic fallback fills missing bytes.
+
 Replay and Stop page through long in-turn histories by cursor under their
 existing deadlines, without a fixed 5,000-record ceiling.
 Explicit agent `ask` permissions always require confirmation, even for sandbox

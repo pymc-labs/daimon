@@ -72,7 +72,7 @@ async def test_turn_tail_drains_other_callers_timer_with_its_own_provider_contex
     local = await set_channel_backend(
         db_session,
         channel,
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
     )
     await mux_state.put_binding(
         db_session,

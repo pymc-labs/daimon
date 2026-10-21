@@ -12,6 +12,11 @@ from pydantic import ValidationError
 from . import harness
 
 
+@pytest.fixture(autouse=True)
+def luna_judge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_JUDGE_MODEL", "gpt-6-luna")
+
+
 def recording(task: str = "two_turn_files") -> harness.Transcript:
     return harness.Transcript(
         task_id=task,
@@ -52,7 +57,11 @@ def test_gate_requires_all_reps_to_fail(
     iterator = iter(passes)
 
     def fake_judge(
-        recording: harness.Transcript, task: harness.Task, *, timeout: float = 300
+        recording: harness.Transcript,
+        task: harness.Task,
+        *,
+        timeout: float = 300,
+        model: str | None = None,
     ) -> harness.Grade:
         return grade(success=next(iterator))
 
@@ -116,7 +125,7 @@ def test_subscription_only_and_structured_cli(
     ) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         assert command[:2] == ["codex", "exec"]
-        assert command[command.index("--model") + 1] == "gpt-6.1-sol"
+        assert command[command.index("--model") + 1] == "gpt-6-luna"
         assert command[command.index("--sandbox") + 1] == "read-only"
         assert "--ignore-user-config" in command and "--ephemeral" in command
         assert "OPENAI_API_KEY" not in env and "OPENAI_BASE_URL" not in env
@@ -146,3 +155,44 @@ def test_subprocess_failure_is_content_free(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(harness.JudgeError) as exc:
         harness.judge(recording(), harness.load_tasks()["two_turn_files"])
     assert "secret" not in str(exc.value)
+
+
+def test_repo_default_and_model_override_precedence(monkeypatch):
+    monkeypatch.delenv("DAIMON_JUDGE_MODEL", raising=False)
+    assert harness.judge_model() == "gpt-6.1-sol"  # String inspection only.
+    monkeypatch.setenv("DAIMON_JUDGE_MODEL", "gpt-6-luna")
+    assert harness.judge_model() == "gpt-6-luna"
+    monkeypatch.setenv("DAIMON_JUDGE_MODEL", "unused-model")
+    assert harness.judge_model("gpt-6-luna") == "gpt-6-luna"
+    for invalid in ("", " gpt-6-luna", "gpt-6-luna "):
+        with pytest.raises(ValueError, match="judge model"):
+            harness.judge_model(invalid)
+
+
+def test_replay_records_selected_judge_model(monkeypatch):
+    def fake_judge(recording, task, *, timeout=300, model=None):
+        assert model == "gpt-6-luna"
+        return grade()
+
+    monkeypatch.setattr(harness, "judge", fake_judge)
+    monkeypatch.setenv("DAIMON_JUDGE_MODEL", "unused-model")
+    assert harness.replay([recording()], reps=1, model="gpt-6-luna")["judge_model"] == "gpt-6-luna"
+
+
+def test_cli_model_flag_overrides_environment(monkeypatch, tmp_path):
+    source = tmp_path / "recordings.json"
+    output = tmp_path / "grades.json"
+    source.write_text(json.dumps([recording().model_dump()]))
+    monkeypatch.setenv("DAIMON_JUDGE_MODEL", "unused-model")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["judge", str(source), "--output", str(output), "--model", "gpt-6-luna", "--reps", "1"],
+    )
+
+    def fake_judge(recording, task, *, timeout=300, model=None):
+        assert model == "gpt-6-luna"
+        return grade()
+
+    monkeypatch.setattr(harness, "judge", fake_judge)
+    harness.main()
+    assert json.loads(output.read_text())["judge_model"] == "gpt-6-luna"

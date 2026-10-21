@@ -125,7 +125,17 @@ def require_subscription_auth() -> None:
         raise JudgeError("Codex ChatGPT subscription login required; API-key auth refused")
 
 
-def judge(recording: Transcript, task: Task, *, timeout: float = 300) -> Grade:
+def judge_model(model: str | None = None) -> str:
+    selected = model if model is not None else os.environ.get("DAIMON_JUDGE_MODEL", MODEL)
+    if not selected or selected != selected.strip():
+        raise ValueError("judge model must be nonempty without surrounding whitespace")
+    return selected
+
+
+def judge(
+    recording: Transcript, task: Task, *, timeout: float = 300, model: str | None = None
+) -> Grade:
+    selected_model = judge_model(model)
     require_subscription_auth()
     prompt = (
         "Grade only the supplied recorded transcript using the fixed task and rubric. "
@@ -152,7 +162,7 @@ def judge(recording: Transcript, task: Task, *, timeout: float = 300) -> Grade:
             "--ignore-user-config",
             "--ephemeral",
             "--model",
-            MODEL,
+            selected_model,
             "--sandbox",
             "read-only",
             "-c",
@@ -185,12 +195,13 @@ def judge(recording: Transcript, task: Task, *, timeout: float = 300) -> Grade:
 
 
 def replay(
-    recordings: list[Transcript], *, reps: int = 3, timeout: float = 300
+    recordings: list[Transcript], *, reps: int = 3, timeout: float = 300, model: str | None = None
 ) -> dict[str, object]:
     if timeout <= 0:
         raise ValueError("timeout must be positive")
     if reps < 1:
         raise ValueError("reps must be positive")
+    selected_model = judge_model(model)
     tasks = load_tasks()
     if not recordings:
         raise ValueError("at least one recorded transcript is required")
@@ -206,7 +217,7 @@ def replay(
         grades: list[dict[str, object]] = []
         passes = 0
         for rep in range(reps):
-            grade = judge(recording, task, timeout=timeout)
+            grade = judge(recording, task, timeout=timeout, model=selected_model)
             passed = validate_grade(grade, recording, task)
             passes += int(passed)
             grades.append({"rep": rep + 1, "passed": passed, "grade": grade.model_dump()})
@@ -231,7 +242,7 @@ def replay(
         )
     return {
         "schema_version": 1,
-        "judge_model": MODEL,
+        "judge_model": selected_model,
         "judged_at": datetime.now(UTC).isoformat(),
         "rubric_sha256": hashlib.sha256((HERE / "rubric.json").read_bytes()).hexdigest(),
         "tasks_sha256": hashlib.sha256((HERE / "tasks.json").read_bytes()).hexdigest(),
@@ -261,9 +272,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=300)
+    parser.add_argument(
+        "--model", help="Judge model; overrides DAIMON_JUDGE_MODEL and the repo default"
+    )
     args = parser.parse_args()
     recordings = [Transcript.model_validate(r) for r in json.loads(args.recordings.read_text())]
-    result = replay(recordings, reps=args.reps, timeout=args.timeout)
+    result = replay(recordings, reps=args.reps, timeout=args.timeout, model=args.model)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
 
 

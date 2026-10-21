@@ -38,13 +38,13 @@ async def test_mcp_header_is_transient_and_never_journaled_or_logged(
             assert VIRTUAL_ENV not in os.environ
             retained.append(context.credentials)
             await context.emit(
-                "model_request_started", {"request_id": "measured", "model": "gpt-5"}
+                "model_request_started", {"request_id": "measured", "model": "gpt-6-luna"}
             )
             await context.emit(
                 "usage",
                 {
                     "request_id": "measured",
-                    "model": "gpt-5",
+                    "model": "gpt-6-luna",
                     "input_tokens": 1,
                     "cached_input_tokens": 0,
                     "output_tokens": 1,
@@ -473,7 +473,7 @@ async def test_sdk_debug_logs_keep_header_filters_and_hide_all_secrets(
                 "id": "response-debug",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-5",
+                "model": "gpt-6-luna",
                 "status": "completed",
                 "output": [
                     {

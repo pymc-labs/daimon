@@ -480,7 +480,7 @@ async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfh
             await set_channel_backend(
                 session,
                 channel_ref(tenant_id_from(first), "discord", CHANNEL),
-                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-5"),
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
             )
         second = await dispatch(THREAD, USER)
         assert second.reused

@@ -153,7 +153,7 @@ async def test_restart_durability_and_no_rerun(tmp_path: Path) -> None:
     assert journal.claim(request)
     journal.append(request, "status_running", {})
     journal.append(
-        request, "model_request_started", {"request_id": "pending-request", "model": "gpt-5"}
+        request, "model_request_started", {"request_id": "pending-request", "model": "gpt-6-luna"}
     )
     journal.save_history(request.session_id, [{"role": "user", "content": "persisted"}])
     journal.close()

@@ -18,15 +18,15 @@ def test_selfhosted_selection_requires_explicit_profile_and_allows_deployment_na
     selected = backend_selection("selfhosted")
     assert (selected.profile, selected.model, selected.thread_mode) == (
         "selfhosted.loop",
-        "gpt-5",
+        "gpt-6.1-sol",
         "per_caller",
     )
     assert runnable_selection(selected)
-    assert runnable_selection(selected.model_copy(update={"model": "tenant-gpt5"}))
+    assert runnable_selection(selected.model_copy(update={"model": "gpt-6-luna"}))
     assert not shared_threads_available("selfhosted")
     assert not runnable_selection(selected.model_copy(update={"thread_mode": "shared"}))
     with pytest.raises(InvalidConfig, match="no default profile"):
-        resolve_default(BackendConfig(backend="selfhosted", model="gpt-5"))
+        resolve_default(BackendConfig(backend="selfhosted", model="gpt-6-luna"))
 
 
 def test_selfhosted_refuses_profiles_without_usage() -> None:

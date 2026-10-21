@@ -2,9 +2,12 @@ param location string
 param name string
 param tags object
 param runtimePrincipalId string
-param deploymentName string
-param capacity int
-param deploymentSku string
+param modelName string
+param modelDeploymentName string
+@minValue(1)
+param modelCapacity int
+@allowed(['DataZoneStandard', 'GlobalStandard'])
+param modelSku string
 param modelVersion string
 
 // AIServices supports both Azure OpenAI deployments and Foundry child projects.
@@ -24,10 +27,10 @@ resource account 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
 }
 resource model 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
   parent: account
-  name: deploymentName
-  sku: { name: deploymentSku, capacity: capacity }
+  name: modelDeploymentName
+  sku: { name: modelSku, capacity: modelCapacity }
   properties: {
-    model: { format: 'OpenAI', name: 'gpt-5', version: modelVersion }
+    model: { format: 'OpenAI', name: modelName, version: modelVersion }
     versionUpgradeOption: 'NoAutoUpgrade'
   }
 }
