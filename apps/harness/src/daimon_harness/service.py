@@ -232,6 +232,7 @@ class Supervisor:
     def prepare_session(self, session_id: str, after_seq: int = 0) -> None:
         if self.session_mode == "single":
             self.journal.bind_session(session_id)
+        after_seq = self.journal.record_cursor(session_id, after_seq)
         if self.checkpoints is not None and not self.restored:
             try:
                 self.journal = self.checkpoints.restore(self.journal, session_id, after_seq)
@@ -241,14 +242,7 @@ class Supervisor:
                     saved = json.loads(cursor_file.read_bytes())
                     if saved["session_id"] != session_id:
                         raise ConflictError("session_bound")
-                    request = self.journal.turns(session_id)[-1]
-                    Journal.fence_restore(
-                        self.journal.connection(session_id),
-                        request,
-                        saved["checkpoint_seq"],
-                        max(after_seq, saved["after_seq"]),
-                        saved.get("remote_seq", 0),
-                    )
+                    self.journal.record_cursor(session_id, max(after_seq, saved["after_seq"]))
                 self.recover(sandbox_lost=cursor_file.exists())
             except ConflictError:
                 raise
@@ -260,6 +254,7 @@ class Supervisor:
                 self.journal = Journal(self.home)
                 raise HTTPException(status_code=503, detail="Session restore unavailable") from None
             self.restored = True
+        self.journal.announce_gap(session_id)
 
     async def ensure_session(self, session_id: str, after_seq: int = 0) -> None:
         identifier(session_id)
@@ -693,6 +688,10 @@ def create_app(
     async def restore_for_turn(turn_id: str, session_id: str | None, after_seq: int) -> None:
         if supervisor.checkpoints is not None and session_id is None:
             raise HTTPException(status_code=422, detail="session_id query parameter is required")
+        if session_id is None:
+            request = await supervisor.io(supervisor.journal.find, turn_id)
+            if request is not None:
+                session_id = request.session_id
         if session_id is not None:
             try:
                 await supervisor.ensure_session(session_id, after_seq)

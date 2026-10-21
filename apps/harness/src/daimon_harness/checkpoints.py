@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .checkpoint_archive import MAX_BYTES, LimitedReader, restore_work
 from .identity import CapturedIdentity
 from .isolation import tool_identity, validate_credential_sources
-from .journal import MAX_CURSOR, MAX_CURSOR_SLACK, Journal, identifier
+from .journal import MAX_CURSOR, Journal, identifier
 
 MAX_ARCHIVE_BYTES = MAX_BYTES + 64 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
@@ -205,6 +205,7 @@ class Checkpoints:
         )
 
     def restore(self, journal: Journal, session_id: str, after_seq: int = 0) -> Journal:
+        after_seq = journal.record_cursor(session_id, after_seq)
         pending = journal.root / "restore.pending"
         cursor_file = journal.root / "restore.cursor"
         if journal.turns() and not pending.exists() and not cursor_file.exists():
@@ -266,13 +267,7 @@ class Checkpoints:
                 continue
             if existing is None:
                 journal.remember_recovery(request, record.digest)
-            Journal.fence_restore(
-                journal.connection(session_id),
-                request,
-                self.restored_seq or 0,
-                after_seq,
-                remote_seq,
-            )
+            Journal.record_cursor_db(journal.connection(session_id), after_seq, remote_seq)
             known = {
                 (event.type, event.data.get("request_id"))
                 for event in journal.events(session_id)
@@ -287,24 +282,20 @@ class Checkpoints:
                     event.type in {"model_request_started", "usage"}
                     or (event.type == "error" and event.data.get("kind") == "usage_unavailable")
                 ) and (event.type, event.data.get("request_id")) not in known:
-                    if event.seq <= after_seq:
-                        # Retain acknowledged inventory at its original position
-                        # for pending-request repair and older-range replay. Never
-                        # republish it above the client's acknowledged high-water.
-                        db = journal.connection(session_id)
-                        with db:
-                            prior = db.execute(
-                                "SELECT body FROM events WHERE seq=?", (event.seq,)
-                            ).fetchone()
-                            if prior is not None and Event.model_validate_json(prior[0]) != event:
-                                raise ValueError("write-ahead changed an acknowledged event")
-                            db.execute(
-                                "INSERT OR IGNORE INTO events(seq, body, turn_id, type) "
-                                "VALUES (?, ?, ?, ?)",
-                                (event.seq, event.model_dump_json(), event.turn_id, event.type),
-                            )
-                    else:
-                        journal.append(request, event.type, event.data)
+                    # Import an existing event, never allocate a new identity or
+                    # sequence for WAL replay (acknowledged or not).
+                    db = journal.connection(session_id)
+                    with db:
+                        prior = db.execute(
+                            "SELECT body FROM events WHERE seq=?", (event.seq,)
+                        ).fetchone()
+                        if prior is not None and Event.model_validate_json(prior[0]) != event:
+                            raise ValueError("write-ahead changed a committed event")
+                        db.execute(
+                            "INSERT OR IGNORE INTO events(seq, body, turn_id, type) "
+                            "VALUES (?, ?, ?, ?)",
+                            (event.seq, event.model_dump_json(), event.turn_id, event.type),
+                        )
                     known.add((event.type, event.data.get("request_id")))
         return journal
 
@@ -453,7 +444,7 @@ class Checkpoints:
             if saved["session_id"] != session_id:
                 raise ValueError("restore cursor belongs to another session")
             after_seq = max(after_seq, int(saved["after_seq"]))
-        if not 0 <= after_seq <= min(MAX_CURSOR, seq + MAX_CURSOR_SLACK):
+        if not 0 <= after_seq <= MAX_CURSOR:
             raise ValueError("restore cursor exceeds permitted range")
         # Keep the client high-water across a crash during publication/retry.
         cursor_stage = cursor_file.with_suffix(".next")
@@ -527,14 +518,14 @@ class Checkpoints:
                 latest = db.execute(
                     "SELECT request FROM turns ORDER BY rowid DESC LIMIT 1"
                 ).fetchone()
-                request = TurnRequest.model_validate_json(latest[0])
+                TurnRequest.model_validate_json(latest[0])
             with closing(sqlite3.connect(stage / "journal.sqlite3")) as db:
                 if (
                     db.execute("PRAGMA integrity_check").fetchone() != ("ok",)
                     or db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0] != seq
                 ):
                     raise ValueError("checkpoint journal is inconsistent")
-                Journal.fence_restore(db, request, seq, after_seq, remote_seq)
+                Journal.record_cursor_db(db, after_seq, remote_seq)
             with (stage / "work.tar").open("rb") as source:
                 restore_work(source, stage / "work")
             # A marker makes publication restartable if the process dies between renames.

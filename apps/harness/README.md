@@ -601,3 +601,21 @@ the shared model/storage identity only after storage calls finish. A stalled
 upload cannot hold process exit; its cleanup retains the credential and log
 redaction until the call unwinds. Restore retains acknowledged remote usage at
 its original sequence rather than publishing it again above the client cursor.
+
+The journal persists `max_client_cursor` before acting on every authenticated
+session request. Polls, turns, approvals and cancels all raise the same ratchet;
+a stale request never lowers it. Every new event uses the greater of the next
+local sequence and `max_client_cursor + 1`. A jump first commits a `history_gap`
+for the skipped range, in the same transaction as the append. Polls announce a
+pending gap even when no turn is active. The ratchet survives process crashes
+and checkpoints; restore carries it into the replacement journal before repair.
+`replay_after_seq` selects only the read range and never changes the ratchet.
+Remote WAL inventory is imported with its original event sequence and identity.
+
+`tests/test_sequence_ratchet.py` runs 100 Hypothesis traces, each with 12–40
+operations across polls, turns, approvals, cancels, checkpoints, sandbox restore,
+local process crashes and concurrent request batches. It checks immutable
+sequence assignments, terminal-or-gap coverage for three clients and unique
+usage identity. Clients retain their observed high-water when restoring, as
+required by C4.8; a separate regression covers a stale poll restoring before a
+later request supplies the newer cursor. No cloud or live model is used.

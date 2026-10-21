@@ -1305,3 +1305,8 @@ Identical recovered usage (same request identity, model and token counts) is an
 idempotent replay; conflicting counts still fail with `duplicate_usage`. When
 core raises the restore fence above the driver's cursor, it retains the original
 replay range so an accounting receipt cannot hide an answer or terminal event.
+
+The harness records a durable maximum of authenticated `after_seq` cursors for
+the session. This ratchet governs every append, including after an earlier poll
+has already restored the sandbox; any sequence jump emits a covering history
+gap. Lower cursors cannot lower it, and `replay_after_seq` remains read-only.

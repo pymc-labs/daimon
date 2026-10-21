@@ -15,7 +15,6 @@ from pydantic import JsonValue
 from .isolation import TOOL_UID_MAX
 
 MAX_CURSOR = 2**53
-MAX_CURSOR_SLACK = 10**9
 
 
 def identifier(value: str) -> str:
@@ -148,11 +147,7 @@ class Journal:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT)"
             )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS event_sequence "
-                "(id INTEGER PRIMARY KEY CHECK(id=1), floor INTEGER)"
-            )
-            db.execute("INSERT OR IGNORE INTO event_sequence VALUES (1, 0)")
+            self.sequence_state(db)
             db.commit()
             self.connections[session_id] = db
         return self.connections[session_id]
@@ -231,10 +226,8 @@ class Journal:
                 ).fetchone()
             ):
                 raise ConflictError("turn already ended; tool events refused")
-            seq = max(
-                db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0],
-                db.execute("SELECT floor FROM event_sequence WHERE id=1").fetchone()[0],
-            )
+            self._announce_gap(db, request.session_id, request.turn_id)
+            seq = self._next_seq(db)
             event = Event(
                 seq=seq,
                 session_id=request.session_id,
@@ -295,41 +288,84 @@ class Journal:
         )
 
     @staticmethod
-    def fence_restore(
-        db: sqlite3.Connection,
-        request: TurnRequest,
-        checkpoint_seq: int,
-        after_seq: int,
-        remote_seq: int = 0,
-    ) -> None:
-        if not 0 <= after_seq <= min(MAX_CURSOR, checkpoint_seq + MAX_CURSOR_SLACK):
-            raise ValueError("restore cursor exceeds permitted range")
-        with db:
+    def sequence_state(db: sqlite3.Connection) -> None:
+        """Migrate old checkpoints without discarding their reserved high-water."""
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS event_sequence "
+            "(id INTEGER PRIMARY KEY CHECK(id=1), floor INTEGER, "
+            "max_client_cursor INTEGER NOT NULL DEFAULT 0)"
+        )
+        if "max_client_cursor" not in {
+            row[1] for row in db.execute("PRAGMA table_info(event_sequence)")
+        }:
             db.execute(
-                "CREATE TABLE IF NOT EXISTS event_sequence "
-                "(id INTEGER PRIMARY KEY CHECK(id=1), floor INTEGER)"
+                "ALTER TABLE event_sequence ADD COLUMN max_client_cursor INTEGER NOT NULL DEFAULT 0"
             )
-            db.execute("INSERT OR IGNORE INTO event_sequence VALUES (1, 0)")
-            floor = max(checkpoint_seq, after_seq, remote_seq) + 1
-            db.execute("UPDATE event_sequence SET floor=MAX(floor, ?) WHERE id=1", (floor,))
-            latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
-            if after_seq > checkpoint_seq and latest <= after_seq:
-                event = Event(
-                    seq=floor,
-                    session_id=request.session_id,
-                    turn_id=request.turn_id,
-                    at=datetime.now(UTC),
-                    type="history_gap",
-                    data={
-                        "from_seq": checkpoint_seq + 1,
-                        "to_seq": after_seq,
-                        "reason": "sandbox_restored",
-                    },
-                )
-                db.execute(
-                    "INSERT INTO events(seq, body, turn_id, type) VALUES (?, ?, ?, ?)",
-                    (floor, event.model_dump_json(), request.turn_id, event.type),
-                )
+        db.execute("INSERT OR IGNORE INTO event_sequence(id, floor) VALUES (1, 0)")
+
+    @staticmethod
+    def record_cursor_db(db: sqlite3.Connection, cursor: int, reserved: int = 0) -> None:
+        if not 0 <= cursor <= MAX_CURSOR:
+            raise ValueError("invalid client cursor")
+        with db:
+            Journal.sequence_state(db)
+            db.execute(
+                "UPDATE event_sequence SET max_client_cursor=MAX(max_client_cursor, ?), "
+                "floor=MAX(floor, ?) WHERE id=1",
+                (cursor, reserved + 1),
+            )
+
+    def client_cursor(self, session_id: str) -> int:
+        return (
+            self.connection(session_id)
+            .execute("SELECT max_client_cursor FROM event_sequence WHERE id=1")
+            .fetchone()[0]
+        )
+
+    def record_cursor(self, session_id: str, cursor: int) -> int:
+        # FULL SQLite commit precedes restore, recovery or request side effects.
+        db = self.connection(session_id)
+        self.record_cursor_db(db, cursor)
+        return self.client_cursor(session_id)
+
+    @staticmethod
+    def _next_seq(db: sqlite3.Connection) -> int:
+        local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
+        # floor is the legacy column name for the local next-position
+        # reservation retained in checkpoints and remote write-ahead records.
+        floor, cursor = db.execute(
+            "SELECT floor, max_client_cursor FROM event_sequence WHERE id=1"
+        ).fetchone()
+        return max(local_next, floor, cursor + 1)
+
+    @staticmethod
+    def _announce_gap(db: sqlite3.Connection, session_id: str, turn_id: str) -> None:
+        local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
+        seq = Journal._next_seq(db)
+        if seq > local_next:
+            event = Event(
+                seq=seq,
+                session_id=session_id,
+                turn_id=turn_id,
+                at=datetime.now(UTC),
+                type="history_gap",
+                data={
+                    "from_seq": local_next,
+                    "to_seq": seq - 1,
+                    "reason": "sandbox_restored",
+                },
+            )
+            db.execute(
+                "INSERT INTO events(seq, body, turn_id, type) VALUES (?, ?, ?, ?)",
+                (seq, event.model_dump_json(), turn_id, event.type),
+            )
+
+    def announce_gap(self, session_id: str) -> None:
+        requests = self.turns(session_id)
+        # A cursor is a valid fence even before this process knows any turn.
+        turn_id = requests[-1].turn_id if requests else "session"
+        with self.connection(session_id) as db:
+            self._announce_gap(db, session_id, turn_id)
 
     def save_history(self, session_id: str, history: list[JsonValue]) -> None:
         with self.connection(session_id) as db:
