@@ -1,4 +1,4 @@
-"""Operator-run Luna-only C3 preflight; executes inside the MCP container."""
+"""Operator-run gpt-5.4-mini C3 preflight; executes inside the MCP container."""
 
 import json
 import os
@@ -17,7 +17,7 @@ for instruction in (
         session_id=session,
         turn_id=turn,
         idempotency_key=turn,
-        model="gpt-6-luna",
+        model=os.environ.get("SELFHOSTED_MODEL", "gpt-5.4-mini"),
         instructions="You are testing persistent tool execution. Follow the request.",
         input=[dict(type="text", text=instruction)],
         mcp_servers=[],
@@ -44,4 +44,4 @@ for instruction in (
     for e in events:
         if e["type"] in {"agent_message", "usage", "turn_ended"}:
             print(json.dumps(e))
-print("Luna-only C3 preflight completed; this is not a host ledger/CLI turn proof")
+print("gpt-5.4-mini C3 preflight completed; this is not a host ledger/CLI turn proof")

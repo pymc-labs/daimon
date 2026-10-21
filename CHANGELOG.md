@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Serve in-cluster MCP over verified TLS with a chart-generated CA, scoped harness trust and protected host-to-harness HTTP ingress.
+- Reuse existing Azure OpenAI deployments in the AKS recipe with a `gpt-5.4-mini` default; restrict MCP startup capabilities and run recipe operator commands as the application user.
+
+- Serve in-cluster MCP over verified TLS with a chart-generated CA, scoped harness trust and verified host-to-harness HTTPS.
 
 - Harden AKS harness startup, prioritize persistent services, and make the selfhosted chart recipe provision metered CLI turns with restart-persistence regressions.
 

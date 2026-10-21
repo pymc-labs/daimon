@@ -67,8 +67,8 @@ azureOpenAI:
   # Explicit M2 opt-in; an existing Secret, never a value containing the key.
   apiKeySecretRef: {name: "", key: AZURE_OPENAI_API_KEY}
   endpoint: ""
-  deployment: gpt-6.1-sol
-  smokeDeployment: gpt-6-luna
+  deployment: gpt-5.4-mini
+  smokeDeployment: gpt-5.4-mini
   apiVersion: 2025-04-01-preview
 ingress:
   enabled: false

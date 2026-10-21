@@ -8,6 +8,7 @@ chart=deploy/helm/daimon-selfhost
 : "${AKS:?export AKS}" "${AOAI:?export AOAI}" "${TAG:?export TAG}"
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
+export AOAI_DEPLOYMENT=${AOAI_DEPLOYMENT:-gpt-5.4-mini}
 case ${1:-} in
 bootstrap)
   az group create -n "$RG" -l "$LOCATION" -o none
@@ -19,11 +20,21 @@ bootstrap)
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
     --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
     --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
-  az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
-    --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
-  az cognitiveservices account deployment create -g "$RG" -n "$AOAI" \
-    --deployment-name gpt-6-luna --model-name gpt-6-luna --model-version 2026-09-22 \
-    --model-format OpenAI --sku-name DataZoneStandard --sku-capacity 1 -o none
+  accounts=$(az cognitiveservices account list -g "$RG" --query '[].name' -o tsv)
+  if grep -Fxq -- "$AOAI" <<< "$accounts"; then
+    az cognitiveservices account deployment show -g "$RG" -n "$AOAI" \
+      --deployment-name "$AOAI_DEPLOYMENT" -o none || {
+        echo "Existing AOAI account is missing or cannot read deployment $AOAI_DEPLOYMENT; provision it before bootstrap" >&2
+        exit 1
+      }
+    echo "Reusing existing AOAI account and deployment $AOAI_DEPLOYMENT"
+  else
+    az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
+      --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
+    az cognitiveservices account deployment create -g "$RG" -n "$AOAI" \
+      --deployment-name "$AOAI_DEPLOYMENT" --model-name gpt-5.4-mini --model-version 2026-03-17 \
+      --model-format OpenAI --sku-name DataZoneStandard --sku-capacity 1 -o none
+  fi
   ;;
 install)
   az aks get-credentials -g "$RG" -n "$AKS" --overwrite-existing -o none
@@ -72,7 +83,7 @@ def merge(target, updates):
             target[key] = value
 merge(values, {
     'images': {'registry': acr+'.azurecr.io', 'host': {'tag':tag}, 'harness': {'tag':tag}},
-    'azureOpenAI': {'endpoint':endpoint, 'deployment':values.get('azureOpenAI', {}).get('deployment', 'gpt-6-luna'),
+    'azureOpenAI': {'endpoint':endpoint, 'deployment':values.get('azureOpenAI', {}).get('deployment', os.environ['AOAI_DEPLOYMENT']),
                     'apiKeySecretRef':{'name':'daimon-aoai','key':'AZURE_OPENAI_API_KEY'}},
     'services': {'teams':{'enabled':values.get('services', {}).get('teams', {}).get('enabled', False)}},
     'host': {'env': {'DAIMON_ANTHROPIC__BASE_URL':'http://127.0.0.1:9'}},
@@ -97,7 +108,7 @@ PY
   kubectl -n daimon rollout status deployment --timeout=300s
   kubectl -n daimon rollout status statefulset --timeout=300s
   mcp_port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("services", {}).get("mcp", {}).get("port", 8765))' "$AKS_STATE/aks-values.json")
-  kubectl -n daimon exec deployment/coke-daimon-mcp -- python -c \
+  kubectl -n daimon exec deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python -c \
     'import ssl,sys,urllib.request; ctx=ssl.create_default_context(); assert urllib.request.urlopen(sys.argv[1], context=ctx).status == 200; print("MCP HTTPS healthy")' "https://coke-daimon-mcp:$mcp_port/healthz"
   ;;
 register)
@@ -105,11 +116,11 @@ register)
   ;;
 turn)
   tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$AKS_STATE/registration.json")
-  kubectl -n daimon exec deployment/coke-daimon-mcp -- daimon selfhosted turn \
+  kubectl -n daimon exec deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon daimon selfhosted turn \
     --tenant-id "$tenant" --thread aks-proof --message "${MESSAGE:?export MESSAGE}"
   ;;
 probe)
-  kubectl -n daimon exec -i deployment/coke-daimon-mcp -- python - < "$chart/scripts/live-c3.py"
+  kubectl -n daimon exec -i deployment/coke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env SELFHOSTED_MODEL="${SELFHOSTED_MODEL:-$AOAI_DEPLOYMENT}" python - < "$chart/scripts/live-c3.py"
   ;;
 egress-start)
   kubectl -n kube-system create configmap coredns-custom --from-literal=log.override=log \

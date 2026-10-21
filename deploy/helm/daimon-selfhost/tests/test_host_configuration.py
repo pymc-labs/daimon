@@ -235,7 +235,14 @@ class HostConfigurationTests(unittest.TestCase):
         )
         for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
             self.assertEqual(container[probe]["httpGet"]["scheme"], "HTTPS")
-        self.assertEqual(pod["securityContext"]["runAsUser"], 0)
+        self.assertEqual(container["securityContext"]["runAsUser"], 0)
+        self.assertEqual(
+            container["securityContext"]["capabilities"],
+            {"drop": ["ALL"], "add": ["SETUID", "SETGID"]},
+        )
+        self.assertFalse(container["securityContext"]["allowPrivilegeEscalation"])
+        self.assertEqual(container["securityContext"]["seccompProfile"]["type"], "RuntimeDefault")
+        self.assertNotIn("securityContext", pod)
         tls = next(v["secret"] for v in pod["volumes"] if v["name"] == "mcp-tls")
         self.assertEqual(tls["defaultMode"], 0o400)
         harness = next(
@@ -500,6 +507,91 @@ elif name == 'az' and 'key1' in sys.argv:
             self.assertTrue(any("statefulset" in c and "status" in c for c in calls))
             self.assertFalse(any("wait" in c and "pod" in c for c in calls))
             self.assertTrue(any("secret" in c and "runtime" in c for c in calls))
+
+    def test_bootstrap_reuses_existing_aoai_and_rejects_missing_deployment(self):
+        for existing, missing, deployment in (
+            (True, False, "gpt-5.4-mini"),
+            (True, False, "custom-deployment"),
+            (True, True, "gpt-5.4-mini"),
+            (False, False, "gpt-5.4-mini"),
+        ):
+            with (
+                self.subTest(existing=existing, missing=missing, deployment=deployment),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = Path(directory)
+                stub = state / "az"
+                stub.write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ['STUB_LOG'], 'a') as output:
+    output.write(json.dumps(args) + '\\n')
+if args[:3] == ['cognitiveservices', 'account', 'list']:
+    if os.environ['EXISTING'] == 'True':
+        print('offline')
+elif args[:4] == ['cognitiveservices', 'account', 'deployment', 'show']:
+    sys.exit(1 if os.environ['MISSING'] == 'True' else 0)
+elif 'properties.endpoint' in args:
+    print('https://localhost')
+elif 'key1' in args:
+    print('offline-placeholder')
+""")
+                stub.chmod(0o755)
+                for name in ("kubectl", "helm"):
+                    (state / name).symlink_to(stub)
+                log = state / "calls.jsonl"
+                env = dict(
+                    os.environ,
+                    PATH=str(state) + os.pathsep + os.environ["PATH"],
+                    RG="offline",
+                    LOCATION="offline",
+                    ACR="offline",
+                    AKS="offline",
+                    AOAI="offline",
+                    TAG="offline",
+                    AKS_STATE=str(state),
+                    STUB_LOG=str(log),
+                    EXISTING=str(existing),
+                    MISSING=str(missing),
+                )
+                env.pop("AOAI_DEPLOYMENT", None)
+                if deployment != "gpt-5.4-mini":
+                    env["AOAI_DEPLOYMENT"] = deployment
+                result = subprocess.run(
+                    ["bash", str(CHART / "scripts/aks.sh"), "bootstrap"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 1 if missing else 0, result.stderr)
+                if not missing:
+                    subprocess.run(
+                        ["bash", str(CHART / "scripts/aks.sh"), "install"],
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    installed = json.loads((state / "aks-values.json").read_text())
+                    self.assertEqual(installed["azureOpenAI"]["deployment"], deployment)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                aoai_creates = [
+                    c for c in calls if c[:2] == ["cognitiveservices", "account"] and "create" in c
+                ]
+                if existing:
+                    self.assertEqual(aoai_creates, [])
+                    show = next(
+                        c
+                        for c in calls
+                        if c[:4] == ["cognitiveservices", "account", "deployment", "show"]
+                    )
+                    self.assertEqual(show[show.index("--deployment-name") + 1], deployment)
+                else:
+                    self.assertEqual(len(aoai_creates), 2)
+                    self.assertIn("gpt-5.4-mini", aoai_creates[1])
+                if missing:
+                    self.assertIn("missing or cannot read deployment", result.stderr)
 
 
 if __name__ == "__main__":

@@ -8,8 +8,8 @@ size; Standard_D4s_v6 is recommended for production. Follow the [recipe](README.
 reviewed checkout containing the verified harness TLS client for both HTTPS Services. RG Owner, or Contributor
 plus ACR role-assignment rights. Subscription admin registers ContainerService,
 ContainerRegistry, CognitiveServices, Compute, Network and Storage. Confirm Dsv6
-capacity and **Luna DataZoneStandard quota** in eastus2 or an approved EU region;
-Sol quota is needed for production. Approve the harness PodSecurity exception and
+capacity and an AOAI deployment of a supported model (we use gpt-5.4-mini);
+use eastus2 or an approved EU region. Approve the harness PodSecurity exception and
 cluster-admin DNS/probes. Teams additionally needs Bot/Entra credentials, tenant
 approval and HTTPS ingress; initially disabled. AOAI **disable local auth** policy
 blocks this API-key path: a reviewed MI proxy is then required before installation.
@@ -18,13 +18,13 @@ blocks this API-key path: a reviewed MI proxy is then required before installati
 ```sh
 export RG=daimon-selfhost LOCATION=eastus2
 export ACR=daimoncoke12345 AKS=daimon-coke AOAI=daimon-coke-12345
-export TAG=$(git rev-parse HEAD)
+export AOAI_DEPLOYMENT=gpt-5.4-mini; export TAG=$(git rev-parse HEAD)
 export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 bash deploy/helm/daimon-selfhost/scripts/aks.sh install
-export SELFHOSTED_MODEL=gpt-6-luna
+export SELFHOSTED_MODEL=gpt-5.4-mini
 export ALLOW_TEST_TARIFFS=true
-export SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
+export SELFHOSTED_MODELS='{"gpt-5.4-mini-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
 bash deploy/helm/daimon-selfhost/scripts/aks.sh register
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
 export MESSAGE='Use bash to print the working directory, then write azure-proof.txt containing PERSISTED. Confirm success.'
@@ -34,7 +34,7 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 ```
 
-Builds/mirrors precede overlay-network AKS and Luna deployment. Install waits for
+Builds/mirrors precede AKS; existing AOAI is reused, else created. Install waits for
 PG/migrations/pods; registration funds a tenant and sets channel/runtime/billing.
 Rates above are explicit **TEST rates** with opt-in; replace and disable for production.
 Keep `AKS_STATE` private. Egress proof checks DNS and blocked curls in both pods.

@@ -48,7 +48,7 @@ For the M2 pitch on one small node, explicitly reference an existing key Secret:
 ```yaml
 azureOpenAI:
   endpoint: https://YOUR-RESOURCE.openai.azure.com/
-  deployment: gpt-6-luna
+  deployment: gpt-5.4-mini
   apiKeySecretRef:
     name: daimon-aoai
     key: AZURE_OPENAI_API_KEY
@@ -62,8 +62,8 @@ The chart injects only
 the MI proxy exists; Workload Identity with the header-protected proxy remains
 the production identity path. There is no key in chart defaults. With neither key nor
 proxy the production harness refuses startup. The offline fixture injects a fake
-adapter separately and makes no model calls. Sol (`gpt-6.1-sol`) is the production
-parameter; every smoke turn uses Luna (`gpt-6-luna`). `HARNESS_LIVE_PROBE` is never
+adapter separately and makes no model calls. The AKS recipe and smoke turns use
+`gpt-5.4-mini`. `HARNESS_LIVE_PROBE` is never
 set by this chart.
 
 The harness entrypoint prepares the HOME PVC as root-owned 0711 before validation,
@@ -171,7 +171,11 @@ Optional operator/cert-manager Secrets must provide the same three keys and all
 SANs; cert-manager is not installed by the chart. Both server keys mount read-only
 as **0400 root-only**. Uvicorn loads its SSL context before the harness app factory
 drops to service UID 10000; MCP loads its context then drops to host UID/GID 1000.
-The private key stays unreadable after the drop. A host init container combines
+The private key stays unreadable after the drop. MCP drops ALL default
+capabilities, adds only SETUID/SETGID for the initial UID change, disables privilege
+escalation and uses RuntimeDefault seccomp. Recipe commands run operator processes
+as UID/GID 1000 via `setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs`
+with `HOME=/home/daimon`; use the same prefix for manual MCP `kubectl exec`. A host init container combines
 certifi roots with the chart CA in a read-only volume; the chart sets
 `SSL_CERT_FILE=/etc/daimon/ca/ca-bundle.crt` for all trusted host clients.
 
@@ -232,7 +236,8 @@ lane. Nothing is scored as live-validated merely because a command is documented
 
 Prerequisites: Azure CLI authenticated to the target subscription; `kubectl`,
 Helm 3.19+, Python 3, git; checkout of the reviewed `azure-selfhost` branch; a
-dedicated empty RG (an existing budget is fine). The deployer needs RG Contributor
+dedicated RG containing only its budget and, optionally, the existing AOAI account
+and deployment. The deployer needs RG Contributor
 plus permission to create role assignments (`attach-acr`); RG Owner covers both.
 Subscription admins must pre-register `Microsoft.ContainerService`,
 `Microsoft.ContainerRegistry`, `Microsoft.CognitiveServices`, `Microsoft.Compute`,
@@ -241,12 +246,15 @@ providers. Storage registration supports AKS managed disks; no Storage account
 or Blob container is created. Kubernetes cluster-admin rights are needed for the
 PodSecurity exception, CoreDNS ConfigMap and ephemeral-container egress probe.
 
-Obtain regional Dsv6 CPU quota/capacity for `Standard_D2s_v6` and **DataZoneStandard
-Luna quota** before running. Sol quota is needed only for later production use.
+Obtain regional Dsv6 CPU quota/capacity for `Standard_D2s_v6` and an AOAI
+deployment of a supported model (we use **gpt-5.4-mini**). An existing account
+and deployment are reused without updating either. Set `AOAI` to that account's
+name and `AOAI_DEPLOYMENT` to its deployment name. If the account exists but the
+named deployment is missing, bootstrap fails clearly; provision it before retrying.
+For a new account, regional DataZoneStandard quota for gpt-5.4-mini is required.
 Use a US/EU Data Zone region such as `eastus2`; do not silently switch to Global
-SKU or another model if quota is zero. Data Zone routing is within the selected
-US/EU zone, not a promise of processing within one Azure region. The program's
-Luna quota is currently a known external gate. Microsoft documents B-series as
+SKU or another model. Data Zone routing is within the selected US/EU zone,
+not a promise of processing within one Azure region. Microsoft documents B-series as
 unsupported for system pools; the first live install in this subscription required `Standard_D2s_v6`
 (B-series was rejected). This recipe uses that exact one-node SKU; other
 subscriptions still require their own quota/API validation.
@@ -270,7 +278,7 @@ references, URLs and resolved endpoint IPs go into generated Helm values.
 ```sh
 export RG=daimon-selfhost LOCATION=eastus2
 export ACR=daimoncoke12345 AKS=daimon-coke AOAI=daimon-coke-12345
-export TAG=$(git rev-parse HEAD)
+export AOAI_DEPLOYMENT=gpt-5.4-mini; export TAG=$(git rev-parse HEAD)
 export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 ```
@@ -287,11 +295,21 @@ az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image po
 az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
   --network-plugin azure --network-plugin-mode overlay --network-policy azure --attach-acr "$ACR" \
   --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
-az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
-  --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
-az cognitiveservices account deployment create -g "$RG" -n "$AOAI" \
-  --deployment-name gpt-6-luna --model-name gpt-6-luna --model-version 2026-09-22 \
-  --model-format OpenAI --sku-name DataZoneStandard --sku-capacity 1 -o none
+accounts=$(az cognitiveservices account list -g "$RG" --query '[].name' -o tsv)
+if grep -Fxq -- "$AOAI" <<< "$accounts"; then
+  az cognitiveservices account deployment show -g "$RG" -n "$AOAI" \
+    --deployment-name "$AOAI_DEPLOYMENT" -o none || {
+      echo "Existing AOAI account is missing or cannot read deployment $AOAI_DEPLOYMENT; provision it before bootstrap" >&2
+      exit 1
+    }
+  echo "Reusing existing AOAI account and deployment $AOAI_DEPLOYMENT"
+else
+  az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
+    --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
+  az cognitiveservices account deployment create -g "$RG" -n "$AOAI" \
+    --deployment-name "$AOAI_DEPLOYMENT" --model-name gpt-5.4-mini --model-version 2026-03-17 \
+    --model-format OpenAI --sku-name DataZoneStandard --sku-capacity 1 -o none
+fi
 ```
 
 **Mandatory Postgres image step:** `images.registry` prefixes **all three**
@@ -345,7 +363,7 @@ racing Postgres or starting scheduler against an unmigrated schema. Completed
 Job pods are excluded from subsequent pod-Ready waits. Failed migrations remain
 visible Job failures; do not enable traffic or hide a real migration error.
 
-The generated nonsecret values use ACR, Luna, `azureOpenAI.apiKeySecretRef`, and
+The generated nonsecret values use ACR, gpt-5.4-mini, `azureOpenAI.apiKeySecretRef`, and
 current AOAI IPv4 `/32` addresses, resolved from the actual account hostname.
 The first live install resolved **`20.62.58.5/32`**. This is observed evidence,
 not a portable default: resolve your own endpoint at install time, as the helper
@@ -367,7 +385,7 @@ stays off until the host tenant/channel/billing grant is configured below. Host
 Anthropic URL is deliberately loopback port 9, so startup reconciliation cannot
 contact Anthropic even when another provider's defaults are present.
 
-The installer checks MCP `/healthz`. A separate **paid Luna-only** C3 preflight
+The installer checks MCP `/healthz`. A separate **paid gpt-5.4-mini** C3 preflight
 checks model usage, a write tool and a second turn reading the same file:
 
 ```sh
@@ -442,7 +460,7 @@ Do not claim egress proof if any other NetworkPolicy admits broad harness egress
 For a disposable pilot, `teardown` removes the Helm release, namespace **including
 both PVCs and their data**, AKS cluster and managed node RG. Confirm backups or
 accept loss of all tenants, ledger, sessions and workspaces before running it.
-It keeps **ACR/images and AOAI/Luna deployment**, plus the protected operator state;
+It keeps **ACR/images and AOAI/gpt-5.4-mini deployment**, plus the protected operator state;
 ACR/storage and AOAI usage remain billable. It checks the managed node RG was
 removed. An incomplete deletion is a failed teardown, not a passing result.
 
@@ -461,7 +479,7 @@ az aks delete -g "$RG" -n "$AKS" --yes -o none
 Retaining built images and model quota avoids rebuilds and model provisioning on
 the timed path. In the same shell, start the clock before re-creating AKS, run the
 same install, re-register the application state below, and stop only after the
-first successful **Daimon CLI/Teams** Luna reply. Record timestamps and elapsed
+first successful **Daimon CLI/Teams** gpt-5.4-mini reply. Record timestamps and elapsed
 seconds. Thirty minutes is a target, **not measured Azure evidence** from this
 lane; capacity, image pulls, RBAC propagation and application setup may exceed it.
 
@@ -500,10 +518,8 @@ control-plane tier has no SLA and does not make node resources free. Sources:
 
 ## Register and run a real selfhosted turn
 
-**Dependency: merge PR #1276 before this chart PR, then build both images from
-that combined branch.** The production CLI turn and verified MCP client require
-its C3.9a CA-bundle interface. Before it lands on `azure-selfhost`, use an integration
-checkout containing both PRs for `bootstrap`; chart-only #1273 images are insufficient.
+Build both images from the reviewed `azure-selfhost` source containing the
+production selfhosted CLI turn and the verified C3.9a MCP CA-bundle client.
 These commands use release `coke`, CLI caller `operator`, channel
 `selfhosted-operator`, and persistent CLI thread `aks-proof`.
 
@@ -517,9 +533,9 @@ agent/environment IDs and configuration digest into the provider grant Secret.
 It makes no model calls. Retain these exports for reinstall:
 
 ```sh
-export SELFHOSTED_MODEL=gpt-6-luna
+export SELFHOSTED_MODEL=gpt-5.4-mini
 export ALLOW_TEST_TARIFFS=true
-export SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
+export SELFHOSTED_MODELS='{"gpt-5.4-mini-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
 bash deploy/helm/daimon-selfhost/scripts/aks.sh register
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
 export MESSAGE='Use bash to print the working directory, then write azure-proof.txt containing PERSISTED. Confirm success.'
@@ -537,6 +553,9 @@ sets billing `DEPLOYMENTS`, `MODELS` and explicit `ALLOW_TEST_TARIFFS`; and bind
 `https://coke-daimon-harness:8088` origin and created tenant. The same Secret token is used by the harness.
 It configures credential-bearing MCP at the internal
 `https://coke-daimon-mcp:8765/mcp` URL on host and harness, with the chart CA.
+Registration sets the advertised MCP resource URL to this internal address;
+this is a **CLI-only pilot**. Before enabling external OAuth/MCP clients, configure
+the public resource URL and a separately reviewed internal routing/trust path.
 The host trusts the chart CA through `SSL_CERT_FILE`; the harness MCP client uses
 its scoped bundle. Both bearer hops use HTTPS, without plaintext consent grants.
 
@@ -547,19 +566,19 @@ mounts compose. Registration applies the Secret and upgrades the release, then
 restarts MCP/scheduler so cached grants refresh. Admission defaults off in the
 chart; registration enables it only after the records and grant are present.
 
-`turn` uses #1276's `admit → bind_session → run_prepared_turn` CLI path with real
+`turn` uses the production `admit → bind_session → run_prepared_turn` CLI path with real
 billing and no exemption. Save its NDJSON (usage IDs and session IDs), the harness
 provider receipts and matching Postgres usage/ledger rows for independent token
 reconciliation. The direct `probe` helper is an optional paid C3 diagnostic and
 does not replace these two application turns. No real inference is performed by
-this lane's local tests. Sol remains the production model; all smoke turns use Luna.
+this lane's local tests. The recipe uses gpt-5.4-mini for every model turn.
 
 ## Local validation
 
 Linux amd64, Docker, uv, Python 3 and curl are required. Binaries are pinned and
 SHA256-verified against the upstream release checksum files, installed in
-`~/.local/bin`. Build from an integration checkout containing #1276 as described
-above; the smoke test exercises its CLI/HTTPS path. No Azure credentials or resources
+`~/.local/bin`. Build from the reviewed application source; the smoke test
+exercises its CLI/HTTPS path. No Azure credentials or resources
 are used:
 
 ```sh

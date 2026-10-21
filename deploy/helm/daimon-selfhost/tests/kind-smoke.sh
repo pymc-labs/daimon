@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build images with PR #1276 first; --reuse needs an explicit KIND_CLUSTER_NAME.
+# Build images from the reviewed application source; --reuse needs an explicit KIND_CLUSTER_NAME.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 chart=deploy/helm/daimon-selfhost
@@ -49,7 +49,7 @@ cat > "$scratch/local.yaml" <<'YAML'
 images:
   host: {repository: daimon-l14, tag: local, pullPolicy: Never}
   harness: {repository: daimon-harness-l14, tag: local, pullPolicy: Never}
-azureOpenAI: {deployment: gpt-6-luna}
+azureOpenAI: {deployment: gpt-5.4-mini}
 postgres: {storage: 1Gi}
 harness: {storage: 1Gi}
 services:
@@ -84,12 +84,13 @@ kubectl -n daimon wait pod/terminal-job-pod --for=jsonpath='{.status.phase}'=Fai
 kubectl -n daimon rollout status deployment --timeout=300s
 kubectl -n daimon rollout status statefulset --timeout=300s
 kubectl -n daimon get pods
-kubectl -n daimon exec deployment/smoke-daimon-mcp -- python -c \
-  'import ssl,urllib.request; ctx=ssl.create_default_context(cafile="/etc/daimon/mcp-tls/ca.crt"); print(urllib.request.urlopen("https://smoke-daimon-mcp:8765/healthz", context=ctx).read().decode())'
+kubectl -n daimon exec deployment/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python -c \
+  'import ssl,urllib.request; ctx=ssl.create_default_context(cafile=__import__("os").environ["SSL_CERT_FILE"]); print(urllib.request.urlopen("https://smoke-daimon-mcp:8765/healthz", context=ctx).read().decode())'
 kubectl -n daimon exec -i smoke-daimon-harness-0 -- python - < "$chart/tests/probe-mcp-tls.py"
 kubectl -n daimon get secret smoke-daimon-mcp-tls -o jsonpath='{.data.ca\.crt}' | sha256sum > "$scratch/ca-before"
-pod_scratch=$(kubectl -n daimon exec deployment/smoke-daimon-mcp -- mktemp -d)
-kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- python - before "$pod_scratch/evidence.json" < "$chart/tests/probe.py"
+kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python - < "$chart/tests/probe-mcp-security.py"
+pod_scratch=$(kubectl -n daimon exec deployment/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon mktemp -d)
+kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python - before "$pod_scratch/evidence.json" < "$chart/tests/probe.py"
 kubectl -n daimon logs smoke-daimon-harness-0 --tail=5
 kubectl -n daimon exec smoke-daimon-harness-0 -- sh -c 'cat /proc/mounts | head -5'
 kubectl -n daimon exec smoke-daimon-harness-0 -- python -c \
@@ -97,42 +98,49 @@ kubectl -n daimon exec smoke-daimon-harness-0 -- python -c \
 # Same PVC, new process: completed turns replay without executing tools again.
 kubectl -n daimon delete pod smoke-daimon-harness-0
 kubectl -n daimon rollout status statefulset/smoke-daimon-harness --timeout=120s
-kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- python - after "$pod_scratch/evidence.json" < "$chart/tests/probe.py"
+kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python - after "$pod_scratch/evidence.json" < "$chart/tests/probe.py"
 kubectl -n daimon exec smoke-daimon-harness-0 -- python -c \
   'from pathlib import Path; assert Path("/home/harness/executions").read_text().splitlines() == ["kind-one", "kind-two", "kind-one-read", "kind-two-read"]; print("Replay did not execute; new turns read persisted files")'
 # Delete the original file and demonstrate that completion alone cannot pass.
 kubectl -n daimon exec smoke-daimon-harness-0 -- python -c \
   'from pathlib import Path; files=list(Path("/home/harness").rglob("kind-proof.txt")); assert files; [p.unlink() for p in files]'
-if kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- python - missing "$pod_scratch/evidence.json" < "$chart/tests/probe.py" > "$scratch/missing.log" 2>&1; then
+if kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python - missing "$pod_scratch/evidence.json" < "$chart/tests/probe.py" > "$scratch/missing.log" 2>&1; then
   echo 'Missing-file persistence check unexpectedly passed' >&2
   exit 1
 fi
-rg 'Missing exact persisted tool result' "$scratch/missing.log"
+grep -F 'Missing exact persisted tool result' "$scratch/missing.log"
 echo 'Deleted file correctly fails tool-result check'
-# Exercise the exact recipe registration with #1276 application images, no model I/O.
+# Exercise the exact recipe registration with production application images, no model I/O.
 uv run python - "$scratch/local.yaml" "$scratch/aks-values.json" <<'PYLOCAL'
 import json, sys, yaml
 from pathlib import Path
 Path(sys.argv[2]).write_text(json.dumps(yaml.safe_load(Path(sys.argv[1]).read_text())))
 PYLOCAL
-AKS_STATE="$scratch" RELEASE=smoke SELFHOSTED_MODEL=gpt-6-luna \
-  ALLOW_TEST_TARIFFS=true SELFHOSTED_MODELS='{"gpt-6-luna-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}' \
+AKS_STATE="$scratch" RELEASE=smoke SELFHOSTED_MODEL=gpt-5.4-mini \
+  ALLOW_TEST_TARIFFS=true SELFHOSTED_MODELS='{"gpt-5.4-mini-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}' \
   POST_RENDERER="$scratch/postrender" bash "$chart/scripts/register.sh"
 kubectl -n daimon get secret smoke-daimon-mcp-tls -o jsonpath='{.data.ca\.crt}' | sha256sum > "$scratch/ca-after"
 cmp "$scratch/ca-before" "$scratch/ca-after"
 kubectl -n daimon exec -i smoke-daimon-harness-0 -- python - < "$chart/tests/probe-mcp-tls.py"
+kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python - < "$chart/tests/probe-mcp-security.py"
 tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$scratch/registration.json")
 for message in write read; do
-  kubectl -n daimon exec deploy/smoke-daimon-mcp -- daimon selfhosted turn \
+  kubectl -n daimon exec deploy/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon daimon selfhosted turn \
     --tenant-id "$tenant" --thread kind-recipe --message "$message" > "$scratch/turn-$message.ndjson"
-  python3 - "$scratch/turn-$message.ndjson" <<'PYTURN'
+  python3 - "$scratch/turn-$message.ndjson" "$message" <<'PYTURN'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.startswith('{')]
 assert rows, 'No CLI lifecycle events'
-print('Metered CLI turn returned lifecycle events')
+if sys.argv[2] == 'read':
+    results = [r['event'] for r in rows
+               if r.get('event', {}).get('type') == 'agent.tool_result']
+    assert any(not r.get('is_error', False) and
+               any(p.get('text') == 'persisted' for p in r.get('content', []))
+               for r in results), 'CLI read did not return exact persisted tool result'
+print('Metered CLI turn returned verified lifecycle events')
 PYTURN
 done
-kubectl -n daimon exec -i deploy/smoke-daimon-mcp -- python - < "$chart/tests/verify-ledger.py"
+kubectl -n daimon exec -i deploy/smoke-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python - < "$chart/tests/verify-ledger.py"
 # kindnet (kind default) does not enforce NetworkPolicy. Do not claim enforcement.
 echo 'NetworkPolicy enforcement NOT tested: kindnet CNI; requires Calico/Cilium/AKS policy engine'
 kubectl apply --server-side --dry-run=server --force-conflicts -n daimon -f "$scratch/rendered.yaml" >/dev/null

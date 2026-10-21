@@ -27,9 +27,6 @@ spec:
       restartPolicy: Never
       {{- end }}
       terminationGracePeriodSeconds: 90
-      {{- if eq $name "mcp" }}
-      securityContext: {runAsUser: 0}
-      {{- end }}
       automountServiceAccountToken: false
       imagePullSecrets: {{ $.Values.imagePullSecrets | toJson }}
       initContainers:
@@ -103,6 +100,11 @@ spec:
           {{- if $init }}
           command: [sh, -ec, "alembic upgrade head && daimon defaults apply"]
           {{- else if eq $name "mcp" }}
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL], add: [SETUID, SETGID]}
+            seccompProfile: {type: RuntimeDefault}
           command: [python, -c]
           args:
             - >-

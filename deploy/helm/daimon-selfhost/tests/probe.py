@@ -51,7 +51,7 @@ for session in ("kind-one", "kind-two"):
         session_id=session,
         turn_id=session,
         idempotency_key=session,
-        model="gpt-6-luna",
+        model="gpt-5.4-mini",
         instructions="Offline smoke",
         input=[dict(type="text", text="write")],
         mcp_servers=[],

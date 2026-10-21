@@ -1657,15 +1657,15 @@ The branch-only AKS Helm baseline, including local kind validation, identity
 proxy requirements and PodSecurity exceptions, is documented in
 [`deploy/helm/daimon-selfhost`](https://github.com/pymc-labs/daimon/tree/azure-selfhost/deploy/helm/daimon-selfhost).
 
-The AKS chart recipe includes metered CLI tenant/runtime registration (requires the
-in-cluster HTTP support), host startup/liveness probes, 90-second host shutdown,
+The AKS chart recipe includes metered CLI tenant/runtime registration, host
+startup/liveness probes, 90-second host shutdown,
 and Postgres/harness priorities. D2s_v6 is a minimum test node; D4s_v6 is recommended
 for production. The harness drops SYS_ADMIN from its bounding set after setup.
 
 MCP in the AKS chart uses HTTPS with a chart-generated CA and a matching Service
 certificate. The harness trusts the read-only `HARNESS_MCP_CA_BUNDLE`; optional
-operator/cert-manager Secrets support managed certificates. HTTP consent applies
-only to the host-to-harness bearer hop, with same-release ingress isolation.
+operator/cert-manager Secrets support managed certificates. The harness C3 hop also
+uses HTTPS with same-release ingress isolation and trusted host CA bundles.
 Explicit TEST tariffs also require the selfhosted `ALLOW_TEST_TARIFFS` opt-in.
 
 The AKS Helm recipe serves both MCP and harness over HTTPS with a generated CA;

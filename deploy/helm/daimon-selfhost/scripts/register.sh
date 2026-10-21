@@ -5,10 +5,10 @@ umask 077
 : "${ALLOW_TEST_TARIFFS:?set true for TEST rates, false for verified production rates}" "${AKS_STATE:?}" "${SELFHOSTED_MODEL:?}" "${SELFHOSTED_MODELS:?JSON tariff catalogue required}"
 release=${RELEASE:-coke}
 chart=deploy/helm/daimon-selfhost
-kubectl -n daimon exec -i "deploy/$release-daimon-mcp" -- \
+kubectl -n daimon exec -i "deploy/$release-daimon-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon \
   env SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/provision.py" > "$AKS_STATE/registration.json"
 tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$AKS_STATE/registration.json")
-kubectl -n daimon exec "deploy/$release-daimon-mcp" -- daimon selfhosted init \
+kubectl -n daimon exec "deploy/$release-daimon-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon daimon selfhosted init \
   --tenant-id "$tenant" --harness-url "https://$release-daimon-harness:8088" \
   --auth-mode bearer_env --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY \
   --model "$SELFHOSTED_MODEL" > "$AKS_STATE/selfhosted-ids"
