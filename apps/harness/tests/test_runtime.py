@@ -286,7 +286,8 @@ async def test_shell_deadline_and_success_reap_background_jobs(tmp_path: Path) -
         while True:
             try:
                 state = Path(f"/proc/{pid}/stat").read_text().split()[2]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
+                # A reaped process can disappear between opening and reading stat.
                 break
             if state == "Z":
                 break
