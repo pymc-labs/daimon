@@ -44,6 +44,9 @@ class Journal:
         self.root.chmod(0o700)
         self.db = connect(self.root / "turns.sqlite3")
         self.connections: dict[str, sqlite3.Connection] = {}
+        # A remote upload may commit even when the following local commit fails.
+        # A restart always reconciles; in-process repair must do so as well.
+        self.diverged = False
         self.reserve: Callable[[str, int], None] | None = None
         self.commit_inventory: Callable[[TurnRequest], None] | None = None
         self.db.execute(
@@ -228,7 +231,17 @@ class Journal:
         row = self.db.execute("SELECT request FROM turns WHERE turn_id=?", (turn_id,)).fetchone()
         return TurnRequest.model_validate_json(row[0]) if row else None
 
+    def mark_diverged(self) -> None:
+        self.diverged = True
+
+    def require_converged(self) -> None:
+        if self.diverged:
+            raise HarnessError(
+                "durability_unavailable", "Journal diverged; remote reconciliation is required"
+            )
+
     def append(self, request: TurnRequest, kind: EventType, data: dict[str, JsonValue]) -> Event:
+        self.require_converged()
         db = self.connection(request.session_id)
         if db.execute(
             "SELECT 1 FROM events WHERE turn_id=? AND type='turn_ended' LIMIT 1",
@@ -247,48 +260,65 @@ class Journal:
                         (data["request_id"], request.turn_id, json.dumps(data)),
                     )
             raise
-        with db:
-            self._announce_gap(db, request.session_id, request.turn_id)
-            seq = self._next_seq(db)
-            event = Event(
-                seq=seq,
-                session_id=request.session_id,
-                turn_id=request.turn_id,
-                at=datetime.now(UTC),
-                type=kind,
-                data=data,
-            )
-            db.execute(
-                "INSERT INTO events(seq, body, turn_id, type) VALUES (?, ?, ?, ?)",
-                (seq, event.model_dump_json(), request.turn_id, kind),
-            )
-            if kind in {"tool_use", "tool_result"}:
-                # Recovery summaries avoid dangling provider function-call items.
-                # Committing with the event preserves known side effects after a crash.
-                history = self.history(request.session_id)
-                history.append(
-                    {"role": "user", "content": "Interrupted-turn tool record: " + json.dumps(data)}
+        remote_attempted = pending_committed = False
+        try:
+            with db:
+                self._announce_gap(db, request.session_id, request.turn_id)
+                seq = self._next_seq(db)
+                if seq > MAX_CURSOR:
+                    raise ValueError("event sequence exceeds the wire cursor range")
+                event = Event(
+                    seq=seq,
+                    session_id=request.session_id,
+                    turn_id=request.turn_id,
+                    at=datetime.now(UTC),
+                    type=kind,
+                    data=data,
                 )
-                db.execute("INSERT OR REPLACE INTO history VALUES (1, ?)", (json.dumps(history),))
-            if self.commit_inventory is not None and (
-                kind in {"model_request_started", "usage", "turn_ended"}
-                or (kind == "error" and data.get("kind") == "usage_unavailable")
-            ):
-                # Remote outcome commits before this transaction can become visible.
-                try:
-                    self.commit_inventory(request)
-                except Exception:
-                    # Keep the immutable event locally, but withhold it from
-                    # replay until its remote inventory commit is confirmed.
-                    db.execute(
-                        "INSERT OR REPLACE INTO pending_inventory VALUES (?, ?)",
-                        (request.turn_id, seq),
+                db.execute(
+                    "INSERT INTO events(seq, body, turn_id, type) VALUES (?, ?, ?, ?)",
+                    (seq, event.model_dump_json(), request.turn_id, kind),
+                )
+                if kind in {"tool_use", "tool_result"}:
+                    # Recovery summaries avoid dangling provider function-call items.
+                    # Committing with the event preserves known side effects after a crash.
+                    history = self.history(request.session_id)
+                    history.append(
+                        {
+                            "role": "user",
+                            "content": "Interrupted-turn tool record: " + json.dumps(data),
+                        }
                     )
-                    db.commit()
-                    raise
-        if kind == "turn_ended":
-            with self.db:
-                self.db.execute("UPDATE turns SET ended=1 WHERE turn_id=?", (request.turn_id,))
+                    db.execute(
+                        "INSERT OR REPLACE INTO history VALUES (1, ?)", (json.dumps(history),)
+                    )
+                if self.commit_inventory is not None and (
+                    kind in {"model_request_started", "usage", "turn_ended"}
+                    or (kind == "error" and data.get("kind") == "usage_unavailable")
+                ):
+                    # Remote outcome commits before this transaction can become visible.
+                    remote_attempted = True
+                    try:
+                        self.commit_inventory(request)
+                    except Exception:
+                        # Keep the immutable event locally, but withhold it from
+                        # replay until its remote inventory commit is confirmed.
+                        db.execute(
+                            "INSERT OR REPLACE INTO pending_inventory VALUES (?, ?)",
+                            (request.turn_id, seq),
+                        )
+                        db.commit()
+                        pending_committed = True
+                        raise
+            if kind == "turn_ended":
+                with self.db:
+                    self.db.execute("UPDATE turns SET ended=1 WHERE turn_id=?", (request.turn_id,))
+        except BaseException:
+            if remote_attempted and not pending_committed:
+                # Includes a failed pending-inventory commit after a lost ack.
+                # Nothing may rebuild the remote WAL from these stale rows.
+                self.mark_diverged()
+            raise
         return event
 
     def events(
@@ -360,6 +390,11 @@ class Journal:
     def record_cursor_db(db: sqlite3.Connection, cursor: int, reserved: int = 0) -> None:
         if not 0 <= cursor <= MAX_CURSOR:
             raise ValueError("invalid client cursor")
+        latest = db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+        # Ahead-of-local fences need room for the gap and a reserved block.
+        # A cursor for an event we actually emitted remains a valid read cursor.
+        if cursor > latest and cursor > MAX_CURSOR - BLOCK - 1:
+            raise ValueError("client cursor leaves no sequence reservation capacity")
         with db:
             Journal.sequence_state(db)
             local_next = db.execute("SELECT COALESCE(MAX(seq), 0)+1 FROM events").fetchone()[0]
@@ -392,6 +427,7 @@ class Journal:
         return db.execute("SELECT reserved_high_water FROM event_sequence WHERE id=1").fetchone()[0]
 
     def flush_inventory(self, session_id: str) -> None:
+        self.require_converged()
         if getattr(self, "flushing_inventory", False):
             return
         self.flushing_inventory = True
@@ -442,7 +478,9 @@ class Journal:
         # A gap itself consumes a sequence before the requested event.
         needed = next_seq + int(next_seq > local_next)
         if needed > self.reserved_high_water(session_id):
-            high_water = next_seq + BLOCK - 1
+            if needed > MAX_CURSOR:
+                raise HarnessError("durability_unavailable", "Event sequence range is exhausted")
+            high_water = min(next_seq + BLOCK - 1, MAX_CURSOR)
             try:
                 self.reserve(session_id, high_water)
             except Exception:
@@ -480,6 +518,8 @@ class Journal:
             local_next = min(local_next, gap_from)
         seq = Journal._next_seq(db)
         if seq > local_next:
+            if seq > MAX_CURSOR:
+                raise ValueError("gap sequence exceeds the wire cursor range")
             event = Event(
                 seq=seq,
                 session_id=session_id,
@@ -499,6 +539,7 @@ class Journal:
             db.execute("UPDATE event_sequence SET gap_from=NULL WHERE id=1")
 
     def announce_gap(self, session_id: str) -> None:
+        self.require_converged()
         requests = self.turns(session_id)
         # A cursor is a valid fence even before this process knows any turn.
         turn_id = requests[-1].turn_id if requests else "session"

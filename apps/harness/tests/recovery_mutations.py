@@ -1,4 +1,4 @@
-"""Run four recovery mutations on isolated source copies (never edit the checkout).
+"""Run five recovery mutations on isolated source copies (never edit the checkout).
 
 Usage: uv run python apps/harness/tests/recovery_mutations.py <empty scratch directory>
 Run from the repository root; each property-test failure is retained in scratch.
@@ -13,7 +13,7 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 source = Path("apps/harness/src/daimon_harness")
-for number in range(1, 5):
+for number in range(1, 6):
     target = root / f"mutation-{number}" / "daimon_harness"
     shutil.copytree(source, target)
 
@@ -49,13 +49,19 @@ for number in range(1, 5):
         start = text.index('            if kind == "usage":\n', text.index("    def append("))
         end = text.index("            raise\n", start)
         path.write_text(text[:start] + text[end:])
-    else:
+    elif number == 4:
         for filename in ("journal.py", "checkpoints.py"):
             change(
                 filename,
                 '{"model_request_started", "usage", "turn_ended"}',
                 '{"model_request_started", "usage"}',
             )
+    else:
+        change(
+            "journal.py",
+            "    def mark_diverged(self) -> None:\n        self.diverged = True",
+            "    def mark_diverged(self) -> None:\n        self.diverged = False",
+        )
     env = os.environ | {"PYTHONPATH": str(target.parent.resolve())}
     with (root / f"mutation-{number}.log").open("w") as output:
         result = subprocess.run(
@@ -75,8 +81,9 @@ for number in range(1, 5):
     assert result.returncode == 1
     expected = {
         1: "measured became unknown",
-        2: "claim has no executor",
+        2: "warning submit was not accepted",
         3: "measured became unknown",
         4: "event after terminal",
+        5: "measured became unknown",
     }
     assert expected[number] in (root / f"mutation-{number}.log").read_text()

@@ -12,7 +12,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
-from daimon_harness.journal import BLOCK, Journal
+from daimon_harness.journal import BLOCK, MAX_CURSOR, Journal
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 from mux.drivers.selfhosted.wire import Event, TurnRequest
@@ -98,7 +98,7 @@ async def test_stale_poll_restore_then_newer_cursor_never_reuses_13_or_14(tmp_pa
 
 async def test_cursor_ratchet_is_durable_before_append_and_accepts_large_fences(tmp_path):
     journal = Journal(tmp_path)
-    cursor = 2**53
+    cursor = MAX_CURSOR - 2 * BLOCK
     assert journal.record_cursor(SESSION, cursor) == cursor
     assert not journal.events(SESSION)
     journal.close()  # Crash after accepting the cursor, before any event append.
@@ -153,11 +153,49 @@ def clone_local(journal, destination):
             )
 
 
+class CommitFailure:
+    """SQLite proxy: fail only writes at COMMIT, after remote inventory upload."""
+
+    def __init__(self, db):
+        self.db, self.full = db, True
+
+    def __getattr__(self, name):
+        return getattr(self.db, name)
+
+    def __enter__(self):
+        self.mark = self.db.total_changes
+        return self.db.__enter__()
+
+    def __exit__(self, kind, value, traceback):
+        if kind is None and self.full and self.db.total_changes != self.mark:
+            self.db.rollback()
+            raise sqlite3.OperationalError("database or disk is full")
+        return self.db.__exit__(kind, value, traceback)
+
+    def commit(self):
+        if self.full and self.db.in_transaction:
+            self.db.rollback()
+            raise sqlite3.OperationalError("database or disk is full")
+        return self.db.commit()
+
+
+def fail_local_commits(journal):
+    db = journal.connection(SESSION)
+    while isinstance(db, CommitFailure):
+        db = db.db
+    journal.connections[SESSION] = CommitFailure(db)
+
+
+def free_local_space(journal):
+    journal.connection(SESSION).full = False
+
+
 class ReservationBlobs(MemoryBlobs):
     def __init__(self):
         super().__init__()
         self.fail_reservations = False
         self.fail_recovery = False
+        self.fail_usage_ack = False
         self.oracle = None
 
     def upload(self, name, source):
@@ -172,6 +210,8 @@ class ReservationBlobs(MemoryBlobs):
             for event in json.loads(raw)["inventory"]:
                 if event["type"] == "usage":
                     self.oracle.durable(event["turn_id"], event["data"])
+        if self.fail_usage_ack and "/wal/" in name and b'"type":"usage"' in raw:
+            raise OSError("usage committed but acknowledgement lost")
         return result
 
 
@@ -242,6 +282,7 @@ OPERATIONS = st.lists(
                 "paid_reservation_failure",
                 "warning_reservation_failure",
                 "recover_retry",
+                "local_commit_failure",
             ]
         ),
         st.integers(min_value=0, max_value=3000),
@@ -272,6 +313,8 @@ OPERATIONS = st.lists(
 @example(trace=[("paid_reservation_failure", 0, 0)] * 8)
 @example(trace=[("warning_reservation_failure", 0, 0)] * 8)
 @example(trace=[("recover_retry", 0, 0)] * 8)
+@example(trace=[("local_commit_failure", 0, 0)] * 8)
+@example(trace=[("local_commit_failure", 0, 1)] * 8)
 async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trace):
     with tempfile.TemporaryDirectory(prefix="sequence-reservation-", dir=tmp_path) as scratch:
         root, blobs, oracle = Path(scratch), ReservationBlobs(), HostSeen()
@@ -291,9 +334,11 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
             # Polling is the only observation channel. Never inspect the journal
             # to learn an event or advance a restoring client's cursor.
 
-        async def poll(cursor=0):
+        async def poll(cursor=0, *, expect_complete=False):
             response = await client.get(EVENTS, params={"after_seq": cursor, "replay_after_seq": 0})
             assert response.status_code == 200, response.text
+            if expect_complete:
+                assert response.json()["complete"], "warning turn remained incomplete"
             events = response.json()["events"]
             oracle.observe(events)
             return events
@@ -377,6 +422,7 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                     "paid_reservation_failure",
                     "warning_reservation_failure",
                     "recover_retry",
+                    "local_commit_failure",
                 }:
                     for turn_id, task in list(supervisor.tasks.items()):
                         if not task.done():
@@ -397,6 +443,7 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                             special=special,
                             ready=ready,
                             release=release,
+                            which=which,
                         ):
                             request_id = special + ":request"
                             await context.emit(
@@ -417,6 +464,9 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                                 output_tokens=45,
                                 reasoning_tokens=0,
                             )
+                            if operation == "local_commit_failure":
+                                await supervisor.io(fail_local_commits, supervisor.journal)
+                                blobs.fail_usage_ack = bool(which % 2)
                             if operation == "paid_reservation_failure":
                                 fence = await supervisor.io(
                                     supervisor.journal.reserved_high_water, SESSION
@@ -478,7 +528,15 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                             await restart(remote_blobs=frozen_remote, recover_retry=True)
                     else:
                         await settle()
-                        await poll()
+                        if operation == "local_commit_failure":
+                            assert (await client.get(EVENTS)).status_code == 503
+                            await supervisor.io(free_local_space, supervisor.journal)
+                            blobs.fail_usage_ack = False
+                        events = await poll()
+                        if operation == "local_commit_failure":
+                            # Same process/supervisor; never hide the failure by
+                            # restarting before checking the host's usage outcome.
+                            oracle.complete(events)
                         if operation == "warning_reservation_failure":
                             assert await supervisor.io(
                                 supervisor.journal.latest_seq, SESSION
@@ -491,14 +549,32 @@ async def test_sequence_ratchet_random_interleavings(tmp_path, monkeypatch, trac
                             result = await client.post(
                                 "/v0/turns", json=turn(turn_id=warning_turn, key=warning_turn)
                             )
-                            claimed = await supervisor.io(supervisor.journal.find, warning_turn)
-                            assert claimed is None or warning_turn in supervisor.tasks, (
-                                "claim has no executor"
-                            )
+                            assert result.status_code == 202, "warning submit was not accepted"
                             await asyncio.gather(*supervisor.tasks.values(), return_exceptions=True)
                             blobs.fail_reservations = False
-                            await poll()
-                            assert await supervisor.io(supervisor.journal.ended, warning_turn)
+                            events = await poll()
+                            assert (
+                                sum(
+                                    e["turn_id"] == warning_turn and e["type"] == "turn_ended"
+                                    for e in events
+                                )
+                                == 1
+                            ), "warning turn has no terminal"
+                            supervisor.adapter = ControlledModel()
+                            following = warning_turn + "-next"
+                            response = await client.post(
+                                "/v0/turns", json=turn(turn_id=following, key=following)
+                            )
+                            assert response.status_code == 202, "warning blocked the next turn"
+                            await settle()
+                            events = await poll()
+                            assert (
+                                sum(
+                                    e["turn_id"] == following and e["type"] == "turn_ended"
+                                    for e in events
+                                )
+                                == 1
+                            )
                     supervisor.adapter = ControlledModel()
                     blobs.fail = False
                 elif operation == "reservation_failure":
@@ -815,7 +891,6 @@ async def test_warning_reservation_failure_at_seq_1024_keeps_claim_owned(tmp_pat
         blobs.fail_reservations = True
         result = await client.post("/v0/turns", json=turn(turn_id="warning", key="warning"))
         assert result.status_code == 202
-        assert "warning" in supervisor.tasks
         await asyncio.gather(supervisor.tasks["warning"], return_exceptions=True)
         blobs.fail_reservations = False
         assert (await client.get(EVENTS)).status_code == 200
@@ -870,3 +945,64 @@ def test_gap_reserves_even_when_imported_inventory_reaches_floor(tmp_path):
         assert journal.reserved_high_water(SESSION) >= 2
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize("route", ["poll", "turn", "action", "cancel", "invocations"])
+@pytest.mark.parametrize("cursor", [MAX_CURSOR, MAX_CURSOR - 1])
+async def test_cursor_without_wire_sequence_headroom_is_rejected_before_ratchet(
+    tmp_path, route, cursor
+):
+    async with harness(tmp_path, MemoryBlobs()) as (supervisor, client):
+        if route == "poll":
+            response = await client.get(EVENTS, params={"after_seq": cursor})
+        elif route == "turn":
+            response = await client.post("/v0/turns", json=turn(), params={"after_seq": cursor})
+        elif route == "invocations":
+            response = await client.post(
+                "/invocations",
+                json={
+                    "c3": {
+                        "method": "GET",
+                        "path": EVENTS,
+                        "query": {"after_seq": str(cursor)},
+                    }
+                },
+            )
+        else:
+            response = await client.post(
+                f"/v0/turns/turn-1/{'actions' if route == 'action' else 'cancel'}",
+                params={"after_seq": cursor},
+                json={"action_id": "missing", "decision": "allow"} if route == "action" else None,
+            )
+        assert response.status_code == 422, response.text
+        assert await supervisor.io(supervisor.journal.client_cursor, SESSION) == 0
+        assert (await client.post("/v0/turns", json=turn())).status_code == 202
+        await supervisor.tasks["turn-1"]
+        replay = await client.get(EVENTS)
+        assert replay.status_code == 200 and replay.json()["complete"]
+
+
+async def test_near_limit_emitted_cursor_round_trips_without_being_rejected_as_a_new_fence(
+    tmp_path,
+):
+    async with harness(tmp_path, MemoryBlobs()) as (supervisor, client):
+        assert (await client.post("/v0/turns", json=turn())).status_code == 202
+        await supervisor.tasks["turn-1"]
+        cursor = MAX_CURSOR - BLOCK - 1
+        assert (
+            await client.post(
+                "/v0/turns", json=turn(turn_id="near", key="near"), params={"after_seq": cursor}
+            )
+        ).status_code == 202
+        for _ in range(100):
+            response = await client.get(EVENTS, params={"after_seq": cursor, "replay_after_seq": 0})
+            assert response.status_code == 200, response.text
+            events = response.json()["events"]
+            assert all(event["seq"] <= MAX_CURSOR for event in events)
+            cursor = max(cursor, *(event["seq"] for event in events))
+            if response.json()["complete"]:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("near-limit turn did not complete")
+        assert (await client.get(EVENTS, params={"after_seq": cursor})).status_code == 200

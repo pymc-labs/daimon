@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -255,13 +256,21 @@ class Supervisor:
         return None
 
     def prepare_session(self, session_id: str, after_seq: int = 0) -> None:
-        if self.session_mode == "single":
-            self.journal.bind_session(session_id)
-        after_seq = self.journal.record_cursor(session_id, after_seq)
+        if self.journal.diverged:
+            self.restored = False
+        try:
+            if self.session_mode == "single":
+                self.journal.bind_session(session_id)
+            after_seq = self.journal.record_cursor(session_id, after_seq)
+        except sqlite3.Error:
+            raise HarnessError("durability_unavailable", "Local journal is unavailable") from None
         if self.checkpoints is not None and not self.restored:
             try:
                 self.journal = self.checkpoints.restore(self.journal, session_id, after_seq)
                 self.attach_durability()
+                # Clear the seal only after all original remote events and the
+                # reservation fence have committed locally. A failed merge keeps it.
+                self.journal.diverged = False
                 self.journal.flush_inventory(session_id)
                 self.journal.bind_session(session_id)
                 cursor_file = self.journal.root / "restore.cursor"
@@ -280,8 +289,10 @@ class Supervisor:
                 audit_logger.warning(
                     "checkpoint_failed stage=restore reason=%s", type(exc).__name__
                 )
+                diverged = self.journal.diverged
                 self.journal.close()
                 self.journal = Journal(self.home)
+                self.journal.diverged = diverged
                 self.attach_durability()
                 self.journal.record_cursor(session_id, after_seq)
                 if isinstance(exc, HarnessError):
@@ -304,8 +315,11 @@ class Supervisor:
                 await self.io(self.prepare_session, session_id, after_seq)
             except ConflictError:
                 raise HTTPException(status_code=409, detail="session_bound") from None
+            except ValueError:
+                raise HTTPException(status_code=422, detail="Invalid client cursor") from None
 
     def recover(self, sandbox_lost: bool = False) -> None:
+        self.journal.require_converged()
         if (self.journal.root / "restore.pending").exists() or (
             (self.journal.root / "restore.cursor").exists() and not sandbox_lost
         ):

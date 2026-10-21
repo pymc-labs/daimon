@@ -157,8 +157,53 @@ class WriteAhead(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request: TurnRequest
     digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    high_water: int = Field(ge=0, le=2**63 - 1)
+    high_water: int = Field(ge=0, le=MAX_CURSOR)
     inventory: list[Event]
+
+
+def merge_write_ahead(remote: WriteAhead, local: WriteAhead) -> WriteAhead:
+    """Union immutable inventory; a measured outcome always dominates unknown."""
+    if remote.request != local.request or remote.digest != local.digest:
+        raise ValueError("write-ahead claim changed")
+    inventory: dict[tuple[str, str], Event] = {}
+    for event in [*remote.inventory, *local.inventory]:
+        if (
+            event.session_id != local.request.session_id
+            or event.turn_id != local.request.turn_id
+            or event.seq > max(remote.high_water, local.high_water)
+        ):
+            raise ValueError("foreign write-ahead inventory")
+        if event.type == "turn_ended":
+            key = ("turn_ended", "")
+        else:
+            request_id = event.data.get("request_id")
+            if not isinstance(request_id, str):
+                raise ValueError("write-ahead inventory has no request id")
+            if event.type == "model_request_started":
+                key = ("model_request_started", request_id)
+            elif event.type == "usage" or (
+                event.type == "error" and event.data.get("kind") == "usage_unavailable"
+            ):
+                key = ("outcome", request_id)
+            else:
+                raise ValueError("invalid write-ahead inventory")
+        previous = inventory.get(key)
+        if previous is not None and previous != event:
+            if key[0] == "outcome" and previous.type != event.type:
+                if previous.type == "usage":
+                    continue
+            else:
+                raise ValueError("write-ahead changed an immutable event")
+        inventory[key] = event
+    events = sorted(inventory.values(), key=lambda event: event.seq)
+    if len({event.seq for event in events}) != len(events):
+        raise ValueError("write-ahead reused an event sequence")
+    return remote.model_copy(
+        update={
+            "high_water": max(remote.high_water, local.high_water),
+            "inventory": events,
+        }
+    )
 
 
 class Checkpoints:
@@ -169,6 +214,8 @@ class Checkpoints:
         self.restored_seq: int | None = None
 
     def reserve_sequences(self, session_id: str, high_water: int) -> None:
+        if not 0 < high_water <= MAX_CURSOR:
+            raise ValueError("sequence reservation exceeds the wire cursor range")
         record = json.dumps(
             {"session_id": identifier(session_id), "reserved_high_water": high_water}
         ).encode()
@@ -191,13 +238,14 @@ class Checkpoints:
             if (
                 json.loads(output.getvalue())
                 != {"session_id": session_id, "reserved_high_water": value}
-                or not 0 < value < 2**63
+                or not 0 < value <= MAX_CURSOR
             ):
                 raise ValueError("invalid sequence reservation")
             high_water = max(high_water, value)
         return high_water
 
     def write_ahead(self, journal: Journal, request: TurnRequest) -> bytes:
+        journal.require_converged()
         body = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
         minimal = request.model_copy(
             update={
@@ -232,9 +280,20 @@ class Checkpoints:
         )
 
     def upload_write_ahead(self, session_id: str, turn_id: str, record: bytes) -> None:
-        self.store.upload(
-            f"sessions/{sandbox_id(session_id)}/wal/{identifier(turn_id)}.json", io.BytesIO(record)
-        )
+        name = f"sessions/{sandbox_id(session_id)}/wal/{identifier(turn_id)}.json"
+        incoming = WriteAhead.model_validate_json(record)
+        if incoming.request.session_id != session_id or incoming.request.turn_id != turn_id:
+            raise ValueError("foreign write-ahead claim")
+        if name in self.store.list(name):
+            output = io.BytesIO()
+            self.store.download(name, output)
+            if output.tell() > 8 * 1024 * 1024:
+                raise ValueError("write-ahead record too large")
+            remote = WriteAhead.model_validate_json(output.getvalue())
+            incoming = merge_write_ahead(remote, incoming)
+        else:
+            incoming = merge_write_ahead(incoming, incoming)
+        self.store.upload(name, io.BytesIO(incoming.model_dump_json().encode()))
 
     def restore(self, journal: Journal, session_id: str, after_seq: int = 0) -> Journal:
         after_seq = journal.record_cursor(session_id, after_seq)

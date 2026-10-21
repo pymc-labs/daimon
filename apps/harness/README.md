@@ -666,6 +666,24 @@ Restore an empty sandbox from its checkpoint; merge immutable WAL events at
 their original sequences. Flush local pending inventory and measured responses
 only after that merge. Then repair unfinished claims: close unmatched requests
 as unknown, and append one interrupted terminal. A durable terminal skips repair.
+The same ordering applies mid-process if the remote upload succeeds but the
+local SQLite commit rolls back (for example, a full disk). The journal enters
+**DIVERGED** state, including when committing pending inventory after a lost
+acknowledgement fails. Appends, recovery and new write-ahead serialization refuse
+with retryable `durability_unavailable` until the next authenticated request
+re-runs the startup WAL/reservation merge. The seal clears only after the original
+remote event identities and reservation fence commit locally. A failed merge
+keeps the seal, including across reopening the local journal. A process restart
+also always reconciles before repair, so the in-memory seal need not write to a
+full disk.
+
+WAL uploads run on the serial WAL worker and merge the stored record before
+replacement. Inventory and high-water never shrink: measured usage dominates
+`usage_unavailable`, original measured event bodies/sequences remain immutable,
+and conflicting measured counts or claims refuse the update. This remote union
+is an additional safeguard; it does not authorize exposing a divergent local
+outcome before reconciliation.
+
 Only after repair succeeds may a new turn be claimed. The claim's task owns
 warning delivery and finalization; submit performs no fallible work between
 committing a claim and registering its executor. Failed recovery is retryable.
@@ -682,13 +700,14 @@ committing a claim and registering its executor. Failed recovery is retryable.
 
 The recovery property generator includes remote usage upload before local commit,
 paid-response reservation failure, warning delivery at an exhausted block, and
-partial recovery failure followed by retry. Its host oracle checks immutable
+partial recovery failure followed by retry, and a mid-process local commit
+failure after remote usage upload (both normal and lost-ack commits). Its host oracle checks immutable
 sequences, durable measured outcomes, one terminal with no later turn events,
-and executor ownership of claims. A separate regression uses the real 1024
+and host-visible completion/admission after warning failures. A separate regression uses the real 1024
 boundary for warning delivery. Remote uploads extend a measurement-only oracle;
 they never advance the simulated host's event cursor.
 
-Reproduce the four isolated mutation checks from the repository root:
+Reproduce the five isolated mutation checks from the repository root:
 
 ```sh
 scratch=$(mktemp -d)
@@ -697,7 +716,18 @@ uv run python apps/harness/tests/recovery_mutations.py "$scratch"
 
 The script reverts each fix separately in copied source, using the same Hypothesis
 property (seed 7, including explicit regression traces). Expected pytest exit: 1
-for all four. Restoring startup repair before WAL reconciliation loses measured
+for all five. Restoring startup repair before WAL reconciliation loses measured
 usage; restoring submit-owned warning delivery strands a claim; removing pending
 measured-response persistence loses measured usage; removing terminal WAL records
-emits events after a terminal. The original source remains untouched.
+emits events after a terminal; disabling the divergence seal makes a mid-process
+commit rollback replace the host's measured outcome with unknown. Mutation 2
+asserts HTTP acceptance, a terminal in the host's poll, and successful admission
+of the following turn, rather than inspecting executor ownership. The original
+source remains untouched.
+
+Cursors and generated events share the driver's `0..2**53` wire range. An
+unseen cursor must leave space for a gap and a 1024-event reservation, or the
+harness rejects it with 422 before persisting the ratchet. In particular,
+`after_seq=2**53` and `2**53-1` cannot fence a session beyond the wire range.
+Cursors from events actually emitted by this journal remain valid for replay;
+reservation writes and event/gap allocation never exceed the wire maximum.

@@ -1605,3 +1605,179 @@ async def test_surviving_real_driver_recovers_wal_usage_once_after_sandbox_loss(
             )
             assert model.calls == 1 and new_model.calls == 0
             assert await driver.usage.reconcile(SCOPE, session.ref) == observations
+
+
+@pytest.mark.parametrize(
+    "incoming", ["start_only", "unknown_same_seq", "unknown_later_seq", "measured"]
+)
+async def test_write_ahead_upload_never_downgrades_remote_measured_usage(tmp_path, incoming):
+    from daimon_harness.checkpoints import WriteAhead
+    from daimon_harness.journal import Journal
+    from mux.drivers.selfhosted.wire import Event, TurnRequest
+
+    blobs, journal = MemoryBlobs(), Journal(tmp_path)
+    checkpoints = Checkpoints(blobs)
+    request = TurnRequest.model_validate(turn())
+    journal.claim(request)
+    journal.append(request, "model_request_started", {"request_id": "paid", "model": "gpt-6-luna"})
+    journal.append(
+        request,
+        "usage",
+        dict(
+            request_id="paid",
+            model="gpt-6-luna",
+            input_tokens=123,
+            cached_input_tokens=0,
+            output_tokens=45,
+            reasoning_tokens=0,
+        ),
+    )
+    rich = WriteAhead.model_validate_json(checkpoints.write_ahead(journal, request))
+    measured = rich.inventory[-1]
+    try:
+        checkpoints.upload_write_ahead(
+            request.session_id, request.turn_id, rich.model_dump_json().encode()
+        )
+        local = rich.model_copy(deep=True)
+        if incoming == "start_only":
+            local.inventory = rich.inventory[:1]
+            local.high_water = local.inventory[-1].seq
+        elif incoming.startswith("unknown"):
+            unknown = Event(
+                seq=measured.seq + int(incoming == "unknown_later_seq"),
+                session_id=request.session_id,
+                turn_id=request.turn_id,
+                at=measured.at,
+                type="error",
+                data={
+                    "kind": "usage_unavailable",
+                    "request_id": "paid",
+                    "message": "stale local inventory",
+                    "retryable": False,
+                },
+            )
+            local.inventory[-1] = unknown
+            local.high_water = unknown.seq
+        checkpoints.upload_write_ahead(
+            request.session_id, request.turn_id, local.model_dump_json().encode()
+        )
+        remote = WriteAhead.model_validate_json(next(iter(blobs.blobs.values())))
+        assert remote.inventory == rich.inventory
+        assert remote.inventory[-1] == measured
+        assert remote.high_water == max(rich.high_water, local.high_water)
+    finally:
+        journal.close()
+
+
+async def test_conflicting_measured_wal_update_preserves_original_blob(tmp_path):
+    from daimon_harness.checkpoints import WriteAhead
+    from daimon_harness.journal import Journal
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    blobs, journal = MemoryBlobs(), Journal(tmp_path)
+    checkpoints = Checkpoints(blobs)
+    request = TurnRequest.model_validate(turn())
+    journal.claim(request)
+    journal.append(
+        request,
+        "usage",
+        dict(
+            request_id="paid",
+            model="gpt-6-luna",
+            input_tokens=123,
+            cached_input_tokens=0,
+            output_tokens=45,
+            reasoning_tokens=0,
+        ),
+    )
+    raw = checkpoints.write_ahead(journal, request)
+    try:
+        checkpoints.upload_write_ahead(request.session_id, request.turn_id, raw)
+        before = blobs.blobs.copy()
+        conflict = WriteAhead.model_validate_json(raw)
+        conflict.inventory[0].data["input_tokens"] = 999
+        with pytest.raises(ValueError, match="immutable event"):
+            checkpoints.upload_write_ahead(
+                request.session_id, request.turn_id, conflict.model_dump_json().encode()
+            )
+        assert blobs.blobs == before
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize("lost_ack", [False, True])
+async def test_divergence_seals_appends_until_remote_merge_succeeds_in_same_process(
+    tmp_path, lost_ack
+):
+    from daimon_harness.errors import HarnessError
+    from mux.drivers.selfhosted.wire import TurnRequest
+
+    from .test_sequence_ratchet import fail_local_commits, free_local_space
+
+    class Storage(MemoryBlobs):
+        offline = False
+        lose_ack = lost_ack
+
+        def list(self, prefix):
+            if self.offline:
+                raise OSError("storage offline during reconciliation")
+            return super().list(prefix)
+
+        def upload(self, name, source):
+            raw = source.read()
+            super().upload(name, io.BytesIO(raw))
+            if self.lose_ack and "/wal/" in name and b'"type":"usage"' in raw:
+                raise OSError("remote commit acknowledgement lost")
+
+    class Model:
+        async def run(self, context, history):
+            await context.emit(
+                "model_request_started", {"request_id": "paid", "model": "gpt-6-luna"}
+            )
+            await supervisor.io(fail_local_commits, supervisor.journal)
+            await context.emit(
+                "usage",
+                dict(
+                    request_id="paid",
+                    model="gpt-6-luna",
+                    input_tokens=123,
+                    cached_input_tokens=0,
+                    output_tokens=45,
+                    reasoning_tokens=0,
+                ),
+            )
+            return history
+
+    blobs = Storage()
+    async with harness(tmp_path, blobs, Model()) as (supervisor, client):
+        request = TurnRequest.model_validate(turn())
+        assert (await client.post("/v0/turns", json=turn())).status_code == 202
+        await asyncio.gather(supervisor.tasks["turn-1"], return_exceptions=True)
+        remote_before = blobs.blobs.copy()
+        assert supervisor.journal.diverged
+        with pytest.raises(HarnessError, match="diverged"):
+            await supervisor.io(supervisor.journal.append, request, "status_running", {})
+        with pytest.raises(HarnessError, match="diverged"):
+            await supervisor.io(supervisor.recover)
+        await supervisor.io(free_local_space, supervisor.journal)
+        blobs.lose_ack, blobs.offline = False, True
+        assert (await client.get("/v0/sessions/session-1/events")).status_code == 503
+        with pytest.raises(HarnessError, match="diverged"):
+            await supervisor.io(supervisor.checkpoints.write_ahead, supervisor.journal, request)
+        assert blobs.blobs == remote_before
+        blobs.offline = False
+        response = await client.get("/v0/sessions/session-1/events")
+        assert response.status_code == 200 and response.json()["complete"]
+        events = response.json()["events"]
+        usage = [e for e in events if e["type"] == "usage"]
+        assert len(usage) == 1
+        assert usage[0]["seq"] == 3 and usage[0]["data"]["input_tokens"] == 123
+        assert usage[0]["data"]["output_tokens"] == 45
+        assert not any(e["data"].get("kind") == "usage_unavailable" for e in events)
+        assert sum(e["type"] == "turn_ended" for e in events) == 1
+        supervisor.adapter = FakeModelAdapter()
+        assert (
+            await client.post("/v0/turns", json=turn(turn_id="next", key="next"))
+        ).status_code == 202
+        await supervisor.tasks["next"]
+        assert (await client.get("/v0/sessions/session-1/events")).json()["complete"]
