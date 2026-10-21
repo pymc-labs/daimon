@@ -2,7 +2,8 @@
 
 This chart deploys the Compose host processes (init, MCP, Teams, scheduler,
 optional Discord/Slack), one persistent multi-session harness and bundled
-PostgreSQL 18. Set `postgres.bundled=false` for PostgreSQL Flexible Server.
+PostgreSQL 18. Set `postgres.bundled=false` and `postgres.host` to the Flexible Server hostname
+for an external PostgreSQL database.
 All Services are ClusterIP. One optional Ingress routes separate MCP and Teams
 hostnames, including Teams `/api/messages`; it never publishes the harness or PG.
 
@@ -183,8 +184,9 @@ Use a US/EU Data Zone region such as `eastus2`; do not silently switch to Global
 SKU or another model if quota is zero. Data Zone routing is within the selected
 US/EU zone, not a promise of processing within one Azure region. The program's
 Luna quota is currently a known external gate. Microsoft documents B-series as
-unsupported for system pools; this recipe follows the lead's explicit D2s_v6
-pilot selection and requires subscription/API acceptance of that one-node SKU.
+unsupported for system pools; the first live install in this subscription required `Standard_D2s_v6`
+(B-series was rejected). This recipe uses that exact one-node SKU; other
+subscriptions still require their own quota/API validation.
 
 If providers are not registered, a subscription admin runs these **before** the
 timed install (do not run with an RG-only identity and expect them to work):
@@ -229,6 +231,13 @@ az cognitiveservices account deployment create -g "$RG" -n "$AOAI" \
   --model-format OpenAI --sku-name DataZoneStandard --sku-capacity 1 -o none
 ```
 
+**Mandatory Postgres image step:** `images.registry` prefixes **all three**
+images, including PostgreSQL and its new readiness init containers. The
+`az acr import` above must complete before Helm: without it, AKS attempts
+`<acr>.azurecr.io/postgres:18-alpine` and enters ImagePullBackOff. To repair an
+existing registry, run that same import command; host/harness builds do not
+create the Postgres repository. The helper verifies the imported image exists.
+
 ACR builds the current checkout remotely. It contains no `.env` or credentials;
 review `.dockerignore` before building. No registry password is generated;
 `attach-acr` grants image pulls to the AKS kubelet identity. No Key Vault, Blob,
@@ -256,15 +265,33 @@ for pair in postgres:pg host:host harness:harness aoai:aoai; do
     --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 done
 helm install coke deploy/helm/daimon-selfhost -n daimon -f "$AKS_STATE/aks-values.json" \
-  --set services.enabled=false --set harness.enabled=false
-kubectl -n daimon wait --for=condition=complete job/coke-daimon-init-1 --timeout=600s
-helm upgrade coke deploy/helm/daimon-selfhost -n daimon -f "$AKS_STATE/aks-values.json" --set init.enabled=false
+  --wait --wait-for-jobs --timeout 15m
 kubectl -n daimon rollout status statefulset/coke-daimon-harness --timeout=300s
-kubectl -n daimon wait --for=condition=ready pod --all --timeout=300s
+kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
 ```
 
+The Job and every host Deployment first run a bounded `pg_isready` init
+container (`postgres.waitTimeoutSeconds`, default 300). Hosts then wait for
+`alembic current --check-heads` before starting; the Job runs upgrade/defaults.
+The Job allows two retries and has a 900-second total deadline. This ordering
+lets **one clean `helm install --wait --wait-for-jobs`** deploy everything without
+racing Postgres or starting scheduler against an unmigrated schema. Completed
+Job pods are excluded from subsequent pod-Ready waits. Failed migrations remain
+visible Job failures; do not enable traffic or hide a real migration error.
+
 The generated nonsecret values use ACR, Luna, `azureOpenAI.apiKeySecretRef`, and
-current AOAI IPv4 `/32` addresses. Only AOAI HTTPS, DNS and the in-cluster MCP
+current AOAI IPv4 `/32` addresses, resolved from the actual account hostname.
+The first live install resolved **`20.62.58.5/32`**. This is observed evidence,
+not a portable default: resolve your own endpoint at install time, as the helper
+does with Python `socket.getaddrinfo`, and refresh it when DNS changes. For
+example, the nonsecret value from that installation was:
+
+```yaml
+networkPolicy:
+  azureOpenAICidrs: [20.62.58.5/32]
+```
+
+Only AOAI HTTPS, DNS and the in-cluster MCP
 Service are allowed from the harness; no Blob destination is supplied. PG is
 used by host processes, not by the harness. IP changes require regenerating the
 allowlist and a controlled Helm update; use private endpoints for production.
@@ -438,7 +465,7 @@ always explicitly select Luna. Never put credentials in the registration JSON.
 
 ## Local validation
 
-Linux amd64, Docker, Python 3 and curl are required. Binaries are pinned and
+Linux amd64, Docker, uv, Python 3 and curl are required. Binaries are pinned and
 SHA256-verified against the upstream release checksum files, installed in
 `~/.local/bin`. No Azure credentials or resources are used:
 
@@ -453,8 +480,10 @@ bash deploy/helm/daimon-selfhost/tests/kind-smoke.sh
 docker image rm daimon-l14:local daimon-harness-l14:local
 ```
 
-The script loads images, installs bundled PG, waits for init completion, enables
-host processes, patches in a fixture-only fake adapter and verifies all pods
+The script loads images and post-renders only offline fixtures: a 20-second
+Postgres startup delay and the fake harness adapter. It installs PG, the init
+Job and all host processes together with `--wait --wait-for-jobs`, asserts revision
+one is deployed with no main-container restarts, and verifies all serving pods
 Ready, MCP health, authenticated C3 health, unauthorized rejection, two sessions,
 tool writes, fake usage, event polling, idempotency and replay after pod replacement. It verifies the multi-mode
 proc/scratch checks, service UID 10000, SYS_ADMIN removal and unprivileged tool UID.

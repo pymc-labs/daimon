@@ -11,8 +11,8 @@ metadata:
   name: {{ include "d.name" $ }}-{{ $name }}{{ if $init }}-{{ $.Release.Revision }}{{ end }}
 spec:
   {{- if $init }}
-  backoffLimit: 0
-  activeDeadlineSeconds: 600
+  backoffLimit: {{ $.Values.init.backoffLimit }}
+  activeDeadlineSeconds: {{ $.Values.init.activeDeadlineSeconds }}
   {{- else }}
   replicas: 1
   strategy: {type: Recreate}
@@ -28,17 +28,60 @@ spec:
       {{- end }}
       automountServiceAccountToken: false
       imagePullSecrets: {{ $.Values.imagePullSecrets | toJson }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "d.image" (dict "root" $ "image" $.Values.images.postgres) | quote }}
+          imagePullPolicy: {{ $.Values.images.postgres.pullPolicy }}
+          command: [sh, -ec]
+          args:
+            - >-
+              echo 'Waiting for PostgreSQL to accept connections';
+              timeout {{ $.Values.postgres.waitTimeoutSeconds }} sh -ec
+              'until pg_isready -q -t 2; do sleep 2; done';
+              echo 'PostgreSQL accepts connections'
+          env:
+            {{- if $.Values.postgres.bundled }}
+            - {name: PGHOST, value: {{ printf "%s-postgres" (include "d.name" $) | quote }}}
+            {{- else }}
+            - {name: PGHOST, value: {{ required "postgres.host is required when bundled=false" $.Values.postgres.host | quote }}}
+            {{- end }}
+            - {name: PGPORT, value: {{ $.Values.postgres.port | quote }}}
+            - {name: PGUSER, value: {{ $.Values.postgres.user | quote }}}
+            - {name: PGDATABASE, value: {{ $.Values.postgres.database | quote }}}
+          securityContext:
+            runAsUser: 65534
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+        {{- if not $init }}
+        - name: wait-for-migrations
+          image: {{ include "d.image" (dict "root" $ "image" $.Values.images.host) | quote }}
+          imagePullPolicy: {{ $.Values.images.host.pullPolicy }}
+          command: [sh, -ec]
+          args:
+            - >-
+              echo 'Waiting for the packaged Alembic heads';
+              timeout {{ $.Values.init.activeDeadlineSeconds }} sh -ec
+              'until alembic current --check-heads >/dev/null 2>&1; do sleep 2; done';
+              echo 'Database schema is current'
+          envFrom:
+            - secretRef: {name: {{ $.Values.secrets.host }}}
+          env:
+            - {name: PGSSLROOTCERT, value: /etc/ssl/certs/ca-certificates.crt}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          {{- include "d.csiMount" $ | nindent 10 }}
+        {{- end }}
       containers:
         - name: {{ $name }}
           image: {{ include "d.image" (dict "root" $ "image" $.Values.images.host) | quote }}
           imagePullPolicy: {{ $.Values.images.host.pullPolicy }}
           {{- if $init }}
-          command: [sh, -ec]
-          args:
-            - >-
-              until python -c 'import asyncio,os; from sqlalchemy.ext.asyncio import create_async_engine; e=create_async_engine(os.environ["DAIMON_DATABASE__URL"]); asyncio.run(e.connect().start())' >/dev/null 2>&1;
-              do sleep 2; done;
-              alembic upgrade head && daimon defaults apply
+          command: [sh, -ec, "alembic upgrade head && daimon defaults apply"]
           {{- else if eq $name "mcp" }}
           command: [uvicorn, "daimon.adapters.mcp.server:create_mcp_app", --factory, --host, 0.0.0.0, --port, {{ $svc.port | quote }}]
           {{- else if eq $name "scheduler" }}

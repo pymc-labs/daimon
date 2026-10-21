@@ -59,37 +59,28 @@ if command -v kubeconform >/dev/null; then
 else
   echo 'kubeconform unavailable; API server dry-run after install validates schema'
 fi
-helm install smoke "$chart" -n daimon -f "$scratch/local.yaml" \
-  --set services.enabled=false --set harness.enabled=false
-kubectl -n daimon wait --for=condition=complete job/smoke-daimon-init-1 --timeout=300s
-kubectl -n daimon logs job/smoke-daimon-init-1 | tail -5
-helm upgrade smoke "$chart" -n daimon -f "$scratch/local.yaml" --set init.enabled=false
 kubectl -n daimon create configmap offline-harness --from-file="$chart/tests/fake.py"
-cat > "$scratch/fake-patch.yaml" <<'YAML'
-spec:
-  template:
-    spec:
-      volumes:
-        - name: offline
-          configMap: {name: offline-harness, defaultMode: 256}
-      containers:
-        - name: harness
-          args:
-            - mount -o remount,hidepid=2,gid=60002 /proc; chmod 755 /tmp /var/tmp /dev/shm /run/lock; chmod 600 /dev/termination-log; chown 0:0 /home/harness; chmod 711 /home/harness; exec python /validation/fake.py
-          volumeMounts:
-            - {name: offline, mountPath: /validation, readOnly: true}
-YAML
-kubectl -n daimon patch statefulset smoke-daimon-harness --type=strategic --patch-file "$scratch/fake-patch.yaml"
-# OrderedReady can hold a failed original pod rather than replace it with the
-# fixture revision. Delete exactly that pod after patching, preserving its PVC.
-kubectl -n daimon delete pod smoke-daimon-harness-0
-kubectl -n daimon rollout status statefulset/smoke-daimon-harness --timeout=300s
-kubectl -n daimon wait --for=condition=ready pod --all --timeout=300s
+cat > "$scratch/postrender" <<'RENDER'
+#!/usr/bin/env bash
+set -euo pipefail
+exec uv run python deploy/helm/daimon-selfhost/tests/kind-postrender.py
+RENDER
+chmod +x "$scratch/postrender"
+# One fresh release, all hosts and Job together; PG intentionally starts late.
+helm install smoke "$chart" -n daimon -f "$scratch/local.yaml" \
+  --post-renderer "$scratch/postrender" --wait --wait-for-jobs --timeout 15m
+kubectl -n daimon wait --for=condition=complete job/smoke-daimon-init-1 --timeout=5s
+helm status smoke -n daimon -o json | python3 -c \
+  'import json,sys; s=json.load(sys.stdin); assert s["version"] == 1 and s["info"]["status"] == "deployed"; print("First install: revision 1 deployed")'
+kubectl -n daimon get pods -o json | python3 -c \
+  'import json,sys; pods=json.load(sys.stdin)["items"]; assert all(c["restartCount"] == 0 for p in pods for c in p["status"].get("containerStatuses", [])); print("No main-container restarts during delayed-Postgres install")'
+kubectl -n daimon logs job/smoke-daimon-init-1 | tail -5
+kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
 kubectl -n daimon get pods
 kubectl -n daimon exec deployment/smoke-daimon-mcp -- python -c \
   'import urllib.request; print(urllib.request.urlopen("http://localhost:8765/healthz").read().decode())'
 kubectl -n daimon exec -i deployment/smoke-daimon-mcp -- python - < "$chart/tests/probe.py"
-kubectl -n daimon logs smoke-daimon-harness-0 | head -5
+kubectl -n daimon logs smoke-daimon-harness-0 --tail=5
 kubectl -n daimon exec smoke-daimon-harness-0 -- sh -c 'cat /proc/mounts | head -5'
 # Same PVC, new process: completed turns replay without executing tools again.
 kubectl -n daimon delete pod smoke-daimon-harness-0

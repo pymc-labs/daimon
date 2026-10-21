@@ -5,7 +5,7 @@ scratch=$(mktemp -d)
 trap 'rm -r "$scratch"' EXIT
 helm lint --strict "$chart"
 helm template coke "$chart" > "$scratch/default.yaml"
-helm template coke "$chart" --set postgres.bundled=false --set ingress.enabled=true \
+helm template coke "$chart" --set postgres.bundled=false --set postgres.host=external-pg.example.invalid --set ingress.enabled=true \
   --set ingress.className=nginx --set services.discord.enabled=true \
   --set services.slack.enabled=true \
   --set azureOpenAI.apiKeySecretRef.name=existing-aoai > "$scratch/external.yaml"
@@ -17,7 +17,7 @@ helm template coke "$chart" --set harness.miProxy.enabled=true \
   --set 'networkPolicy.entraCidrs={10.0.0.3/32}' \
   --set keyVaultCSI.enabled=true --set keyVaultCSI.secretProviderClass=fixture \
   > "$scratch/identity.yaml"
-for option in 'harness.sessions.mode=single' 'harness.miProxy.enabled=true' \
+for option in 'postgres.bundled=false' 'harness.sessions.mode=single' 'harness.miProxy.enabled=true' \
   'networkPolicy.azureOpenAICidrs={169.254.169.254/32}' \
   'networkPolicy.azureOpenAICidrs={0.0.0.0/0}'; do
   if helm template coke "$chart" --set "$option" > /dev/null 2>&1; then

@@ -15,6 +15,7 @@ bootstrap)
   az acr build -r "$ACR" -t "daimon:$TAG" . --no-logs -o none
   az acr build -r "$ACR" -t "daimon-harness:$TAG" -f apps/harness/Dockerfile . --no-logs -o none
   az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
+  az acr repository show -n "$ACR" --image postgres:18-alpine --query digest -o tsv > "$AKS_STATE/postgres-digest"
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
     --network-plugin azure --network-policy azure --attach-acr "$ACR" \
     --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
@@ -77,11 +78,9 @@ PY
       --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   done
   helm install coke "$chart" -n daimon -f "$AKS_STATE/aks-values.json" \
-    --set services.enabled=false --set harness.enabled=false
-  kubectl -n daimon wait --for=condition=complete job/coke-daimon-init-1 --timeout=600s
-  helm upgrade coke "$chart" -n daimon -f "$AKS_STATE/aks-values.json" --set init.enabled=false
+    --wait --wait-for-jobs --timeout 15m
   kubectl -n daimon rollout status statefulset/coke-daimon-harness --timeout=300s
-  kubectl -n daimon wait --for=condition=ready pod --all --timeout=300s
+  kubectl -n daimon wait --for=condition=ready pod --field-selector=status.phase!=Succeeded --timeout=300s
   kubectl -n daimon exec deployment/coke-daimon-mcp -- python -c \
     'import urllib.request; assert urllib.request.urlopen("http://localhost:8765/healthz").status == 200; print("MCP healthy")'
   ;;

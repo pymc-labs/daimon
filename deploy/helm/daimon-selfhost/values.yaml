@@ -9,11 +9,15 @@ secrets: {host: daimon-host, harness: daimon-harness}
 postgres:
   bundled: true
   existingSecret: daimon-postgres
+  # Required when bundled=false; used by readiness checks, not URL construction.
+  host: ""
+  port: 5432
+  waitTimeoutSeconds: 300
   user: daimon
   database: daimon
   storage: 10Gi
   storageClassName: null
-init: {enabled: true}
+init: {enabled: true, backoffLimit: 2, activeDeadlineSeconds: 900}
 services:
   enabled: true
   mcp: {enabled: true, port: 8765, healthPath: /healthz, env: {}}

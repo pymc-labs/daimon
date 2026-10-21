@@ -30,8 +30,8 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 ```
 
 `bootstrap` builds both images in ACR, mirrors PG, creates Azure-policy AKS with
-ACR attachment, and deploys Luna. `install` creates Kubernetes Secrets, runs init,
-and waits for health. `probe` makes paid Luna-only C3 tool/file turns; it is **not**
+ACR attachment, and deploys Luna. `install` creates Kubernetes Secrets and uses one Helm wait for PG, migrations
+and all serving pods. The Postgres image is explicitly imported into ACR. `probe` makes paid Luna-only C3 tool/file turns; it is **not**
 a CLI/Teams ledger test. Register the tenant/channel/runtime grant in the recipe
 before testing the actual Daimon entry point. Keep `AKS_STATE` private: it contains
 operator keys. DNS logs and the blocked Anthropic curl provide egress evidence.
