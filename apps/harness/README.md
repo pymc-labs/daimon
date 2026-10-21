@@ -825,7 +825,7 @@ both hops with the chart CA.
 
 Set `harness.mode: perConversation` in the lane-14 Helm chart. Apply
 `deploy/helm/patches/per-conversation.patch` to PR #1273 at
-`e9f7b0414baa7fd9e96284b447bd80f74bdd622b`. The chart is not vendored here.
+`780b1e6a10cf0098693c44458e038454cebef6d1`. The chart is not vendored here.
 The host uses `https://<release>-daimon-harness.<namespace>.svc:8088`, direct
 transport and `session_pool: false`. Host code and the MCP CA client integrate
 with PR #1276. The controller preserves C3 JSON/SSE, cursors, MCP headers and

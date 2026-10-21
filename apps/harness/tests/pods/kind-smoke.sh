@@ -23,7 +23,7 @@ COPY apps/harness/src/daimon_harness /opt/venv/lib/python3.12/site-packages/daim
 COPY apps/harness/tests/pods/fake.py /opt/l16-smoke.py
 DOCKER
 docker build --build-arg "BASE=$base" -f "$scratch/Dockerfile" -t "$image" .
-chart_head=e9f7b0414baa7fd9e96284b447bd80f74bdd622b
+chart_head=780b1e6a10cf0098693c44458e038454cebef6d1
 if ! git cat-file -e "$chart_head"; then git fetch origin "$chart_head"; fi
 git archive "$chart_head" deploy/helm/daimon-selfhost | tar -x -C "$scratch"
 patch -p1 -d "$scratch" < deploy/helm/patches/per-conversation.patch

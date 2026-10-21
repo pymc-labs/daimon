@@ -307,7 +307,7 @@ index 9bca977..936597e 100644
  kind: NetworkPolicy
  metadata: {name: {{ include "d.name" . }}-harness}
 diff --git a/deploy/helm/daimon-selfhost/values.yaml b/deploy/helm/daimon-selfhost/values.yaml
-index 7420479..9fcaf67 100644
+index 86b1843..5424df1 100644
 --- a/deploy/helm/daimon-selfhost/values.yaml
 +++ b/deploy/helm/daimon-selfhost/values.yaml
 @@ -39,6 +39,24 @@ host:
