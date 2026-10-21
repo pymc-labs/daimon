@@ -5,7 +5,7 @@
 **Before starting:** use a DEDICATED Daimon resource group and budget, never a shared
 AOAI group. Reuse AOAI only if already in this dedicated group; otherwise create new.
 The helper cannot reuse AOAI from another group. Removal deletes everything in `RG`.
-Azure CLI must support az acr run; subscription policy must allow ACR Tasks.
+Use Linux/WSL; Azure CLI must support az acr run and az acr manifest show; subscription policy must allow ACR Tasks.
 Helm 3.19+, kubectl, Python 3 and git are required; no local Docker/buildx is needed.
 RG Owner, or Contributor plus ACR role-assignment rights; cluster-admin is required.
 A subscription admin registers **Microsoft.ContainerService, Microsoft.ContainerRegistry,
@@ -25,9 +25,9 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 bash deploy/helm/daimon-selfhost/scripts/aks.sh install
 bash deploy/helm/daimon-selfhost/scripts/aks.sh probe
 ```
-Bootstrap saves its image tag in `AKS_STATE`; uploads source to ACR Tasks. Remote BuildKit builds/pushes both images
-(build timeout: 2 hours), mirrors PostgreSQL, creates AKS/network/disks/public IP
-and AOAI if absent. Build pulls pinned Docker Hub frontend **docker/dockerfile:1.7.0**.
+Bootstrap saves its image tag in `AKS_STATE`; uploads source to ACR Tasks. Remote BuildKit builds/pushes both images (default wait: 2 hours); pulls pinned Docker Hub frontend **docker/dockerfile:1.7.0**.
+Postgres import tries **ECR Public first, Docker Hub fallback**, pinned to the reviewed digest; verifies the index, Linux/amd64 descriptor and child manifest in ACR.
+Import has a **15-minute total budget** (3-minute attempt cap); failure stops before AKS creation. Bootstrap then creates AKS/network/disks/public IP and AOAI if absent.
 Helm installs Secrets, TLS, policies, PVCs; waits for migrations/Ready pods. **Probe
 is paid:** two short **gpt-5.4-mini** turns write then read a file; tokens are billed.
 **App admission stays off until [Register and run](README.md#register-and-run-a-real-selfhosted-turn)**; follow its registration, application turns and egress checks. Sample billing rates are TEST rates.
@@ -37,7 +37,7 @@ for one pilot including disks/network/ACR, plus model tokens/builds/egress; unve
 planning range, not a quote. Confirm region/contract and budgets. AKS Free has no SLA.
 
 **Security trade-offs:** public AKS API and public AOAI endpoint (no Private Endpoint),
-public-IP node egress; Docker Hub pulls/imports (Postgres, curl probe, BuildKit frontend).
+public-IP node egress; ECR Public/Docker Hub import sources and Docker Hub pulls (curl probe, BuildKit frontend). Public mirrors can rate-limit; no extra pod egress is allowed.
 Kubernetes Secrets/local key files replace Key Vault. The whole namespace permits
 privileged PodSecurity. Sessions share a kernel: trusted tenant only, no per-session VM.
 One node has no HA; bundled PG has no automatic backups/PITR. Data stays in your tenant;
