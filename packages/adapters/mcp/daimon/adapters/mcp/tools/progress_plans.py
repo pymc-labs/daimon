@@ -137,7 +137,7 @@ def _target(platform: str, thread_id: str | None, channel_id: str | None) -> _Ta
             channel, sep, ts = thread_id.partition(":")
             if not sep:
                 if channel_id is None:
-                    raise ToolError("pass the thread's channel_id with a Slack thread_id")
+                    raise ToolError("pass the thread's channel_id with this thread_id")
                 channel, ts = channel_id, thread_id
             thread_id = f"{channel}:{ts}"
             channel_id = channel
