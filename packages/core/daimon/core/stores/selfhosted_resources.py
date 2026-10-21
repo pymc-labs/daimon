@@ -100,8 +100,14 @@ async def _skill_attachments(
     scope: Scope,
     spec: AgentSpec,
     previous: list[dict[str, str]],
+    previous_spec: AgentSpec | None,
 ) -> list[dict[str, str]]:
-    """Retain uploader provenance for unchanged pins; new pins belong to their writer."""
+    """Keep provenance; authorize only pins introduced by this write."""
+    previous_pins: set[tuple[str, str | None]] = (
+        {(ref.id, ref.version) for ref in (previous_spec.skills or ())}
+        if previous_spec is not None
+        else set()
+    )
     attachments: list[dict[str, str]] = []
     for ref in spec.skills or ():
         if ref.version is None:
@@ -116,6 +122,10 @@ async def _skill_attachments(
         )
         if old is not None:
             attachments.append(old)
+            continue
+        # An unchanged but unattached pin must stay unattached. Another editor
+        # may have added it without the current writer's authorization.
+        if (ref.id, ref.version) in previous_pins:
             continue
         # Operator-created seeded refs have no personal catalog ownership.
         if scope.account_id == "operator":
@@ -378,7 +388,7 @@ class _Resources[
                 revision=1,
             )
             if isinstance(row, SelfHostedAgentRecord) and isinstance(spec, AgentSpec):
-                row.skill_attachments = await _skill_attachments(session, scope, spec, [])
+                row.skill_attachments = await _skill_attachments(session, scope, spec, [], None)
             session.add(row)
             await session.flush()
             result = self._result(scope, row)
@@ -492,7 +502,7 @@ class _Resources[
             spec = self._patched(row, patch)
             if isinstance(row, SelfHostedAgentRecord) and isinstance(spec, AgentSpec):
                 row.skill_attachments = await _skill_attachments(
-                    session, scope, spec, row.skill_attachments
+                    session, scope, spec, row.skill_attachments, AgentSpec.model_validate(row.spec)
                 )
             if spec.name != row.name:
                 exists = await session.scalar(

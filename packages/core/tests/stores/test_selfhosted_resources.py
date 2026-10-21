@@ -607,8 +607,9 @@ async def test_chat_identity_resolution_is_tenant_scoped_and_live(
     assert await agents.find_by_derived_uuid(authorized, identity) is None
 
 
+@pytest.mark.parametrize("owner_save", ["system", "metadata", "same_skills"])
 async def test_shared_agent_skill_attachments_keep_uploader_provenance(
-    db_session_factory, tmp_path
+    db_session_factory, tmp_path, owner_save
 ):
     from daimon.core.skills.ingest import bundle_from_files
     from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
@@ -684,6 +685,52 @@ async def test_shared_agent_skill_attachments_keep_uploader_provenance(
     foreign = scope(str(other_tenant.id), str(outsider.id))
     with pytest.raises(ScopeViolation):
         await catalog.get_agent_skill(foreign, changed, pinned)
+    # Bob names Alice's private version, but cannot authorize sharing it.
+    changed = await agents.update(
+        bob_scope,
+        agent.ref,
+        AgentPatch(skills=(pinned, unpinned)),
+        expected=changed.revision,
+        key="bob-adds-private-pin",
+    )
+    assert await catalog.get_agent_skill(bob_scope, changed, unpinned) is None
+    owner_patch = {
+        "system": AgentPatch(system="Alice edits only the prompt"),
+        "metadata": AgentPatch(metadata={"note": "Alice saves"}),
+        "same_skills": AgentPatch(skills=(pinned, unpinned)),
+    }[owner_save]
+    changed = await agents.update(
+        alice_scope,
+        agent.ref,
+        owner_patch,
+        expected=changed.revision,
+        key="alice-unrelated-save",
+    )
+    assert await catalog.get_agent_skill(bob_scope, changed, unpinned) is None
+    loaded = await load_turn_skill_bundles(
+        tmp_path, (pinned, unpinned), scope=bob_scope, catalog=catalog, agent=changed
+    )
+    assert loaded == {("pinned", "v1"): original}
+
+    # Alice must explicitly introduce the pin in her own edit to authorize it.
+    changed = await agents.update(
+        alice_scope,
+        agent.ref,
+        AgentPatch(skills=(pinned,)),
+        expected=changed.revision,
+        key="alice-removes-private-pin",
+    )
+    changed = await agents.update(
+        alice_scope,
+        agent.ref,
+        AgentPatch(skills=(pinned, unpinned)),
+        expected=changed.revision,
+        key="alice-adds-private-pin",
+    )
+    authorized = await catalog.get_agent_skill(bob_scope, changed, unpinned)
+    assert authorized is not None and authorized.bundle == private
+    retained = await catalog.get_agent_skill(bob_scope, changed, pinned)
+    assert retained is not None and retained.bundle == original
     removed = await agents.update(
         bob_scope, agent.ref, AgentPatch(skills=()), expected=changed.revision, key="remove-pin"
     )

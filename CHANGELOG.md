@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Attach shared selfhosted skill pins only when an authorized editor adds them; unrelated saves cannot authorize another editor’s unowned pins.
+
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
 
 - Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance for locally provisioned skill versions attached to shared agents.
