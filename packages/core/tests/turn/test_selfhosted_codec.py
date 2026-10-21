@@ -95,7 +95,8 @@ def test_mcp_confirmation_preserves_server_and_denied_tool(authority):
 
 
 @pytest.mark.parametrize("name,executor", [("write", "agent"), ("reports/write", "mcp")])
-def test_approval_execution_and_result_update_one_call_block(name, executor):
+@pytest.mark.parametrize("approval_first", [False, True])
+def test_approval_execution_and_result_update_one_call_block(name, executor, approval_first):
     from daimon.core.turn.reducers import apply
     from daimon.core.turn.state import ToolUseBlock, TurnState
 
@@ -126,11 +127,13 @@ def test_approval_execution_and_result_update_one_call_block(name, executor):
         {"call_id": "call-id", "content": [{"type": "text", "text": "written"}], "is_error": False},
     )
     state = TurnState()
-    for value in (approval, execution, result):
+    ordered = (approval, execution) if approval_first else (execution, approval)
+    for value in (*ordered, result):
         for display in display_batch(value, session_id="session"):
             state = apply(state, display)
     blocks = [block for block in state.content if isinstance(block, ToolUseBlock)]
     assert len(blocks) == 1
     assert blocks[0].id == tool_display_id("call-id")
     assert blocks[0].status == "complete"
+    assert blocks[0].evaluated_permission == "ask"
     assert blocks[0].result_content and blocks[0].result_content[0].text == "written"

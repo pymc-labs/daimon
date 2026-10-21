@@ -207,6 +207,36 @@ def test_apply_propagates_evaluated_permission_onto_tool_use_block() -> None:
     assert block.evaluated_permission == "ask"
 
 
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        ("allow", "ask", "ask"),
+        ("ask", "allow", "ask"),
+        ("deny", "ask", "deny"),
+        ("ask", "deny", "deny"),
+    ],
+)
+def test_repeated_tool_identity_only_tightens_permission_and_retains_result(
+    first, second, expected
+) -> None:
+    state = apply(
+        TurnState(),
+        make_tool_use(event_id="tool", name="write", evaluated_permission=first),
+    )
+    state = apply(state, make_tool_result(event_id="result", tool_use_id="tool", text="written"))
+    updated = apply(
+        state, make_tool_use(event_id="tool", name="write", evaluated_permission=second)
+    )
+    block = updated.content[0]
+    assert isinstance(block, ToolUseBlock)
+    assert len(updated.content) == 1
+    assert block.evaluated_permission == expected
+    assert block.status == "complete"
+    assert block.result_content == state.content[0].result_content
+    assert updated.seen_event_ids == state.seen_event_ids
+    assert apply(updated, make_tool_use(event_id="tool", name="write")) == updated
+
+
 def test_apply_propagates_mcp_server_name_only_on_mcp_variant() -> None:
     state = apply(
         TurnState(),

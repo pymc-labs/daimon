@@ -1024,7 +1024,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 decision="deny" if scenario in ("ask_deny", "stored_deny") else "allow",
             )
         ]
-        assert len(cards) == (0 if scenario in ("stored_deny", "proxy_safety") else 1)
+        assert len(cards) == (0 if scenario == "stored_deny" else 1)
         assert bool(executions) == (scenario not in ("ask_deny", "stored_deny"))
     if scenario == "proxy_default":
         assert executions == ["neutral"] and cards == [] and actions == []
@@ -1302,8 +1302,23 @@ async def test_batched_host_approvals_submit_independent_idempotent_actions(comp
     with pytest.raises(ProviderError):
         await stale.send(confirmations[:1])
     assert actions == []
-    await io.send(confirmations)
-    await io.send(confirmations)
+    await io.send(confirmations[:1])
+    restarted = await prepare_selfhosted(request)
+    assert restarted.backend is not prepared.backend
+    assert restarted.session_ref == prepared.session_ref
+    pending = await restarted.backend.events.reconcile(SCOPE, restarted.session_ref)
+    assert [action.id for action in pending.required_actions] == ["two"]
+    recovered = SelfHostedTurnIO(
+        restarted.backend,
+        SCOPE,
+        restarted.session_ref,
+        persistence=Persistence(),
+        root_turn_id=wire.events[0]["turn_id"],
+    )
+    await recovered.send(confirmations)
+    await recovered.send(confirmations)
+    settled = await restarted.backend.events.reconcile(SCOPE, restarted.session_ref)
+    assert settled.required_actions == ()
     assert actions == [
         dict(action_id="one", decision="allow"),
         dict(action_id="two", decision="allow"),
@@ -1452,8 +1467,11 @@ async def test_replay_pages_past_five_thousand_records_in_one_turn(composed, mon
     assert caught.value.native_code == "host_history_cursor"
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-async def test_live_and_replayed_approval_permissions_match(composed, explicit):
+@pytest.mark.parametrize("explicit", [None, False, True])
+@pytest.mark.parametrize("approval_first", [False, True])
+async def test_live_and_replayed_approval_permissions_match(composed, explicit, approval_first):
+    from daimon.core.tool_safety import ToolSafetyPolicy, decide_tool_call
+    from daimon.core.turn.approvals import tool_calls_for
     from daimon.core.turn.reducers import apply
     from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
     from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -1480,6 +1498,21 @@ async def test_live_and_replayed_approval_permissions_match(composed, explicit):
             data=dict(action_id="approval", call_id="call", name="reports/get_report", input={}),
         )
     )
+    tool_use = {
+        **wire.events[-1],
+        "type": "tool_use",
+        "data": {
+            "call_id": "call",
+            "name": "reports/get_report",
+            "input": {},
+            "executor": "mcp",
+        },
+    }
+    if approval_first:
+        wire.events.append({**tool_use, "seq": 4})
+    else:
+        wire.events[-1] = {**wire.events[-1], "seq": 4}
+        wire.events.insert(-1, tool_use)
 
     class Persistence:
         async def record(self, *args, **kwargs):
@@ -1494,22 +1527,18 @@ async def test_live_and_replayed_approval_permissions_match(composed, explicit):
         prepared.session_ref,
         persistence=Persistence(),
         root_turn_id=receipt.turn_id,
-        explicit_ask=lambda name: explicit,
+        explicit_ask=(lambda name: explicit) if explicit is not None else None,
         baseline_loader=baseline,
     )
     page = await prepared.backend.events.list(SCOPE, prepared.session_ref, page=PageRequest())
-    approval = next(value for value in page.data if value.type == "session.requires_action")
-    live = [frame.native for frame in await io.accept_record(approval)]
+    live = []
+    for value in page.data:
+        live.extend(frame.native for frame in await io.accept_record(value))
     replayed = await io.replay()
     live_tools = [value for value in live if value.type == "agent.mcp_tool_use"]
     replayed_tools = [value for value in replayed if value.type == "agent.mcp_tool_use"]
-    assert len(live_tools) == len(replayed_tools) == 1
-    assert (
-        live_tools[0].evaluated_permission
-        == replayed_tools[0].evaluated_permission
-        == ("ask" if explicit else "allow")
-    )
-    assert live_tools[0].id == replayed_tools[0].id == "selfhosted:tool:call"
+    assert live_tools and replayed_tools
+    assert all(value.id == "selfhosted:tool:call" for value in live_tools + replayed_tools)
     states = []
     for displays in (live, replayed):
         state = TurnState()
@@ -1521,4 +1550,13 @@ async def test_live_and_replayed_approval_permissions_match(composed, explicit):
     ]
     assert blocks[0] == blocks[1]
     assert len(blocks[0]) == 1
-    assert blocks[0][0].evaluated_permission == ("ask" if explicit else "allow")
+    assert blocks[0][0].evaluated_permission == "ask"
+    for state in states:
+        (call,) = tool_calls_for(state, ["selfhosted:tool:call"])
+        assert (
+            decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=True).outcome == "ask"
+        )
+        assert (
+            decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=False).outcome
+            == "deny"
+        )

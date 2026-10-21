@@ -4,7 +4,7 @@ Contract:
 
 1. `apply(state, event)` returns a new `TurnState`. Never mutates `state`.
 2. If `event.id` is already in `state.seen_event_ids`, returns `state`
-   unchanged (dedup).
+   unchanged, except that a tool permission may become stricter.
 3. Otherwise, records the id and folds the event into state.
 4. Event types outside the dispatched set fall through to a dedup-only
    update, so the driver may forward everything it receives.
@@ -88,6 +88,24 @@ def apply(
     `TurnState`. Unhandled `event.type` values fall through to a dedup-only
     update — see contract point 4."""
     if event.id in state.seen_event_ids:
+        if isinstance(
+            event,
+            BetaManagedAgentsAgentToolUseEvent
+            | BetaManagedAgentsAgentCustomToolUseEvent
+            | BetaManagedAgentsAgentMCPToolUseEvent,
+        ):
+            permission = getattr(event, "evaluated_permission", None)
+            rank = {None: 0, "allow": 1, "ask": 2, "deny": 3}
+            content = [
+                dataclasses.replace(block, evaluated_permission=permission)
+                if isinstance(block, ToolUseBlock)
+                and block.id == event.id
+                and rank[permission] > rank[block.evaluated_permission]
+                else block
+                for block in state.content
+            ]
+            if content != state.content:
+                return dataclasses.replace(state, content=content)
         return state
     seen = state.seen_event_ids | {event.id}
 

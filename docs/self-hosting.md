@@ -432,7 +432,10 @@ tool policy; the stricter effective permission wins, including server defaults.
 MCP approvals retain their server and tool names during live delivery and replay.
 Replay applies the same explicit agent permissions as live delivery. Approval
 cards and tool results share the tool call identity; confirmations retain the
-harness action identity. Retained skill versions load from the tenant's local
+harness action identity. Repeated call records can tighten an approval permission;
+they cannot relax it. After a host restart, historical approval records recover
+completed batch members so the remaining approvals can still be submitted.
+Retained skill versions load from the tenant's local
 selfhosted catalog, including exact channel grants uploaded by another account.
 Replay and Stop page through long in-turn histories by cursor under their
 existing deadlines, without a fixed 5,000-record ceiling.

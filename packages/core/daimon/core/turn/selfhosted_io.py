@@ -324,11 +324,8 @@ class SelfHostedTurnIO:
                     if display.type == "agent.mcp_tool_use"
                     else display.name
                 )
-                display = display.model_copy(
-                    update={
-                        "evaluated_permission": "ask" if self._explicit_ask(qualified) else "allow"
-                    }
-                )
+                if self._explicit_ask(qualified) and display.evaluated_permission != "deny":
+                    display = display.model_copy(update={"evaluated_permission": "ask"})
             result.append(display)
         return tuple(result)
 
@@ -404,6 +401,21 @@ class SelfHostedTurnIO:
                 for action in snapshot.required_actions:
                     if action.call_id:
                         self._action_ids[action.call_id] = action.id
+                # Completed actions have left the pending projection. Their
+                # durable approval records still identify the original batch,
+                # allowing the driver to recover already-settled receipts.
+                for event in await self._history():
+                    if (
+                        event.turn_id != self._root
+                        or event.thread_id is not None
+                        or event.authority not in ("record", "reconciled")
+                    ):
+                        continue
+                    payload = event.typed_payload()
+                    if isinstance(payload, RequiresActionPayload):
+                        for action in payload.actions:
+                            if action.call_id:
+                                self._action_ids[action.call_id] = action.id
         resolved: list[InputEvent] = []
         for item in inputs:
             if isinstance(item, UserToolConfirmation):
