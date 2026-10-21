@@ -417,7 +417,7 @@ def create_app(
             raise HTTPException(status_code=422, detail="Invalid session identifier") from exc
         if supervisor.session_mode == "single":
             try:
-                await supervisor.io(supervisor.journal.bind_session, session_id)
+                await supervisor.io(supervisor.journal.check_session, session_id)
             except ConflictError as exc:
                 raise HTTPException(status_code=409, detail="session_bound") from exc
         complete = await supervisor.io(supervisor.journal.complete, session_id)

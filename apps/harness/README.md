@@ -19,8 +19,9 @@ docker run --rm -p 8088:8088 --env-file /path/to/private/harness.env \
 ```
 
 Run one worker per persistent HOME. `HARNESS_SESSION_MODE=single` is the
-production default: the first session ID seen on a turn or event poll is bound
-persistently under `.daimon`; other IDs return HTTP 409 `session_bound`, including
+production default: the first session ID submitted to `POST /v0/turns` is bound
+persistently under `.daimon`. Earlier events polls do not claim the sandbox.
+Once bound, other IDs return HTTP 409 `session_bound`, including
 after restart. Existing multi-session state refuses single-mode startup. Deploy
 one container per session using Azure Container Apps dynamic sessions with a
 custom container, and route every call for that session to its sandbox identifier.
@@ -83,7 +84,10 @@ They have CPU (up to the turn deadline, capped at 300 seconds), 4 GiB address
 space, 1024 processes, 256 open files and 256 MiB output-file limits; core dumps
 are disabled. Each command has a wall timeout (the turn deadline, capped at 300 seconds). Output
 is bounded to 256 KiB with a truncation marker. Every command exit kills its process
-group, and turn cleanup kills any remaining processes of that session UID.
+group, and turn cleanup kills any remaining processes of that session UID. An
+unredirected background command (`cmd &`) keeps its output pipes open, so bash
+waits until the command timeout; redirect both stdout and stderr for background
+work that should let the shell return.
 
 Production refuses startup without UID switching. There is no same-UID
 production fallback. `HARNESS_TEST_MODE=1` permits unprivileged offline tests

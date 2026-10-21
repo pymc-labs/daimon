@@ -514,3 +514,38 @@ async def test_sdk_debug_logs_keep_header_filters_and_hide_all_secrets(
     for secret in (key, bearer, harness, operator, client_secret):
         assert secret not in caplog.text
     assert "[redacted]" in caplog.text
+
+
+def test_uvicorn_access_formatter_preserves_arguments_with_log_redaction():
+    import io
+    import logging
+
+    from daimon_harness.credentials import credential_log_redaction
+    from uvicorn.logging import AccessFormatter
+
+    output = io.StringIO()
+    handler = logging.StreamHandler(output)
+    handler.setFormatter(
+        AccessFormatter("%(client_addr)s - %(request_line)s %(status_code)s", use_colors=False)
+    )
+    logger = logging.getLogger("uvicorn.access")
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        with credential_log_redaction({"token": "synthetic-access-secret"}):
+            logger.info(
+                '%s - "%s %s HTTP/%s" %d',
+                "127.0.0.1:4321",
+                "GET",
+                "/v0/healthz?value=synthetic-access-secret",
+                "1.1",
+                200,
+            )
+        logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:4321", "POST", "/v0/turns", "1.1", 202)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+    assert "synthetic-access-secret" not in output.getvalue()
+    assert "GET /v0/healthz?value=[redacted] HTTP/1.1 200 OK" in output.getvalue()
+    assert "POST /v0/turns HTTP/1.1 202 Accepted" in output.getvalue()

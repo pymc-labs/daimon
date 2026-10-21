@@ -279,9 +279,17 @@ def test_test_mode_requires_fake_adapter_and_refuses_credentials(tmp_path, monke
         create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
 
 
-async def test_single_session_binds_on_first_poll_and_rejects_other_turns(harness):
+async def test_single_session_binds_on_first_turn_after_unrelated_polls(harness):
     client, model, _ = harness
-    assert (await client.get("/v0/sessions/session-1/events")).status_code == 200
+    assert (await client.get("/v0/sessions/unclaimed/events")).status_code == 200
+    wrapped = await client.post(
+        "/invocations",
+        json={"c3": {"method": "GET", "path": "/v0/sessions/another/events"}},
+    )
+    assert wrapped.status_code == 200
+    assert model.calls == 0
+    assert (await client.post("/v0/turns", json=turn())).status_code == 200
+    assert model.calls == 1
     assert (await client.get("/v0/sessions/other/events")).json() == {"detail": "session_bound"}
     request = turn()
     request["session_id"] = "other"
@@ -293,12 +301,11 @@ async def test_single_session_binds_on_first_poll_and_rejects_other_turns(harnes
         json={"c3": {"method": "GET", "path": "/v0/sessions/other/events"}},
     )
     assert wrapped.status_code == 409
-    assert model.calls == 0
-    assert (await client.post("/v0/turns", json=turn())).status_code == 200
     assert model.calls == 1
 
 
 async def test_single_session_binding_survives_restart(tmp_path):
+    first_start = True
     for session_id, expected in (("first", 200), ("second", 409), ("first", 200)):
         app = create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
         async with (
@@ -309,6 +316,11 @@ async def test_single_session_binding_survives_restart(tmp_path):
                 headers={"Authorization": "Bearer test"},
             ) as client,
         ):
+            if first_start:
+                request = turn()
+                request["session_id"] = "first"
+                assert (await client.post("/v0/turns", json=request)).status_code == 200
+                first_start = False
             response = await client.get(f"/v0/sessions/{session_id}/events")
             assert response.status_code == expected
             if expected == 409:

@@ -190,7 +190,7 @@ async def main() -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        for _ in range(30):
+        for _ in range(200):
             for operation in (
                 lambda: first.read("race/file"),
                 lambda: first.write("race/file", "inside"),

@@ -114,6 +114,13 @@ class Journal:
         if known:
             self.bind_session(known.pop())
 
+    def check_session(self, session_id: str) -> None:
+        """Check an existing binding without claiming an unused sandbox."""
+        identifier(session_id)
+        bound = self.db.execute("SELECT session_id FROM session_binding WHERE id=1").fetchone()
+        if bound is not None and bound[0] != session_id:
+            raise ConflictError("session_bound")
+
     def bind_session(self, session_id: str) -> None:
         identifier(session_id)
         with self.db:

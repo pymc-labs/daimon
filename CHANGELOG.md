@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance for locally provisioned skill versions attached to shared agents.
 - Reject self-hosted session-pool credentials without pool routing and empty
   transport session IDs; document matching Entra authentication in the harness.
+- Bind a single-session harness on its first turn, so an earlier events poll cannot claim the sandbox.
 
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
