@@ -70,14 +70,21 @@ class EntraTokenProvider:
         await self._credential.close()
 
 
+def build_harness_http_client() -> httpx.AsyncClient:
+    """Honor the operator's combined SSL_CERT_FILE bundle, with TLS verification."""
+    return httpx.AsyncClient(timeout=30, trust_env=True)
+
+
 def validate_harness_auth(config: HarnessConfig, settings: SelfHostedSettings, tenant: str) -> None:
     """Validate origin, audience and tenant before resolving any credential."""
+    from daimon.core.config import HarnessAuthBinding
+
     bindings = {
         (binding.auth_mode, binding.name): binding for binding in settings.harness_auth_bindings
     }
     binding = bindings.get((config.auth_mode, config.auth_ref))
     parsed = urlsplit(config.project_endpoint or config.harness_url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
+    origin = HarnessAuthBinding.exact_https_origin(f"{parsed.scheme}://{parsed.netloc}")
     if (
         (
             config.auth_mode == "bearer_env"
@@ -475,7 +482,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 return await credential()
 
             if transport_impl is None:
-                client = httpx.AsyncClient(timeout=30)
+                client = build_harness_http_client()
                 if config.transport == "foundry_invocations":
                     if config.project_endpoint is None or config.agent_name is None:
                         raise AdmissionDenied(reason="backend_unsupported")
@@ -491,6 +498,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         base_url=config.harness_url,
                         token_provider=token_provider,
                         session_pool=config.session_pool,
+                        allow_insecure_http=config.allow_insecure_http,
                     )
             # Cleanup and reconciliation need a small independent budget after the host deadline.
             limit = (

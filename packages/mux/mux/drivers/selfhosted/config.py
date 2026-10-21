@@ -46,7 +46,32 @@ _SECRET_KEYS = frozenset(
 )
 
 
+def reject_metadata_url(value: str) -> None:
+    """Reject known metadata literals/names without DNS resolution."""
+    host = (urlsplit(value).hostname or "").lower().rstrip(".")
+    if host in {"metadata", "metadata.google.internal", "metadata.azure.internal"} or re.match(
+        r"^instance-data(?:[.-]|$)", host
+    ):
+        raise ValueError("metadata destinations are forbidden")
+    address = None
+    with suppress(ValueError):
+        address = ipaddress.ip_address(host)
+    if address is None:
+        with suppress(OSError):
+            address = ipaddress.IPv4Address(socket.inet_aton(host))
+    if isinstance(address, ipaddress.IPv6Address):
+        if address in ipaddress.ip_network("fd00:ec2::/32"):
+            raise ValueError("metadata destinations are forbidden")
+        if address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        elif int(address) >> 32 == 0:
+            address = ipaddress.IPv4Address(int(address))
+    if address is not None and (address.is_link_local or str(address) == "100.100.100.200"):
+        raise ValueError("metadata destinations are forbidden")
+
+
 def _url(value: str, *, allow_internal_http: bool = False, audience: bool = False) -> None:
+    reject_metadata_url(value)
     parsed = urlsplit(value)
     host = parsed.hostname
     _ = parsed.port  # Validate malformed port syntax as well as the host.

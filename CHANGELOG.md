@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Refuse MCP authorization on non-loopback HTTP harness requests before credential refresh or network I/O (C3.9a), even with HTTP consent.
+
+- Add `daimon selfhosted turn` for billed operator turns with persistent threads, enforce selfhosted admission before provider access, and require explicit consent for harness HTTP. MCP credentials require TLS or loopback, with a scoped CA bundle for in-cluster TLS. Reject normalized TEST tariff names at startup unless explicitly enabled, and keep diagnostic logging failures from interrupting metering.
+
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 
 - Isolate self-hosted checkpoint exporters from tool cleanup, retry interrupted exports, and keep sessions sealed when process termination cannot be verified.

@@ -612,8 +612,11 @@ async def test_mcp_credential_only_appears_in_turn_header_and_never_invocation_j
         assert credential not in caplog.text
 
 
+@pytest.mark.parametrize("plain_http", [False, True])
 @pytest.mark.parametrize("reserved_server", ["daimon-mcp", "other-server"])
-async def test_host_tools_resolver_inlines_skills_and_seals_virtual_mcp_env(reserved_server):
+async def test_host_tools_resolver_inlines_skills_and_seals_virtual_mcp_env(
+    reserved_server, plain_http
+):
     from types import SimpleNamespace
 
     from mux.drivers.selfhosted import wire
@@ -625,7 +628,8 @@ async def test_host_tools_resolver_inlines_skills_and_seals_virtual_mcp_env(rese
             mcp_servers=(
                 wire.MCPServer(
                     name=reserved_server,
-                    url="https://mcp",
+                    url="http://mcp" if plain_http else "https://mcp",
+                    allow_insecure_http=plain_http,
                     headers_env={"Authorization": "DAIMON_MCP_AUTHORIZATION"},
                 ),
             ),
@@ -635,7 +639,11 @@ async def test_host_tools_resolver_inlines_skills_and_seals_virtual_mcp_env(rese
     fake = Harness()
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
         driver, session = await setup(client, fake, tools_resolver=tools)
-        if reserved_server != "daimon-mcp":
+        if plain_http:
+            with pytest.raises(UnsupportedCapability, match="credential_mcp_requires_https"):
+                await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
+            assert fake.executions == 0
+        elif reserved_server != "daimon-mcp":
             with pytest.raises(UnsupportedCapability, match="reserved_mcp_credential"):
                 await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
             assert fake.executions == 0
@@ -1008,7 +1016,7 @@ async def test_bearer_transport_only_allows_plain_http_on_loopback(url, allowed)
         if allowed:
             DirectTransport(client, base_url=url, token="token")
         else:
-            with pytest.raises(ValueError, match="HTTPS"):
+            with pytest.raises(ValueError, match="HTTPS|allow_insecure_http"):
                 DirectTransport(client, base_url=url, token="token")
 
 

@@ -17,6 +17,14 @@ retain their resolver and self-healing behavior. The operator entry point
 `daimon selfhosted init` creates or reuses these records without provider
 credentials.
 
+The operator command `daimon selfhosted turn` uses the production
+`admit → bind_session → run_prepared_turn` path and its usage recorder. It forces
+the selfhosted Anthropic guard before admission and refuses an effective backend
+other than selfhosted, including retained legacy threads and disabled channel
+backend selection. Reuse `--thread` for session continuity. It requires operator
+runtime credentials and never grants a billing exemption.
+
+
 Opted-in Discord worker fleets use the existing posted-card renderer and Stop
 guard. The card shows each worker's role, backend, model and current state.
 Complete rows stay in ordinal order within Discord's total text limit; large

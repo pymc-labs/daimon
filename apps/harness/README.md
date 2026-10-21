@@ -44,6 +44,7 @@ mode platform checks only with its mandatory fake adapter and no credentials.
 | `HARNESS_CODEX_BINARY` | Codex executable path; defaults to `codex` on PATH, version 0.162.1 required |
 | `HARNESS_SESSION_MODE` | `single` (default, persistent session binding) or `multi` (verified proc/tmp/UID isolation required) |
 | `HARNESS_AUTH_MODE` | `bearer` (default) or `entra`; `foundry_gateway` refuses startup |
+| `HARNESS_MCP_CA_BUNDLE` | Optional read-only PEM CA bundle for MCP HTTPS only; chart mount `/etc/daimon/mcp-ca/ca.crt`. Adds to system roots; certificate and hostname verification remain enabled. |
 | `HARNESS_TOKEN` | Local/direct HTTP bearer secret; no default |
 | `HARNESS_MCP_CRED_BINDINGS` | Required for operator MCP credentials: JSON list of `{name, origin, tenants}` objects |
 | `HARNESS_DAIMON_MCP_URL` | Approved URL (normalized before comparison) for the reserved `daimon-mcp` server |
@@ -429,7 +430,14 @@ MCP environment references must start with `HARNESS_MCP_CRED_`; the sole
 exception is the in-memory `DAIMON_MCP_AUTHORIZATION` reference reserved for
 `daimon-mcp`. Unscoped process variables are rejected before resolution.
 Credential-bearing servers require HTTPS, except literal loopback addresses or
-`localhost`. Daimon MCP URLs are compared after normalizing host/default port
+`localhost`. No private HTTP opt-in authorizes MCP credentials. In-cluster
+MCP uses the chart's HTTPS Service and CA: set
+`HARNESS_MCP_CA_BUNDLE=/etc/daimon/mcp-ca/ca.crt` and mount that PEM read-only.
+Missing, invalid or untrusted CA material fails closed; verification is never
+disabled. This setting affects only the MCP HTTPX client, including the Codex
+loop's shared MCP tools, and adds to system trust. It does not alter Azure
+OpenAI transport. Redirects stay disabled.
+Daimon MCP URLs are compared after normalizing host/default port
 and trailing slashes; a different server name cannot alias the reserved URL.
 
 Inline skills support UTF-8 text and base64 binary files with a verified SHA-256
@@ -806,3 +814,9 @@ Mutation 8 restores the PID allocation-range scan; the
 cursor rejection; an explicit and randomly generated property operation must
 fail with `empty remote cursor fence rejected`. The production PID-burn image
 probe is enabled in CI's single-session run. Neither image probe calls a model.
+
+The host-to-harness C3 request also carries the per-turn MCP credential. It must
+use HTTPS or loopback HTTP when `X-Daimon-MCP-Authorization` is present. Generic
+`allow_insecure_http` consent cannot override C3.9a; non-loopback HTTP turns with
+MCP credentials are refused by the driver before any I/O. AKS uses HTTPS for
+both hops with the chart CA.

@@ -1315,3 +1315,24 @@ gap. Lower cursors cannot lower it, and `replay_after_seq` remains read-only.
 Selfhosted production profile defaults to `gpt-6.1-sol`. All harness tests,
 interop and live test deployments use `gpt-6-luna`; production defaults are
 asserted as strings only and are never sent to a model in tests.
+
+The harness C3 transport accepts `allow_insecure_http=True` only for literal or
+name patterns classified as in-cluster by `HarnessConfig`; no DNS resolution
+verifies the destination. The operator must restrict harness ingress to the
+same release's host/controller pods with NetworkPolicy. AKS uses chart-CA HTTPS
+for both Services; F76 covers the remaining controller-to-sandbox HTTP hop.
+HTTPS remains the default, and metadata endpoints are refused.
+
+MCP credentials require HTTPS or loopback. The legacy wire field
+`MCPServer.allow_insecure_http` never authorizes credential transport; false is
+omitted using a model serializer compatible with the declared Pydantic floor.
+The harness supports a scoped `HARNESS_MCP_CA_BUNDLE` for chart-generated CA
+trust, with certificate and hostname verification enabled. Host and harness
+compare MCP destinations through `mux.mcp_url.canonical_mcp_url`, preserving
+path case and normalizing scheme/host case, default ports and trailing slashes.
+
+C3.9a also protects the host-to-harness credential carrier: a non-loopback HTTP
+request with `mcp_authorization` is refused with a non-retryable permission error
+before token-provider calls or network I/O. `allow_insecure_http` supports only
+turns without MCP credentials. HTTPS and loopback HTTP can carry the transient
+`X-Daimon-MCP-Authorization` header; this applies to both transport implementations.

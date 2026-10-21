@@ -396,6 +396,62 @@ admission refuses with `selfhosted_admission_disabled`. Enabling it still requir
 usage observations and a configured self-hosted core runtime; it does not select
 a backend for any channel. See [configuration](configuration.md) for the setting.
 
+### Billed operator turns on an explicit selfhosted channel
+
+After provisioning the tenant, calling `daimon selfhosted init`, selecting
+`selfhosted.loop` on its CLI channel and mounting an exact provider runtime
+manifest, run:
+
+```bash
+daimon selfhosted turn --tenant-id "$TENANT_ID" --thread verification \
+  --message 'Use bash to write a small file and read it back.'
+daimon selfhosted turn --tenant-id "$TENANT_ID" --thread verification \
+  --message 'Use bash to read the file from the previous turn.'
+```
+
+The default channel is `selfhosted-operator` and caller is `operator`; override
+with `--channel` and `--caller`. The command uses production channel admission,
+session binding and the prepared-turn usage recorder. It refuses a channel
+without an explicit selfhosted revision. Reusing the thread retains the same
+caller-scoped session. This is a trusted deployment-operator CLI, so access to
+its database credentials must remain restricted to operators.
+
+For AKS, enable the chart's generated CA and HTTPS on both MCP and harness
+Services. Use `https://acme-daimon-mcp:8765/mcp` and
+`https://acme-daimon-harness:8088` for the example release `acme`. Configure the
+harness auth binding with the HTTPS origin, and initialize its environment
+without `--allow-insecure-http`. Map the harness Secret into an operator variable
+named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*` through `auth_ref`.
+Host pods set `SSL_CERT_FILE` to the chart-mounted combined certifi + chart CA
+PEM bundle (for example `/etc/daimon/ca/ca-bundle.crt`). Host harness and MCP
+HTTPX clients honor it with certificate and hostname verification enabled.
+MCP credentials always require HTTPS, except loopback. Host grants and legacy
+`HARNESS_ALLOW_INSECURE_DAIMON_MCP` flags never authorize credential-bearing
+HTTP. For in-cluster MCP HTTPS, mount the chart-generated CA bundle read-only
+in harness/sandbox containers at `/etc/daimon/mcp-ca/ca.crt` and set
+`HARNESS_MCP_CA_BUNDLE=/etc/daimon/mcp-ca/ca.crt`. Configure
+`HARNESS_DAIMON_MCP_URL` and `DAIMON_MCP__PUBLIC_URL` with the same HTTPS
+Service URL, and include that hostname in the server certificate's SANs.
+The MCP client adds this CA to system trust and verifies both certificate chain
+and hostname. Azure OpenAI trust settings are unaffected.
+
+The generic harness C3 transport retains explicit environment and binding
+consent for HTTP only when no per-turn MCP authorization is sent. Under C3.9a,
+a non-loopback HTTP harness request carrying MCP authorization is refused before
+credential refresh or network I/O, even with `allow_insecure_http=true`. Ordinary
+Daimon turns include a built-in MCP credential and therefore require HTTPS on
+the harness hop too. Loopback HTTP remains allowed. Hostname classification is
+literal/name-based and does
+not resolve DNS; it cannot establish where a name actually routes. In deployments
+that use this capability, NetworkPolicy must restrict harness ingress to the
+same release's host/controller pods. The remaining controller-to-sandbox HTTP
+risk is tracked as F76. The AKS chart uses HTTPS and no HTTP consent flags.
+
+The Agents SDK adapter emits `harness.azure_usage` receipts with only the
+provider response ID, model and raw usage object. Request/response content and
+credentials are excluded. Capture these alongside C3 usage and database rows
+when verifying billing.
+
 ## Self-hosted harness runtime
 
 The opt-in `selfhosted.loop` backend runs chat turns through a separately
@@ -442,7 +498,8 @@ Production uses `HarnessConfig.transport="direct"` with a private harness
 endpoint. Direct transport sends authenticated `/v0` requests to `harness_url`.
 The Foundry invocation adapter is retained for future platform validation;
 unsigned gateway identity headers do not authorize harness calls. `bearer_env`
-only accepts operator variables named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
+accepts operator variables named
+`DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
 Declare each in `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`, a JSON list of
 `{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY", "origin": "https://harness.example", "tenants": ["TENANT_UUID"]}`.
 Entra mode requires a binding too, with `auth_mode: "entra"` and `name` equal
@@ -1579,3 +1636,17 @@ Harness process cleanup enumerates present `/proc` PIDs, including after PID wra
 If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;
 only that helper receives the exemption group. Multi-session harness mode requires
 `hidepid=2,gid=60002`. Ordinary tool processes do not receive the exemption.
+
+Harness bearer references use operator variables named
+`DAIMON_SELFHOSTED__HARNESS_TOKEN_*`, selected through the environment's
+`auth_ref` and an exact origin/tenant binding. Chart Secret key names do not
+change this rule. Existing installations using a different bearer reference
+must map the Secret to a dedicated variable and update the environment's
+`auth_ref`, binding, and runtime revision pins before rolling the new image.
+Historical TEST tariffs also require the explicit billing opt-in described in
+[billing](billing.md); use verified tariffs for production.
+
+`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS` authorizes credential-free MCP
+connections only. Hostname classification is literal/name-based, without DNS
+resolution. No grant permits credentials over non-loopback HTTP. Known cloud
+metadata names and addresses are refused regardless of grants or scheme.

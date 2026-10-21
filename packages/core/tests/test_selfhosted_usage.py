@@ -48,7 +48,7 @@ def fixed_billing_clock(monkeypatch):
 def billing():
     # Deliberately synthetic rates, not a claim about Azure's current prices.
     return SelfhostedBillingSettings(
-        deployments={"coke-production": "underlying-model"},
+        deployments={"acme-production": "underlying-model"},
         models={
             "underlying-model": [
                 SelfhostedModelPrice(
@@ -92,8 +92,8 @@ def observation(**changes):
 
 def test_arbitrary_deployments_price_the_explicit_underlying_model():
     settings = billing()
-    price = require_selfhosted_price(settings, "coke-production")
-    assert price.model == "coke-production"
+    price = require_selfhosted_price(settings, "acme-production")
+    assert price.model == "acme-production"
     assert price.input == Decimal("2")
     assert selfhosted_prices(settings)[("selfhosted", "underlying-model")].output == 10
 
@@ -113,7 +113,7 @@ def test_unpriced_turn_is_refused(case):
         settings.models["underlying-model"][0] = settings.models["underlying-model"][0].model_copy(
             update={"effective_from": NOW.date() + timedelta(days=1)}
         )
-    deployment = "underlying-model" if case == "model-only" else "coke-production"
+    deployment = "underlying-model" if case == "model-only" else "acme-production"
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         require_selfhosted_price(settings, deployment)
 
@@ -165,7 +165,7 @@ async def sessions(db_engine, db_clean):
     return sm
 
 
-async def admit(sessions, *, settings=None, key="turn-admission-1", deployment="coke-production"):
+async def admit(sessions, *, settings=None, key="turn-admission-1", deployment="acme-production"):
     return await admit_selfhosted_usage(
         sessionmaker=sessions,
         tenant_id=TENANT,
@@ -204,7 +204,7 @@ async def pending(sessions, tenant=TENANT):
         return (await list_pending_usage(session, tenant_id=tenant)).rows
 
 
-@pytest.mark.parametrize("model", ["underlying-model", "coke-production"])
+@pytest.mark.parametrize("model", ["underlying-model", "acme-production"])
 async def test_metered_request_debits_once_with_cached_and_reasoning_subsets(sessions, model):
     usage = observation(model=ModelRef(provider="selfhosted", id=model))
     results = await asyncio.gather(record(sessions, usage), record(sessions, usage))
@@ -275,7 +275,7 @@ async def test_missing_admission_preserves_receipt_for_reconciliation(sessions):
 
 
 @pytest.mark.parametrize("initial_key", [None, "wrong-key"])
-@pytest.mark.parametrize("initial_model", [None, "coke-production", "underlying-model"])
+@pytest.mark.parametrize("initial_model", [None, "acme-production", "underlying-model"])
 async def test_unassociated_receipt_adopts_existing_admission_once(
     sessions, initial_key, initial_model
 ):
@@ -287,7 +287,7 @@ async def test_unassociated_receipt_adopts_existing_admission_once(
     # Model-less usage needs a measured correction with the recovered identity.
     repaired = observation(
         revision=2 if initial_model is None else 1,
-        model=ModelRef(provider="selfhosted", id="coke-production"),
+        model=ModelRef(provider="selfhosted", id="acme-production"),
     )
     assert await record(sessions, repaired)
     assert await balance(sessions) == Decimal("-0.004050")
@@ -369,7 +369,7 @@ async def test_adoption_cannot_hide_original_request_before_admission(sessions):
 
 
 async def test_concurrent_adoption_settles_once(sessions):
-    usage = observation(model=ModelRef(provider="selfhosted", id="coke-production"))
+    usage = observation(model=ModelRef(provider="selfhosted", id="acme-production"))
     assert not await record(sessions, usage, admission_key=None)
     assert sorted(await asyncio.gather(record(sessions, usage), record(sessions, usage))) == [
         False,
@@ -389,12 +389,12 @@ async def test_deployment_remap_never_changes_admitted_tariff_or_corrections(ses
             cache_read="5",
         )
     ]
-    settings.deployments["coke-production"] = "new-model"
+    settings.deployments["acme-production"] = "new-model"
     # Idempotent recovery loads original admission, even with a remapped deployment.
     recovered = await admit(sessions, settings=settings)
     assert recovered == original
     assert recovered.underlying_model == "underlying-model"
-    usage = observation(model=ModelRef(provider="selfhosted", id="coke-production"))
+    usage = observation(model=ModelRef(provider="selfhosted", id="acme-production"))
     assert not await record(sessions, usage, infrastructure_usd=None)
     assert await record(sessions, usage)
     assert await balance(sessions) == Decimal("-0.004050")
@@ -405,7 +405,7 @@ async def test_deployment_remap_never_changes_admitted_tariff_or_corrections(ses
 
 async def test_restarted_recorder_uses_persisted_tariff_not_remapped_deployment(sessions):
     usage = observation(
-        model=ModelRef(provider="selfhosted", id="coke-production"),
+        model=ModelRef(provider="selfhosted", id="acme-production"),
         input_cached_tokens=0,
         output_tokens=20,
         output_reasoning_tokens=0,
@@ -417,8 +417,8 @@ async def test_restarted_recorder_uses_persisted_tariff_not_remapped_deployment(
             effective_from=date(2026, 1, 1), input="10", output="50", cache_read="0"
         )
     ]
-    remapped.deployments["coke-production"] = "new-model"
-    assert require_selfhosted_price(remapped, "coke-production").input == 10
+    remapped.deployments["acme-production"] = "new-model"
+    assert require_selfhosted_price(remapped, "acme-production").input == 10
     # Recreate the factory, as recovery does, without retaining an admission object.
     recovered_sessions = async_sessionmaker(sessions.kw["bind"], expire_on_commit=False)
     recovered = await admit(recovered_sessions, settings=remapped)
@@ -432,7 +432,7 @@ async def test_restarted_recorder_uses_persisted_tariff_not_remapped_deployment(
         saved = await contexts.read_context(
             db, tenant_id=TENANT, binding_id="selfhosted-binding", key=key
         )
-    assert saved["admission"]["deployment"] == "coke-production"
+    assert saved["admission"]["deployment"] == "acme-production"
     assert saved["admission"]["underlying_model"] == "underlying-model"
     assert saved["admission"]["tariff_effective_from"] == "2026-01-01"
     # The receipt association alone suffices; no live settings or key are needed.
@@ -446,9 +446,9 @@ async def test_restarted_recorder_uses_persisted_tariff_not_remapped_deployment(
 @pytest.mark.parametrize(
     ("first_model", "next_model"),
     [
-        ("coke-production", "underlying-model"),
-        ("underlying-model", "coke-production"),
-        (None, "coke-production"),
+        ("acme-production", "underlying-model"),
+        ("underlying-model", "acme-production"),
+        (None, "acme-production"),
     ],
 )
 async def test_alias_changes_retain_canonical_accounting_identity(
@@ -558,12 +558,12 @@ def test_history_selects_effective_windows_and_gaps():
         )
     )
     assert (
-        selfhosted_prices(settings, on=date(2026, 5, 1))[("selfhosted", "coke-production")].input
+        selfhosted_prices(settings, on=date(2026, 5, 1))[("selfhosted", "acme-production")].input
         == 2
     )
     assert not selfhosted_prices(settings, on=date(2026, 6, 15))
     assert (
-        selfhosted_prices(settings, on=date(2026, 7, 1))[("selfhosted", "coke-production")].input
+        selfhosted_prices(settings, on=date(2026, 7, 1))[("selfhosted", "acme-production")].input
         == 3
     )
 
@@ -606,7 +606,7 @@ async def test_corrupt_receipt_tariff_keeps_alias_correction_durable(
     from mux.state.operations import OperationRecord
     from sqlalchemy import select, update
 
-    first = observation(model=ModelRef(provider="selfhosted", id="coke-production"))
+    first = observation(model=ModelRef(provider="selfhosted", id="acme-production"))
     assert (
         await record(sessions, first, infrastructure_usd=Decimal(0) if settled_first else None)
         is settled_first
@@ -632,7 +632,7 @@ async def test_corrupt_receipt_tariff_keeps_alias_correction_durable(
     correction = observation(
         revision=2,
         output_tokens=200,
-        model=ModelRef(provider="selfhosted", id="coke-production"),
+        model=ModelRef(provider="selfhosted", id="acme-production"),
         native_meter={"request_id": "request-1", "corrected": True},
     )
     assert not await record(sessions, correction)
@@ -677,7 +677,7 @@ async def test_midnight_clock_lag_prices_from_frozen_admission_date(sessions, mo
     assert admitted.tariff_effective_from == host_at.date()
     assert admitted.price().checked_on == admitted.price().admitted_on == host_at.date()
     usage = observation(
-        observed_at=harness_at, model=ModelRef(provider="selfhosted", id="coke-production")
+        observed_at=harness_at, model=ModelRef(provider="selfhosted", id="acme-production")
     )
     assert await record(sessions, usage, admission_key="midnight")
     assert not await record(sessions, usage, admission_key="midnight")
@@ -741,3 +741,58 @@ async def test_bad_row_is_flagged_without_hiding_other_pending_rows(sessions):
     assert len(page.rows) == 2 and page.invalid_rows == 1
     assert {row.reason for row in page.rows} == {"invalid_observation", "usage_unknown"}
     assert next(row for row in page.rows if row.reason == "invalid_observation").session_id is None
+
+
+@pytest.mark.parametrize("test_model,test_deployment", [(True, False), (False, True), (True, True)])
+@pytest.mark.parametrize(
+    "test_identity",
+    [
+        "gpt-6-luna-test",
+        "gpt-6-luna-Test",
+        "gpt-6-luna-TEST",
+        "gpt-6-luna_TEST",
+        "gpt-6-luna test",
+        " TEST ",
+        "gpt-6-luna-TEST ",
+        "gpt-6-luna-TEST\t",
+    ],
+)
+def test_test_tariffs_require_explicit_startup_consent(
+    monkeypatch, test_model, test_deployment, test_identity
+):
+    from daimon.core.config import load_settings
+    from structlog.testing import capture_logs
+
+    monkeypatch.setenv(
+        "DAIMON_DATABASE__URL", "postgresql+asyncpg://localhost/daimon_test_nc_tariffs"
+    )
+    model = test_identity if test_model else "gpt-6-luna"
+    deployment = test_identity if test_deployment else "luna"
+    import json
+
+    monkeypatch.setenv(
+        "DAIMON_BILLING__SELFHOSTED__MODELS",
+        json.dumps(
+            {
+                model: [
+                    {
+                        "effective_from": "2026-10-21",
+                        "input": 1,
+                        "output": 2,
+                        "cache_read": 0,
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS", json.dumps({deployment: model}))
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS", "false")
+    with pytest.raises(ValidationError, match="ALLOW_TEST_TARIFFS"):
+        load_settings(_env_file=None)
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS", "true")
+    with capture_logs() as logs:
+        settings = load_settings(_env_file=None)
+    assert settings.billing.selfhosted.allow_test_tariffs
+    assert any(
+        row["log_level"] == "warning" and "TEST TARIFFS ENABLED" in row["event"] for row in logs
+    )

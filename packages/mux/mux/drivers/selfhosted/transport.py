@@ -17,6 +17,7 @@ import httpx
 from pydantic import JsonValue, TypeAdapter
 
 from mux.contracts.errors import ProviderErrorCategory
+from mux.drivers.selfhosted.config import HarnessConfig
 from mux.errors import ProviderError
 
 _JSON = TypeAdapter[JsonValue](JsonValue)
@@ -107,12 +108,21 @@ class DirectTransport:
         token: str | None = None,
         token_provider: TokenProvider | None = None,
         session_pool: bool = False,
+        allow_insecure_http: bool = False,
     ) -> None:
         if (token is None) == (token_provider is None) or (token is not None and not token.strip()):
             raise ValueError("exactly one harness token or token provider is required")
         url = httpx.URL(base_url)
-        if not secure_url(base_url) or not url.host or url.userinfo or url.query or url.fragment:
-            raise ValueError("harness URL must use HTTPS except on loopback")
+        try:
+            HarnessConfig(
+                harness_url=base_url,
+                auth_ref="TRANSPORT_TOKEN",
+                allow_insecure_http=allow_insecure_http,
+            )
+        except ValueError:
+            raise ValueError(
+                "harness URL must use HTTPS except on loopback or opted-in private endpoints"
+            ) from None
         if session_pool and (url.scheme != "https" or token_provider is None):
             raise ValueError("session pools require HTTPS and a refreshing Entra token provider")
         self._client, self._base_url = client, base_url.rstrip("/")
@@ -129,6 +139,14 @@ class DirectTransport:
         replay: bool = False,
         deadline: datetime | None = None,
     ) -> JsonValue:
+        # C3.9a covers the credential carrier hop as well as harness→MCP.
+        # Refuse before refreshing the harness token or invoking the HTTP client.
+        if mcp_authorization is not None and not secure_url(url):
+            raise ProviderError(
+                "permission",
+                retryable=False,
+                native_code="C3.9a_mcp_authorization_requires_https_or_loopback",
+            )
         if mcp_authorization is not None and (
             not mcp_authorization.startswith("Bearer ")
             or not mcp_authorization.removeprefix("Bearer ").strip()
