@@ -68,6 +68,7 @@ from mux.contracts.profile import SUPPORTED, Capability, Profile
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, ScopeViolation, UnsupportedCapability
 from mux.profiles import (
+    MANAGED_AGENTS,
     PROFILES,
     RUNNABLE_PROFILES,
     backend_selection,
@@ -175,8 +176,8 @@ async def effective_thread_backend(
                     raise ScopeViolation(
                         previous.ma_session_id, "session history differs from authorized channel"
                     )
-                return "anthropic"
-    return latest.backend if latest is not None else "anthropic"
+                return MANAGED_AGENTS.provider
+    return latest.backend if latest is not None else DEFAULT_BACKEND
 
 
 async def current_backend_and_sharing(
