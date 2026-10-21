@@ -1480,3 +1480,24 @@ The Anthropic session-create extension accepts an explicit `system` override,
 including `null` to clear it. This lets isolated long-job workers replace the
 parent agent instructions without changing the agent resource. Omission preserves
 the existing session-create payload.
+
+The harness C3 transport accepts `allow_insecure_http=True` only for literal or
+name patterns classified as in-cluster by `HarnessConfig`; no DNS resolution
+verifies the destination. The operator must restrict harness ingress to the
+same release's host/controller pods with NetworkPolicy. AKS uses chart-CA HTTPS
+for both Services; F76 covers the remaining controller-to-sandbox HTTP hop.
+HTTPS remains the default, and metadata endpoints are refused.
+
+MCP credentials require HTTPS or loopback. The legacy wire field
+`MCPServer.allow_insecure_http` never authorizes credential transport; false is
+omitted using a model serializer compatible with the declared Pydantic floor.
+The harness supports a scoped `HARNESS_MCP_CA_BUNDLE` for chart-generated CA
+trust, with certificate and hostname verification enabled. Host and harness
+compare MCP destinations through `mux.mcp_url.canonical_mcp_url`, preserving
+path case and normalizing scheme/host case, default ports and trailing slashes.
+
+C3.9a also protects the host-to-harness credential carrier: a non-loopback HTTP
+request with `mcp_authorization` is refused with a non-retryable permission error
+before token-provider calls or network I/O. `allow_insecure_http` supports only
+turns without MCP credentials. HTTPS and loopback HTTP can carry the transient
+`X-Daimon-MCP-Authorization` header; this applies to both transport implementations.

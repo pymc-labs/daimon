@@ -368,3 +368,40 @@ def test_tool_policy_rejects_invalid_keys(key):
             limits={"max_tool_calls": 1, "deadline_s": 1},
             tool_policy={key: "deny"},
         )
+
+
+@pytest.mark.parametrize("explicit_false", [False, True])
+def test_default_mcp_request_accepts_previous_strict_wire_model(explicit_false):
+    from mux.drivers.selfhosted.wire import MCPServer, WireModel
+    from pydantic import Field
+
+    class PreviousMCPServer(WireModel):
+        name: str
+        url: str
+        headers_env: dict[str, str] = Field(default_factory=dict)
+
+    class PreviousTurnRequest(TurnRequest):
+        mcp_servers: list[PreviousMCPServer] = Field(default_factory=list)
+
+    kwargs = {"allow_insecure_http": False} if explicit_false else {}
+    server = MCPServer(name="mcp", url="https://mcp/mcp", **kwargs)
+    request = TurnRequest(
+        session_id="s",
+        turn_id="t",
+        idempotency_key="k",
+        model="gpt-6-luna",
+        instructions="",
+        input=[],
+        mcp_servers=[server],
+        skills=[],
+        limits={"max_tool_calls": 1, "deadline_s": 30},
+    )
+    wire = request.model_dump(mode="json")
+    assert "allow_insecure_http" not in wire["mcp_servers"][0]
+    PreviousTurnRequest.model_validate(wire)
+    assert (
+        MCPServer(name="mcp", url="http://mcp/mcp", allow_insecure_http=True).model_dump()[
+            "allow_insecure_http"
+        ]
+        is True
+    )

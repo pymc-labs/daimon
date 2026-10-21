@@ -317,3 +317,13 @@ Each row carries a reason such as `usage_unknown`, `infrastructure_unknown`,
 `--cursor <next-cursor>` for the next page. The command is read-only. The
 runtime repairs gaps by replaying the harness's measured usage, and a tariff
 added after a request cannot repair it. Never treat pending turns as free.
+
+Every provider request, including compaction, journals `model_request_started`
+before model I/O and exactly one closing outcome under the same request ID:
+measured `usage` or unknown `usage_unavailable`. Compaction usage follows the
+same accounting and reconciliation rules as ordinary requests.
+
+Selfhosted tariff model and deployment names with a normalized `-test`, `_test`, or ` test` suffix, or bare `test`, are refused at
+startup by default. Classification strips surrounding whitespace and ignores case. An explicit test installation can set
+`DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS=true`; startup logs a warning
+that these rates are not production prices. Keep this disabled for production.

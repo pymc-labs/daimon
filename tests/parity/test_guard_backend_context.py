@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARD_SITES = {
+    "packages/adapters/cli/daimon/adapters/cli/commands/selfhosted.py",
     "packages/core/daimon/core/thread_handoff.py",
     "packages/core/daimon/core/continuity/dispatch.py",
     "packages/core/daimon/core/continuity/watch_reports.py",

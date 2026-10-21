@@ -13,7 +13,9 @@ from typing import cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
+from mux.drivers.selfhosted.config import reject_metadata_url
 from mux.drivers.selfhosted.wire import MCPServer, TurnRequest
+from mux.mcp_url import canonical_mcp_url
 from pydantic import JsonValue, TypeAdapter
 
 JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -34,13 +36,9 @@ def normalized_mcp_url(url: str) -> str:
         or any(char.isspace() or ord(char) < 32 for char in url)
     ):
         raise ValueError("invalid MCP URL")
-    host = parsed.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    port = parsed.port
-    if port is not None and port != (443 if parsed.scheme == "https" else 80):
-        host += f":{port}"
-    return urlunsplit((parsed.scheme, host, parsed.path.rstrip("/"), "", ""))
+    _ = parsed.port  # Preserve strict malformed-port rejection before comparison.
+    reject_metadata_url(url)
+    return canonical_mcp_url(url)
 
 
 def mcp_origin(url: str) -> str:
