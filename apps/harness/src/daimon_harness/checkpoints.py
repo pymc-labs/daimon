@@ -284,8 +284,8 @@ class Checkpoints:
             return journal
         checkpoints = self.names(session_id)
         if not checkpoints:
-            if pending.exists():
-                raise ValueError("interrupted restore has no remote checkpoint")
+            if pending.exists() or after_seq > 0:
+                raise ValueError("observed session has no remote checkpoint")
             return journal
         if not pending.exists():
             workspace_name = hashlib.sha256(session_id.encode()).hexdigest()[:32]
