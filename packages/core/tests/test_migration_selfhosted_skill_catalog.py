@@ -51,3 +51,33 @@ async def test_selfhosted_skill_catalog_upgrade_preserves_existing_versions(db_s
         )
 
     await connection.run_sync(upgrade)
+
+
+@pytest.mark.fresh_schema
+async def test_attachment_upgrade_preserves_existing_agents(db_session):
+    tenant = await make_tenant(db_session)
+    path = Path(__file__).parents[1] / "alembic/versions/0114_selfhosted_skill_pins.py"
+    spec = importlib.util.spec_from_file_location("selfhosted_attachment_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    connection = await db_session.connection()
+
+    def upgrade(sync):
+        sync.execute(text("ALTER TABLE selfhosted_agents DROP COLUMN skill_attachments"))
+        sync.execute(
+            text(
+                "INSERT INTO selfhosted_agents (id, tenant_id, name, spec, revision) "
+                "VALUES ('sh_agent_existing', :tenant, 'existing', '{}'::jsonb, 1)"
+            ),
+            {"tenant": tenant.id},
+        )
+        with Operations.context(MigrationContext.configure(sync)):
+            module.upgrade()
+            with pytest.raises(NotImplementedError, match="cannot be discarded"):
+                module.downgrade()
+        assert sync.execute(text("SELECT id, skill_attachments FROM selfhosted_agents")).all() == [
+            ("sh_agent_existing", [])
+        ]
+
+    await connection.run_sync(upgrade)

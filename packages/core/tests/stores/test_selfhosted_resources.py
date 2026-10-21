@@ -605,3 +605,95 @@ async def test_chat_identity_resolution_is_tenant_scoped_and_live(
     assert await agents.find_by_derived_uuid(authorized, uuid4()) is None
     await agents.archive(authorized, agent.ref, key="archive-identity")
     assert await agents.find_by_derived_uuid(authorized, identity) is None
+
+
+async def test_shared_agent_skill_attachments_keep_uploader_provenance(
+    db_session_factory, tmp_path
+):
+    from daimon.core.skills.ingest import bundle_from_files
+    from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+    from daimon.core.turn.selfhosted_tools import load_turn_skill_bundles
+
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db)
+        alice = await make_account(db, tenant=tenant)
+        bob = await make_account(db, tenant=tenant)
+        other_tenant = await make_tenant(db)
+        outsider = await make_account(db, tenant=other_tenant)
+    alice_scope = scope(str(tenant.id), str(alice.id)).model_copy(update={"principal_id": "alice"})
+    bob_scope = scope(str(tenant.id), str(bob.id)).model_copy(update={"principal_id": "bob"})
+    catalog = PostgresNeutralCatalog(
+        db_session_factory, provider="selfhosted", account_scope_id=str(tenant.id)
+    )
+
+    def bundle(text):
+        return bundle_from_files(
+            {"SKILL.md": f"---\nname: shared\ndescription: Shared context.\n---\n{text}".encode()}
+        )
+
+    original, private = bundle("Alice pinned"), bundle("Alice private")
+    for id_, content in (("pinned", original), ("private", private)):
+        await catalog.put_skill(
+            alice_scope,
+            skill_id=id_,
+            version="v1",
+            agent_name="shared",
+            display_title=id_,
+            bundle=content,
+        )
+    pinned, unpinned = SkillRef(id="pinned", version="v1"), SkillRef(id="private", version="v1")
+    agents = SelfHostedAgents(db_session_factory)
+    agent = await agents.create(
+        alice_scope,
+        AgentSpec(
+            name="shared", model=ModelRef(provider="selfhosted", id="gpt-5"), skills=(pinned,)
+        ),
+        key="alice-pins",
+    )
+    # A caller's same-named upload must not replace the attachment's bytes.
+    await catalog.put_skill(
+        bob_scope,
+        skill_id="pinned",
+        version="v1",
+        agent_name="shared",
+        display_title="pinned",
+        bundle=bundle("Bob copy"),
+    )
+    admitted = await SelfHostedAgents(db_session_factory).retrieve(bob_scope, agent.ref)
+    assert await catalog.get_skill(bob_scope, "private", "v1") is None
+    assert await catalog.get_agent_skill(bob_scope, admitted, unpinned) is None
+    forged = admitted.model_copy(
+        update={"spec": admitted.spec.model_copy(update={"skills": (pinned, unpinned)})}
+    )
+    assert await catalog.get_agent_skill(bob_scope, forged, unpinned) is None
+    loaded = await load_turn_skill_bundles(
+        tmp_path, (pinned, unpinned), scope=bob_scope, catalog=catalog, agent=admitted
+    )
+    assert loaded == {("pinned", "v1"): original}
+    changed = await agents.update(
+        bob_scope,
+        agent.ref,
+        AgentPatch(system="Another caller edits the prompt"),
+        expected=agent.revision,
+        key="bob-edits",
+    )
+    retained = await catalog.get_agent_skill(bob_scope, changed, pinned)
+    assert retained is not None and retained.bundle == original
+    with pytest.raises(ScopeViolation, match="revision changed"):
+        await catalog.get_agent_skill(bob_scope, admitted, pinned)
+    foreign = scope(str(other_tenant.id), str(outsider.id))
+    with pytest.raises(ScopeViolation):
+        await catalog.get_agent_skill(foreign, changed, pinned)
+    removed = await agents.update(
+        bob_scope, agent.ref, AgentPatch(skills=()), expected=changed.revision, key="remove-pin"
+    )
+    assert await catalog.get_agent_skill(bob_scope, removed, pinned) is None
+    # Pinning an id alone cannot attach another account's private bundle.
+    unrelated = await agents.create(
+        bob_scope,
+        AgentSpec(
+            name="unrelated", model=ModelRef(provider="selfhosted", id="gpt-5"), skills=(unpinned,)
+        ),
+        key="unowned-pin",
+    )
+    assert await catalog.get_agent_skill(bob_scope, unrelated, unpinned) is None

@@ -432,11 +432,18 @@ tool policy; the stricter effective permission wins, including server defaults.
 MCP approvals retain their server and tool names during live delivery and replay.
 Replay applies the same explicit agent permissions as live delivery. Approval
 cards and tool results share the tool call identity; confirmations retain the
-harness action identity. Repeated call records can tighten an approval permission;
-they cannot relax it. After a host restart, historical approval records recover
-completed batch members so the remaining approvals can still be submitted.
-Retained skill versions load from the tenant's local
-selfhosted catalog, including exact channel grants uploaded by another account.
+harness action identity. Repeated call records can tighten an explicit approval
+permission; they cannot relax it. Host inspection pauses still honor automatic
+permissions and saved allow rules, including unattended runs. After a host
+restart, historical approval records recover completed batch members so the
+remaining approvals can still be submitted.
+Locally provisioned skill versions load from the tenant's selfhosted catalog,
+including exact channel grants for bundles retained by another account.
+Selfhosted skill uploads are not yet available; a channel grant without a local
+bundle is skipped, and an agent pin without a local bundle refuses the turn.
+Agent skill pins retain their uploader account and principal when attached, so
+authorized callers of a shared agent load the same retained bytes. This grants
+access only to attached versions, without exposing the uploader's other bundles.
 Replay and Stop page through long in-turn histories by cursor under their
 existing deadlines, without a fixed 5,000-record ceiling.
 Explicit agent `ask` permissions always require confirmation, even for sandbox

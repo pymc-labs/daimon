@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance for locally provisioned skill versions attached to shared agents.
+
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
 
@@ -28,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include async managed-identity transport in the harness image and finish subprocess cleanup when cancellation arrives during launch.
 
 - Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.
-- Load retained agent and channel skill bundles in selfhosted turns, preserve approval permissions across reconnects, and attach approved tool results to their original tool blocks. Replay and Stop can read past 5,000 journal records within one turn.
+- Load locally provisioned agent and channel skill bundles in selfhosted turns, preserve approval permissions across reconnects, and attach approved tool results to their original tool blocks. Replay and Stop can read past 5,000 journal records within one turn. Selfhosted skill uploads are not yet available.
 
 - Bound selfhosted Entra audiences to operator-approved origins and tenants. Fixed approval handling through the turn runner, preserved explicit agent confirmation and stored MCP rules, and resumed session history and usage replay from durable cursors.
 

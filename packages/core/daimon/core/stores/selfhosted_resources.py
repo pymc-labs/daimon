@@ -15,6 +15,7 @@ from uuid import UUID
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core._models import (
     Account,
+    NeutralSkillVersion,
     SelfHostedAgentRecord,
     SelfHostedEnvironmentRecord,
     SelfHostedResourceOperation,
@@ -92,6 +93,54 @@ async def list_live_agent_facts(
             )
         )
     return facts
+
+
+async def _skill_attachments(
+    session: AsyncSession,
+    scope: Scope,
+    spec: AgentSpec,
+    previous: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Retain uploader provenance for unchanged pins; new pins belong to their writer."""
+    attachments: list[dict[str, str]] = []
+    for ref in spec.skills or ():
+        if ref.version is None:
+            continue
+        old = next(
+            (
+                item
+                for item in previous
+                if (item["skill_id"], item["version"]) == (ref.id, ref.version)
+            ),
+            None,
+        )
+        if old is not None:
+            attachments.append(old)
+            continue
+        # Operator-created seeded refs have no personal catalog ownership.
+        if scope.account_id == "operator":
+            continue
+        retained = await session.scalar(
+            select(NeutralSkillVersion).where(
+                NeutralSkillVersion.tenant_id == UUID(scope.tenant_id),
+                NeutralSkillVersion.account_id == UUID(scope.account_id),
+                NeutralSkillVersion.provider == "selfhosted",
+                NeutralSkillVersion.account_scope_id == scope.tenant_id,
+                NeutralSkillVersion.skill_id == ref.id,
+                NeutralSkillVersion.version == ref.version,
+                NeutralSkillVersion.principal_id == scope.principal_id,
+            )
+        )
+        if retained is not None:
+            attachments.append(
+                {
+                    "skill_id": ref.id,
+                    "version": ref.version,
+                    "account_id": str(retained.account_id),
+                    "principal_id": retained.principal_id,
+                }
+            )
+    return attachments
 
 
 async def cleanup_expired_receipts(
@@ -328,6 +377,8 @@ class _Resources[
                 spec=spec.model_dump(mode="json"),
                 revision=1,
             )
+            if isinstance(row, SelfHostedAgentRecord) and isinstance(spec, AgentSpec):
+                row.skill_attachments = await _skill_attachments(session, scope, spec, [])
             session.add(row)
             await session.flush()
             result = self._result(scope, row)
@@ -439,6 +490,10 @@ class _Resources[
             if expected != Revision(local=row.revision) or row.archived_at is not None:
                 raise ProviderError("conflict", retryable=False)
             spec = self._patched(row, patch)
+            if isinstance(row, SelfHostedAgentRecord) and isinstance(spec, AgentSpec):
+                row.skill_attachments = await _skill_attachments(
+                    session, scope, spec, row.skill_attachments
+                )
             if spec.name != row.name:
                 exists = await session.scalar(
                     select(self.table.id).where(

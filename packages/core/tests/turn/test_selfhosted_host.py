@@ -462,6 +462,10 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "stored_deny"),
         (False, False, "proxy_default"),
         (False, False, "proxy_safety"),
+        (False, False, "inspection_allow_chat"),
+        (False, False, "inspection_allow_unattended"),
+        (False, False, "inspection_auto_chat"),
+        (False, False, "inspection_auto_unattended"),
         (False, False, "long_history"),
         (False, False, "retained_skills"),
     ],
@@ -518,6 +522,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             ),
         )
         await mux_state.put_config_revision(db, REVISION)
+    attachment_scope = SCOPE
     if scenario == "retained_skills":
         from daimon.core.skills.ingest import bundle_from_files
         from daimon.core.stores.channel_skills import add_channel_skill
@@ -528,9 +533,12 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         )
         async with request.deps.sessionmaker() as db, db.begin():
             uploader = await make_account(db, tenant=tenant)
+        attachment_scope = SCOPE.model_copy(
+            update={"account_id": str(uploader.id), "principal_id": "uploader"}
+        )
         for name, owner in (
-            ("retained", SCOPE),
-            ("channel-upload", SCOPE.model_copy(update={"account_id": str(uploader.id)})),
+            ("retained", attachment_scope),
+            ("channel-upload", attachment_scope),
         ):
             for version in ("v1", "v2"):
                 bundle = bundle_from_files(
@@ -562,7 +570,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 actor_account_id=uploader.id,
             )
     agent = await SelfHostedAgents(request.deps.sessionmaker).create(
-        SCOPE,
+        attachment_scope,
         AgentSpec(
             name="test",
             model=ModelRef(provider="selfhosted", id="gpt-5"),
@@ -571,7 +579,11 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             else None,
             tools=(
                 ToolSpec(name="write", kind="builtin", permission="ask"),
-                ToolSpec(name="reports", kind="mcp_toolset", permission="ask"),
+                ToolSpec(
+                    name="reports",
+                    kind="mcp_toolset",
+                    permission="auto" if scenario.startswith("inspection") else "ask",
+                ),
             ),
             mcp_servers=(
                 MCPConnection(
@@ -758,7 +770,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         "mcp_ask_accept",
         "stored_deny",
         "proxy_safety",
-    )
+    ) or scenario.startswith("inspection")
     if approval_case and scenario != "ask_disabled":
         from daimon.core.tool_safety import ToolSafetyPolicy
 
@@ -768,7 +780,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 request.deps, tool_safety=ToolSafetyPolicy(enabled=True, agent_rules=True)
             ),
         )
-    if scenario == "stored_deny":
+    if scenario == "stored_deny" or scenario.startswith("inspection_allow"):
         from daimon.core.authz import Subject
         from daimon.core.stores.agent_tool_rules import set_rule
 
@@ -780,7 +792,8 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 agent_name="test",
                 tool_key="reports/get_report",
                 server_url="https://reports.example/mcp",
-                rule="deny",
+                rule="deny" if scenario == "stored_deny" else "allow",
+                scope="chat_and_routines",
                 set_by="admin",
                 actor=Subject(is_admin=True),
             )
@@ -880,7 +893,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             body = json.loads(call.content)
             tool = (
                 "reports/get_report"
-                if scenario == "stored_deny"
+                if scenario == "stored_deny" or scenario.startswith("inspection")
                 else "reports/summarize"
                 if scenario == "mcp_ask_accept"
                 else "daimon-mcp/call_tool"
@@ -900,6 +913,23 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                         session_id=body["session_id"],
                         turn_id=body["turn_id"],
                         at=datetime.now(UTC).isoformat(),
+                        type="tool_use",
+                        data=dict(
+                            call_id="call-approval",
+                            name=tool,
+                            executor="mcp" if "/" in tool else "agent",
+                            input={"name": "get_current_time", "arguments": {}}
+                            if scenario.startswith("proxy")
+                            else {"path": "result.txt"},
+                        ),
+                    )
+                )
+                wire.events.append(
+                    dict(
+                        seq=4,
+                        session_id=body["session_id"],
+                        turn_id=body["turn_id"],
+                        at=datetime.now(UTC).isoformat(),
                         type="requires_action",
                         data=dict(
                             action_id="approval",
@@ -912,7 +942,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                     )
                 )
                 for event in deferred:
-                    event["seq"] += 1
+                    event["seq"] += 2
         if late and method == "POST" and call.url.path == "/v0/turns":
             deferred.extend(wire.events[1:])
             measured = deferred[0]
@@ -1013,6 +1043,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         render_interval_s=0.01,
         operation_key="production-shell",
         confirm_write=confirm,
+        attended=not scenario.endswith("unattended"),
         # Leave room for durable admission before testing a missing terminal event.
         deadline=datetime.now(UTC) + timedelta(seconds=5) if late else None,
     )
@@ -1024,7 +1055,11 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 decision="deny" if scenario in ("ask_deny", "stored_deny") else "allow",
             )
         ]
-        assert len(cards) == (0 if scenario == "stored_deny" else 1)
+        assert len(cards) == (
+            0
+            if scenario in ("stored_deny", "proxy_safety") or scenario.startswith("inspection")
+            else 1
+        )
         assert bool(executions) == (scenario not in ("ask_deny", "stored_deny"))
     if scenario == "proxy_default":
         assert executions == ["neutral"] and cards == [] and actions == []
@@ -1550,13 +1585,13 @@ async def test_live_and_replayed_approval_permissions_match(composed, explicit, 
     ]
     assert blocks[0] == blocks[1]
     assert len(blocks[0]) == 1
-    assert blocks[0][0].evaluated_permission == "ask"
+    expected_ask = explicit is not False
+    assert blocks[0][0].evaluated_permission == ("ask" if expected_ask else "allow")
     for state in states:
         (call,) = tool_calls_for(state, ["selfhosted:tool:call"])
-        assert (
-            decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=True).outcome == "ask"
+        assert decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=True).outcome == (
+            "ask" if expected_ask else "allow"
         )
-        assert (
-            decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=False).outcome
-            == "deny"
+        assert decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=False).outcome == (
+            "deny" if expected_ask else "allow"
         )

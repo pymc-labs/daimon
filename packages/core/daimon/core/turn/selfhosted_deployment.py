@@ -353,6 +353,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             channel_id=revision.channel.channel_id,
             agent_names=names,
             channel_skills=channel_rows,
+            agent=agent,
         )
         prepared_tools = await asyncio.to_thread(
             build_turn_tools,

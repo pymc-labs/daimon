@@ -324,8 +324,16 @@ class SelfHostedTurnIO:
                     if display.type == "agent.mcp_tool_use"
                     else display.name
                 )
-                if self._explicit_ask(qualified) and display.evaluated_permission != "deny":
-                    display = display.model_copy(update={"evaluated_permission": "ask"})
+                if display.evaluated_permission != "deny":
+                    # The host pauses execution to inspect safety and saved rules;
+                    # this pause does not itself require a user confirmation.
+                    display = display.model_copy(
+                        update={
+                            "evaluated_permission": "ask"
+                            if self._explicit_ask(qualified)
+                            else "allow"
+                        }
+                    )
             result.append(display)
         return tuple(result)
 

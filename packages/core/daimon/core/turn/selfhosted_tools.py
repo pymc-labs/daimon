@@ -35,7 +35,7 @@ from daimon.core.stores.domain import ChannelSkillRow
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.ports import Agents
-from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
+from mux.contracts.resources import Agent, MCPConnection, SkillUpload, SkillUploadFile
 from mux.drivers.selfhosted.wire import SKILL_MAX_BYTES as MAX_SKILL_BYTES
 from mux.drivers.selfhosted.wire import TURN_SKILLS_MAX_BYTES as MAX_TURN_SKILL_BYTES
 from mux.drivers.selfhosted.wire import InlineSkill, MCPServer, skill_sha256
@@ -433,6 +433,7 @@ async def load_turn_skill_bundles(
     channel_id: str | None = None,
     agent_names: Sequence[str] = (),
     channel_skills: Sequence[ChannelSkillRow] = (),
+    agent: Agent | None = None,
 ) -> dict[tuple[str, str | None], SkillBundle]:
     """Load local seeds off-loop and exact retained versions from an authorized catalog.
 
@@ -443,7 +444,11 @@ async def load_turn_skill_bundles(
     if catalog is not None:
         for ref in refs:
             if ref.version is not None:
-                stored = await catalog.get_skill(scope, ref.id, ref.version)
+                stored = (
+                    await catalog.get_agent_skill(scope, agent, ref)
+                    if agent is not None and ref in (agent.spec.skills or ())
+                    else await catalog.get_skill(scope, ref.id, ref.version)
+                )
                 if stored is not None:
                     bundles[(ref.id, ref.version)] = stored.bundle
     if channel_skills:

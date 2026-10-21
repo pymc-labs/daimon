@@ -22,9 +22,10 @@ from daimon.core._models import (
     ChannelSkill,
     NeutralAgentRevision,
     NeutralSkillVersion,
+    SelfHostedAgentRecord,
 )
 from daimon.core.skills.ingest import SkillBundle, SkillPreview, bundle_from_upload
-from mux.contracts.ids import Provider, Scope
+from mux.contracts.ids import Provider, Scope, SkillRef
 from mux.contracts.resources import Agent
 from mux.errors import ScopeViolation
 from mux.profiles import neutral_catalog_profile_for
@@ -270,6 +271,58 @@ class PostgresNeutralCatalog:
                     *self._where(NeutralSkillVersion, scope),
                     NeutralSkillVersion.skill_id == skill_id,
                     NeutralSkillVersion.version == version,
+                )
+            )
+            return None if row is None else self._skill(row)
+
+    async def get_agent_skill(
+        self, scope: Scope, agent: Agent, ref: SkillRef
+    ) -> SkillVersion | None:
+        """Load only an exact pin on the admitted agent through its stored uploader."""
+        key = self._key(scope)
+        if (
+            self._provider != "selfhosted"
+            or self._workspace != scope.tenant_id
+            or agent.ref.provider != self._provider
+            or agent.ref.kind != "agent"
+            or agent.ref.tenant_id != scope.tenant_id
+            or agent.ref.account_scope_id != self._workspace
+        ):
+            raise ScopeViolation(agent.ref.id, "agent differs from the admitted skill catalog")
+        async with self._sessions() as session:
+            await self._authorize(session, scope)
+            attached = await session.scalar(
+                select(SelfHostedAgentRecord).where(
+                    SelfHostedAgentRecord.tenant_id == key["tenant_id"],
+                    SelfHostedAgentRecord.id == agent.ref.id,
+                    SelfHostedAgentRecord.archived_at.is_(None),
+                )
+            )
+            if attached is None or attached.revision != agent.revision.local:
+                raise ScopeViolation(agent.ref.id, "agent attachment revision changed")
+            if ref not in (agent.spec.skills or ()) or ref.model_dump(mode="json") not in (
+                attached.spec.get("skills") or []
+            ):
+                return None
+            owner = next(
+                (
+                    item
+                    for item in attached.skill_attachments
+                    if (item["skill_id"], item["version"]) == (ref.id, ref.version)
+                ),
+                None,
+            )
+            if owner is None:
+                return None
+            row = await session.scalar(
+                select(NeutralSkillVersion).where(
+                    NeutralSkillVersion.tenant_id == key["tenant_id"],
+                    NeutralSkillVersion.provider == self._provider,
+                    NeutralSkillVersion.account_scope_id == self._workspace,
+                    NeutralSkillVersion.account_id == uuid.UUID(owner["account_id"]),
+                    NeutralSkillVersion.principal_id == owner["principal_id"],
+                    NeutralSkillVersion.skill_id == ref.id,
+                    NeutralSkillVersion.version == ref.version,
                 )
             )
             return None if row is None else self._skill(row)
