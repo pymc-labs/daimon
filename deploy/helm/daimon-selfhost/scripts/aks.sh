@@ -5,9 +5,20 @@ umask 077
 cd "$(git rev-parse --show-toplevel)"
 chart=deploy/helm/daimon-selfhost
 : "${RG:?export RG}" "${LOCATION:?export LOCATION}" "${ACR:?export ACR}"
-: "${AKS:?export AKS}" "${AOAI:?export AOAI}" "${TAG:?export TAG}"
+: "${AKS:?export AKS}" "${AOAI:?export AOAI}"
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
+if [[ -z ${TAG:-} ]]; then
+  if [[ ${1:-} == bootstrap ]]; then
+    TAG="$(git rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S%N)"
+  elif [[ -s "$AKS_STATE/image-tag" ]]; then
+    TAG=$(cat "$AKS_STATE/image-tag")
+  else
+    echo 'export TAG or retain AKS_STATE/image-tag from a successful bootstrap' >&2
+    exit 1
+  fi
+fi
+export TAG
 export AOAI_DEPLOYMENT=${AOAI_DEPLOYMENT:-gpt-5.4-mini}
 export SELFHOSTED_MODEL=${SELFHOSTED_MODEL:-$AOAI_DEPLOYMENT}
 verify_aoai_model() {
@@ -64,21 +75,7 @@ bootstrap)
   }
   az group create -n "$RG" -l "$LOCATION" -o none
   az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled false -o none
-  # Stream remote builder diagnostics and wait for BOTH pushes before AKS creation.
-  # Do not use --no-logs: operators need the run ID and first failing step.
-  az acr run -r "$ACR" -f "$chart/scripts/acr-build.yaml" \
-    --set "tag=$TAG" --timeout 7200 . || {
-    echo 'ACR Tasks BuildKit build/push failed; inspect the run ID above. The remote builder must support DOCKER_BUILDKIT=1; AKS has not been created.' >&2
-    exit 1
-  }
-  # A detached/interrupted client may return before a remote push is available.
-  # Confirm BOTH requested tags before any downstream provisioning.
-  for image in "daimon:$TAG" "daimon-harness:$TAG"; do
-    az acr repository show -n "$ACR" --image "$image" -o none || {
-      echo "Required ACR image $image is missing or unreadable; stopping before Postgres import and AKS creation. Check the ACR run above." >&2
-      exit 1
-    }
-  done
+  bash "$chart/scripts/build-images.sh"
   az acr import -n "$ACR" --source docker.io/library/postgres:18-alpine --image postgres:18-alpine --force -o none
   az acr repository show -n "$ACR" --image postgres:18-alpine --query digest -o tsv > "$AKS_STATE/postgres-digest"
   az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \

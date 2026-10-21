@@ -41,7 +41,7 @@ class AksBuildkitTests(unittest.TestCase):
             self.assertNotIn("when", push)
             self.assertNotIn("detach", build)
 
-    def run_bootstrap(self, mode):
+    def run_bootstrap(self, mode, tag="buildtest-14"):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
             stub = state / "az"
@@ -54,7 +54,21 @@ with Path(os.environ['CALLS']).open('a') as out:
 if args[:2] == ['acr', 'run']:
     if '--help' in args:
         sys.exit(1 if os.environ['MODE'] == 'missing' else 0)
-    sys.exit(1 if os.environ['MODE'] == 'failed' else 0)
+    if os.environ['MODE'] == 'failed':
+        sys.exit(1)
+    if os.environ['MODE'] != 'no-receipt':
+        print('WARNING: Queued a run with ID: offline-run', file=sys.stderr)
+if args[:3] == ['acr', 'task', 'show-run']:
+    mode = os.environ['MODE']
+    if mode == 'poll-error':
+        sys.exit(1)
+    if mode == 'running-then-success':
+        counter = Path(os.environ['AKS_STATE']) / 'poll-count'
+        count = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(count + 1))
+        print('Running' if count == 0 else 'Succeeded')
+    else:
+        print(mode.removeprefix('status-') if mode.startswith('status-') else 'Succeeded')
 if args[:3] == ['acr', 'repository', 'show']:
     image = args[args.index('--image') + 1]
     if ((os.environ['MODE'] == 'missing-host' and image.startswith('daimon:'))
@@ -72,7 +86,9 @@ if args[:2] == ['aks', 'create']:
                 ACR="offline",
                 AKS="offline",
                 AOAI="offline",
-                TAG="buildtest-14",
+                TAG=tag,
+                ACR_BUILD_WAIT_SECONDS="5" if mode == "running-then-success" else "1",
+                ACR_BUILD_POLL_SECONDS="1",
                 AKS_STATE=directory,
                 CALLS=str(state / "calls"),
                 MODE=mode,
@@ -84,6 +100,15 @@ if args[:2] == ['aks', 'create']:
                 text=True,
             )
             calls = [json.loads(line) for line in (state / "calls").read_text().splitlines()]
+            if result.returncode == 73:
+                build = next(c for c in calls if c[:2] == ["acr", "run"] and "--help" not in c)
+                self.assertEqual(
+                    (state / "image-tag").read_text().strip(),
+                    build[build.index("--set") + 1].removeprefix("tag="),
+                )
+                self.assertEqual((state / "acr-run-id").read_text().strip(), "offline-run")
+            else:
+                self.assertFalse((state / "image-tag").exists())
             return result, calls
 
     def test_missing_acr_tasks_cli_fails_before_resource_creation(self):
@@ -116,22 +141,78 @@ if args[:2] == ['aks', 'create']:
                 checks = [c for c in calls if c[:3] == ["acr", "repository", "show"]]
                 self.assertEqual(checks[-1][checks[-1].index("--image") + 1], missing_image)
 
+    def test_unsuccessful_run_refuses_existing_tags_and_stops_before_provisioning(self):
+        for status in (
+            "Failed",
+            "Canceled",
+            "Error",
+            "Timeout",
+            "Running",
+            "Queued",
+            "Started",
+            "",
+        ):
+            with self.subTest(status=status):
+                result, calls = self.run_bootstrap("status-" + status)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("stopping before provisioning", result.stderr)
+                # Stub repository lookups always succeed: old images cannot bypass run status.
+                self.assertFalse(any(c[:3] == ["acr", "repository", "show"] for c in calls))
+                self.assertFalse(
+                    any(c[:2] in (["aks", "create"], ["acr", "import"]) for c in calls)
+                )
+
+    def test_missing_queue_receipt_stops_before_poll_or_provisioning(self):
+        result, calls = self.run_bootstrap("no-receipt")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no valid run ID", result.stderr)
+        self.assertFalse(any(c[:3] == ["acr", "task", "show-run"] for c in calls))
+        self.assertFalse(any(c[:2] in (["aks", "create"], ["acr", "import"]) for c in calls))
+
+    def test_failed_status_lookup_stops_before_provisioning(self):
+        result, calls = self.run_bootstrap("poll-error")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Cannot verify ACR run", result.stderr)
+        self.assertFalse(any(c[:2] in (["aks", "create"], ["acr", "import"]) for c in calls))
+
+    def test_running_then_succeeded_waits_for_terminal_success(self):
+        result, calls = self.run_bootstrap("running-then-success")
+        self.assertEqual(result.returncode, 73, result.stderr)
+        polls = [c for c in calls if c[:3] == ["acr", "task", "show-run"]]
+        self.assertEqual(len(polls), 2)
+
+    def test_default_tag_is_unique_and_operator_tag_is_preserved(self):
+        generated = []
+        for _ in range(2):
+            result, calls = self.run_bootstrap("success", tag="")
+            self.assertEqual(result.returncode, 73, result.stderr)
+            build = next(c for c in calls if c[:2] == ["acr", "run"] and "--help" not in c)
+            generated.append(build[build.index("--set") + 1])
+        self.assertNotEqual(*generated)
+        self.assertTrue(all(value.startswith("tag=") for value in generated))
+
     def test_successful_remote_push_precedes_cluster_creation(self):
         result, calls = self.run_bootstrap("success")
-        self.assertEqual(result.returncode, 73)
+        self.assertEqual(result.returncode, 73, result.stderr)
         build = next(c for c in calls if c[:2] == ["acr", "run"] and "--help" not in c)
         self.assertEqual(
             build[build.index("-f") + 1], "deploy/helm/daimon-selfhost/scripts/acr-build.yaml"
         )
         self.assertEqual(build[build.index("--set") + 1], "tag=buildtest-14")
-        self.assertNotIn("--no-wait", build)
+        self.assertEqual(build[-1], ".")
+        self.assertIn("--no-wait", build)
+
         self.assertNotIn("--no-logs", build)
+        poll = next(c for c in calls if c[:3] == ["acr", "task", "show-run"])
+        self.assertEqual(poll[poll.index("--run-id") + 1], "offline-run")
+        self.assertEqual(poll[poll.index("--query") + 1], "status")
         cluster = next(c for c in calls if c[:2] == ["aks", "create"])
         imported = next(c for c in calls if c[:2] == ["acr", "import"])
         for image in ("daimon:buildtest-14", "daimon-harness:buildtest-14"):
             check = next(c for c in calls if c[:3] == ["acr", "repository", "show"] and image in c)
             self.assertEqual(check[check.index("-n") + 1], "offline")
-            self.assertLess(calls.index(build), calls.index(check))
+            self.assertLess(calls.index(build), calls.index(poll))
+            self.assertLess(calls.index(poll), calls.index(check))
             self.assertLess(calls.index(check), calls.index(imported))
         self.assertLess(calls.index(imported), calls.index(cluster))
         self.assertFalse(any(c[:2] == ["acr", "build"] for c in calls))

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Require the queued ACR run's authoritative `Succeeded` status before image
+  checks or AKS provisioning, with bounded polling and unique default build tags
+  retained in operator state for later install/reinstall commands.
+
 - Pin the AKS ACR Tasks Dockerfile frontend by digest and verify both pushed image
   tags before importing Postgres or creating AKS, stopping if either is unavailable.
 

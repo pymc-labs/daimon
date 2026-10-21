@@ -581,7 +581,11 @@ from unittest.mock import patch
 args = sys.argv[1:]
 with open(os.environ['STUB_LOG'], 'a') as output:
     output.write(json.dumps(args) + '\\n')
-if args[:3] == ['cognitiveservices', 'account', 'list']:
+if args[:2] == ['acr', 'run'] and '--no-wait' in args:
+    print('WARNING: Queued a run with ID: offline-run', file=sys.stderr)
+elif args[:3] == ['acr', 'task', 'show-run']:
+    print('Succeeded')
+elif args[:3] == ['cognitiveservices', 'account', 'list']:
     if os.environ['EXISTING'] == 'True':
         print('offline')
 elif args[:4] == ['cognitiveservices', 'account', 'deployment', 'show']:

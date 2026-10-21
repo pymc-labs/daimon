@@ -1698,7 +1698,17 @@ selects `docker/dockerfile:1.7.0@sha256:dbbd5e059e8a07ff7ea6233b213b36aa516b4c53
 operator needs Azure CLI with `az acr run` support and permission to run ACR
 Tasks; local Docker/buildx is not required. Bootstrap checks CLI support before
 creating resources, streams run IDs and builder diagnostics, and stops on either
-build/push failure before creating AKS. After the task returns, bootstrap checks
+build/push failure before creating AKS. After confirmed run success, bootstrap checks
 both requested image tags in ACR and stops before Postgres import or AKS creation
 if either tag is missing or unreadable. No local image/cache cleanup is needed.
 See Microsoft's [ACR Tasks BuildKit configuration](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-tasks-reference-yaml#build).
+
+AKS image builds queue with `--no-wait` and poll the captured run ID through
+`az acr task show-run`. Only `Succeeded` permits the image existence checks and
+subsequent provisioning. A failed/canceled/error/timeout/unknown status, failed
+status lookup or local wait timeout stops before Postgres import or AKS creation,
+even when an explicit reused tag already exists. Logs are diagnostic only.
+The local wait defaults to 7200 seconds with 15-second polls, configurable through
+`ACR_BUILD_WAIT_SECONDS` and `ACR_BUILD_POLL_SECONDS`. When `TAG` is unset,
+bootstrap generates a unique git-SHA/timestamp tag, saves it after success in
+`AKS_STATE/image-tag`, and later commands reuse it. Explicit operator tags win.
