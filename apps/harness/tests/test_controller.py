@@ -349,7 +349,11 @@ async def test_maintenance_exception_survives_and_full_disk_reports_admission(
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://test"
     ) as client:
-        assert (await client.get("/readiness")).json() == {"ok": True, "admission_available": False}
+        assert (await client.get("/readiness")).json() == {
+            "ok": True,
+            "admission_available": False,
+            "checkpoint_blocked_sandboxes": 0,
+        }
         r = await client.post(
             "/v0/turns", json={"session_id": "a"}, headers={"Authorization": "Bearer host"}
         )
@@ -429,7 +433,7 @@ async def test_reaper_uses_sandbox_activity_after_controller_restart():
     active = True
 
     async def upstream(request):
-        return httpx.Response(200, json={"active": active, "last_activity": 1000})
+        return httpx.Response(200, json={"active": active, "last_activity": 1000, "durable": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
         rebuilt.client = client
@@ -461,6 +465,43 @@ async def test_sandbox_activity_retains_sealed_worker_context(tmp_path, monkeypa
             app.state.supervisor.contexts.clear()
 
 
+async def test_activity_retries_failed_checkpoint_without_new_turn(tmp_path, monkeypatch):
+    from daimon_harness.checkpoints import Checkpoints
+    from daimon_harness.service import create_app as service
+
+    from .conftest import FakeModelAdapter, turn
+    from .test_checkpoints import MemoryBlobs
+
+    monkeypatch.setenv("HARNESS_ROLE", "sandbox")
+    blobs = MemoryBlobs()
+    app = service(
+        home=tmp_path,
+        token="test",
+        adapter=FakeModelAdapter(),
+        checkpoints=Checkpoints(blobs),
+    )
+    async with app.router.lifespan_context(app):
+        supervisor = app.state.supervisor
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://test",
+            headers={"Authorization": "Bearer test", "Accept": "application/json"},
+        ) as client:
+            blobs.fail = True
+            assert (await client.post("/v0/turns", json=turn())).status_code == 202
+            await supervisor.tasks["turn-1"]
+            await supervisor.flush_checkpoints()
+            assert supervisor.checkpoint_pending == "session-1"
+            assert not (await client.get("/internal/activity")).json()["durable"]
+            await supervisor.flush_checkpoints()
+            assert supervisor.checkpoint_pending == "session-1"
+            blobs.fail = False
+            assert not (await client.get("/internal/activity")).json()["durable"]
+            await supervisor.flush_checkpoints()
+            assert (await client.get("/internal/activity")).json()["durable"]
+            assert supervisor.checkpoint_pending is None
+
+
 async def test_retention_waits_for_acquire_lock_and_rechecks_binding(tmp_path, monkeypatch):
     import os
     import time
@@ -474,26 +515,156 @@ async def test_retention_waits_for_acquire_lock_and_rechecks_binding(tmp_path, m
     wal = tmp_path / "sessions" / key / "wal" / "turn.json"
     PVCStore(tmp_path).upload(str(wal.relative_to(tmp_path)), io.BytesIO(b"paid inventory"))
     os.utime(wal.parent.parent, (time.time() - 100, time.time() - 100))
-    # acquire is paused inside its session lock while GC takes its initial scan.
+    # Park GC immediately before its destructive disk call, after all binding
+    # checks. Acquisition must still be excluded at THIS point.
     entered, proceed = asyncio.Event(), asyncio.Event()
-    original = ctl.kube.list
+    original = asyncio.to_thread
+    deleted_while_bound = []
 
-    async def paused(owner):
+    async def paused(func, *args, **kwargs):
+        if func is __import__("shutil").rmtree:
+            entered.set()
+            await proceed.wait()
+            deleted_while_bound.append(
+                any(p["metadata"]["labels"][SESSION] == key for p in ctl.kube.items.values())
+            )
+        return await original(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", paused)
+    gc = asyncio.create_task(app.state.collect())
+    await asyncio.wait_for(entered.wait(), 1)
+    acquire = asyncio.create_task(ctl.acquire("returning"))
+    try:
+        await asyncio.wait_for(asyncio.shield(acquire), 0.05)
+    except TimeoutError:
+        pass
+    finally:
+        proceed.set()
+    await gc
+    pod = await acquire
+    await ctl.release(pod)
+    assert deleted_while_bound == [False]
+
+
+@pytest.mark.parametrize("age", [901, 86401, 172801])
+async def test_idle_non_durable_survives_eviction_and_failed_probes(tmp_path, age):
+    now = [1000]
+    ctl = controller(Kube(), warm=0, clock=lambda: now[0])
+    pod = await ctl.acquire("dirty")
+    await ctl.release(pod)
+    now[0] += age
+    durable, failing = False, False
+
+    async def activity(request):
+        if failing:
+            raise httpx.ConnectError("unavailable")
+        return httpx.Response(
+            200, json={"active": False, "last_activity": 1000, "durable": durable}
+        )
+
+    app = create_app(controller=ctl, root=tmp_path, token="host")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(activity)) as client:
+        ctl.client = client
+        await ctl.maintain()
+        assert pod["metadata"]["name"] in ctl.kube.items
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as caller:
+            assert (await caller.get("/readiness")).json()["checkpoint_blocked_sandboxes"] == 1
+        failing = True
+        for _ in range(ctl.unknown_limit + 1):
+            await ctl.maintain()
+        assert pod["metadata"]["name"] in ctl.kube.items
+        failing, durable = False, True
+        await ctl.maintain()
+        assert not ctl.kube.items
+        assert not ctl.checkpoint_blocked
+
+
+async def test_late_checkpoint_cannot_resurrect_deleted_session(tmp_path):
+    ctl = controller(Kube(), warm=0)
+    pod = await ctl.acquire("deleted")
+    await ctl.release(pod)
+    app = create_app(controller=ctl, root=tmp_path, token="host")
+    name = "sessions/" + pod["metadata"]["labels"][SESSION] + "/wal/t.json"
+    PVCStore(tmp_path).upload(name, io.BytesIO(b"old"))
+    entered, proceed = asyncio.Event(), asyncio.Event()
+
+    async def delayed_body():
+        yield b"late"
         entered.set()
         await proceed.wait()
-        return await original(owner)
+        yield b" upload"
 
-    ctl.kube.list = paused
-    acquire = asyncio.create_task(ctl.acquire("returning"))
-    await entered.wait()
-    gc = asyncio.create_task(app.state.collect())
-    await asyncio.sleep(0)
-    assert not gc.done()
-    proceed.set()
-    pod = await acquire
-    await gc
-    assert wal.read_bytes() == b"paid inventory"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        upload = asyncio.create_task(
+            client.put(
+                "/internal/checkpoints/" + name,
+                content=delayed_body(),
+                headers={"Authorization": "Bearer " + ctl.credential(pod, "checkpoint")},
+            )
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        headers = {"Authorization": "Bearer host"}
+        assert (await client.delete("/v0/sessions/deleted", headers=headers)).status_code == 503
+        assert (await client.delete("/v0/sessions/deleted", headers=headers)).status_code == 204
+        assert not (tmp_path / "sessions" / pod["metadata"]["labels"][SESSION]).exists()
+        proceed.set()
+        assert (await upload).status_code == 410
+        assert not (tmp_path / "sessions" / pod["metadata"]["labels"][SESSION]).exists()
+
+
+async def test_checkpoint_disk_commit_serializes_with_session_deletion(tmp_path, monkeypatch):
+    ctl = controller(Kube(), warm=0)
+    pod = await ctl.acquire("deleted")
     await ctl.release(pod)
+    app = create_app(controller=ctl, root=tmp_path, token="host")
+    name = "sessions/" + pod["metadata"]["labels"][SESSION] + "/wal/t.json"
+    entered, proceed = asyncio.Event(), asyncio.Event()
+    original = asyncio.to_thread
+
+    async def paused(func, *args, **kwargs):
+        if getattr(func, "__name__", "") == "upload":
+            entered.set()
+            await proceed.wait()
+        return await original(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", paused)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        upload = asyncio.create_task(
+            client.put(
+                "/internal/checkpoints/" + name,
+                content=b"checkpoint",
+                headers={"Authorization": "Bearer " + ctl.credential(pod, "checkpoint")},
+            )
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        deletion = asyncio.create_task(
+            client.delete(
+                "/v0/sessions/deleted",
+                headers={"Authorization": "Bearer host"},
+            )
+        )
+        try:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(deletion), 0.05)
+        finally:
+            proceed.set()
+            await upload
+            await deletion
+        assert upload.result().status_code == 204
+        assert deletion.result().status_code == 503
+        assert (
+            await client.delete(
+                "/v0/sessions/deleted",
+                headers={"Authorization": "Bearer host"},
+            )
+        ).status_code == 204
+        assert not (tmp_path / "sessions" / pod["metadata"]["labels"][SESSION]).exists()
 
 
 @pytest.mark.parametrize("reply", ["missing", "non-json", "wrong-types", "never", "keyerror"])
@@ -523,7 +694,7 @@ async def test_hostile_activity_is_bounded_and_other_pods_still_reap(reply):
                 if reply == "missing"
                 else {"active": "false", "last_activity": "yesterday"},
             )
-        return httpx.Response(200, json={"active": False, "last_activity": 1000})
+        return httpx.Response(200, json={"active": False, "last_activity": 1000, "durable": True})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
         ctl.client = client

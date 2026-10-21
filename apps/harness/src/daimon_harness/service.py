@@ -826,6 +826,14 @@ def create_app(
 
         @app.get("/internal/activity", dependencies=secured)
         async def pod_activity():
+            # Maintenance polls keep retrying an idle failed checkpoint even if
+            # the user never sends another turn. The controller keeps this pod.
+            if (
+                not supervisor.contexts
+                and not any(not task.done() for task in supervisor.tasks.values())
+                and supervisor.checkpoint_pending is not None
+            ):
+                supervisor.retry_pending_checkpoint(supervisor.checkpoint_pending)
             return {
                 "active": bool(supervisor.contexts)
                 or any(not task.done() for task in supervisor.tasks.values()),

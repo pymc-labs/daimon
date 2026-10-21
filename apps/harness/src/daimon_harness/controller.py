@@ -169,6 +169,7 @@ class Controller:
         self.max_age, self.hard_age = max_age, hard_age
         self.unknown_limit, self.probe_timeout = unknown_limit, probe_timeout
         self.unknown: dict[str, int] = defaultdict(int)
+        self.checkpoint_blocked: set[str] = set()
         self.kube, self.template, self.owner = kube, template, owner
         self.warm, self.idle, self.maximum, self.clock = warm, idle, maximum, clock
         self.version = hashlib.sha256(json.dumps(template, sort_keys=True).encode()).hexdigest()[
@@ -190,6 +191,7 @@ class Controller:
 
     async def pods(self) -> list[dict[str, Any]]:
         self.inventory = await self.kube.list(self.owner)
+        self.checkpoint_blocked.intersection_update(p["metadata"]["uid"] for p in self.inventory)
         self.capabilities = {
             self.credential(p, "checkpoint"): p
             for p in self.inventory
@@ -296,9 +298,13 @@ class Controller:
                         ):
                             raise ValueError("invalid activity")
                     self.unknown.pop(meta["uid"], None)
+                    if not durable:
+                        self.checkpoint_blocked.add(meta["uid"])
+                        logger.warning("sandbox_eviction_blocked reason=checkpoint_pending")
+                        return
+                    self.checkpoint_blocked.discard(meta["uid"])
                     if age < self.hard_age and (
                         active
-                        or ((age >= self.max_age or stale) and not durable)
                         or (
                             age < self.max_age
                             and not stale
@@ -309,7 +315,9 @@ class Controller:
                 except Exception as exc:
                     self.unknown[meta["uid"]] += 1
                     logger.warning("sandbox_activity_unknown reason=%s", type(exc).__name__)
-                    if self.unknown[meta["uid"]] < self.unknown_limit and age < self.hard_age:
+                    if meta["uid"] in self.checkpoint_blocked or (
+                        self.unknown[meta["uid"]] < self.unknown_limit and age < self.hard_age
+                    ):
                         return
             # Lost/wedged workers reconcile from the write-ahead inventory on restore.
             await self.kube.delete(pod)
@@ -512,7 +520,11 @@ def create_app(
     @app.get("/readiness")
     async def readiness():
         await liveness()
-        return {"ok": True, "admission_available": space_ok()}
+        return {
+            "ok": True,
+            "admission_available": space_ok(),
+            "checkpoint_blocked_sandboxes": len(ctl.checkpoint_blocked),
+        }
 
     @app.middleware("http")
     async def separate_ports(request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -597,6 +609,18 @@ def create_app(
         key = name or request.query_params.get("prefix", "")
         if not key.startswith("sessions/" + pod["metadata"]["labels"][SESSION] + "/"):
             raise HTTPException(403)
+
+        async def validate_binding() -> None:
+            # Deletion and commits share this lock. Rebuild capabilities from the
+            # API so an upload spooled before deletion cannot resurrect its data.
+            await ctl.pods()
+            current = ctl.capabilities.get(value)
+            if current is None or (
+                current["metadata"]["uid"] != pod["metadata"]["uid"]
+                or current["metadata"]["labels"][SESSION] != pod["metadata"]["labels"][SESSION]
+            ):
+                raise HTTPException(410, "sandbox binding retired")
+
         if request.method == "GET":
             if not name:
                 return await asyncio.to_thread(store.list, key)
@@ -616,9 +640,13 @@ def create_app(
                         raise HTTPException(413)
                     await asyncio.to_thread(source.write, chunk)
                 source.seek(0)
-                await asyncio.to_thread(store.upload, name, source)
+                async with ctl.locks[pod["metadata"]["labels"][SESSION]]:
+                    await validate_binding()
+                    await asyncio.to_thread(store.upload, name, source)
         else:
-            await asyncio.to_thread(store.delete, name)
+            async with ctl.locks[pod["metadata"]["labels"][SESSION]]:
+                await validate_binding()
+                await asyncio.to_thread(store.delete, name)
         return Response(status_code=204)
 
     @app.delete("/v0/sessions/{session}")

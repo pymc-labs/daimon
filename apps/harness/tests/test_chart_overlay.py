@@ -1,25 +1,19 @@
-"""Render the shipped overlay against the exact chart revision in its recipe."""
+"""Render the shipped overlay against the chart in the current checkout."""
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
-PIN = "473a53a2ad0e315314c53d2615243ab46645a6f5"
 ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
 def chart(tmp_path):
-    archive = subprocess.run(
-        ["git", "archive", PIN, "deploy/helm/daimon-selfhost"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(["tar", "-x", "-C", str(tmp_path)], input=archive.stdout, check=True)
+    shutil.copytree(ROOT / "deploy/helm/daimon-selfhost", tmp_path / "deploy/helm/daimon-selfhost")
     subprocess.run(
         ["patch", "-p1", "-d", str(tmp_path)],
         input=(ROOT / "deploy/helm/patches/per-conversation.patch").read_bytes(),

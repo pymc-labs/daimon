@@ -1336,3 +1336,9 @@ request with `mcp_authorization` is refused with a non-retryable permission erro
 before token-provider calls or network I/O. `allow_insecure_http` supports only
 turns without MCP credentials. HTTPS and loopback HTTP can carry the transient
 `X-Daimon-MCP-Authorization` header; this applies to both transport implementations.
+
+The selfhosted transport treats HTTP 503 with `X-Daimon-Error: sandbox_busy`
+as an immediate capacity response. It raises the retryable `sandbox_busy` driver
+error with “Busy, try again shortly”, without entering the transport polling
+retry loop. The host shows that message so the user can retry when a sandbox
+slot becomes available.

@@ -46,11 +46,15 @@ class HTTPObjects(DiskObjects):
         from daimon_harness.controller import Controller, create_app
         from starlette.testclient import TestClient
 
-        class NoAPI:
-            async def list(self, owner):
-                raise AssertionError("checkpoint HTTP path called Kubernetes")
+        class FakeAPI:
+            def __init__(self):
+                self.items = {}
 
-        self.controller = Controller(NoAPI(), {}, "recovery", warm=0)
+            async def list(self, owner):
+                return list(self.items.values())
+
+        self.kube = FakeAPI()
+        self.controller = Controller(self.kube, {}, "recovery", warm=0)
         self.app = create_app(
             controller=self.controller, root=Path(self.directory.name), token="host"
         )
@@ -63,10 +67,11 @@ class HTTPObjects(DiskObjects):
 
         prefix = "/".join(name.split("/")[:2]) + "/"
         self.prefixes.add(prefix)
-        token = prefix + "capability"
-        self.controller.capabilities[token] = {
-            "metadata": {"labels": {SESSION: name.split("/")[1]}}
-        }
+        key = name.split("/")[1]
+        pod = {"metadata": {"uid": key, "labels": {SESSION: key}}}
+        self.kube.items[key] = pod
+        token = self.controller.credential(pod, "checkpoint")
+        self.controller.capabilities[token] = pod
         remote = object.__new__(ControllerStore)
         remote.client = self.client
         self.client.headers["Authorization"] = "Bearer " + token

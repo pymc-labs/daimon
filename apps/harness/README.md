@@ -938,11 +938,18 @@ is idempotent. Disk admission thresholds are `minFreeBytes` (default
 1 GiB) and `minFreeFraction` (default 0.1). Existing remote WAL/reservation barriers
 remain fail-closed before paid work. Checkpoint writes retain temp-file fsync,
 atomic rename and parent-directory fsync before acknowledgment. Each sandbox activity/bootstrap probe has a four-second bound and a separate
-HTTP client. Unknown activity is evicted after three failed probes. Idle and
-checkpointed pods recycle after 24 hours; a 48-hour hard limit prevents expired
-7-day server certificates from stranding capacity. A stale maintenance heartbeat
+HTTP client. Unknown activity is evicted after three failed probes unless a
+previous probe reported a pending checkpoint. Pods reporting `durable=false`
+survive idle, template and age eviction, including the 48-hour hard age; idle
+activity polls retry their checkpoint. Readiness exposes
+`checkpoint_blocked_sandboxes`, and maintenance logs `sandbox_eviction_blocked`.
+After a successful checkpoint, idle pods recycle after 24 hours with a 48-hour
+hard limit below the 7-day server certificate validity. A stale maintenance heartbeat
 fails liveness and readiness; per-pod failures are logged and isolated. Checkpoints use a separate HTTPS listener on 8089, and
-all capability checks use the in-memory inventory before any storage/API work.
+initial capability checks use the in-memory inventory before any storage/API work.
+Checkpoint commits and deletes additionally take the session lock and recheck
+live pod binding before disk changes, so a late upload cannot recreate a deleted
+session.
 Per-capability 100 requests/second limits return 429; store clients retry boundedly.
 
 Run recovery against the controller HTTP store path (ASGI transport for deterministic

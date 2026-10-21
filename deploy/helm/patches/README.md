@@ -1,11 +1,11 @@
-Apply `per-conversation.patch` to PR #1273 chart head
-`473a53a2ad0e315314c53d2615243ab46645a6f5` (or a verified compatible later head):
+Apply `per-conversation.patch` to the in-tree `deploy/helm/daimon-selfhost`
+chart on `azure-selfhost` (#1273 is merged):
 
 ```sh
 git apply deploy/helm/patches/per-conversation.patch
 ```
 
-This PR carries the overlay, not the pending chart. Set
+This PR carries the opt-in overlay. Set
 `harness.mode=perConversation`. The chart owns both `DAIMON_MCP__PUBLIC_URL`
 on the host and `HARNESS_DAIMON_MCP_URL` in sandboxes, using
 `https://<release>-daimon-mcp.<namespace>.svc:8765/mcp` (configured MCP port).
@@ -32,10 +32,13 @@ and temporary proof support from the original measurement: 1547m baseline +
 original memory requests leave room for four 256Mi sandboxes as well. This
 is a requests budget, not a throughput guarantee; size the cap for your release. Sandboxes recycle
 when idle and checkpointed after 24 hours; unknown activity is evicted after
-three failed probes, and the hard lifetime is 48 hours, below 7-day cert validity.
+three failed probes unless a checkpoint was reported pending. Non-durable pods
+are retained and their idle checkpoints retried; readiness exposes their count.
+The 48-hour hard lifetime applies after a successful checkpoint, below 7-day
+cert validity.
 Rotate the sandbox signer Secret (including its controller client certificate)
 before its 365-day client expiry and restart the controller and sandboxes.
 
-The offline kind runner extracts this pinned chart in scratch and applies the
-overlay. It does not merge the chart branch. See the harness README for RBAC
+The chart overlay tests copy the in-tree chart into scratch and apply the
+overlay, without requiring Git history. See the harness README for RBAC
 and durability guarantees.
