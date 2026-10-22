@@ -1307,14 +1307,15 @@ JSON object.
 
 Read from `daimon.core.config.TurnSettings`. Prefix `DAIMON_TURN__`.
 
-Experimental neutral turn ports; legacy remains the default.
+Neutral turn ports; mux is the default path and legacy remains selectable.
 
 ### `DAIMON_TURN__PATH`
 
-`'legacy' | 'mux'` · optional · default `legacy`
+`'legacy' | 'mux'` · optional · default `mux`
 
-Experimental turn I/O path. legacy (the default) preserves the current behavior; mux
-opts into neutral Events/Sessions ports. Off by default.
+Turn I/O path. mux (the default) runs turns through the neutral Events/Sessions ports;
+legacy selects the previous direct-SDK path, kept for rollback. Channel backend
+selection also needs channel_backends.
 
 ### `DAIMON_TURN__NATIVE_FOOTER_COST`
 
@@ -1329,10 +1330,11 @@ unchanged with either value.
 
 `bool` · optional · default `False`
 
-Read each channel's backend configuration at admission. Off by default: no channel's
-configuration is read and every turn runs as before. On: a channel with no backend
-configuration is unchanged; a configured one is checked against its profile and refused
-(backend_unsupported) if the profile cannot meet it or this release cannot run it yet.
+Read each channel's backend configuration at admission. Needs path=mux. Off by default:
+no channel's configuration is read and every turn runs as before. On: a channel with no
+backend configuration is unchanged; a configured one is checked against its profile and
+refused (backend_unsupported) if the profile cannot meet it or this release cannot run
+it yet.
 
 ### `DAIMON_TURN__AGENT_BACKENDS`
 

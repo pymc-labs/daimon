@@ -147,16 +147,14 @@ jobs:
           path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
 
-  # The mux leg: the turn-relevant suites again with the turn path on mux and
-  # channel backends on. The legacy legs above are unchanged and stay the
-  # default; each test also asserts which path it ran (daimon.testing.turn_leg).
+  # The mux + channel-backends leg: the turn-relevant suites again with channel
+  # backends on. Mux is the default turn path, so the legs above already run it with
+  # channel backends off (the default); this leg adds the opt-in backend selection.
+  # Each test also asserts which path it ran (daimon.testing.turn_leg).
   # Blocking, as a ratchet: tests/mux_leg_known_failures.txt lists the failures
   # that exist today and daimon.testing.mux_leg_known marks exactly those
   # xfail(strict), so a new failure fails the leg and so does a listed test that
-  # starts passing (delete its line). The list shrinks until the mux-leg failures
-  # are fixed. This job is deliberately NOT in the deploy job's `needs`: the
-  # production default path is legacy, so a mux regression fails the pull request
-  # check but does not hold back the staging deploy of a legacy build.
+  # starts passing (delete its line). The list shrinks until the failures are fixed.
   # Suites carry a `-mux` suffix so shard-check proves each one is covered once.
   # The whole core suite is not doubled: most of its ~6 shards never read the
   # turn path, so a second pass would spend minutes without testing a new path.
@@ -201,6 +199,64 @@ jobs:
         run: >-
           uv run pytest ${{ matrix.paths }} -n 2 -rfE --tb=short
           -p daimon.testing.ci_shard -p daimon.testing.mux_leg_known
+          --ci-shard-by=file
+          --ci-shard-suite=${{ matrix.suite }}
+          --ci-shard-index=${{ matrix.shard }}
+          --ci-shard-count=${{ matrix.shards }} --durations=20
+          --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
+          path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
+
+  # The legacy leg: the same turn-relevant suites with the turn path on legacy
+  # (DAIMON_TURN__PATH=legacy), so the previous path stays covered while it exists.
+  # Blocking, as a ratchet like the mux leg above, with its own list:
+  # tests/legacy_leg_known_failures.txt. Like the mux leg it is NOT in the deploy
+  # job's `needs`.
+  pytest-legacy-leg:
+    name: pytest-${{ matrix.suite }}${{ matrix.shards > 1 && format(' ({0}/{1})', matrix.shard, matrix.shards) || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suite: turn-legacy, shard: 0, shards: 1, paths: packages/core/tests/turn }
+          - { suite: parity-legacy, shard: 0, shards: 1, paths: tests/parity }
+          - { suite: slack-legacy, shard: 0, shards: 1, paths: packages/adapters/slack }
+          - { suite: discord-legacy, shard: 0, shards: 2, paths: packages/adapters/discord }
+          - { suite: discord-legacy, shard: 1, shards: 2, paths: packages/adapters/discord }
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      DAIMON_TURN__PATH: legacy
+      TMPDIR: /dev/shm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
+        with:
+          database: "true"
+      - name: pytest (${{ matrix.suite }})
+        run: >-
+          uv run pytest ${{ matrix.paths }} -n 2 -rfE --tb=short
+          -p daimon.testing.ci_shard -p daimon.testing.mux_leg_known
+          --mux-leg-known-failures tests/legacy_leg_known_failures.txt
           --ci-shard-by=file
           --ci-shard-suite=${{ matrix.suite }}
           --ci-shard-index=${{ matrix.shard }}
@@ -401,7 +457,7 @@ jobs:
   # Collect-only, so it needs no database: every sharded suite's legs together
   # must collect exactly what the suite collects unsharded, each test file in
   # exactly one leg. Reads the matrices of every job that loads the shard
-  # plugin (pytest-db, pytest-discord, pytest-mux-leg), so a new leg is checked as added.
+  # plugin (pytest-db, pytest-discord, pytest-mux-leg, pytest-legacy-leg), so a new leg is checked as added.
   shard-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15

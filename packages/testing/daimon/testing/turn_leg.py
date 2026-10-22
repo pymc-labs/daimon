@@ -1,8 +1,9 @@
 """The turn leg a test run selects: one real `TurnSettings` read from the environment.
 
-CI runs the turn-relevant suites twice. The legacy leg is the default and sets
-nothing. The mux leg sets ``DAIMON_TURN__PATH=mux`` and
-``DAIMON_TURN__CHANNEL_BACKENDS=true``. Fixtures that build turn dependencies
+CI runs the turn-relevant suites on three legs. The default leg sets nothing and
+gets the product default (mux, channel backends off). The mux-backends leg sets
+``DAIMON_TURN__PATH=mux`` and ``DAIMON_TURN__CHANNEL_BACKENDS=true``. The legacy
+leg sets ``DAIMON_TURN__PATH=legacy``. Fixtures that build turn dependencies
 (`daimon.testing.turn_fakes.deps_for`, the parity drivers) take their path and
 backend flags from `turn_leg()` instead of hard-coding them, so the environment
 moves them with the product settings loader and not around it.

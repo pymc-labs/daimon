@@ -119,16 +119,17 @@ once (`--collect-only`, no database), places its files the way CI will, and
 fails if a shard is empty or the shards omit or repeat a test, so a new test
 file lands in exactly one shard without any edit.
 
-The turn-relevant suites (`packages/core/tests/turn`, `tests/parity` and the
-Slack and Discord adapters) also run on a second, blocking `pytest-mux-leg` job
-with `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`; its suites
-carry a `-mux` suffix. Fixtures read the leg through `daimon.testing.turn_leg`
-(`deps_for` and the parity drivers), so run a suite locally on the mux leg by
-setting those two variables. The mux leg is a ratchet: `tests/mux_leg_known_failures.txt` lists the
-failures that exist today and `-p daimon.testing.mux_leg_known` marks them strict
-expected failures, so a new failure fails the leg and a listed test that starts
-passing must be removed from the list. It is not a prerequisite of the staging
-deploy, because legacy is the production default. A test that only holds on mux builds its deps with
+Mux is the default turn path, so the legs above run it. The turn-relevant suites
+(`packages/core/tests/turn`, `tests/parity` and the Slack and Discord adapters)
+also run on two more blocking jobs: `pytest-mux-leg` with `DAIMON_TURN__PATH=mux`
+and `DAIMON_TURN__CHANNEL_BACKENDS=true`, and `pytest-legacy-leg` with
+`DAIMON_TURN__PATH=legacy`; their suites carry a `-mux` or `-legacy` suffix. Fixtures read the leg through `daimon.testing.turn_leg`
+(`deps_for` and the parity drivers), so run a suite locally on a leg by setting
+its variables. Both extra legs are ratchets: `tests/mux_leg_known_failures.txt` and
+`tests/legacy_leg_known_failures.txt` list the failures that exist today and
+`-p daimon.testing.mux_leg_known` marks them strict expected failures, so a new
+failure fails the leg and a listed test that starts passing must be removed from
+the list. Neither is a prerequisite of the staging deploy. A test that only holds on mux builds its deps with
 `deps_for_pinned_mux`; the rest must hold on both legs.
 
 The pre-commit hooks from the setup above run the linters and the generator

@@ -1,4 +1,4 @@
-"""The experimental turn path requires an explicit opt-in."""
+"""The turn path defaults to mux; legacy is an explicit opt-in."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ def test_turn_flag_matches_main_settings_and_turn_only_loader(
         monkeypatch.setenv("DAIMON_TURN__PATH", value)
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://offline:offline@localhost/db")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "offline-fixture")
-    expected = value or "legacy"
+    expected = value or "mux"
     assert load_settings(_env_file=None).turn.path == expected
     assert load_turn_settings(_env_file=None).path == expected
-    assert TurnSettings().path == "legacy"
+    assert TurnSettings().path == "mux"
 
 
 def test_turn_only_loader_needs_no_unrelated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `DAIMON_TURN__PATH` defaults to `mux`, so turns run through the Events/Sessions ports. Set `DAIMON_TURN__PATH=legacy` to keep the previous path; an empty value now selects `mux`. `DAIMON_TURN__CHANNEL_BACKENDS` stays off by default, so channels with no backend configuration behave as before and configured channels are still not read. CI adds a legacy leg beside the mux leg.
+
 - Agent edits now reach an open self-hosted conversation at its next message: changed instructions, model, tools, skills or MCP servers apply on the same session, so workspace files stay. A turn already running finishes on its old configuration and its usage is metered at the model and tariff it used. Environment changes and archived agents still require a fresh session.
 
 - Anthropic backend configurations that require `steer`, `native_event_replay`, `environments_fork` or `native_schedules` are now refused at admission; the Anthropic driver never supported them. The self-hosted profile now declares native settlement over model-request usage (`native_requests`) instead of native totals; recorded self-hosted usage and billing are unchanged. A new CI test checks every capability a profile declares against its driver.

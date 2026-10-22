@@ -1680,13 +1680,14 @@ class SupportSettings(BaseModel):
 
 
 class TurnSettings(BaseModel):
-    """Experimental neutral turn ports; legacy remains the default."""
+    """Neutral turn ports; mux is the default path and legacy remains selectable."""
 
     path: Literal["legacy", "mux"] = Field(
-        default="legacy",
+        default="mux",
         description=(
-            "Experimental turn I/O path. legacy (the default) preserves the current "
-            "behavior; mux opts into neutral Events/Sessions ports. Off by default."
+            "Turn I/O path. mux (the default) runs turns through the neutral "
+            "Events/Sessions ports; legacy selects the previous direct-SDK path, "
+            "kept for rollback. Channel backend selection also needs channel_backends."
         ),
     )
 
@@ -1703,11 +1704,12 @@ class TurnSettings(BaseModel):
     channel_backends: bool = Field(
         default=False,
         description=(
-            "Read each channel's backend configuration at admission. Off by default: "
-            "no channel's configuration is read and every turn runs as before. On: a "
-            "channel with no backend configuration is unchanged; a configured one is "
-            "checked against its profile and refused (backend_unsupported) if the "
-            "profile cannot meet it or this release cannot run it yet."
+            "Read each channel's backend configuration at admission. Needs path=mux. "
+            "Off by default: no channel's configuration is read and every turn runs "
+            "as before. On: a channel with no backend configuration is unchanged; a "
+            "configured one is checked against its profile and refused "
+            "(backend_unsupported) if the profile cannot meet it or this release "
+            "cannot run it yet."
         ),
     )
 
@@ -1735,8 +1737,8 @@ class TurnSettings(BaseModel):
 
     @field_validator("path", mode="before")
     @classmethod
-    def _empty_path_is_legacy(cls, value: object) -> object:
-        return "legacy" if value == "" else value
+    def _empty_path_is_default(cls, value: object) -> object:
+        return "mux" if value == "" else value
 
 
 class ThreadNamingSettings(BaseModel):

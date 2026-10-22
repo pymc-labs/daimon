@@ -862,9 +862,9 @@ discovery or host activation and makes no live calls.
 
 ### Experimental turn bridge
 
-`DAIMON_TURN__PATH=legacy` remains the default, including an empty value.
-Setting `mux` opts into Events/Sessions ports for turn input, confirmed stream
-opening and status checks. The host keeps its existing authorization, billing,
+`DAIMON_TURN__PATH=mux` is the default, including an empty value. It runs
+turn input, confirmed stream opening and status checks through Events/Sessions
+ports; `DAIMON_TURN__PATH=legacy` selects the previous direct-SDK path. The host keeps its existing authorization, billing,
 rendering and lifecycle policies. Prepared turns derive the scope from the
 admitted tenant and account; direct callers must supply their authorized scope.
 An injected backend also requires the session's bound ResourceRef. Ancillary
@@ -1004,11 +1004,11 @@ PR3 caller coordination includes the CLI's direct turn entry at
 `packages/adapters/cli/daimon/adapters/cli/run/command.py:131`: mux must pass the
 actual authorized tenant/account scope before provider I/O. N7 owns that
 adapter change; the core bridge refuses a missing scope rather than supplying
-a legacy-host authorization escape. The default legacy caller stays unchanged.
+a legacy-host authorization escape. The `legacy` caller stays unchanged.
 
 Headless routine turns on the mux path pass the caller's authorized tenant and
 account to the shared turn driver. A missing identity is rejected before session
-assembly or provider I/O. The default legacy path retains its existing requests.
+assembly or provider I/O. The `legacy` path retains its existing requests.
 
 Prepared turns also carry their admitted tenant/account scope through legacy
 replay, interruption and confirmation recovery. Seal publication commits before
@@ -2667,8 +2667,8 @@ host configuration requiring them until a credential materializer exists.
 Native readback does not grant fleet execution authority: the headless caller
 must use the canonical resolver output and obtain fresh fleet/budget admission
 before native execution. Ordinary OpenAI legacy-source environment preservation
-remains refused. All switches remain default off; the legacy and channel paths
-keep their existing behavior.
+remains refused. The channel and agent backend switches remain default off; the `legacy` path
+keeps its existing behavior.
 
 Restricted worker preparation uses the earlier of the caller's turn deadline and
 the canonical worker deadline. A shorter caller bound is valid. The same bound
