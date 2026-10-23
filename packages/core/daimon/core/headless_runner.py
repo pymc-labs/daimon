@@ -81,6 +81,7 @@ from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import fleet as fleet_store
+from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.mux_state import PostgresStateStore, database_clock
 from daimon.core.tool_safety import (
     OPEN_TOOL_SAFETY,
@@ -1028,8 +1029,14 @@ async def run_worker(
                 markup=deps.markup,
             )
 
-            async def recapture(db: AsyncSession | None = None):
-                source = await capture_preparation_source(source_request)
+            async def recapture(
+                db: AsyncSession | None = None, *, captured: BackendAgent | None = None
+            ):
+                source = (
+                    captured
+                    if captured is not None
+                    else await capture_preparation_source(source_request)
+                )
                 async with (
                     _setup_transaction(deps.sessionmaker) if db is None else _bounded_locks(db)
                 ) as db:
@@ -1039,16 +1046,18 @@ async def run_worker(
                         != worker.spec_digest
                     ):
                         raise FleetConflict(
-                            "worker source intent changed before native dispatch",
+                            "worker source intent changed since its admission",
                             reason="source_intent_changed",
                         )
                     return await require_admission(db, policy=policy, binding=binding)
 
-            async def guard() -> None:
+            async def guard(
+                db: AsyncSession | None = None, *, captured: BackendAgent | None = None
+            ) -> None:
                 remaining_s(bound, now=request.now(), refuse_expired=True)
                 if cancel.is_set():
                     raise asyncio.CancelledError
-                fresh = await recapture()
+                fresh = await recapture(db, captured=captured)
                 if not fresh.admitted:
                     raise FleetConflict(
                         "worker financial admission refused", reason="financial_admission_refused"
@@ -1172,6 +1181,9 @@ async def run_worker(
                 remaining_s(bound, now=request.now(), refuse_expired=True)
                 if cancel.is_set():
                     raise asyncio.CancelledError
+                # A fresh capture at claim time: it runs before this claim transaction's
+                # first statement (its connection is checked out lazily), so no pooled
+                # connection is held over the HTTP read.
                 verdict = await recapture(db)
                 if not verdict.admitted:
                     return False
@@ -1193,7 +1205,13 @@ async def run_worker(
             with store.checking_claims(claim_input):
                 try:
                     async with _worker_stage(worker, "resolve", setup_at=setup_at):
-                        await guard()
+                        # The source is read over HTTP once, before the resolve transaction:
+                        # that transaction holds a connection (and the shared policy fence)
+                        # from its first statement, so its origin checks re-verify this
+                        # capture on the same session instead of reading again and opening
+                        # a second pooled session for the fleet lock (SMOKE d75dd687).
+                        resolve_source = await capture_preparation_source(source_request)
+                        await guard(captured=resolve_source)
                         async with deps.sessionmaker.begin() as db:
                             retained, _, origin = await resolve_turn_backend(
                                 db,
@@ -1202,7 +1220,9 @@ async def run_worker(
                                 enabled=True,
                                 retained_revision=revision.local,
                                 worker=resolved,
-                                validate_origin=lambda selection, origin, retained: guard(),
+                                validate_origin=lambda selection, origin, retained: guard(
+                                    db, captured=resolve_source
+                                ),
                             )
                     if retained != revision or origin != "agent":
                         raise FleetConflict(
