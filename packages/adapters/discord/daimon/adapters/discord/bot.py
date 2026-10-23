@@ -3432,10 +3432,11 @@ class DaimonBot(commands.Bot):
     ) -> bool:
         """A typed stop phrase in a thread: the Stop buttons' paths. True when answered.
 
-        - @-mentioned, with a still-running fleet run in the thread: the fleet card's
-          Stop-all (its starter or a server admin, as the button), and the author's
-          own running reply too. Refused there, the author can still stop a reply
-          they may stop.
+        - Addressed to the bot (an @mention, a typed-name mention, or a reply to one
+          of its posts: see `typed_stop`), with a still-running fleet run in the
+          thread: the fleet card's Stop-all (its starter or a server admin, as the
+          button), and the author's own running reply too. Refused there, the
+          author can still stop a reply they may stop.
         - Otherwise the running reply's Stop: its asker or a server admin. An
           unmentioned stop phrase never touches a fleet, and one from someone who
           may not stop the reply is left alone; an @-mentioned one is told who can.
