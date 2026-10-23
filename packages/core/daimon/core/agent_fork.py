@@ -8,8 +8,8 @@ repos that need connecting again are named in its receipt (`fork_notes`).
 Skills scoped to the source are uploaded again under the copy's own name, so
 the two never share a skill id; skills scoped to another agent, and any copy
 that fails, are left off and named. It also takes the source's provider,
-model and settings, its fleet grant and its shared memory, and the forker
-owns it (`_carry`); a channel's own copy takes the provider and model only.
+model and settings, its fleet grant and its shared memory (`_carry`); a
+channel's own copy takes the provider and model only.
 Its face starts rendering as soon as it exists, so its first post has it.
 Whether it may be copied is `authorize(FORK)`'s: an admin's call, and never
 a pinned agent. The chat `fork_agent` tool, the CLI and
@@ -34,7 +34,6 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
-from daimon.core.agent_ownership import record_agent_creator
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.channel_backend import AgentBackendService, CarriedBackend, load_backend_agent
 from daimon.core.defaults.ma_index import (
@@ -92,7 +91,6 @@ class CopyCarry:
     backend: CarriedBackend | None = None
     memory: CopiedMemory | None = None
     memory_failed: bool = False
-    owner_recorded: bool = False
     reconnect: tuple[tuple[str, str], ...] = ()
     """The source's MCP servers (name, URL) left off because their key stays with the source."""
     github_repos: tuple[str, ...] = ()
@@ -141,8 +139,6 @@ def fork_notes(copy: AgentCopy, new_name: str) -> tuple[str, ...]:
             )
     if carry.memory_failed or (memory is not None and not memory.copied and memory.failed):
         notes.append(f"{source}'s memory couldn't be copied, so {new_name} starts with none.")
-    if carry.owner_recorded:
-        notes.append(f"You own {new_name}, so you can change it without an admin.")
     for server, url in carry.reconnect:
         notes.append(
             f"{server} needs connecting again: ask in chat "
@@ -297,15 +293,13 @@ async def copy_agent(
     subject: Subject,
     default_agent_name: str | None,
     extra_metadata: Mapping[str, str] | None = None,
-    owner_account_id: uuid.UUID | None = None,
     capture_source: CaptureSource | None = None,
 ) -> AgentCopy:
     """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
 
     `extra_metadata` is stamped on the copy too (an isolation copy's channel).
     `default_agent_name` is the deployment default, which gets no face.
-    `owner_account_id` is the forker, recorded as the copy's owner; None for a
-    caller who can't own an agent. `capture_source` captures the copy the way
+    `capture_source` captures the copy the way
     its turns will, which a provider switch that dropped features needs to be
     carried (`AgentBackendService.carry_to_copy`).
     """
@@ -392,7 +386,6 @@ async def copy_agent(
         source_uuid=source_uuid,
         new_name=new_name,
         channel_copy=MA_METADATA_KEY_CHANNEL_COPY in (extra_metadata or {}),
-        owner_account_id=owner_account_id,
         capture_source=capture_source,
         reconnect=reconnect,
     )
@@ -433,7 +426,6 @@ class _CarryArgs:
     source_uuid: uuid.UUID
     new_name: str
     channel_copy: bool
-    owner_account_id: uuid.UUID | None
     capture_source: CaptureSource | None
     reconnect: tuple[tuple[str, str], ...]
 
@@ -447,8 +439,8 @@ async def _carry(
     """Give the new copy what lives outside its definition. Never raises: the copy exists.
 
     A channel's own copy takes the provider and model only: no fleet grant
-    (spending authority nobody asked for there), no memory (it exists to keep a
-    channel apart) and no owner (it belongs to the channel).
+    (spending authority nobody asked for there) and no memory (it exists to
+    keep a channel apart). Who owns the copy is recorded apart, by the owner rule.
     """
     tenant_id = args.tenant_id
     copy_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(copy.id))
@@ -471,7 +463,7 @@ async def _carry(
                 source_revision,
                 backend_agent,
                 fleet_grant=not args.channel_copy,
-                account_id=args.owner_account_id,
+                account_id=None,
                 now=datetime.now(UTC),
             )
     except Exception as exc:
@@ -492,17 +484,6 @@ async def _carry(
         except Exception as exc:
             _log.warning("agent_fork.memory_copy_failed", error=type(exc).__name__, **log_fields)
             memory_failed = True
-    owner_recorded = False
-    if args.owner_account_id is not None and not args.channel_copy:
-        try:
-            owner_recorded = await record_agent_creator(
-                sessionmaker,
-                tenant_id=tenant_id,
-                agent_id=copy_uuid,
-                account_id=args.owner_account_id,
-            )
-        except Exception as exc:
-            _log.warning("agent_fork.owner_failed", error=type(exc).__name__, **log_fields)
     repos: list[AgentRepo] = []
     try:
         async with sessionmaker() as session:
@@ -516,7 +497,6 @@ async def _carry(
         backend=backend,
         memory=memory,
         memory_failed=memory_failed,
-        owner_recorded=owner_recorded,
         reconnect=args.reconnect,
         github_repos=tuple(repo.full_name for repo in repos if repo.status == "active"),
     )

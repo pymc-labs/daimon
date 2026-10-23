@@ -272,7 +272,7 @@ Personal and channel memory stores are never copied. A provider switch whose
 consent dropped features is carried only with a fresh consent pinned to the
 fork, and only when the fork drops nothing more; a provider turned off for
 the tenant is never carried. A channel's own copy takes
-the provider setting only: no fleet grant, no memory and no owner.
+the provider setting only: no fleet grant and no memory.
 
 ## Skills
 

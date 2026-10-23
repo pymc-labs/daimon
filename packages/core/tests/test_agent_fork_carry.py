@@ -1,4 +1,4 @@
-"""A copy of an agent takes its provider, fleet setup, memory and owner, and names what it lacks."""
+"""A copy of an agent takes its provider, fleet setup and memory, and names what it lacks."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import write_memory
 from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
 from daimon.core.specs import SkillRef
-from daimon.core.stores import agent_backends, agent_owners, security_audit
+from daimon.core.stores import agent_backends, security_audit
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.domain import AgentBackendRevision
 from daimon.testing.factories import make_account, make_tenant
@@ -223,7 +223,7 @@ def _client(
 
 
 @pytest.mark.parametrize("channel_copy", [False, True], ids=["fork", "channel-copy"])
-async def test_copy_agent_carries_memory_owner_and_provider_and_names_what_to_reconnect(
+async def test_copy_agent_carries_memory_and_provider_and_names_what_to_reconnect(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     channel_copy: bool,
@@ -284,7 +284,6 @@ async def test_copy_agent_carries_memory_owner_and_provider_and_names_what_to_re
         subject=Subject(is_admin=True),
         default_agent_name="daimon",
         extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: "chan"} if channel_copy else None,
-        owner_account_id=account.id,
     )
 
     assert created[0]["metadata"][MA_METADATA_KEY_COPY_OF] == "source"
@@ -292,7 +291,6 @@ async def test_copy_agent_carries_memory_owner_and_provider_and_names_what_to_re
     assert copy.carry.reconnect == (("crm", "https://crm.example.com/mcp"),)
     async with factory() as session:
         revision = await agent_backends.current(session, tenant.id, copy_uuid)
-        owner = await agent_owners.owner_of(session, tenant.id, copy_uuid)
         store = await get_memory_store_id(session, tenant_id=tenant.id, agent_id=copy_uuid)
     assert revision is not None and (revision.backend, revision.model) == (
         "gemini",
@@ -304,18 +302,16 @@ async def test_copy_agent_carries_memory_owner_and_provider_and_names_what_to_re
         'to mine".'
     ) in notes
     if channel_copy:
-        assert revision.fleet_grant is None and owner is None and store is None
-        assert copy.carry.memory is None and not copy.carry.owner_recorded
+        assert revision.fleet_grant is None and store is None
+        assert copy.carry.memory is None
         return
     assert revision.fleet_grant is not None
-    assert owner == account.id and copy.carry.owner_recorded
     assert store is not None and store != mount["memory_store_id"]
     copied = {(m["path"], m["content"]) for m in memory.memories[store]}
     assert copied == {("/conventions.md", "tabs"), ("/project/facts.md", "due friday")}
     assert copy.carry.memory == CopiedMemory(2, 0)
     assert "It runs on Gemini (gemini-4-argon), like source." in notes
     assert "It has source's fleet setup, with the same limits." in notes
-    assert "You own mine, so you can change it without an admin." in notes
 
 
 def test_fork_notes_name_a_provider_left_behind_and_lost_memory() -> None:
@@ -458,7 +454,6 @@ async def test_a_failed_carry_still_returns_the_copy_and_lists_only_active_repos
     monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
-        account = await make_account(session, tenant=tenant)
 
     async def broken(*_a: Any, **_k: Any) -> Any:
         raise SQLAlchemyError("database went away")
@@ -470,7 +465,6 @@ async def test_a_failed_carry_still_returns_the_copy_and_lists_only_active_repos
         ]
 
     monkeypatch.setattr(agent_fork, "copy_shared_memory", broken)
-    monkeypatch.setattr(agent_fork, "record_agent_creator", broken)
     monkeypatch.setattr(agent_fork.agent_backends, "current", broken)
     monkeypatch.setattr(agent_fork.github_access, "list_agent_repos", repos)
     source = ma_agent(id="ag_src", name="source", tenant_id=tenant.id)
@@ -483,9 +477,8 @@ async def test_a_failed_carry_still_returns_the_copy_and_lists_only_active_repos
         public_url=None,
         subject=Subject(is_admin=True),
         default_agent_name="daimon",
-        owner_account_id=account.id,
     )
     assert copy.agent.id == "ag_new"
-    assert copy.carry.memory_failed and not copy.carry.owner_recorded
+    assert copy.carry.memory_failed
     assert copy.carry.backend is None
     assert copy.carry.github_repos == ("acme/app",)
