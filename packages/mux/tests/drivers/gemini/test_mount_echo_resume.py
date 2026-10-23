@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
 from mux.contracts.actions import UserMessage
@@ -27,6 +26,7 @@ from mux.drivers.gemini.mcp_auth import RedactedCredential
 from mux.drivers.gemini.transport import Object, SDKTransport, mount_header_digest
 from mux.errors import ProviderError
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 
 OLD = RedactedCredential("offline-turn-one-mount-token")
 NEW = RedactedCredential("offline-turn-two-mount-token")
