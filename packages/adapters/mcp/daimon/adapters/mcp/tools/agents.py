@@ -12,7 +12,7 @@ import datetime
 import uuid
 from collections.abc import Mapping
 from functools import partial
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import anthropic
 import httpx
@@ -110,6 +110,9 @@ from mux.contracts.ids import Provider
 from mux.contracts.profile import Capability
 from mux.profiles import selectable_models
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
+
+if TYPE_CHECKING:
+    from daimon.core.confirmation import BackendSwitchReference
 
 log = structlog.get_logger()
 
@@ -497,59 +500,20 @@ async def _move_this_thread(
     *,
     pinned_here: bool,
 ) -> str:
-    """After a confirmed switch, move the requester's own slot of this thread too.
+    """After a confirmed switch, move the requester's own slot of this thread too."""
+    from daimon.core.switch_cards import move_this_thread
 
-    Only when the switched agent is the one answering here, and never a shared
-    thread (it stays pinned for everyone in it). Says plainly what happens.
-    """
-    from daimon.core.stores import mux_state, thread_agent_bindings
-    from daimon.core.thread_release import caller_slot, request_thread_release
-    from daimon.core.turn.notices import provider_name
-
-    provider = provider_name(target)
-    if pinned_here:
-        return "This channel pins its own provider, so this conversation stays on it."
-    async with runtime.session_factory() as session:
-        handed = await thread_agent_bindings.get_binding(
-            session,
-            tenant_id=auth.tenant_id,
-            platform=origin.platform,
-            parent_channel_id=origin.parent_channel_id,
-            thread_id=origin.thread_id,
-        )
-    # Who answers this conversation's next message: a hand-off's agent, else this
-    # turn's responder. A setup conversation's configuration target never moves it.
-    answering = (
-        handed.responder_name
-        if handed is not None and handed.kind == "handoff"
-        else origin.responder_name
-    )
-    if (handed is not None and handed.kind == "setup") or agent_name != answering:
-        return f"{agent_name} isn't the one answering here, so this conversation is unchanged."
-    slot = caller_slot(
+    return await move_this_thread(
+        runtime.session_factory,
         tenant_id=auth.tenant_id,
-        platform=origin.platform,
-        channel_id=origin.parent_channel_id,
-        thread_id=origin.thread_id,
         account_id=auth.account_id,
-    )
-    async with runtime.session_factory.begin() as session:
-        shared = slot.model_copy(update={"account_id": None})
-        if await mux_state.get_binding(session, shared) is not None:
-            return (
-                "This conversation is shared, so it stays on its current model; "
-                f"start a new thread to talk to {agent_name} on {provider}."
-            )
-        pinned = await mux_state.get_binding(session, slot, include_released=True)
-        await request_thread_release(
-            session,
-            slot,
-            generation=pinned.generation if pinned is not None else 0,
-            now=datetime.datetime.now(datetime.UTC),
-        )
-    return (
-        f"This conversation moves to {provider} from the next message; "
-        "earlier messages here aren't carried over."
+        platform=origin.platform,
+        parent_channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        responder_name=origin.responder_name,
+        agent_name=agent_name,
+        target=target,
+        pinned_here=pinned_here,
     )
 
 
@@ -1237,6 +1201,8 @@ async def _capture_backend_source(
     auth: AuthIdentity,
     origin: TurnOriginRow | None,
     source: BackendAgent,
+    *,
+    self_posted: bool = False,
 ) -> BackendAgent:
     from daimon.adapters.mcp.tools._session_gate import session_card_gap
     from daimon.core.authz import Place
@@ -1245,7 +1211,12 @@ async def _capture_backend_source(
     from daimon.core.turn.admission import capture_backend_source
     from daimon.core.turn.deps import build_turn_deps
 
-    if origin is not None and (
+    if self_posted:
+        # No provider session to read the card gate from: the verified origin
+        # itself must be a public conversation, as for an admitted Claude card.
+        if origin is None or _private_origin(origin):
+            raise channel_backend.AgentBackendRefused("source_context_unavailable")
+    elif origin is not None and (
         gap := await session_card_gap(
             runtime,
             auth,
@@ -1571,7 +1542,7 @@ async def _set_agent_backend_impl(
 
 
 class AgentBackendSwitchInfo(BaseModel):
-    status: Literal["preview", "changed"]
+    status: Literal["preview", "changed", "awaiting_confirmation"]
     agent_name: str
     target_backend: Provider
     model: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -1590,24 +1561,120 @@ class AgentBackendSwitchInfo(BaseModel):
     channel_pin: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
+async def _post_own_switch_card(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    service: channel_backend.AgentBackendService,
+    reference: BackendSwitchReference,
+) -> str:
+    """Post the Confirm card a provider turn can't show, after the same checks as its click.
+
+    The card goes only into the verified origin's thread and only its requester
+    can press it (`daimon.core.switch_cards.press_switch_card`). Nothing changes
+    here; the press re-verifies everything before applying.
+    """
+    from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
+    from daimon.core.confirmation import (
+        CardRefusal,
+        ConfirmationPrompt,
+        backend_switch_callbacks,
+    )
+    from daimon.core.stores import backend_switch_cards as cards
+    from daimon.core.switch_cards import requested_switch_card
+
+    if auth.platform != "discord" or auth.platform_user_id is None:
+        raise ToolError(
+            "I can't post a confirmation card from this conversation here yet. An admin can "
+            "switch the agent from its Details. Nothing changed."
+        )
+    now = datetime.datetime.now(datetime.UTC)
+    expires_at = now + datetime.timedelta(
+        seconds=runtime.settings.tool_safety.confirmation_timeout_s
+    )
+
+    async def current_admin(_clicker: str) -> bool:
+        return auth.is_admin
+
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=runtime.session_factory,
+        anthropic=runtime.client,
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        current_admin=current_admin,
+        default_agent_name=runtime.deployment_default.agent_name,
+        place_word=space_noun(auth.platform),
+        answering_agent_name=origin.responder_name,
+        handoff_thread=(origin.platform, origin.parent_channel_id, origin.thread_id),
+    )
+    prompt = ConfirmationPrompt(
+        title="Change the model provider?",
+        requester_platform_user_id=auth.platform_user_id,
+        expires_at=expires_at,
+        admin=True,
+        backend_switch=reference,
+    )
+    try:
+        prepared = await prepare(prompt)
+    except CardRefusal as exc:
+        said = str(exc)
+        raise ToolError(
+            said if said.endswith("Nothing changed.") else f"{said} Nothing changed."
+        ) from exc
+    except ValueError as exc:
+        raise ToolError(f"{exc} Nothing changed.") from exc
+    async with runtime.session_factory.begin() as session:
+        row = await cards.create_card(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=origin.platform,
+            channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+            setup_thread=origin.is_setup,
+            requester_platform_user_id=auth.platform_user_id,
+            answering_agent_name=origin.responder_name,
+            reference=reference.model_dump(mode="json"),
+            expires_at=expires_at,
+        )
+    card = requested_switch_card(
+        row.id,
+        title=prepared.title,
+        facts=tuple(fact for fact in (prepared.consequence, *prepared.detail_lines) if fact),
+        requester_platform_user_id=auth.platform_user_id,
+        expires_at=expires_at,
+    )
+    from daimon.adapters.mcp.tools.discord._switch_card import post_switch_card
+
+    message_id = await post_switch_card(
+        runtime, auth, channel_id=origin.thread_id, card=card, origin=turn_origin_place(origin)
+    )
+    async with runtime.session_factory.begin() as session:
+        await cards.mark_posted(session, card_id=row.id, message_id=message_id)
+    return (
+        "I posted a Confirm card in this conversation. Nothing changes until the requester "
+        "presses Confirm on it. Tell them so; do not call this tool again for this switch."
+    )
+
+
+def _private_origin(origin: TurnOriginRow) -> bool:
+    from daimon.core.session_seal import is_private_conversation
+
+    return is_private_conversation(origin.parent_channel_id) or is_private_conversation(
+        origin.thread_id
+    )
+
+
 async def _channel_pin_line(runtime: McpRuntime, origin: TurnOriginRow) -> str | None:
     """Say so when this chat's channel pins a provider: the agent's switch won't apply there."""
-    from daimon.core.channel_backend import channel_ref, current_backend
-    from daimon.core.stores import mux_state
-    from daimon.core.turn.notices import provider_name
+    from daimon.core.switch_cards import channel_pin_line
 
-    channel = channel_ref(origin.tenant_id, origin.platform, origin.parent_channel_id)
-    async with runtime.session_factory() as session:
-        pinned = await current_backend(session, channel)
-        if (
-            pinned is None
-            or await mux_state.config_origin(session, channel, pinned.local) != "channel"
-        ):
-            return None
-    model = f" ({pinned.model})" if pinned.model else ""
-    return (
-        f"This channel pins {provider_name(pinned.backend)}{model}, so this agent keeps "
-        'answering on that here until an admin clears it: say "clear this channel\'s pin".'
+    return await channel_pin_line(
+        runtime.session_factory,
+        tenant_id=origin.tenant_id,
+        platform=origin.platform,
+        channel_id=origin.parent_channel_id,
     )
 
 
@@ -1654,6 +1721,9 @@ async def _request_agent_backend_switch_impl(
     )
     from pydantic import ValidationError
 
+    # A provider turn with no card of its own (OpenAI, Gemini): Daimon posts the
+    # card itself. Decided by the verified token's surface, never by the model.
+    self_card = auth.no_confirmation_surface
     on_now: Provider | None = None
     # A new copy of this conversation's responder, made here: the confirmed switch
     # hands it this conversation too.
@@ -1662,14 +1732,22 @@ async def _request_agent_backend_switch_impl(
         service = make_backend_service(
             runtime.session_factory,
             runtime.settings.turn,
-            capture_source=partial(_capture_backend_source, runtime, auth, origin),
+            capture_source=partial(
+                _capture_backend_source, runtime, auth, origin, self_posted=self_card
+            ),
         )
         if not service.enabled:
             raise ToolError("Choosing a model provider is turned off. Nothing changed.")
-        gap = await session_card_gap(
-            runtime, auth, origin, tool_name="request_agent_backend_switch"
-        )
-        if gap is not None:
+        if self_card:
+            if _private_origin(origin):
+                raise ToolError(
+                    "I can't post a confirmation card in a private conversation. Ask in a "
+                    "channel or thread where I answer. Nothing changed."
+                )
+        elif (
+            await session_card_gap(runtime, auth, origin, tool_name="request_agent_backend_switch")
+            is not None
+        ):
             raise ToolError(
                 "This conversation cannot verify the confirmation card. Nothing changed."
             )
@@ -1734,12 +1812,13 @@ async def _request_agent_backend_switch_impl(
         preview = await service.preview(agent, target_backend, model, settings)
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
-        status: Literal["preview", "changed"] = "preview"
+        status: Literal["preview", "changed", "awaiting_confirmation"] = "preview"
         summary = (
             "Show this compatibility and cost preview. If they want to proceed, call "
             "request_agent_backend_switch again with its expected_revision and preview_digest; "
             "the requester must Confirm on the card. Nothing has changed yet."
         )
+        reference: BackendSwitchReference | None = None
         if preview_digest is not None:
             reference = BackendSwitchReference.model_validate(
                 {
@@ -1752,6 +1831,7 @@ async def _request_agent_backend_switch_impl(
                     "thread_mode": thread_mode,
                     "required_capabilities": required_capabilities,
                     "unsaved_work": unsaved_work,
+                    "for_everyone": for_everyone,
                 }
             )
             if (
@@ -1762,6 +1842,17 @@ async def _request_agent_backend_switch_impl(
                 # invented one is a different request. (Omitting a bound answer fails
                 # the switch's own digest check.)
                 raise channel_backend.AgentBackendRefused("stale_preview")
+        if reference is not None and self_card:
+            if awaiting is not None or unsaved_work is not None:
+                # The hand-off this switch carries runs at the write, which a
+                # self-posted card's press doesn't do.
+                raise ToolError(
+                    "This switch also hands the conversation over, which I can't confirm "
+                    "from this conversation yet. Ask from a Claude conversation. Nothing changed."
+                )
+            status = "awaiting_confirmation"
+            summary = await _post_own_switch_card(runtime, auth, origin, service, reference)
+        elif reference is not None:
             # The card check awaited provider I/O; reread configuration at the write edge.
             agent = await load_backend_agent(
                 runtime.client,
@@ -2194,8 +2285,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             shared-thread limits, what won't be available, and the cost line. Call again
             with the same model and that preview's expected_revision, preview_digest and
             exact declared_drops as accepted_drops: the requester must Confirm
-            on the card before anything is changed. A stale preview or expired card
-            changes nothing; preview again. Pass this active turn's origin_context_id.
+            on the card before anything is changed. On an OpenAI or Gemini turn that
+            confirm call posts the card itself and returns awaiting_confirmation: tell
+            the person to press Confirm, and don't call again. A stale preview or
+            expired card changes nothing; preview again. Pass this active turn's origin_context_id.
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
             to share threads where the channel allows it, admins only; or "per_caller") and
             ``required_capabilities`` (a channel that can't give one refuses the turn).
