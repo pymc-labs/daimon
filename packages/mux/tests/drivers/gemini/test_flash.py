@@ -424,3 +424,84 @@ def test_a_429_naming_its_quota_is_a_definite_rejection(
         native_error_code="http_429",
     )
     assert definite_rejection(error) == rejected
+
+
+class Interrupted(FakeTransport):
+    """A create that ends without any answer from Google (a timeout or a cancel)."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    async def create(self, request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        self.requests.append(dict(request))
+        raise self.error
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), __import__("asyncio").CancelledError()])
+async def test_an_interrupted_create_still_publishes_one_unknown_receipt(
+    error: BaseException,
+) -> None:
+    accounting = Accounting()
+    with pytest.raises(type(error)):
+        await FlashTransport(Interrupted(error), accounting).create(request())
+    # Google may have accepted it: kept as unknown, never silently dropped.
+    assert [(r.outcome, r.sent) for r in accounting.receipts] == [("unknown", True)]
+
+
+async def test_a_malformed_acceptance_still_publishes_one_unknown_receipt() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append({"id": "", "status": "in_progress"})
+    with pytest.raises(ValueError):
+        await FlashTransport(source, accounting).create(request())
+    assert [r.outcome for r in accounting.receipts] == ["unknown"]
+
+
+async def test_a_create_whose_connection_never_opened_is_refused_as_unsent() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(
+        ProviderError("transient_network", retryable=True, native_code="connect_failed")
+    )
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    (receipt,) = accounting.receipts
+    assert (receipt.outcome, receipt.sent, receipt.http_status) == ("refused", False, None)
+
+
+async def test_a_network_failure_after_the_send_stays_unknown() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(ProviderError("transient_network", retryable=True))
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert [(r.outcome, r.sent) for r in accounting.receipts] == [("unknown", True)]
+
+
+async def test_the_503_chain_still_publishes_one_receipt_per_attempt() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend(
+        [
+            ProviderError("overloaded", retryable=True, native_code="503"),
+            {"id": "interaction", "status": "completed"},
+        ]
+    )
+    await FlashTransport(source, accounting).create(request())
+    assert [r.outcome for r in accounting.receipts] == ["refused", "accepted"]
+
+
+def test_only_a_failed_connection_is_classified_as_never_sent() -> None:
+    import httpx
+    from mux.drivers.gemini.transport import normalize_error
+
+    url = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/interactions")
+    assert (
+        normalize_error(httpx.ConnectError("refused", request=url)).native_code == "connect_failed"
+    )
+    assert (
+        normalize_error(httpx.ConnectTimeout("slow", request=url)).native_code == "connect_failed"
+    )
+    wrapped = httpx.HTTPError("wrapped")
+    wrapped.__cause__ = httpx.ConnectError("refused", request=url)
+    assert normalize_error(wrapped).native_code == "connect_failed"
+    # The request may have been sent: a read timeout or a dropped reply is unknown.
+    assert normalize_error(httpx.ReadTimeout("slow", request=url)).native_code is None
+    assert normalize_error(httpx.RemoteProtocolError("dropped", request=url)).native_code is None

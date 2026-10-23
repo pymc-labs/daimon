@@ -358,8 +358,8 @@ def test_an_unknown_provider_is_named_generically():
 
 def test_a_full_gemini_hold_ledger_reads_as_busy_in_plain_words() -> None:
     rendered = admission_refusal_text("provider_hold_cap_reached", _NOUNS)
-    assert "Too many replies are already running" in rendered
-    assert "Try again when one finishes." in rendered
+    assert "Too many replies are running or still being settled" in rendered
+    assert "Try again in a few minutes." in rendered
     assert "hold" not in rendered.lower(), "no ledger jargon"
 
 

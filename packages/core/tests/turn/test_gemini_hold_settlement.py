@@ -19,6 +19,7 @@ from daimon.core.turn.gemini_state import (
 from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
+from mux.errors import ProviderError
 from mux.profiles.gemini import ARGON_MODEL
 from sqlalchemy import select, update
 from structlog.testing import capture_logs
@@ -125,16 +126,15 @@ async def test_concurrent_settlements_release_one_hold_once(postgres_state):
     assert (row["held_usd"], row["settled_usd"]) == ("0", "0.10")
 
 
-@pytest.mark.parametrize("outcome", ["unknown", "accepted", "refused"])
+@pytest.mark.parametrize("outcome", ["unknown", "accepted"])
 async def test_an_unsettled_hold_expires_after_the_ttl_with_an_audit_log(postgres_state, outcome):
     sessions, scope, _, _ = postgres_state
     model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
     clock = Clock()
     owner = holds(sessions, scope, clock, hold="0.49")
     await owner.before_attempt(model=model, attempt=1)
-    # A lost response (unknown), an accepted turn whose usage never came, or a 503.
-    status = 503 if outcome == "refused" else None
-    await owner.after_attempt(receipt=FlashAttempt(model, 1, outcome, http_status=status))
+    # A lost response (unknown), or an accepted turn whose usage never came.
+    await owner.after_attempt(receipt=FlashAttempt(model, 1, outcome))
     clock.now = START + HOLD_TTL - timedelta(seconds=1)
     with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
         await holds(sessions, scope, clock, hold="0.49").before_attempt(model=model, attempt=1)
@@ -148,12 +148,13 @@ async def test_an_unsettled_hold_expires_after_the_ttl_with_an_audit_log(postgre
     assert audit["expired_usd"] == "0.49" and audit["outcome"] == outcome
 
 
-async def test_a_4xx_refusal_still_releases_at_once(postgres_state):
+@pytest.mark.parametrize("status", [400, 503])
+async def test_a_4xx_or_503_refusal_releases_at_once(postgres_state, status):
     sessions, scope, _, _ = postgres_state
     model = ModelRef(provider="gemini", id=ARGON_MODEL)
     owner = holds(sessions, scope, hold="0.49")
     await owner.before_attempt(model=model, attempt=1)
-    await owner.after_attempt(receipt=FlashAttempt(model, 1, "refused", http_status=400))
+    await owner.after_attempt(receipt=FlashAttempt(model, 1, "refused", http_status=status))
     await holds(sessions, scope, hold="0.49").before_attempt(model=model, attempt=1)
 
 
@@ -366,3 +367,128 @@ async def test_release_never_touches_a_measured_cost_and_a_late_reading_still_se
     assert rows["billed"]["actual_usd"] == "0.02" and "released_usd" not in rows["billed"]
     assert rows["late"]["actual_usd"] == "0.004" and rows["late"]["held_usd"] == "0"
     assert not await owner.release_unbilled(interaction_id="unknown")
+
+
+async def test_an_attempt_that_never_reached_google_releases_its_hold_at_once(postgres_state):
+    sessions, scope, _, _ = postgres_state
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    owner = holds(sessions, scope, cap="0.10")
+    await owner.before_attempt(model=model, attempt=1)
+    await owner.after_attempt(receipt=FlashAttempt(model, 1, "refused", sent=False))
+    (row,) = (await ledger(sessions)).values()
+    assert row["held_usd"] == "0" and row["released_usd"] == "0.10"
+    # The cap is free again for the next attempt.
+    await accepted(holds(sessions, scope, cap="0.10"), model, "next")
+
+
+async def test_a_failed_receipt_never_strands_the_pending_marker(postgres_state, monkeypatch):
+    sessions, scope, _, _ = postgres_state
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    owner = holds(sessions, scope)
+    await owner.before_attempt(model=model, attempt=1)
+
+    async def broken(update):
+        raise RuntimeError("ledger write failed")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(owner, "_update", broken)
+        with pytest.raises(RuntimeError):
+            await owner.after_attempt(receipt=FlashAttempt(model, 1, "unknown"))
+    # Before, the stale marker refused this as backend_unsupported.
+    await accepted(owner, model, "next")
+
+
+async def test_an_interrupted_create_keeps_its_hold_and_the_next_attempt_runs(postgres_state):
+    from mux.drivers.gemini.flash import FlashTransport
+    from mux.testing.drivers.gemini.fake import FakeTransport
+
+    sessions, scope, _, _ = postgres_state
+
+    class Source(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first = True
+
+        async def create(self, request):
+            if self.first:
+                self.first = False
+                raise TimeoutError
+            return await super().create(request)
+
+    source = Source()
+    source.responses.append({"id": "second", "status": "in_progress"})
+    transport = FlashTransport(source, holds(sessions, scope))
+    body = {"agent_config": {"type": "antigravity", "model": FLASH_PRIMARY}, "input": []}
+    with pytest.raises(TimeoutError):
+        await transport.create(body)
+    # Same context, same owner: admitted, not refused for a missing receipt.
+    await transport.create(body)
+    rows = list((await ledger(sessions)).values())
+    lost = next(row for row in rows if row["interaction_id"] is None)
+    # Google may have accepted the lost create: kept (unknown) for the TTL/sweep.
+    assert lost["outcome"] == "unknown" and lost["held_usd"] == "0.10"
+    assert any(row["interaction_id"] == "second" for row in rows)
+
+
+async def test_default_gemini_holds_admit_a_root_and_three_workers_on_postgres(
+    postgres_state, monkeypatch
+):
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+    from daimon.core.turn.runtime_manifest import select_runtime_manifest
+
+    from .test_runtime_defaults import request
+
+    sessions, scope, _, _ = postgres_state
+    monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", raising=False)
+    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    root = select_runtime_manifest(request("gemini.inline_reuse", FLASH_PRIMARY), GeminiPlan)
+    worker = select_runtime_manifest(
+        request("gemini.inline_reuse", FLASH_PRIMARY, worker=True), GeminiPlan
+    )
+
+    def owner(plan):
+        return holds(sessions, scope, hold=str(plan.hold_usd), cap=str(plan.cap_usd))
+
+    await accepted(owner(root), model, "root")
+    for index in range(3):
+        await accepted(owner(worker), model, f"worker-{index}")
+    with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
+        await owner(worker).before_attempt(model=model, attempt=1)
+    summary = outstanding_holds(json.dumps(await ledger(sessions)))
+    assert summary["open_holds"] == 4 and summary["held_usd"] == "1.72"
+
+
+@pytest.mark.parametrize("last", ["503", "accepted"])
+async def test_a_503_storm_across_the_flash_chain_strands_no_hold(postgres_state, last):
+    from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport
+    from mux.testing.drivers.gemini.fake import FakeTransport
+
+    sessions, scope, _, _ = postgres_state
+    source = FakeTransport()
+    unavailable = [
+        ProviderError("overloaded", retryable=True, native_code="503") for _ in FLASH_MODELS[:-1]
+    ]
+    source.responses.extend(
+        [
+            *unavailable,
+            ProviderError("overloaded", retryable=True, native_code="503")
+            if last == "503"
+            else {"id": "answered", "status": "in_progress"},
+        ]
+    )
+    # Cap room for the chain: each 503 frees its hold before the next model's.
+    transport = FlashTransport(source, holds(sessions, scope, cap="0.10"))
+    body = {"agent_config": {"type": "antigravity", "model": FLASH_PRIMARY}, "input": []}
+    if last == "503":
+        with pytest.raises(ProviderError):
+            await transport.create(body)
+    else:
+        await transport.create(body)
+    rows = list((await ledger(sessions)).values())
+    assert len(rows) == len(FLASH_MODELS)
+    refused = [row for row in rows if row["outcome"] == "refused"]
+    assert all(row["held_usd"] == "0" and row["released_usd"] == "0.10" for row in refused)
+    summary = outstanding_holds(json.dumps({str(i): row for i, row in enumerate(rows)}))
+    # Only an accepted interaction keeps its hold (for settlement).
+    assert summary["open_holds"] == (0 if last == "503" else 1)

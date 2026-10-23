@@ -44,7 +44,8 @@ OPENAI_SPEND_LIMIT_CENTS = 50
 # worst case must fit it), so it stays at $0.49.
 _GEMINI_HOLD, _GEMINI_WORKER_HOLD = "0.25", "0.49"
 # Root turns and workers of one account share one hold ledger (same project), and
-# every attempt checks the ledger's whole total against its own cap. One cap for
+# every attempt checks the ledger's whole total against its own cap. The cap limits
+# outstanding reservations, not spend (billing is the measured usage). One cap for
 # both, with room for a root turn and three workers at once (0.25 + 3 x 0.49):
 # a cap equal to the worker hold let one open hold block every other Gemini call.
 _GEMINI_CAP = _GEMINI_WORKER_CAP = "1.75"

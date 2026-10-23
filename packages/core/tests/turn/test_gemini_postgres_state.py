@@ -123,12 +123,12 @@ async def test_postgres_serializes_first_insert_and_releases_cancelled_writer(
     [
         ("refused", 400, True),  # Google rejected the request: nothing to bill
         ("refused", 404, True),
-        ("refused", 503, False),  # chain fallback refusal keeps its hold, as before
+        ("refused", 503, True),  # a 503 refused the work: no interaction returned
         ("refused", None, False),
         ("unknown", None, False),  # maybe accepted: the full hold stays
     ],
 )
-async def test_postgres_definite_4xx_refusal_releases_its_hold(
+async def test_postgres_definite_refusal_releases_its_hold(
     postgres_state, outcome, status, released
 ):
     sessions, scope, _, _ = postgres_state
