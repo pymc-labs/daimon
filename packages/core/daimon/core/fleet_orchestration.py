@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from daimon.core.stores.fleet import WorkerPool
     from daimon.core.turn.deps import TurnDeps
     from daimon.core.turn.prepare import ProviderPreparationRequest
+    from daimon.core.turn.running import RunningTurns
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -158,6 +159,39 @@ def _admission_cause(
             else current.__context__
         )
     return None
+
+
+def cancelled_by(error: BaseException) -> bool:
+    """A cancel, or a cleanup that failed after one (its cause/context chain)."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, asyncio.CancelledError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def ended_by_shutdown(
+    running_turns: RunningTurns, error: BaseException, cancel: asyncio.Event | None
+) -> bool:
+    """Whether a worker's failure is the host shutdown's, never a refusal or a time-out.
+
+    A shutdown stops a running worker by setting its cancel event; the driver then
+    interrupts it, and what escapes may be that interrupt's own refusal (an OpenAI
+    worker with no active root turn), not a cancel. So during a shutdown the worker's
+    set cancel event, a cancel in the error's chain, or this task's own cancellation
+    marks the failure as the restart. Anything else keeps its own code.
+    """
+    if not running_turns.shutting_down:
+        return False
+    task = asyncio.current_task()
+    return (
+        (cancel is not None and cancel.is_set())
+        or cancelled_by(error)
+        or (task is not None and task.cancelling() > 0)
+    )
 
 
 def worker_failure_code(
@@ -1507,8 +1541,9 @@ class HostFleetPorts:
                                                     parent,
                                                     claimed,
                                                     failure_code="shutdown"
-                                                    if request.deps.running_turns.shutting_down
-                                                    and isinstance(error, asyncio.CancelledError)
+                                                    if ended_by_shutdown(
+                                                        request.deps.running_turns, error, cancel
+                                                    )
                                                     else worker_failure_code(error, failure_code),
                                                 )
                                             )
