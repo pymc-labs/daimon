@@ -122,3 +122,28 @@ def test_a_missing_worker_runtime_or_provider_key_reads_as_that(phase):
     # Any other backend refusal keeps its phase.
     other = AdmissionDenied(reason="backend_unsupported")
     assert worker_failure_code(other, phase) == phase
+
+
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+def test_a_suppressed_context_never_names_the_cause(phase):
+    """#1380 review: `raise X from None` replaced the refusal; its context is not the cause."""
+    missing = _runtime_selection_refusal()
+    try:
+        try:
+            raise missing
+        except AdmissionDenied:
+            raise AdmissionDenied(reason="backend_unsupported") from None
+    except AdmissionDenied as replaced:
+        assert replaced.__context__ is missing and replaced.__suppress_context__
+        assert worker_failure_code(replaced, phase) == phase
+    # An explicit cause and an unsuppressed context still count.
+    explicit = AdmissionDenied(reason="backend_unsupported")
+    explicit.__cause__ = missing
+    assert worker_failure_code(explicit, phase) == "worker_runtime_missing"
+    try:
+        try:
+            raise missing
+        except AdmissionDenied:
+            raise AdmissionDenied(reason="backend_unsupported")  # noqa: B904
+    except AdmissionDenied as implicit:
+        assert worker_failure_code(implicit, phase) == "worker_runtime_missing"
