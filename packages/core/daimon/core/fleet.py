@@ -116,6 +116,8 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
     # A bug on our side, never a model limit: the card adds a reference to the logs.
     "setup_error": "a setup error on our side",
     "provider_error": "the model provider returned an error or didn't respond",
+    "provider_not_configured": "that model provider isn't set up on this server yet",
+    "worker_runtime_missing": "this server isn't set up to run that model's workers yet",
 }
 
 

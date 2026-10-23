@@ -403,6 +403,10 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
                 raw["archived_at"] = NOW.isoformat()
             if controls["fault"] == "agent_drift" and agent.id == "new-worker":
                 raw["system"] = "changed instructions"
+            if controls["fault"] == "echo_default_controls" and agent.id == "new-worker":
+                # SMOKE-1 J3: MA fills its default controls on a bare-id model.
+                model = raw["model"]["id"] if isinstance(raw["model"], dict) else raw["model"]
+                raw["model"] = {"id": model, "speed": "standard", "effort": {"type": "medium"}}
             if controls["fault"] == "builtin_widening" and agent.id == "new-worker":
                 for config in raw["tools"][0]["configs"]:
                     if config["name"] == "bash":
@@ -453,6 +457,12 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
         return httpx.Response(200, json=native["session"].model_dump(mode="json"))
 
     router.add("POST", r"/v1/sessions/worker-session/archive", archive)
+
+    def archive_agent(call, match):
+        native["agent"] = native["agent"].model_copy(update={"archived_at": NOW})
+        return httpx.Response(200, json=native["agent"].model_dump(mode="json"))
+
+    router.add("POST", r"/v1/agents/new-worker/archive", archive_agent)
     router.add(
         "POST", r"/v1/sessions/worker-session/events", lambda call, match: send_events_response()
     )

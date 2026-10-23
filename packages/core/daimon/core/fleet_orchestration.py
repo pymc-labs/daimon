@@ -120,9 +120,39 @@ def _provider_failures() -> tuple[type[BaseException], ...]:
     return tuple(failures)
 
 
+WorkerFailureCode = Literal[
+    "preparation_refused",
+    "dispatch_refused",
+    "provider_error",
+    "provider_not_configured",
+    "worker_runtime_missing",
+    "setup_error",
+]
+
+
+def _admission_cause(
+    error: BaseException,
+) -> Literal["provider_not_configured", "worker_runtime_missing"] | None:
+    """A plain cause for a backend refusal, from its closed cause or its raise site."""
+    from daimon.core.turn.errors import AdmissionDenied
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, AdmissionDenied) and current.reason == "backend_unsupported":
+            if current.cause == "provider_not_configured":
+                return "provider_not_configured"
+            # No installed or default runtime row serves this worker's model/profile.
+            if (current.site or "").startswith("turn.runtime_manifest.select_runtime_manifest:"):
+                return "worker_runtime_missing"
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def worker_failure_code(
     error: BaseException, phase: Literal["preparation_refused", "dispatch_refused"]
-) -> Literal["preparation_refused", "dispatch_refused", "provider_error", "setup_error"]:
+) -> WorkerFailureCode:
     """The closed code a failed worker records: a refusal keeps its phase; a bug is ours.
 
     Refusals are the typed errors admission, preparation and providers raise. A raw
@@ -137,7 +167,7 @@ def worker_failure_code(
 
     refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
     if not isinstance(error, Exception) or isinstance(error, refusal):
-        return phase
+        return _admission_cause(error) or phase
     if isinstance(error, _provider_failures()):
         return "provider_error"
     return "setup_error"

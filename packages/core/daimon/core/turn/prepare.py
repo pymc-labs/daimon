@@ -20,6 +20,7 @@ every adapter test patches.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import functools
 import time
@@ -1580,6 +1581,15 @@ async def bind_session_impl(
                 guard=before_native,
                 retry_failed=False,
             )
+
+            async def archive_allocated() -> None:
+                # Never leave the allocated native agent behind (one orphan per attempt).
+                from daimon.core.mux_compat import archive_agent
+                from mux.drivers.anthropic import single_attempt_mutation
+
+                with contextlib.suppress(Exception), single_attempt_mutation():
+                    await archive_agent(deps.anthropic, allocated.ref.id, scope=scope)
+
             observed = agent_record(
                 await retrieve_agent(deps.anthropic, allocated.ref.id, scope=scope),
                 allocated.ref.account_scope_id,
@@ -1591,10 +1601,15 @@ async def bind_session_impl(
             )
             expected.setdefault("multiagent", None)
             actual = agent_payload(observed.spec)
-            if isinstance(expected.get("model"), str) and actual.get("model") == {
-                "id": worker.spec.model.id,
-                "speed": None,
-            }:
+            echoed = actual.get("model")
+            if (
+                isinstance(expected.get("model"), str)
+                and isinstance(echoed, dict)
+                and cast(dict[str, object], echoed).get("id") == worker.spec.model.id
+            ):
+                # The spec declares no model controls (a task worker drops them), so
+                # whatever speed/effort the provider echoes are its own defaults:
+                # only the model itself must match (SMOKE-1 J3 Opus).
                 actual["model"] = worker.spec.model.id
             if (
                 observed.ref != allocated.ref
@@ -1606,6 +1621,7 @@ async def bind_session_impl(
                 )
                 or await recapture() != selected.source
             ):
+                await archive_allocated()
                 raise AdmissionDenied(reason="backend_unsupported")
             executing = replace(
                 admission,
@@ -1615,19 +1631,25 @@ async def bind_session_impl(
                 origin_channel_id=worker.permissions.fleet.root.channel.channel_id,
                 origin_thread_id=thread_id,
             )
-            created = await create_ma_session(
-                deps,
-                executing,
-                tenant_id=tenant_id,
-                preparation=replace(selected, admission=executing),
-                platform=platform,
-            )
+            try:
+                created = await create_ma_session(
+                    deps,
+                    executing,
+                    tenant_id=tenant_id,
+                    preparation=replace(selected, admission=executing),
+                    platform=platform,
+                )
+            except (AdmissionDenied, ScopeViolation):
+                # A definite refusal only: an unknown outcome (a lost ACK, a transport
+                # error) is retried and must find this same agent.
+                await archive_allocated()
+                raise
             try:
                 if await recapture() != selected.source:
                     raise AdmissionDenied(reason="backend_unsupported")
                 remaining_s(effective_deadline, now=now(), refuse_expired=True)
 
-            except BaseException:
+            except BaseException as error:
                 from daimon.core.turn.run import (
                     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
                 )
@@ -1637,6 +1659,8 @@ async def bind_session_impl(
                     await _archive_orphaned_session(
                         deps.anthropic, session_id=created.ma_session_id, scope=scope
                     )
+                if isinstance(error, (AdmissionDenied, ScopeViolation)):
+                    await archive_allocated()
                 raise
 
             async with deps.sessionmaker.begin() as db:

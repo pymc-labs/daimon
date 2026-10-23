@@ -70,3 +70,55 @@ def test_the_card_never_calls_a_setup_error_a_model_limit():
     assert worker_error_text("preparation_refused", ref="8d427e0b") == (
         "it couldn't be set up on that model here"
     )
+
+
+def _runtime_selection_refusal() -> AdmissionDenied:
+    """A real refusal from runtime row selection (no admitted revision)."""
+    from types import SimpleNamespace
+
+    from daimon.core.turn.runtime_manifest import select_runtime_manifest
+
+    request = SimpleNamespace(admission=SimpleNamespace(backend_revision=None))
+    try:
+        select_runtime_manifest(request, object)  # type: ignore[arg-type]
+    except AdmissionDenied as error:
+        return error
+    raise AssertionError("expected a refusal")
+
+
+def test_a_backend_refusal_records_the_code_site_that_raised_it():
+    """SMOKE-1 B: 12+ raise sites, and the log could not say which one refused."""
+    from daimon.core.channel_backend import backend_refusal_causes
+
+    refused = _runtime_selection_refusal()
+    assert refused.site is not None
+    assert refused.site.startswith("turn.runtime_manifest.select_runtime_manifest:")
+    (cause,) = backend_refusal_causes(refused)
+    assert cause == {
+        "type": "AdmissionDenied",
+        "reason": "backend_unsupported",
+        "site": refused.site,
+    }
+    # Other refusals carry no site; outside daimon code there is none either.
+    assert AdmissionDenied(reason="channel_budget_exceeded").site is None
+    assert AdmissionDenied(reason="backend_unsupported").site is None
+
+
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+def test_a_missing_worker_runtime_or_provider_key_reads_as_that(phase):
+    missing = _runtime_selection_refusal()
+    assert worker_failure_code(missing, phase) == "worker_runtime_missing"
+    assert worker_failure_code(FleetConflict("x", reason="claim_changed"), phase) == phase
+    unconfigured = AdmissionDenied(
+        reason="backend_unsupported", cause="provider_not_configured", provider="openai"
+    )
+    assert worker_failure_code(unconfigured, phase) == "provider_not_configured"
+    assert worker_error_text("worker_runtime_missing") == (
+        "this server isn't set up to run that model's workers yet"
+    )
+    assert worker_error_text("provider_not_configured") == (
+        "that model provider isn't set up on this server yet"
+    )
+    # Any other backend refusal keeps its phase.
+    other = AdmissionDenied(reason="backend_unsupported")
+    assert worker_failure_code(other, phase) == phase

@@ -1711,3 +1711,36 @@ async def test_a_model_the_person_named_that_isnt_allowed_is_asked_about_not_sub
                 )
             assert ASK_DONT_SUBSTITUTE in str(refused.value)
     orchestrator.spawn.assert_not_awaited()
+
+
+async def test_j10_fork_yourself_across_models_means_fleet_workers_not_a_saved_copy() -> None:
+    """J10: "fork yourself across opus, astra and argon" got "Forking is admin-only"."""
+    from pathlib import Path
+
+    from daimon.adapters.mcp.tools.agents import register_agent_tools
+    from daimon.adapters.mcp.tools.fleet import fleet_model
+
+    phrase = "fork yourself across Opus 5.5, Astra and Argon"
+    bridge, _ = plain_bridge(fork_root())
+    async with Client(registered(bridge)) as client:
+        spawn = next(t for t in await client.list_tools() if t.name == "fleet_spawn")
+    spawn_doc = " ".join((spawn.description or "").split())
+    assert '"fork yourself across Opus 5.5, Astra and Argon"' in spawn_doc
+    assert "No admin is needed and no saved agent is made" in spawn_doc
+    agents = FastMCP("agents")
+    register_agent_tools(agents, runtime())
+    fork = next(t for t in await agents.list_tools() if t.name == "fork_agent")
+    fork_doc = " ".join((fork.description or "").split())
+    assert "Only for a saved, named copy" in fork_doc and "is NOT this" in fork_doc
+    skill = (Path(__file__).parents[5] / "defaults/skills/workspace-setup/SKILL.md").read_text()
+    skill = " ".join(skill.split())
+    assert '"Fork yourself across Opus, Astra and Argon"' in skill and "`fleet_spawn`" in skill
+    assert "Forking is admin-only" not in skill
+    # And the models it names resolve to the fleet's allowed ids.
+    names = phrase.split("across ")[1].replace(" and ", ", ").split(", ")
+    allowed = fork_root().models
+    assert [fleet_model(name, allowed) for name in names] == [
+        "claude-opus-5-5",
+        "gpt-6-astra",
+        "gemini-4-argon",
+    ]

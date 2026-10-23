@@ -72,6 +72,15 @@ async def test_native_worker_unproved_output_never_binds_or_sends(native_worker,
         call.path == "/v1/sessions" and call.method == "POST" for call in trace.requests
     ) == (1 if fault in {"resource_drift", "source_drift"} else 0)
     assert not any(call.path.endswith("/events") for call in trace.requests)
+    # A refused allocation never leaves its native agent behind (SMOKE-1: one orphan per try).
+    if fault in {"agent_drift", "resource_drift", "source_drift"}:
+        assert (
+            sum(
+                call.method == "POST" and call.path == "/v1/agents/new-worker/archive"
+                for call in trace.requests
+            )
+            == 1
+        )
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet.lock_budget(
             db, tenant_id=request.tenant_id, actor_id=root.fleet.account_id, run_id=claimed.run_id
@@ -226,7 +235,12 @@ async def test_frozen_session_execution_must_match_the_proved_worker_before_inpu
             cancel=asyncio.Event(),
         )
     assert not any(call.path.endswith("/events") for call in trace.requests)
-    assert sum(call.path.endswith("/archive") for call in trace.requests) == 1
+    archived = [call.path for call in trace.requests if call.path.endswith("/archive")]
+    # The refused session and the agent allocated for it are both archived.
+    assert sorted(archived) == [
+        "/v1/agents/new-worker/archive",
+        "/v1/sessions/worker-session/archive",
+    ]
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet.lock_budget(
             db, tenant_id=request.tenant_id, actor_id=root.fleet.account_id, run_id=claimed.run_id
@@ -311,7 +325,10 @@ async def test_warm_binding_changed_after_capture_never_provisions_or_sends(
             cancel=asyncio.Event(),
         )
     assert len(changed) == 1
-    assert len(trace.requests) == changed[0][1]
+    # Nothing is provisioned or sent after the change; only our own allocated agent is
+    # archived, so a refused attempt leaves no orphan.
+    after = [(call.method, call.path) for call in trace.requests[changed[0][1] :]]
+    assert after == [("POST", "/v1/agents/new-worker/archive")]
     assert not any(
         call.method == "POST"
         and call.path in {"/v1/memory_stores", "/v1/sessions"}
@@ -384,7 +401,16 @@ async def test_foreign_unproved_session_is_never_archived(native_worker):
             prices=tariffs(root),
             cancel=asyncio.Event(),
         )
-    assert not any(call.path.endswith(("/archive", "/events")) for call in trace.requests)
+    # The foreign session is never touched; the agent we allocated and verified is ours.
+    assert not any(
+        call.path.endswith("/events")
+        or call.path.startswith("/v1/sessions/")
+        and "archive" in call.path
+        for call in trace.requests
+    )
+    assert [call.path for call in trace.requests if call.path.endswith("/archive")] == [
+        "/v1/agents/new-worker/archive"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -566,3 +592,25 @@ async def test_real_run_worker_records_why_it_failed_before_native_start(
     assert ended.status == "failed" and ended.error_code == code
     assert "on that model" not in (worker_error_text(ended.error_code) or "")
     assert not any(call.method == "POST" for call in trace.requests)
+
+
+async def test_a_task_worker_runs_when_the_provider_echoes_its_default_model_controls(
+    native_worker,
+):
+    """SMOKE-1 J3: an Opus task worker (model controls dropped) was refused because MA
+    echoed its default speed/effort, and its allocated agent was left behind."""
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, controls = native_worker
+    assert not claimed.spec.get("extensions")  # the worker declares no model controls
+    controls["fault"] = "echo_default_controls"
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    assert not any(call.path.endswith("/new-worker/archive") for call in trace.requests)
