@@ -10,6 +10,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import caller_owned_ids, owned_in
 from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_isolation_view
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -116,7 +117,8 @@ async def resolve_setup_agent(
 ) -> BetaManagedAgentsAgent:
     """Resolve a name without adopting an ambiguous or recreated namesake.
 
-    An agent the caller's channel isolation hides resolves as missing.
+    An agent the caller's channel isolation hides resolves as missing, unless the
+    caller owns it.
     ``location_channel_id`` is the turn's channel from a verified origin
     (`load_caller_view`), so a setup thread in an isolated channel sees
     that channel's own agents.
@@ -133,7 +135,11 @@ async def resolve_setup_agent(
         location_channel_id=location_channel_id,
         location_thread_id=location_thread_id,
     )
-    agents = [agent for agent in agents if caller.sees_agent(agent)]
+    owned = await caller_owned_ids(runtime, auth) if agents else frozenset[str]()
+    # An owner always reaches their own agent, routed anywhere or nowhere.
+    agents = [
+        agent for agent in agents if caller.sees_agent(agent) or owned_in(owned, auth, agent.id)
+    ]
     if expected_ma_agent_id is not None:
         for agent in agents:
             if agent.id == expected_ma_agent_id:

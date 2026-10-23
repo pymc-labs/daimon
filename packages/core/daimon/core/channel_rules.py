@@ -689,6 +689,8 @@ async def set_channel_rule(
             subject=subject,
             default_agent_name=default.agent_name,
             extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: channel_id},
+            # The channel's copy stands in for the same agent: same owner.
+            owner="source",
         )
     else:
         taken = {

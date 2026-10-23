@@ -12,9 +12,14 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import structlog
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_owners, security_audit
+from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
 
 
 @asynccontextmanager
@@ -42,13 +47,21 @@ async def record_agent_creator(
     agent_id: uuid.UUID,
     account_id: uuid.UUID,
 ) -> bool:
-    """Make the creating person the owner, unless the agent already has one."""
-    async with sessionmaker.begin() as session:
-        recorded = await agent_owners.record_creator(
-            session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
-        )
-        if recorded:
-            await _audit(session, tenant_id, agent_id, account_id, "create")
+    """Make the creating person the owner, unless the agent already has one.
+
+    An account outside the tenant is never recorded: the agent, already
+    created, stays admin-only (fails closed) and the miss is logged.
+    """
+    try:
+        async with sessionmaker.begin() as session:
+            recorded = await agent_owners.record_creator(
+                session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+            )
+            if recorded:
+                await _audit(session, tenant_id, agent_id, account_id, "create")
+    except LookupError:
+        _log.warning("agent_owner.creator_not_in_tenant", tenant_id=str(tenant_id))
+        return False
     return recorded
 
 
@@ -84,6 +97,38 @@ async def clear_agent_owner(
         if cleared:
             await _audit(session, tenant_id, agent_id, by_account_id, "clear")
     return cleared
+
+
+async def owns_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str | None,
+    account_id: uuid.UUID | None = None,
+    platform: str | None = None,
+    platform_user_id: str | None = None,
+) -> bool:
+    """Whether the person (by account, or by platform user) owns the agent.
+
+    A platform user with no principal yet owns nothing; this never creates one.
+    A person from another organisation (`foreign_home_id`) is never an owner,
+    whichever way they are named.
+    """
+    if ma_agent_id is None:
+        return False
+    if account_id is None and platform is not None and platform_user_id is not None:
+        principal = await find_platform_principal(
+            session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
+        )
+        if principal is None or principal.foreign_home_id is not None:
+            return False
+        account_id = principal.account_id
+    if account_id is None or await agent_owners.has_foreign_principal(
+        session, tenant_id, account_id
+    ):
+        return False
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+    return await agent_owners.owner_of(session, tenant_id, agent_id) == account_id
 
 
 async def agent_owner(

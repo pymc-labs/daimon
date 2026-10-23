@@ -204,28 +204,38 @@ allow.
 ## Changing agent setup
 
 Server or workspace admins may change an agent's setup, and so may the
-agent's **owner**. The owner is the person who created the agent from chat,
-or the account an admin named with `daimon agents owner set`; an agent has
-at most one. Agents created before owners existed have none and stay
-admin-only. The owner may change the agent's instructions, model,
-description, tools, skills, MCP server attachments, model provider, its
-required capabilities, and its fleet. Making the agent share threads stays
-with admins, because it applies in every channel the agent answers in that
-doesn't pin a backend; the owner may keep an admin's choice or return to one
-thread per person. If two people create agents of the same name at once, one
-is refused; nobody becomes the owner of an agent someone else created. Ownership is read again
-when a change is written and when a confirmation card is clicked, so a
-change of owner applies at once. An agent key or a requester from another
-organisation is never the owner.
+agent's **owner**. The owner is the person who created the agent, from chat
+or the setup panel's New agent button, or who copied it with `fork_agent`; a
+channel's own copy of an agent keeps that agent's owner. An admin can also
+name one with `daimon agents owner set`. An agent has at most one owner.
+Agents created before owners existed have none and stay admin-only.
+
+The owner may change the agent's instructions, model, description, tools,
+skills, MCP server attachments (including token forms and OAuth connections),
+keys, model provider, its required capabilities, and its fleet, from chat and
+from the Discord, Slack and Teams setup panels. They see their agent's setup
+(its prompt and connections) and find it with `list_agents` (`mine=true`), even
+while it answers nowhere. An owner reaches their own agents past channel
+isolation too, including a channel's copy they own, since the copy keeps its
+source's owner. Because the owner can rewrite the prompt, keys an admin added
+to that agent are not secret from its owner: the agent can be told to use or
+reveal them. Give an agent's keys only to an agent whose owner may hold them.
+A person from another organisation is never an agent's owner. Making the agent share threads stays with admins,
+because it applies in every channel the agent answers in that doesn't pin a
+backend; the owner may keep an admin's choice or return to one thread per
+person. If two people create agents of the same name at once, one is refused;
+nobody becomes the owner of an agent someone else created. Ownership is read
+again when a change is written, when a form is submitted and when a
+confirmation card is clicked, always for the person acting, so a change of
+owner applies at once. An agent key or a requester from another organisation
+is never the owner.
 
 The owner may not change what the whole workspace shares: the provider
 allowlist, channel budgets, GitHub access (repo and skill-repo binds, grants),
 deleting a skill from the workspace, archiving or copying the agent, and its
-tool rules stay with admins. In this release, token forms and OAuth
-connections still need an admin, and so do the Discord, Slack and Teams setup
-panels. A channel default alone does not grant permission to edit setup.
-Defaults-managed specs retain their existing protections, including for
-admins.
+tool rules stay with admins. A channel default alone does not grant
+permission to edit setup. Defaults-managed specs retain their existing
+protections, including for admins.
 
 When approval cards are off, a skill add needs a preview followed by the
 requester's next message of `yes` in that thread. Only one preview is active

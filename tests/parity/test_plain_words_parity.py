@@ -20,11 +20,12 @@ STARTING = (
     "Ask me to make you a new agent, or ask an admin to copy this one."
 )
 SHARED = (
-    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Changing this agent's keys or connections needs its owner or an admin, "
+    "and connecting a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 SHARED_SKILLS = (
-    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Adding skills from a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 CODING_TOOLS = (

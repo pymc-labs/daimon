@@ -140,16 +140,19 @@ def decide_operation(
 def needs_reachability_read(
     operation: OperationKind, *, is_admin: bool, is_daimon_managed: bool
 ) -> bool:
-    """True only when `decide_operation` cannot answer without the reachability fact.
+    """True only when `decide_operation` cannot answer without reading the target's facts.
 
-    Exists so the I/O-avoidance property — an admin or a posted-token write
-    never pays for a reachability read, and a managed-agent target never
-    needs one either, since both families settle the outcome before
-    reachability is consulted — is provable in one unit test rather than
-    re-derived at each of the three call sites that gate a live DB read on
-    it.
+    The fact that can change an answer is whether the caller owns the agent
+    (`TargetFacts.owned_by_caller`; reachability no longer does). An admin, a
+    posted-token write, a managed target and an operation the owner may not
+    make settle without it, so they never pay for the read. Derived from the
+    table itself, so it can't drift from `decide_operation`.
     """
-    return False
+    unowned = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    owned = unowned.model_copy(update={"owned_by_caller": True})
+    return _decide_operation(operation, is_admin=is_admin, target=unowned) != _decide_operation(
+        operation, is_admin=is_admin, target=owned
+    )
 
 
 __all__ = [

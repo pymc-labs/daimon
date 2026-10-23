@@ -50,18 +50,12 @@ async def target_facts(
     agent_names: tuple[str | None, ...],
     ma_agent_id: str | None,
     is_daimon_managed: bool,
-    owner_counts: bool = False,
 ) -> TargetFacts:
-    """The facts `decide_operation` reads.
-
-    `owner_counts` lets the agent's owner make the change. Credential-form
-    paths leave it off until their submit side (the platform panels) checks
-    the owner too, so a card never passes a check its submit then refuses.
-    """
+    """The facts `decide_operation` reads: managed, and whether the caller owns it."""
     return TargetFacts(
         is_daimon_managed=is_daimon_managed,
         is_reachable_in_tenant=False,
-        owned_by_caller=owner_counts
+        owned_by_caller=not is_daimon_managed
         and ma_agent_id is not None
         and await caller_owns_agent(runtime, auth, ma_agent_id),
     )

@@ -33,7 +33,12 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._owner import caller_owns_agent, may_own
+from daimon.adapters.mcp.tools._owner import (
+    caller_owned_ids,
+    caller_owns_agent,
+    may_own,
+    owned_in,
+)
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools._rule_view import (
     load_caller_view,
@@ -153,6 +158,9 @@ class AgentInfo(BaseModel):
     """Set only by ``fork_agent``: the source's own skills, uploaded again under the
     copy's name. The copy has them even when ``skills`` does not list them yet; do
     not add them again."""
+    owned_by_you: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Set by ``get_agent`` and ``list_agents``: whether the caller owns this agent
+    (created it, or an admin named them), so may change it without an admin."""
 
     @classmethod
     def from_ma(
@@ -348,13 +356,6 @@ def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
     return None
 
 
-async def _may_see_setup(
-    runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
-) -> bool:
-    """Members see capabilities; native admins see setup details."""
-    return auth.is_admin
-
-
 async def _reject_guild_name_collision(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -389,9 +390,11 @@ async def _list_agents_impl(
     auth: AuthIdentity,
     page: str | None,
     origin_context_id: str | None = None,
+    mine: bool = False,
 ) -> list[AgentInfo]:
     del page
     rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    owned = await caller_owned_ids(runtime, auth)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     caller = await load_caller_view(
         runtime,
@@ -400,17 +403,24 @@ async def _list_agents_impl(
         location_channel_id=origin_channel_id(origin),
         location_thread_id=origin.thread_id if origin is not None else None,
     )
-    rows = [row for row in rows if caller.sees_agent(row)]
+    # An owner always sees their own agents, routed anywhere or nowhere.
+    rows = [
+        row
+        for row in rows
+        if (owned_in(owned, auth, row.id) or (not mine and caller.sees_agent(row)))
+    ]
     skill_titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
     )
-    infos = [AgentInfo.from_ma(a, skill_titles=skill_titles) for a in rows]
+    infos = [
+        AgentInfo.from_ma(a, skill_titles=skill_titles).model_copy(
+            update={"owned_by_you": owned_in(owned, auth, a.id)}
+        )
+        for a in rows
+    ]
     if auth.is_admin:
         return infos
-    return [
-        info if await _may_see_setup(runtime, auth, row) else info.for_member()
-        for row, info in zip(rows, infos, strict=True)
-    ]
+    return [info if info.owned_by_you else info.for_member() for info in infos]
 
 
 async def _get_agent_impl(
@@ -432,16 +442,17 @@ async def _get_agent_impl(
         location_thread_id=origin.thread_id if origin is not None else None,
     )
     info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
-    # The prompt is readable only by callers who could replace it: admins, and
-    # tools may edit at all. A defaults-managed or system
+    # The prompt is readable only by callers who could replace it: admins and the
+    # agent's owner, on an agent chat tools may edit at all. A defaults-managed or system
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
-    sees_setup = auth.is_admin or await _may_see_setup(runtime, auth, agent)
+    owned = await caller_owns_agent(runtime, auth, agent.id)
+    sees_setup = auth.is_admin or owned
     if sees_setup and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
         info = info.for_member()
-    return info
+    return info.model_copy(update={"owned_by_you": owned})
 
 
 def _reject_unknown_model(model: ModelSelection) -> None:
@@ -1082,6 +1093,8 @@ async def _fork_agent_impl(
                 public_url=str(public_url) if public_url is not None else None,
                 subject=mcp_subject(auth, is_admin=auth.is_admin),
                 default_agent_name=runtime.deployment_default.agent_name,
+                # Whoever made the copy owns it.
+                owner=auth.account_id if may_own(auth) else None,
             )
         except DaimonError as exc:
             raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
@@ -1742,20 +1755,28 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def list_agents(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, page: str | None = None, origin_context_id: str | None = None
+        ctx: Context,
+        page: str | None = None,
+        origin_context_id: str | None = None,
+        mine: bool = False,
     ) -> list[AgentInfo]:
         """List agents visible here, including their attached ``mcp_servers`` and ``skills``.
 
+        Each agent says ``owned_by_you``: the caller owns it and may change it without
+        an admin. ``mine=true`` lists only the caller's own agents ("which agents do I
+        own?"), wherever they answer, including ones that answer nowhere yet.
         ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
-        admin: setup details are
-        for admins, capabilities (name, description, model, skills) are not. Members
-        see the channel/thread responders and agents explicitly allowed to run
-        here; unrouted agents and other channels' agents are hidden.
-        Pass this turn's ``origin_context_id`` to verify its location. Without
-        a verified location a member cannot list unrestricted agents. Admins
-        retain their existing visibility. ``page`` is reserved for pagination.
+        admin nor its owner: setup details are for them, capabilities (name,
+        description, model, skills) are not. Members see the channel/thread
+        responders, agents explicitly allowed to run here, and their own agents;
+        other unrouted agents and other channels' agents are hidden.
+        Always pass this turn's ``origin_context_id`` to verify its location: without
+        it a member sees only their own agents. Admins retain their existing
+        visibility. ``page`` is reserved for pagination.
         """
-        return await _list_agents_impl(runtime, await _auth(ctx), page, origin_context_id)
+        return await _list_agents_impl(
+            runtime, await _auth(ctx), page, origin_context_id, mine=mine
+        )
 
     @mcp.tool
     async def get_agent(  # pyright: ignore[reportUnusedFunction]

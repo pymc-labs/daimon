@@ -2508,3 +2508,62 @@ async def test_an_admins_dm_turn_posts_a_credential_card_for_a_pinned_agent_into
     body = posts[0].kwargs["json"]
     assert body["channel"] == "D0ADMIN1"
     assert "thread_ts" not in body or body["thread_ts"] is None, "a dm: scope is not a Slack ts"
+
+
+@pytest.mark.parametrize("server_name", ["linear", "notion"], ids=["replace", "new-name"])
+async def test_the_agents_owner_may_connect_and_rotate_on_their_own_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    server_name: str,
+) -> None:
+    from daimon.core.stores import agent_owners
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [
+            _ma_agent_with_server(
+                agent_id="ag_shared",
+                tenant_id=tenant.id,
+                server_name="linear",
+                url="https://mcp.linear.app/sse",
+            )
+        ]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9501", posted=posted)
+
+    async def request():
+        return await _request_mcp_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_shared",
+            agent_name="daimon",
+            server_name=server_name,
+            url="https://mcp.example.com/mcp",
+            channel_id="222",
+        )
+
+    with pytest.raises(ToolError, match="admin"):
+        await request()
+    async with committing_sessionmaker.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared"),
+            owner_account_id=auth.account_id,
+            source="admin_assigned",
+        )
+    result = await request()
+    assert result.message_id == "9501"

@@ -14,6 +14,7 @@ from daimon.adapters.discord.agent_setup.write import (
 )
 from daimon.adapters.discord.errors import render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import agent_lifecycle
 from daimon.core.errors import AgentNameCollision
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -150,18 +151,19 @@ async def test_create_blank_agent_is_not_marked_managed(
         public_url: str | None = None,
         managed: bool = True,
         references: object = None,
+        create_only: bool = False,
     ) -> Any:
         captured["managed"] = managed
         captured["account_id"] = account_id
         return MagicMock()
 
-    monkeypatch.setattr(write_mod, "reconcile_agent", spy_reconcile)
+    monkeypatch.setattr(agent_lifecycle, "reconcile_agent", spy_reconcile)
 
     # Stub find_agents_by_daimon_tag to return empty (no collision).
     async def _no_collision(*args: Any, **kwargs: Any) -> list[Any]:
         return []
 
-    monkeypatch.setattr(write_mod, "find_agents_by_daimon_tag", _no_collision)
+    monkeypatch.setattr(agent_lifecycle, "find_agents_by_daimon_tag", _no_collision)
 
     runtime = _runtime_with_settings(build_stub_anthropic(), tenant_id=tenant_id, public_url=None)
 
@@ -213,7 +215,7 @@ async def test_create_blank_agent_rejects_duplicate_tenant_name(
     async def _collision_found(*args: Any, **kwargs: Any) -> list[Any]:
         return [existing_agent]
 
-    monkeypatch.setattr(write_mod, "find_agents_by_daimon_tag", _collision_found)
+    monkeypatch.setattr(agent_lifecycle, "find_agents_by_daimon_tag", _collision_found)
 
     runtime = _runtime_with_settings(build_stub_anthropic(), tenant_id=tenant_id, public_url=None)
 
@@ -262,8 +264,8 @@ async def test_create_blank_agent_rejects_name_held_by_other_owner(
         reconcile_calls.append(args)
         return MagicMock()
 
-    monkeypatch.setattr(write_mod, "find_agents_by_daimon_tag", _collision_found)
-    monkeypatch.setattr(write_mod, "reconcile_agent", _spy_reconcile)
+    monkeypatch.setattr(agent_lifecycle, "find_agents_by_daimon_tag", _collision_found)
+    monkeypatch.setattr(agent_lifecycle, "reconcile_agent", _spy_reconcile)
 
     runtime = _runtime_with_settings(build_stub_anthropic(), tenant_id=tenant_id, public_url=None)
 
@@ -298,8 +300,8 @@ async def test_create_blank_agent_queues_the_new_agents_face(
         return []
 
     queued: list[tuple[uuid.UUID, str]] = []
-    monkeypatch.setattr(write_mod, "reconcile_agent", reconcile)
-    monkeypatch.setattr(write_mod, "find_agents_by_daimon_tag", no_collision)
+    monkeypatch.setattr(agent_lifecycle, "reconcile_agent", reconcile)
+    monkeypatch.setattr(agent_lifecycle, "find_agents_by_daimon_tag", no_collision)
     monkeypatch.setattr(
         write_mod,
         "queue_agent_face",

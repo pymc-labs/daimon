@@ -233,14 +233,16 @@ def details_card(
     backend_options: tuple[Provider, ...] = (),
     backend_selection: Provider | None = None,
     channel_names: Mapping[str, str] | None = None,
+    owned: bool = False,
 ) -> AdaptiveCard:
     """One agent's readable state. Key values are not in the model, so never here.
 
     `channel_names` names the channels it answers in; one with no name shows a
     neutral label, never its id.
 
-    Add skill and the coding-tool token are admin changes, so only an admin is
-    offered them: a member's press could only end in a refusal.
+    Add skill is offered to an admin and to the agent's owner (`owned`); the
+    coding-tool token stays an admin's. A member's press could only end in a
+    refusal.
     """
     purpose = details.purpose
     body: list[CardElement] = [_text(clip(purpose, _PURPOSE_MAX_CHARS))] if purpose else []
@@ -287,7 +289,7 @@ def details_card(
             ]
         )
     actions: list[Action] = []
-    if is_admin and not details.daimon_managed:
+    if (is_admin or owned) and not details.daimon_managed:
         add = OpenDialogData(SKILL_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="➕ Add skill", data=add))
     if is_admin and coding_tools:

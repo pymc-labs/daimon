@@ -21,6 +21,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
@@ -180,6 +181,13 @@ async def complete_mcp_oauth_flow(
         return McpOAuthCompletion(vault_id=vault_id, credential_id=credential_id, ma_agent_id=None)
     async with session_factory() as session:
         requester = await get_account_with_tenant(session, account_id=flow.account_id)
+        # The person the grant belongs to; their ownership is read, never claimed.
+        owned = requester is not None and await owns_agent(
+            session,
+            tenant_id=flow.tenant_id,
+            ma_agent_id=str(agent.id),
+            account_id=flow.account_id,
+        )
     caller = AdminCaller(
         platform_user_id=requester.platform_user_id if requester is not None else None,
         is_server_admin=requester is not None and requester.role is Role.ADMIN,
@@ -210,6 +218,7 @@ async def complete_mcp_oauth_flow(
             caller=caller,
             default=default,
             shares_token=False,
+            owned=owned,
         )
         if decision.refused:
             await _withdraw_grant(

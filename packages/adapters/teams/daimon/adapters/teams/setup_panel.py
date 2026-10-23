@@ -56,6 +56,7 @@ from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
@@ -532,6 +533,14 @@ class SetupPanel:
                 channel_label=None,
             )
             details = await self._without_hidden_places(session, actor, details)
+            # Only a member's ownership adds anything: an admin already gets every control.
+            owned = not actor.is_admin and await owns_agent(
+                session,
+                tenant_id=actor.tenant_id,
+                ma_agent_id=match.ma_agent_id,
+                platform="teams",
+                platform_user_id=actor.user_id,
+            )
             github_panel = await load_grants_panel(
                 session,
                 tenant_id=actor.tenant_id,
@@ -566,6 +575,7 @@ class SetupPanel:
             page=page,
             coding_tools=coding_tools,
             is_admin=actor.is_admin,
+            owned=owned,
             github_panel=github_panel,
             expanded=expanded,
             backend_options=backend_options,
@@ -746,6 +756,8 @@ class SetupPanel:
                     model=values["model"],
                     account_id=derive_guild_account_uuid(actor.tenant_id),
                     public_url=str(mcp_url) if mcp_url is not None else None,
+                    sessionmaker=self._runtime.sessionmaker,
+                    creator_account_id=await get_or_create_account(self._runtime, actor),
                 )
                 created_id = outcome.anthropic_id
                 if created_id is None:

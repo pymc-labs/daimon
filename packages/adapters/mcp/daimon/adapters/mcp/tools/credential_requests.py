@@ -25,6 +25,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import caller_owns_agent
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.discord import (
     _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
@@ -350,6 +351,7 @@ async def _require_mcp_replacement_allowed(
         caller=admin_caller(auth),
         default=runtime.deployment_default,
         shares_token=shares_token,
+        owned=await caller_owns_agent(runtime, auth, str(ma_agent.id)),
     )
     if decision.refused:
         raise ToolError(
