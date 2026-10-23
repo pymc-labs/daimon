@@ -14,9 +14,11 @@ import pytest
 import structlog
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.posted_controls.fleet import (
+    FLEET_STOPPING,
     DiscordFleetCard,
     DiscordFleetCardFactory,
     FleetControl,
+    TypedPresser,
     build_fleet_view,
 )
 from daimon.core.access_policy import TenantAccessPolicy
@@ -638,6 +640,42 @@ async def test_run_level_control_uses_the_same_owner_and_run_compare_and_set(act
     assert owner.control.call_args.args[2] is None
     assert owner.control.call_args.kwargs["expected_version"] == run().version
     assert owner.control.call_args.kwargs["operation_key"] == f"discord:fleet:{RUN}:all:2:{action}"
+
+
+def _author(user_id: int) -> discord.Member:
+    author = MagicMock(spec=discord.Member)
+    author.id = user_id
+    return author
+
+
+async def test_a_typed_stop_is_the_run_level_stop_button_by_its_author():
+    """J7: "stop the fleet" in the run's thread kills the whole run, as Stop-all does."""
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+    presser = TypedPresser(user=_author(123), guild_id=60, channel_id=70)
+    assert await card.stop_typed(presser, message=None) == FLEET_STOPPING
+    owner.control.assert_awaited_once()
+    assert owner.control.call_args.args[2] is None
+    assert owner.control.call_args.kwargs["action"] == "kill"
+    assert owner.control.call_args.kwargs["expected_version"] == run().version
+    assert owner.control.call_args.kwargs["operation_key"] == f"discord:fleet:{RUN}:all:2:kill"
+    assert loader.await_args_list[-1].args == (presser,)
+
+
+async def test_a_typed_stop_by_someone_else_is_refused_before_any_control_write():
+    """The loader answers for the live author (as the host's does); not the starter, not admin."""
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+
+    async def as_author(presser):
+        current = parent()
+        return replace(current, subject=Subject(platform_user_id=str(presser.user.id))), POLICY
+
+    loader.side_effect = as_author
+    presser = TypedPresser(user=_author(456), guild_id=60, channel_id=70)
+    text = await card.stop_typed(presser, message=None)
+    owner.control.assert_not_awaited()
+    assert text.startswith("Only the person who started this fleet")
 
 
 @pytest.mark.parametrize("enabled", [False, True])

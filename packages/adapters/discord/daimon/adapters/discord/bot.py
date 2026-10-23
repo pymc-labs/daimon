@@ -24,7 +24,7 @@ from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
-from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
+from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
     build_context_xml,
@@ -94,7 +94,13 @@ from daimon.adapters.discord.turn_posts import (
     archive_thread_quietly,
     record_replacement_post,
 )
-from daimon.adapters.discord.views import CancelView
+from daimon.adapters.discord.typed_stop import (
+    ALREADY_STOPPING,
+    STOPPED,
+    TypedStops,
+    is_stop_request,
+)
+from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
     build_skipped_image_prefix,
@@ -747,6 +753,8 @@ class DaimonBot(commands.Bot):
         # turn so the user doesn't lose messages they fired while the bot was busy.
         self._processing: set[int] = set()
         self._processing_tasks: dict[int, asyncio.Task[object]] = {}
+        # The running turn of each thread, for a typed "stop" (`_typed_stop`).
+        self._typed_stops = TypedStops()
         self._pending: dict[int, list[discord.Message]] = {}
         self._queued_reactions: set[int] = set()
         # Threads whose running turn lost its thread (deleted) or its right to write
@@ -945,12 +953,56 @@ class DaimonBot(commands.Bot):
     ) -> DiscordFleetCard | None:
         """Rebuild through the captured post and the same transport owner."""
         thread, message = interaction.channel, interaction.message
-        if (
-            not isinstance(thread, discord.Thread)
-            or message is None
-            or self.runtime.fleet_card_factory is None
-            or not self.runtime.settings.fleet.enabled
-        ):
+        if not isinstance(thread, discord.Thread) or message is None:
+            return None
+        return await self._fleet_card_from_post(thread, message, run_id=run_id)
+
+    async def _live_fleet_card(
+        self, thread: discord.Thread, *, author_id: int, is_admin: bool
+    ) -> tuple[DiscordFleetCard, discord.Message] | Literal["not_allowed"] | None:
+        """The card of this thread's still-running fleet run, rebuilt from its post.
+
+        "not_allowed" when the author neither started it nor is a server admin: read
+        from the stored card post, before any Discord call. The card's own control
+        path still proves authority for the rest.
+        """
+        from daimon.core.stores import fleet as fleet_store
+
+        if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
+            return None
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+        live = await fleet_store.live_run_card(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=str(thread.id),
+        )
+        if live is None:
+            return None
+        run_id, message_id = live
+        async with self.runtime.sessionmaker() as session:
+            post = await get_post(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=str(thread.id),
+                message_id=message_id,
+            )
+        if post is None:
+            return None
+        if post.requester_platform_user_id != str(author_id) and not is_admin:
+            return "not_allowed"
+        try:
+            message = await thread.fetch_message(int(message_id))
+        except discord.HTTPException:
+            return None
+        card = await self._fleet_card_from_post(thread, message, run_id=run_id)
+        return None if card is None or card.run_id != run_id else (card, message)
+
+    async def _fleet_card_from_post(
+        self, thread: discord.Thread, message: discord.Message, *, run_id: uuid.UUID
+    ) -> DiscordFleetCard | None:
+        if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
             return None
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
         async with self.runtime.sessionmaker() as session:
@@ -2555,6 +2607,9 @@ class DaimonBot(commands.Bot):
             return
         thread = message.channel
         thread_id = thread.id
+        # A typed stop from someone allowed stops the running reply or fleet.
+        if await self._typed_stop(message, thread, mentioned=False):
+            return
         if thread_id in self._processing:
             # The in-flight turn's delta context already carries this message.
             return
@@ -3221,6 +3276,11 @@ class DaimonBot(commands.Bot):
             # Per-thread mention queueing. Check before claiming an in-flight slot
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
+            # "@Daimon stop" stops the running reply or fleet instead of waiting behind it.
+            if isinstance(message.channel, discord.Thread) and await self._typed_stop(
+                message, message.channel, mentioned=True
+            ):
+                return
             if thread_id in self._processing:
                 queued_message = True
                 await self._queue_behind_inflight_turn(thread_id, message)
@@ -3366,6 +3426,91 @@ class DaimonBot(commands.Bot):
         async with self.runtime.sessionmaker() as session:
             await finish_messages(session, tenant_id=tenant_id, message_ids=pending)
             await session.commit()
+
+    async def _typed_stop(
+        self, message: discord.Message, thread: discord.Thread, *, mentioned: bool
+    ) -> bool:
+        """A typed stop phrase in a thread: the Stop buttons' paths. True when answered.
+
+        - @-mentioned, with a still-running fleet run in the thread: the fleet card's
+          Stop-all (its starter or a server admin, as the button), and the author's
+          own running reply too. Refused there, the author can still stop a reply
+          they may stop.
+        - Otherwise the running reply's Stop: its asker or a server admin. An
+          unmentioned stop phrase never touches a fleet, and one from someone who
+          may not stop the reply is left alone; an @-mentioned one is told who can.
+        """
+        bot_id = self.user.id if self.user is not None else None
+        if not is_stop_request(message.content, bot_id=bot_id):
+            return False
+        from daimon.adapters.discord.posted_controls.fleet import (
+            FLEET_STOP_NOT_ALLOWED,
+            FLEET_STOPPING,
+            TypedPresser,
+        )
+
+        thread_id, author_id = thread.id, message.author.id
+        is_admin = isinstance(message.author, discord.Member) and (
+            admin_caller(message.author).is_server_admin
+        )
+        fleet = (
+            await self._live_fleet_card(thread, author_id=author_id, is_admin=is_admin)
+            if mentioned
+            else None
+        )
+        if fleet is not None:
+            if fleet == "not_allowed":
+                text = FLEET_STOP_NOT_ALLOWED
+            else:
+                card, card_message = fleet
+                text = await card.stop_typed(
+                    TypedPresser(
+                        user=message.author, guild_id=thread.guild.id, channel_id=thread_id
+                    ),
+                    message=card_message,
+                )
+            reply_outcome = self._typed_stops.stop(
+                thread_id, author_id=author_id, is_admin=is_admin
+            )
+            fleet_stopped = text == FLEET_STOPPING
+            log.info(
+                "turn.stop_typed",
+                platform="discord",
+                thread_id=str(thread_id),
+                pressed_by=str(author_id),
+                outcome="fleet_stopped" if fleet_stopped else "fleet_refused",
+                reply_outcome=reply_outcome,
+            )
+            if not fleet_stopped and reply_outcome in ("stopped", "already_stopping"):
+                # Not their fleet to stop, but their own reply: that much stops.
+                text = STOPPED if reply_outcome == "stopped" else ALREADY_STOPPING
+            await self._reply_quietly(message, text)
+            return True
+        if thread_id not in self._processing:
+            return False
+        outcome = self._typed_stops.stop(thread_id, author_id=author_id, is_admin=is_admin)
+        log.info(
+            "turn.stop_typed",
+            platform="discord",
+            thread_id=str(thread_id),
+            pressed_by=str(author_id),
+            outcome=outcome,
+        )
+        if outcome == "no_running_turn" or (outcome == "not_allowed" and not mentioned):
+            return False
+        reply = {
+            "stopped": STOPPED,
+            "already_stopping": ALREADY_STOPPING,
+            "not_allowed": STOP_NOT_ALLOWED,
+        }[outcome]
+        await self._reply_quietly(message, reply)
+        return True
+
+    async def _reply_quietly(self, message: discord.Message, text: str) -> None:
+        try:
+            await message.reply(text, mention_author=False)
+        except discord.HTTPException as exc:
+            log.warning("turn.stop_typed_reply_failed", message_id=str(message.id), error=str(exc))
 
     async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
         """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.
@@ -3521,6 +3666,8 @@ class DaimonBot(commands.Bot):
             return groups
 
         async def run(messages: list[discord.Message]) -> None:
+            # The turn before this one is over; this group's turn registers its own Stop.
+            self._typed_stops.release(thread_id)
             if self._thread_stops.get(thread_id) is not None:
                 # Checked before every group, so a thread lost mid-drain starts nothing more.
                 for message in messages:
@@ -3920,6 +4067,7 @@ class DaimonBot(commands.Bot):
     def _release_thread(self, thread_id: int) -> None:
         self._processing_tasks.pop(thread_id, None)
         self._thread_stops.release(thread_id)
+        self._typed_stops.release(thread_id)
 
         def resume(_key: int, request: tuple[uuid.UUID, discord.Thread, str]) -> None:
             tenant_id, thread, guild_id = request
@@ -4151,6 +4299,9 @@ class DaimonBot(commands.Bot):
         cancel = asyncio.Event()
         # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
         self._thread_stops.watch(thread.id, cancel)
+        self._typed_stops.watch(
+            thread.id, requester_id=int(row.requester_external_user_id), cancel=cancel
+        )
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -4359,6 +4510,9 @@ class DaimonBot(commands.Bot):
             )
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
+            self._typed_stops.watch(
+                thread.id, requester_id=int(row.requester_external_user_id), cancel=cancel_event
+            )
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
@@ -5140,6 +5294,7 @@ class DaimonBot(commands.Bot):
         cancel = asyncio.Event()
         # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
         self._thread_stops.watch(thread.id, cancel)
+        self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -5724,6 +5879,7 @@ class DaimonBot(commands.Bot):
             )
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
+            self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel_event)
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
