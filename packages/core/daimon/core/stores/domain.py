@@ -1251,8 +1251,9 @@ class AgentBackendRevision(_BackendConsentFacts):
     created_at: datetime
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
     fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
-    # Per login key: "share" | "skip" | "ask"; a missing key is "ask".
-    fleet_credential_sharing: dict[str, Literal["share", "skip", "ask"]] | None = Field(
+    # Per login key: the saved share|skip|ask with who, role, when and row version.
+    # Kept raw and read with `fleet_credentials.parse_sharing` (malformed = "ask").
+    fleet_credential_sharing: JsonValue | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 

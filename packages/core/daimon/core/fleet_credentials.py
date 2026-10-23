@@ -2,44 +2,56 @@
 
 A worker ceiling leaves out everything with its own login (#1357). Before that loss
 is silent, the requester is asked per login: share it with the workers, skip it, or
-ask each time. This module only describes the logins and decides who may answer;
-it never reads a secret value. Labels are what a person already sees: a connector's
-server name, a repository's name, a stored key's NAME.
+ask each time. This module describes the logins, decides who may answer, and reads
+saved choices back fail closed; it never reads a secret value. Labels are what a
+person already sees: a connector's server name, a repository's name, a stored key's
+NAME.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
+
+from mux.profiles import MANAGED_AGENTS
 
 if TYPE_CHECKING:
     from daimon.core.stores.domain import BackendAgent
     from mux.contracts.ids import Provider
     from mux.contracts.resources import ResourceBinding
+    from pydantic import JsonValue
     from sqlalchemy.ext.asyncio import AsyncSession
 
 LoginKind = Literal["agent_mcp", "caller_mcp", "github_app", "env", "repository", "unknown"]
 Installer = Literal["owner", "admin", "caller", "unknown"]
 Choice = Literal["share", "skip", "ask"]
+SaverRole = Literal["admin", "owner"]
 CHOICES: tuple[Choice, ...] = ("share", "skip", "ask")
 #: A stored login whose server isn't on the agent any more: never shareable.
 UNMATCHED_CONNECTOR = "a connected tool"
 
-#: Only a native Anthropic worker session can receive a shared login today
-#: (its own vault and .env). OpenAI/Gemini workers run without connectors.
-SHAREABLE_PROVIDERS: frozenset[str] = frozenset({"anthropic"})
+#: Only a native worker session can receive a shared login (its own vault and .env).
+#: OpenAI/Gemini workers run without connectors.
+SHAREABLE_PROVIDERS: frozenset[str] = frozenset({MANAGED_AGENTS.provider})
 
 
 @dataclass(frozen=True)
 class ConnectorLogin:
-    """One login a worker would otherwise run without."""
+    """One login a worker would otherwise run without.
+
+    `version` changes whenever the stored row behind it is replaced, so a share saved
+    for one version never carries over to another.
+    """
 
     key: str
     kind: LoginKind
     label: str
     installed_by: Installer
     account_label: str | None = None
+    version: str | None = None
 
     @property
     def shareable(self) -> bool:
@@ -53,6 +65,61 @@ class ConnectorLogin:
             self.kind != "agent_mcp" or self.label != UNMATCHED_CONNECTOR
         )
 
+    @property
+    def savable(self) -> bool:
+        """Whether a choice for it may be stored on the agent at all.
+
+        Never the requester's own connections: they are a person's, and the agent's
+        config is shared by everyone who uses it.
+        """
+        return self.kind != "caller_mcp"
+
+
+@dataclass(frozen=True)
+class SavedChoice:
+    """A stored per-login choice, with who saved it, in what role, when, for what row."""
+
+    choice: Choice
+    by: uuid.UUID
+    role: SaverRole
+    at: str
+    version: str | None
+
+    def to_json(self) -> dict[str, JsonValue]:
+        return {
+            "choice": self.choice,
+            "by": str(self.by),
+            "role": self.role,
+            "at": self.at,
+            "version": self.version,
+        }
+
+
+def parse_sharing(raw: object) -> dict[str, SavedChoice]:
+    """Read a stored sharing map; anything malformed reads as no choice ("ask")."""
+    import structlog
+
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[str, SavedChoice] = {}
+    for key, value in raw.items():  # pyright: ignore[reportUnknownVariableType]
+        try:
+            assert isinstance(key, str) and isinstance(value, dict)
+            choice, role = value["choice"], value["role"]  # pyright: ignore[reportUnknownVariableType]
+            assert choice in CHOICES and role in ("admin", "owner")
+            version = value.get("version")  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+            assert version is None or isinstance(version, str)
+            parsed[key] = SavedChoice(
+                choice=choice,
+                by=uuid.UUID(str(value["by"])),  # pyright: ignore[reportUnknownArgumentType]
+                role=role,
+                at=str(value["at"]),  # pyright: ignore[reportUnknownArgumentType]
+                version=version,
+            )
+        except (AssertionError, KeyError, ValueError, TypeError):
+            structlog.get_logger(__name__).warning("fleet.sharing_entry_unreadable")
+    return parsed
+
 
 def may_share(
     login: ConnectorLogin,
@@ -64,17 +131,39 @@ def may_share(
 ) -> bool:
     """Whether this person may give the workers this login.
 
-    Only the requester answers. Their own connections are theirs to share. A login
-    the agent's owner set is the owner's (or an admin's) to share. Anything an admin
-    installed, or whose installer is unknown, needs an admin.
+    Only the requester answers. A login the agent's owner set (and nobody else since)
+    is the owner's or an admin's to share. Anything an admin installed, or whose
+    installer is unknown, needs an admin.
     """
     if not login.shareable or actor_account_id != requester_account_id:
         return False
-    if login.installed_by == "caller":
-        return True
     if login.installed_by == "owner":
         return is_owner or is_admin
     return is_admin
+
+
+def still_shared(
+    login: ConnectorLogin, saved: SavedChoice | None, *, owner: uuid.UUID | None
+) -> bool:
+    """Whether a saved "share" still holds for this login as it is NOW.
+
+    Re-checked at every freeze: the same row version it was saved for, and the saver
+    may still share it under the current installer classification (an admin, or the
+    owner, still the owner, sharing a key that is still theirs).
+    """
+    return (
+        saved is not None
+        and saved.choice == "share"
+        and login.shareable
+        and saved.version == login.version
+        and may_share(
+            login,
+            actor_account_id=saved.by,
+            requester_account_id=saved.by,
+            is_admin=saved.role == "admin",
+            is_owner=saved.role == "owner" and owner == saved.by,
+        )
+    )
 
 
 def shareable_with(login: ConnectorLogin, provider: Provider) -> bool:
@@ -102,8 +191,20 @@ def login_key_of(binding: ResourceBinding) -> str | None:
 
 
 def _repository_name(url: str) -> str:
-    tail = url.rstrip("/").removesuffix(".git").split("/")
-    return "/".join(tail[-2:]) if len(tail) >= 2 else url
+    """owner/repo from a repository URL, never its userinfo, query or fragment."""
+    parts = urlsplit(url)
+    if parts.scheme or parts.netloc:
+        path = parts.path
+    else:
+        # scp-style (user@host:owner/repo) or a bare path: no userinfo, query or fragment.
+        path = url.split("?", 1)[0].split("#", 1)[0].rsplit("@", 1)[-1].replace(":", "/")
+    tail = path.rstrip("/").removesuffix(".git").split("/")
+    tail = [part for part in tail if part]
+    return "/".join(tail[-2:]) if len(tail) >= 2 else (tail[-1] if tail else "a repository")
+
+
+def _version(*parts: object) -> str:
+    return ":".join(part.isoformat() if isinstance(part, datetime) else str(part) for part in parts)
 
 
 async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[ConnectorLogin, ...]:
@@ -115,6 +216,7 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
     from daimon.core.mcp_server_url import canonical_mcp_url
     from daimon.core.stores import agent_owners
     from daimon.core.stores.fleet_logins import mcp_credential_url, stored_key_setters
+    from daimon.core.stores.github_access import list_live_grant_repositories
 
     owner = await agent_owners.owner_of(session, source.tenant_id, source.agent_id)
     spec = source.effective_spec
@@ -138,15 +240,23 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
             except ValueError:
                 add(ConnectorLogin(reference, "unknown", "a stored login", "unknown"))
                 continue
-            url = await mcp_credential_url(
+            stored = await mcp_credential_url(
                 session,
                 tenant_id=source.tenant_id,
                 agent_id=source.agent_id,
                 credential_id=credential_id,
             )
-            name = servers.get(canonical_mcp_url(url)) if url is not None else None
+            name = servers.get(canonical_mcp_url(stored[0])) if stored is not None else None
             # No record of who stored it: an admin's to share (fail closed).
-            add(ConnectorLogin(reference, "agent_mcp", name or UNMATCHED_CONNECTOR, "unknown"))
+            add(
+                ConnectorLogin(
+                    reference,
+                    "agent_mcp",
+                    name or UNMATCHED_CONNECTOR,
+                    "unknown",
+                    version=_version(stored[1]) if stored is not None else None,
+                )
+            )
         elif reference.startswith("caller-mcp:"):
             add(ConnectorLogin("caller", "caller_mcp", "your own connections", "caller"))
         elif reference.startswith("agent-env:") and binding.target_path is not None:
@@ -158,7 +268,7 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
                 owner is not None
                 and setters is not None
                 and setters[0] == owner
-                and setters[1] in (None, owner)
+                and setters[1] == owner
             )
             add(
                 ConnectorLogin(
@@ -166,6 +276,7 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
                     "env",
                     f"the stored key {key}",
                     "owner" if by_owner else "unknown",
+                    version=_version(setters[1], setters[2]) if setters is not None else None,
                 )
             )
         else:
@@ -173,12 +284,6 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
     for server in (spec.mcp_servers or ()) if spec is not None else ():
         if server.credential_ref and server.credential_ref not in logins:
             add(ConnectorLogin(server.credential_ref, "agent_mcp", server.name, "unknown"))
-    for repository in source.repository_sources:
-        if repository.credential_ref is not None:
-            name = _repository_name(repository.repository_url or repository.target_path)
-            add(ConnectorLogin(f"repo:{name}", "repository", f"the repository {name}", "unknown"))
-    from daimon.core.stores.github_access import list_live_grant_repositories
-
     repositories = await list_live_grant_repositories(
         session, tenant_id=source.tenant_id, agent_id=source.agent_id
     )
@@ -192,6 +297,16 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
                 "admin",
             )
         )
+    else:
+        # With GitHub app access the logged-in repositories are its; listed once there.
+        for repository in source.repository_sources:
+            if repository.credential_ref is not None:
+                name = _repository_name(repository.repository_url or repository.target_path)
+                add(
+                    ConnectorLogin(
+                        f"repo:{name}", "repository", f"the repository {name}", "unknown"
+                    )
+                )
     return tuple(logins.values())
 
 

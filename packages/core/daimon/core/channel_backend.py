@@ -22,12 +22,12 @@ import hashlib
 import inspect
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
-from typing import TYPE_CHECKING, Literal, Protocol, cast, get_args
+from typing import Literal, Protocol, cast, get_args
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -95,9 +95,6 @@ from mux.state.operations import request_digest
 from mux.state.store import ConfigRevisionConflict
 from pydantic import JsonValue
 from sqlalchemy.exc import IntegrityError
-
-if TYPE_CHECKING:
-    from daimon.core.fleet_credentials import ConnectorLogin
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -479,6 +476,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "invalid_fleet_grant",
         "invalid_credential_choice",
         "credential_share_not_allowed",
+        "credential_choice_admin_set",
         "fleet_raise_admin_required",
         "fleet_provider_limits_exceed_budget",
         "fleet_root_credentials",
@@ -1097,9 +1095,7 @@ class AgentBackendService:
                     preview_digest=preview.digest,
                     fleet_grant=retained_grant,
                     # Login sharing is its own confirmed choice; every change keeps it.
-                    fleet_credential_sharing=cast(
-                        JsonValue, current.fleet_credential_sharing if current else None
-                    ),
+                    fleet_credential_sharing=current.fleet_credential_sharing if current else None,
                     drop_consent=consent_json,
                     model=model,
                     profile=settings.profile,
@@ -1166,7 +1162,7 @@ class AgentBackendService:
         self,
         agent: BackendAgent,
         choices: Mapping[str, Literal["share", "skip", "ask"]],
-        logins: Sequence[ConnectorLogin],
+        source: BackendAgent,
         actor: BackendActor,
         *,
         requester_account_id: uuid.UUID,
@@ -1174,38 +1170,60 @@ class AgentBackendService:
     ) -> AgentBackendRevision:
         """Save the requester's per-login choice for this agent's fleet workers.
 
-        Saving is an agent-config change: the agent's owner or an admin. "share" also
-        needs `may_share` for that login (an owner shares only logins they set, or
-        their own connections; an admin's need an admin). Unknown logins are never
-        shareable. Every decision is audited by login key (never a value).
+        The logins are read here, inside the write, from the captured source (never a
+        caller's list). Saving is an agent-config change: the agent's owner or an
+        admin. "share" also needs `may_share` for that login. The requester's own
+        connections are never stored (they are a person's, not the agent's). An
+        admin's choice stays for owners: only an admin may change it. Each entry keeps
+        who saved it, in what role, when, and for which version of the stored row;
+        every decision is audited by login key (never a value).
         """
-        from daimon.core.fleet_credentials import CHOICES, may_share
+        from daimon.core.fleet_credentials import (
+            CHOICES,
+            SavedChoice,
+            fleet_logins,
+            may_share,
+            parse_sharing,
+        )
 
         self._check_editor(agent.tenant_id, actor)
-        known = {login.key: login for login in logins}
-        if not choices or any(
-            key not in known or choice not in CHOICES for key, choice in choices.items()
-        ):
+        if (source.tenant_id, source.agent_id) != (agent.tenant_id, agent.agent_id):
+            raise AgentBackendRefused("tenant_mismatch")
+        if not choices or any(choice not in CHOICES for choice in choices.values()):
             raise AgentBackendRefused("invalid_credential_choice")
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=agent.tenant_id
         ) as session:
             admin = await self._authorize_edit(session, agent, actor)
             owner = await agent_owners.owner_of(session, agent.tenant_id, agent.agent_id, lock=True)
+            known = {login.key: login for login in await fleet_logins(session, source)}
+            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            saved = parse_sharing(current.fleet_credential_sharing if current else None)
+            now = datetime.now(UTC).isoformat()
             for key, choice in choices.items():
+                login = known.get(key)
+                if login is None or not login.savable:
+                    raise AgentBackendRefused("invalid_credential_choice")
+                if not admin and key in saved and saved[key].role == "admin":
+                    raise AgentBackendRefused("credential_choice_admin_set")
                 if choice == "share" and not may_share(
-                    known[key],
+                    login,
                     actor_account_id=actor.account_id,
                     requester_account_id=requester_account_id,
                     is_admin=admin,
                     is_owner=owner == actor.account_id,
                 ):
                     raise AgentBackendRefused("credential_share_not_allowed")
-            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-            sharing: dict[str, str] = dict(
-                (current.fleet_credential_sharing or {}) if current else {}
+                saved[key] = SavedChoice(
+                    choice=choice,
+                    by=actor.account_id,
+                    role="admin" if admin else "owner",
+                    at=now,
+                    version=login.version,
+                )
+            sharing = cast(
+                JsonValue, {key: entry.to_json() for key, entry in sorted(saved.items())}
             )
-            sharing.update(choices)
             local = current.local if current else 0
             kept = AgentSettings.of(current)
             backend = current.backend if current else None
@@ -1229,7 +1247,7 @@ class AgentBackendService:
                     digest=_revision_digest(agent, backend, grant, consent, model, kept),
                     preview_digest=current.preview_digest if current else "credential-sharing",
                     fleet_grant=grant,
-                    fleet_credential_sharing=cast(JsonValue, sharing),
+                    fleet_credential_sharing=sharing,
                     drop_consent=consent,
                     model=model,
                     profile=kept.profile,
@@ -1249,7 +1267,8 @@ class AgentBackendService:
                     tool_name="fleet_credentials",
                     operation=choice,
                     outcome="allowed",
-                    reason=f"login={key}" + (f"; run={run_id}" if run_id else ""),
+                    reason=f"login={key}; role={'admin' if admin else 'owner'}"
+                    + (f"; run={run_id}" if run_id else ""),
                     scope=f"agent_backend:{agent.agent_id}:{revision.local}",
                 )
             return revision
