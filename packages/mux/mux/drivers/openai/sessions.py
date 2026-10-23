@@ -335,11 +335,15 @@ class OpenAISessions:
             return
         if self._mcp_secrets is None:
             raise self._c.unsupported("host_mcp_secret_resolver")
-        raw = await self._c.call("GET", "/agents/sessions/" + segment(ref.id))
-        if raw.get("id") != ref.id:
-            raise ValueError("wrong session identity")
-        await self._decode(scope, raw)
-        agent_id = text(object_json(raw["agent"])["id"])
+        # The binding names the session's agent; the turn's own retrieve right after
+        # this still checks the native session against it.
+        agent_id = (binding.native_refs.get("agent") if binding is not None else None) or None
+        if agent_id is None:
+            raw = await self._c.call("GET", "/agents/sessions/" + segment(ref.id))
+            if raw.get("id") != ref.id:
+                raise ValueError("wrong session identity")
+            await self._decode(scope, raw)
+            agent_id = text(object_json(raw["agent"])["id"])
         agent = await self._c.call("GET", "/agents/" + segment(agent_id))
         if agent.get("id") != agent_id:
             raise ValueError("wrong session agent identity")

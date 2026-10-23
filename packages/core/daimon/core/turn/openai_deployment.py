@@ -466,10 +466,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     counterpart_verified = False
     from daimon.core.turn.template_mcp import TemplateMCPCredential, template_mcp_kept
 
-    # A template that keeps the agent's MCP serves one whose switch dropped it with none.
-    mcp_template = deployment.template_capabilities == "mcp" and template_mcp_kept(
-        request.target_spec
-    )
+    mcp_template = deployment.template_capabilities == "mcp"
     template_mcp = TemplateMCPCredential(request, scope, label=OPENAI_TEMPLATE_MCP_LABEL)
 
     def check(config: ConfigRevision, authorized: Scope) -> None:
@@ -607,7 +604,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             operation_key="counterpart-read",
         )
         checked = await deployment.read_counterpart(preparation, source=source, resources=resources)
-        if mcp_template:
+        # A template that keeps the agent's MCP serves one whose switch dropped it
+        # (or could not represent it) with none: never more than the consent allows.
+        if mcp_template and template_mcp_kept(preparation.target_spec):
             from daimon.core.turn.template_mcp import consented_catalogue
 
             template_mcp.catalogue = consented_catalogue(source, preparation.target_spec)

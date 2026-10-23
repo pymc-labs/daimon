@@ -399,7 +399,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
                 await runtime.end_of_turn()
             except Exception:
                 structlog.get_logger(__name__).warning(
-                    "openai.mcp_credential_revoke_failed", exc_info=True
+                    "turn.mcp_credential_revoke_failed", exc_info=True
                 )
         raise
 

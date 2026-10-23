@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 
 
 def template_mcp_kept(target: AgentSpec | None) -> bool:
-    """A template keeps MCP unless the agent's switch dropped it (then it has none)."""
-    return target is None or "mcp" not in target.declared_drops
+    """The consented target carries the represented MCP (a dropped or absent one: none)."""
+    return target is not None and bool(target.mcp_servers) and "mcp" not in target.declared_drops
 
 
 def consented_catalogue(source: BackendAgent, target: AgentSpec | None) -> frozenset[str]:
