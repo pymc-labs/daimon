@@ -36,7 +36,9 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 if TYPE_CHECKING:
     from daimon.core.neutral_resources import WorkerPermissions
+    from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.turn.deps import TurnDeps
+    from mux.contracts.ids import Scope
 
 log = structlog.get_logger(__name__)
 
@@ -268,6 +270,37 @@ class HostFleetToolService:
         self._runtime = runtime
         self._deps = deps
 
+    async def _agent_obstacle(
+        self, caller: AuthIdentity, origin: TurnOriginRow, scope: Scope
+    ) -> str | None:
+        """Why the responding agent's own setup keeps it from a fleet, read in this process.
+
+        Only for a turn that never retained a root: a root that ended or went stale is
+        just unavailable. Any failure here is no answer, never an error.
+        """
+        if self._runtime is None or self._deps is None:
+            return None
+        from daimon.adapters.mcp.tools.fleet_config import fleet_root_obstacle_for
+        from daimon.core.channel_backend import load_backend_agent
+        from daimon.core.stores import mux_state
+
+        try:
+            async with self._deps.sessionmaker() as db:
+                if await mux_state.get_fleet_root_operation(db, scope, origin_id=origin.id):
+                    return None
+            agent = await load_backend_agent(
+                self._runtime.client,
+                self._runtime.session_factory,
+                tenant_id=caller.tenant_id,
+                agent_name=origin.responder_name,
+            )
+        except Exception as error:
+            log.warning("fleet.obstacle_lookup_failed", cause=type(error).__name__)
+            return None
+        if agent.agent_id != caller.chat_agent_id:
+            return None  # a renamed or replaced namesake is not this turn's agent
+        return await fleet_root_obstacle_for(self._runtime, caller, agent)
+
     async def _parent(
         self,
         caller: AuthIdentity,
@@ -332,6 +365,11 @@ class HostFleetToolService:
                     now=datetime.now(UTC),
                 ):
                     raise ToolError(FLEET_UNAVAILABLE_HERE) from None
+                # The turn that couldn't freeze its root ran in the chat adapter's
+                # process; ask this agent's own setup here instead of a closed code.
+                obstacle = await self._agent_obstacle(caller, origin, scope)
+                if obstacle is not None:
+                    raise ToolError(fleet_root_obstacle_text(obstacle)) from None
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
             parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_admin))
         else:
