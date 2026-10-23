@@ -114,6 +114,22 @@ def test_default_reads_the_same_every_time_so_a_frozen_root_never_goes_stale():
     assert first.expires_at > datetime.now(UTC) + timedelta(days=365)
 
 
+def test_default_gives_each_worker_10_minutes_and_a_run_20_and_the_card_says_so():
+    from types import SimpleNamespace
+    from typing import cast
+
+    from daimon.core.fleet_configuration import fleet_detail_lines
+    from daimon.core.stores.domain import CompatibilityPreview
+
+    grant = default_fleet_grant(policy(*ALL))
+    assert grant is not None
+    assert (grant.max_worker_seconds, grant.max_run_seconds) == (600, 1200)
+    preview = cast(CompatibilityPreview, SimpleNamespace(fleet_grant=grant.model_dump(mode="json")))
+    lines = fleet_detail_lines(preview)
+    assert "Each worker: up to 10 minutes; 1 replies." in lines
+    assert any(line.startswith("Each run: up to 20 minutes and ") for line in lines)
+
+
 def test_cap_refusals_are_plain():
     assert "Use fewer workers" in str(FleetRefused("worker_limit_reached"))
     assert "owner or an admin" in str(FleetRefused("worker_limit_reached"))

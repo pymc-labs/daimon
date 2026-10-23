@@ -477,7 +477,7 @@ def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Worker access defaults to any agent on this server for a NEW config;
         existing grants stay unchanged until confirmed. Show every detail,
         especially worker agents, budget, expiry and provider caps.
-        max_run_seconds defaults to 600; max_turns to 1; access expires after
+        max_run_seconds defaults to 1200; max_turns to 1; access expires after
         90 days unless specified. No provider map means a shared budget; a
         partial map prevents omitted providers from spending.
         Omit config to show the current settings; revoke=true turns fleet off.

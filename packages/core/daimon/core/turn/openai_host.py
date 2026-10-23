@@ -303,6 +303,8 @@ async def _create(
             raise AdmissionDenied(reason="backend_unsupported")
         await store.claim_send(request.scope, key, now=request.now(), fence=lease)
         try:
+            # Bounds this one create call (inside the 5 min lease), not the worker's
+            # runtime, which is the deadline.
             async with asyncio.timeout(
                 min(120, (request.deadline - request.now()).total_seconds())
             ):

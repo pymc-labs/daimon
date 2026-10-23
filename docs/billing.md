@@ -1193,7 +1193,7 @@ controls; a financial snapshot alone never certifies a provider spending cap.
 
 An optional `native_budget_usd` requests a native session spend control, in
 positive exact cents. It is a soft control, separate from the held worker
-budget. Its worker must have one host input and a deadline within 120 seconds;
+budget. Its worker must have one host input and a deadline within 600 seconds;
 the existing input claim counts that input before dispatch and retains the
 count after an uncertain acknowledgement. Additional turn-input mutations are
 refused, while cancellation and archive remain available. A child cannot drop

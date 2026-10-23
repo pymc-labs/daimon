@@ -828,8 +828,9 @@ def register_fleet_tools(
         Leave everything else out: the host binds this turn's run (never
         invent a run_id), picks the granted backend, splits the budget left
         evenly across your planned workers (and each provider's cap across
-        the planned workers on that provider) and uses the run's deadline (a
-        later deadline is shortened to it; a Gemini worker gets at most 120 s).
+        the planned workers on that provider) and gives each worker up to the
+        fleet's worker time, within the run's deadline (a later deadline is
+        shortened to it).
         planned_workers (a plain count) is the older form of the same hint. A
         worker on another model than yours runs at that model's default
         effort. Budgets above the grant are refused. After spawning, end your

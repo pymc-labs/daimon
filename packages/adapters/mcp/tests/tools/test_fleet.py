@@ -1165,6 +1165,9 @@ async def test_fleet_r7_plain_gemini_worker_gets_the_gemini_runtime_bound() -> N
             backend_selection("gemini").model_copy(update={"model": flash.id}),
         ),
         models=(*root.models, flash),
+        limits=root.limits.model_copy(
+            update={"deadline": datetime.now(UTC) + timedelta(minutes=20)}
+        ),
     )
     bridge, orchestrator = plain_bridge(root)
     before = datetime.now(UTC)
@@ -1175,9 +1178,25 @@ async def test_fleet_r7_plain_gemini_worker_gets_the_gemini_runtime_bound() -> N
                 {"operation_key": model, "role": "W", "task": "Compare.", "model": model},
             )
     gemini, luna = (call.kwargs["limits"] for call in orchestrator.spawn.await_args_list)
-    assert before + timedelta(seconds=120) <= gemini.deadline
-    assert gemini.deadline <= datetime.now(UTC) + timedelta(seconds=120)
+    assert before + timedelta(minutes=10) <= gemini.deadline
+    assert gemini.deadline <= datetime.now(UTC) + timedelta(minutes=10)
     assert luna.deadline == root.limits.deadline
+
+
+async def test_the_grants_worker_time_bounds_every_spawned_worker() -> None:
+    """ROOT 10-min decision: each worker gets the grant's worker time, on any provider."""
+    root = replace(plain_root(), max_worker_seconds=300)
+    bridge, orchestrator = plain_bridge(root)
+    before = datetime.now(UTC)
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {"operation_key": "luna", "role": "W", "task": "Compare.", "model": "gpt-6-luna"},
+        )
+    (luna,) = (call.kwargs["limits"] for call in orchestrator.spawn.await_args_list)
+    assert root.limits.deadline > before + timedelta(seconds=300)
+    assert before + timedelta(seconds=300) <= luna.deadline
+    assert luna.deadline <= datetime.now(UTC) + timedelta(seconds=300)
 
 
 async def test_plain_spawn_retry_reuses_the_admitted_workers_limits() -> None:
