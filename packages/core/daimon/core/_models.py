@@ -4632,6 +4632,10 @@ class LongJobRecord(Base):
     parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     parent_session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_metadata: Mapped[dict[str, str]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    initial_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     tool_use_id: Mapped[str] = mapped_column(Text, nullable=False)
     command: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)

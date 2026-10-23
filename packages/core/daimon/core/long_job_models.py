@@ -52,6 +52,8 @@ class LongJob(BaseModel):
     thread_id: str
     parent_session_id: str
     tool_use_id: str
+    source_metadata: dict[str, str] = Field(default_factory=dict)
+    initial_send_at: datetime | None = None
     command: str
     title: str
     deadline_minutes: int

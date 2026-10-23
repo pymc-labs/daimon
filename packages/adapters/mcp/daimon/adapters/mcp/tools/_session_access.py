@@ -188,7 +188,11 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
     A routine's private stamp is its owner's own: no grant is needed, and no
     one else's hub read opens it.
     """
-    metadata = session.metadata or {}
+    return metadata_belongs_to_caller(session.metadata or {}, auth)
+
+
+def metadata_belongs_to_caller(metadata: Mapping[str, str], auth: AuthIdentity) -> bool:
+    """Apply the same account and private execution-grant check to retained provenance."""
     if metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
         # hub read opens it (never a private DM, never to continue).
         return _admin_may_read_other(metadata)
@@ -310,3 +314,35 @@ async def require_session_outside_seals(
         ):
             raise ToolError(_ADMIN_CONTINUE_REFUSED)
         raise ToolError(_SEALED_SESSION_MSG)
+
+
+async def source_metadata_readable(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    metadata: dict[str, str],
+    *,
+    origin_context_id: str | None = None,
+) -> bool:
+    """Authorize retained source context exactly like a session transcript."""
+    if not metadata_belongs_to_caller(metadata, auth):
+        return False
+    if auth.agent_id is not None or auth.chat_agent_id is None:
+        origin_context_id = None
+    read = await load_read_policy(
+        runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
+    )
+    subject, surface, action = _hub_request(auth)
+    return bool(
+        authorize(
+            read.policy,
+            subject=subject,
+            surface=surface,
+            action=action,
+            agent=read.agent,
+            origin_channel_ids=read.origin_channel_ids,
+            origin=read.origin_place,
+            session=session_facts(
+                metadata, owned=metadata.get(MA_METADATA_KEY_ACCOUNT) == str(auth.account_id)
+            ),
+        )
+    )

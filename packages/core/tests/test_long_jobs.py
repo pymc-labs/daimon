@@ -322,8 +322,12 @@ class FakeWorker:
             raise WorkerVanished()
         return self.started
 
-    async def drive(self, job, *, resume):
-        self.calls.append("resume" if resume else "send")
+    async def drive(self, job, *, resume, send_guard):
+        if not resume:
+            async with send_guard():
+                self.calls.append("send")
+        else:
+            self.calls.append("resume")
         if self.block:
             await asyncio.Event().wait()
 
@@ -495,7 +499,16 @@ async def test_worker_creation_transport_is_empty_and_owner_billed(db_engine, db
     from pydantic import SecretStr
 
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
-    job = await seed(sm)
+    job = (await seed(sm)).model_copy(
+        update={
+            "source_metadata": {
+                "daimon_channel": "private",
+                "daimon_thread": "thread",
+                "daimon_sealed": "retained,private",
+                "daimon_private_dm": "private-grant",
+            }
+        }
+    )
     router = MARouter()
     router.add("GET", r"/v1/sessions$", lambda _r, _m: list_response([]))
     agent = ma_agent(id=job.agent_id, version=job.agent_version)
@@ -525,6 +538,7 @@ async def test_worker_creation_transport_is_empty_and_owner_billed(db_engine, db
         port = ManagedLongJobPort(client, sm, settings)
         assert await port.create_or_find(job) == "ses_worker"
         [body] = created
+        assert job.source_metadata.items() <= body["metadata"].items()
         assert body["resources"] == [] and body["vault_ids"] == []
         assert body["agent"]["skills"] == [] and body["agent"]["mcp_servers"] == []
         assert [t["type"] for t in body["agent"]["tools"]] == ["agent_toolset_20260401"]
@@ -791,3 +805,76 @@ async def test_queued_cancel_does_not_wait_for_running_capacity(db_engine, db_cl
     await executor.execute(cancelled[0])
     assert (await read(sm, queued)).state == "cancelled"
     assert port.calls == []
+
+
+async def test_expired_executor_cannot_send_after_reclaimer_finished(db_engine, db_clean):
+    """A process suspended before POST cannot send on its old launch decision."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    entered, release = asyncio.Event(), asyncio.Event()
+    old_checked = asyncio.Event()
+    sends = []
+
+    class PausedWorker(FakeWorker):
+        async def drive(self, job, *, resume, send_guard):
+            entered.set()
+            await release.wait()
+            try:
+                async with send_guard():
+                    sends.append("old")
+            finally:
+                old_checked.set()
+
+    class NewWorker(FakeWorker):
+        async def drive(self, job, *, resume, send_guard):
+            async with send_guard():
+                sends.append("new")
+
+    old = LongJobExecutor(sm, PausedWorker(), LIMITS, clock=lambda: NOW)
+    job = await claimed(sm, await seed(sm), owner=old.owner)
+    task = asyncio.create_task(old.execute(job))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        # Wait until the first normal heartbeat has committed, so the old
+        # executor is suspended at the send boundary during its 20s wait.
+        async with asyncio.timeout(10):
+            while (await read(sm, job)).version < job.version + 3:
+                await asyncio.sleep(0.001)
+        new = LongJobExecutor(
+            sm, NewWorker(), LIMITS, clock=lambda: NOW + timedelta(seconds=91), heartbeat_s=0.001
+        )
+        async with sm.begin() as db:
+            [reclaimed] = await store.claim(
+                db, tenant_id=job.tenant_id, owner=new.owner, now=new.clock(), ceilings=LIMITS
+            )
+        await new.execute(reclaimed)
+        assert (await read(sm, job)).state == "succeeded"
+        release.set()
+        await asyncio.wait_for(old_checked.wait(), 10)
+        await asyncio.wait_for(task, 10)
+        assert sends == ["new"]
+        assert (await read(sm, job)).state == "succeeded"
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_uncertain_initial_send_is_reconciled_without_retry(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = await claimed(sm, await seed(sm), owner="dead")
+    async with sm.begin() as db:
+        job = await store.save_worker(db, job, worker_session_id="ses_worker")
+        job = await store.transition(db, job, state="running")
+        assert await store.lock_initial_send(db, job, now=NOW, deadline=job.deadline_at)
+    port = FakeWorker(started=False)
+    executor = LongJobExecutor(
+        sm, port, LIMITS, clock=lambda: NOW + timedelta(seconds=91), heartbeat_s=0.001
+    )
+    async with sm.begin() as db:
+        [reclaimed] = await store.claim(
+            db, tenant_id=job.tenant_id, owner=executor.owner, now=executor.clock(), ceilings=LIMITS
+        )
+    await executor.execute(reclaimed)
+    assert (await read(sm, job)).state == "lost"
+    assert "send" not in port.calls
+    assert port.calls.index("interrupt") < port.calls.index("archive")

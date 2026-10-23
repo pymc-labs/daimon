@@ -2795,5 +2795,9 @@ for the complete specification.
 `start_long_job` registers an approved command with tenant, owner and pinned
 agent/environment provenance. The scheduler owns leased isolated worker sessions and
 reattaches after restart. Completion atomically records a result and a `job_finished`
-wake. Discord, Slack and Teams run that wake unattended with only `get_long_job`; built-
-ins remain off in the parent. See [Long jobs](long-jobs.md) for policy and recovery.
+wake. Discord verifies current owner destination access and runs that wake unattended
+with only `get_long_job`; built-ins remain off in the parent. Slack and Teams fail
+closed before completion delivery until they can prove current owner destination
+access. Job records and worker transcripts retain source privacy restrictions.
+A durable initial-send intent and lease fence prevent a reclaimed executor from
+sending another initial message. See [Long jobs](long-jobs.md) for policy and recovery.

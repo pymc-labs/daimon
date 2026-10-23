@@ -897,3 +897,95 @@ async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: 
     assert "access settings here can't be read" in str(result), result
     create.assert_not_awaited()
     assert world.sent == []
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("admin", [False, True])
+async def test_long_job_source_and_worker_remain_private_after_unseal(
+    world, monkeypatch, private, admin
+):
+    """The review probe: all three reads must deny the outside caller."""
+    from dataclasses import replace
+    from decimal import Decimal
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools import long_jobs as tools
+    from daimon.core.authz import Subject
+    from daimon.core.config import LongJobsSettings
+    from daimon.core.long_job_models import LongJob, LongJobPolicy
+    from daimon.core.stores import long_jobs as store
+    from fastmcp import Client, FastMCP
+
+    await world.seal(_SEALED)
+    stamps = dict(daimon_channel=_SEALED, daimon_thread="thread", daimon_sealed=_SEALED)
+    if private:
+        stamps["daimon_private_dm"] = "private-grant"
+    now = dt.datetime.now(dt.UTC)
+    job = LongJob(
+        id=uuid.uuid4(),
+        tenant_id=world.tenant_id,
+        owner_account_id=world.account_id,
+        owner_external_user_id="user",
+        agent_id=_AGENT,
+        agent_name="worker",
+        agent_version=1,
+        environment_id="env",
+        environment_updated_at=now,
+        platform="discord",
+        parent_channel_id=_SEALED,
+        thread_id="thread",
+        parent_session_id="ses_parent",
+        tool_use_id="call",
+        command=_SEALED_TOPIC,
+        title="private job",
+        deadline_minutes=60,
+        max_usd=Decimal("5"),
+        state="queued",
+        version=0,
+        created_at=now,
+        source_metadata=stamps,
+    )
+    async with world.sessionmaker.begin() as db:
+        await store.set_policy(
+            db,
+            tenant_id=world.tenant_id,
+            agent_id=None,
+            policy=LongJobPolicy(enabled=True),
+            ceilings=LongJobsSettings(),
+            actor=Subject(is_admin=True),
+            set_by="admin",
+        )
+        await store.register(db, job, ceilings=LongJobsSettings())
+    world.add_session("ses_parent", **stamps)
+    # The worker creation transport test separately asserts these exact retained stamps.
+    world.add_session("ses_worker", daimon_long_job=str(job.id), **stamps)
+    runtime = world.runtime()
+    auth = world.auth()
+    if admin:
+        auth = replace(auth, account_id=uuid.uuid4(), role=Role.ADMIN)
+    monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
+    monkeypatch.setattr(tools, "fresh_admin", AsyncMock(return_value=admin))
+    mcp = FastMCP("source privacy regression")
+    tools.register_long_job_tools(mcp, runtime)
+    try:
+        async with Client(mcp) as client:
+            for unsealed in (False, True):
+                if unsealed:
+                    await world.seal()
+                for sid in ("ses_parent", "ses_worker"):
+                    with pytest.raises(ToolError):
+                        await _list_session_events_impl(runtime, auth, sid, None, None, None)
+                with pytest.raises(ToolError):
+                    await client.call_tool("get_long_job", {"job_id": str(job.id)})
+                with pytest.raises(ToolError):
+                    await client.call_tool("cancel_long_job", {"job_id": str(job.id)})
+                listing = await client.call_tool("list_long_jobs", {})
+                assert listing.data == []
+            inside = await world.origin(_SEALED, "thread")
+            if not private and not admin:
+                result = await client.call_tool(
+                    "get_long_job", {"job_id": str(job.id), "origin_context_id": inside}
+                )
+                assert _SEALED_TOPIC in result.content[0].text
+    finally:
+        await runtime.client.close()

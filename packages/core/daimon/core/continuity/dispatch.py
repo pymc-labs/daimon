@@ -148,6 +148,10 @@ async def dispatch_pending_continuations(
         raise ValueError("A history port is required")
 
     async def notify(row: TaskContinuationRow, text: str, *, reason: str) -> None:
+        if row.reason == "job_finished":
+            # Completion delivery is read-and-report only after native owner
+            # access proof. Refusal/target-change notices must not bypass it.
+            return
         if notice is not None:
             await notice(row, text, reason)
             return

@@ -1392,3 +1392,21 @@ async def test_handoff_retains_initiation_at_dispatch(
         reason="task_handoff",
         attended=attended,
     )
+
+
+async def test_job_completion_fails_closed_before_preparation(
+    db_session, db_session_factory, fake_slack_web_client
+):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    with patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind:
+        with pytest.raises(AdmissionDenied):
+            await _run_continuation_and_capture_controls(
+                db_session,
+                db_session_factory,
+                fake_slack_web_client,
+                workspace_id="T_JOB_DENIED",
+                reason="job_finished",
+                attended=False,
+            )
+        bind.assert_not_awaited()

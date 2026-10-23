@@ -9,14 +9,19 @@ from decimal import Decimal, InvalidOperation
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
+from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._session_access import source_metadata_readable
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.watches import fresh_admin
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
+from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.errors import StoreError
 from daimon.core.long_job_models import LongJob
 from daimon.core.long_jobs import require_admission
+from daimon.core.permissions import limiting_ids_at
 from daimon.core.scope import ScopeContext
+from daimon.core.session_seal import origin_stamp, seal_ids
 from daimon.core.stores import long_jobs as store
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -127,6 +132,17 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             or parent.environment_id != environment.id
         ):
             raise ToolError("Approved agent or environment is unavailable")
+        privacy_policy = await load_channel_policy(runtime, auth)
+        provenance = origin_stamp(
+            channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+            seal=seal_ids(parent.metadata)
+            | limiting_ids_at(
+                privacy_policy, channel_id=origin.parent_channel_id, thread_id=origin.thread_id
+            ),
+        )
+        if MA_METADATA_KEY_PRIVATE_DM in parent.metadata:
+            provenance[MA_METADATA_KEY_PRIVATE_DM] = parent.metadata[MA_METADATA_KEY_PRIVATE_DM]
         job = LongJob(
             id=uuid.uuid4(),
             tenant_id=auth.tenant_id,
@@ -142,6 +158,7 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             thread_id=origin.thread_id,
             parent_session_id=parent.id,
             tool_use_id=matches[-1].id,
+            source_metadata=provenance,
             command=command,
             title=title,
             deadline_minutes=deadline_minutes
@@ -166,29 +183,57 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             raise ToolError(str(exc)) from exc
 
     @mcp.tool
-    async def get_long_job(ctx: Context, job_id: uuid.UUID) -> LongJob:  # pyright: ignore[reportUnusedFunction]
-        """Read one job's outcome, bounded output tail, file names and cost. Owner only."""
+    async def get_long_job(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, job_id: uuid.UUID, origin_context_id: str | None = None
+    ) -> LongJob:
+        """Read an owner's outcome, bounded output tail, files and cost.
+
+        Source privacy applies: supply origin_context_id from a turn inside a
+        restricted source channel. Retained seals survive later unsealing.
+        """
         auth = await _auth(ctx)
         async with runtime.session_factory.begin() as db:
             job = await store.get(
                 db, job_id, tenant_id=auth.tenant_id, owner_account_id=auth.account_id
             )
-        if job is None:
-            raise ToolError("Long job not found")
+        if job is None or not await source_metadata_readable(
+            runtime,
+            auth,
+            {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
+            origin_context_id=origin_context_id,
+        ):
+            raise ToolError("Long job not found or source context is not readable")
         return job
 
     @mcp.tool
-    async def list_long_jobs(ctx: Context) -> list[LongJob]:  # pyright: ignore[reportUnusedFunction]
-        """List your latest 100 jobs; current tenant admins may list all tenant jobs."""
+    async def list_long_jobs(ctx: Context, origin_context_id: str | None = None) -> list[LongJob]:  # pyright: ignore[reportUnusedFunction]
+        """List the latest 100 jobs allowed by ownership and source privacy.
+
+        Current tenant admins may list tenant jobs where session-read policy
+        permits it. Supply origin_context_id when inside a restricted source.
+        """
         auth = await _auth(ctx)
         admin = await fresh_admin(runtime, auth)
         async with runtime.session_factory.begin() as db:
-            return await store.list_jobs(
+            jobs = await store.list_jobs(
                 db, tenant_id=auth.tenant_id, owner_account_id=auth.account_id, admin=admin
             )
 
+        return [
+            job
+            for job in jobs
+            if await source_metadata_readable(
+                runtime,
+                auth,
+                {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
+                origin_context_id=origin_context_id,
+            )
+        ]
+
     @mcp.tool
-    async def cancel_long_job(ctx: Context, job_id: uuid.UUID) -> LongJob:  # pyright: ignore[reportUnusedFunction]
+    async def cancel_long_job(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, job_id: uuid.UUID, origin_context_id: str | None = None
+    ) -> LongJob:
         """Request worker interrupt and archive. Owner or current tenant admin only.
 
         Cancellation becomes terminal after the scheduler has both interrupted and
@@ -197,9 +242,25 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         admin = await fresh_admin(runtime, auth)
         async with runtime.session_factory.begin() as db:
+            job = await store.get(
+                db, job_id, tenant_id=auth.tenant_id, owner_account_id=auth.account_id, admin=admin
+            )
+        if job is None or not await source_metadata_readable(
+            runtime,
+            auth,
+            {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
+            origin_context_id=origin_context_id,
+        ):
+            raise ToolError("Long job not found or source context is not readable")
+        async with runtime.session_factory.begin() as db:
             job = await store.request_cancel(
                 db, job_id, tenant_id=auth.tenant_id, owner_account_id=auth.account_id, admin=admin
             )
-        if job is None:
-            raise ToolError("Long job not found")
+        if job is None or not await source_metadata_readable(
+            runtime,
+            auth,
+            {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
+            origin_context_id=origin_context_id,
+        ):
+            raise ToolError("Long job not found or source context is not readable")
         return job

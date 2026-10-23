@@ -3323,6 +3323,11 @@ class SlackApp:
         The outgoing agent's identity is read off the thread's live session
         row BEFORE `bind_session` runs, since that bind is what supersedes it.
         """
+        if row.reason == "job_finished":
+            # Native current owner membership has no complete proof on this path.
+            # Cancel before preparation or output; never redirect to another destination.
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
         # Read the predecessor BEFORE bind_session decides the replacement --
         # once it runs, the old row is superseded and this is the only chance
         # to read what it was running.
@@ -3622,7 +3627,6 @@ class SlackApp:
                     thread_id=thread_id,
                     external_user_id=row.requester_external_user_id,
                     watch_row=row if row.reason == "watch_fired" else None,
-                    job_row=row if row.reason == "job_finished" else None,
                     origin="handoff" if handoff_notice is not None else "chat",
                     attended=False if row.reason == "watch_fired" else continuation_attended(row),
                     user_message=(

@@ -2058,6 +2058,11 @@ class TeamsApp:
         service_url: str | None,
     ) -> None:
         """The receiving agent's first turn, run as the requester on the ordinary path."""
+        if row.reason == "job_finished":
+            # Native current owner membership has no complete proof on this path.
+            # Cancel before preparation or output; never redirect to another destination.
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
         handoff: HandoffFactory | None = None
         if row.reason == "task_handoff":
             # Read before the bind, which supersedes the outgoing agent's session.

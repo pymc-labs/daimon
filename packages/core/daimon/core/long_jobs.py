@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -33,7 +34,13 @@ class WorkerBudgetReached(Exception):
 class WorkerPort(Protocol):
     async def create_or_find(self, job: LongJob) -> str: ...
     async def has_started(self, job: LongJob) -> bool: ...
-    async def drive(self, job: LongJob, *, resume: bool) -> None: ...
+    async def drive(
+        self,
+        job: LongJob,
+        *,
+        resume: bool,
+        send_guard: Callable[[], AbstractAsyncContextManager[None]],
+    ) -> None: ...
     async def manifest(self, job: LongJob) -> LongJobManifest | None: ...
     async def interrupt(self, job: LongJob) -> None: ...
     async def archive(self, job: LongJob) -> None: ...
@@ -107,6 +114,7 @@ class LongJobExecutor:
 
     async def execute(self, job: LongJob) -> None:
         current = job
+        send_lock = asyncio.Lock()
         deadline = self.deadline(job)
         drive: asyncio.Task[None] | None = None
         outcome: LongJobState | None = job.stop_state
@@ -148,6 +156,10 @@ class LongJobExecutor:
                 outcome = "timed_out"
             if outcome is None and current.worker_session_id is not None:
                 resumed = await self.port.has_started(current)
+                if not resumed and current.initial_send_at is not None:
+                    raise WorkerVanished(
+                        "Initial send outcome is uncertain; refusing to send again"
+                    )
                 async with self.sm.begin() as db:
                     saved = await store.transition(db, current, state="running")
                 if saved is None:
@@ -155,7 +167,36 @@ class LongJobExecutor:
                 current = saved
                 # No send if already cancelled or past its retained deadline.
                 if not current.cancel_requested and (deadline is None or self.clock() < deadline):
-                    drive = asyncio.create_task(self.port.drive(current, resume=resumed))
+
+                    @asynccontextmanager
+                    async def send_guard() -> AsyncIterator[None]:
+                        async with send_lock:
+                            assert deadline is not None
+                            reserved_at = self.clock()
+                            async with self.sm.begin() as db:
+                                reserved = await store.lock_initial_send(
+                                    db, current, now=reserved_at, deadline=deadline
+                                )
+                            if not reserved:
+                                raise WorkerVanished(
+                                    "Initial send authority expired or was already used"
+                                )
+                            # Recheck after committing intent. A suspension here may have
+                            # allowed reclaim: the stale process must still never POST.
+                            async with self.sm.begin() as db:
+                                if not await store.lock_initial_send(
+                                    db,
+                                    current,
+                                    now=self.clock(),
+                                    deadline=deadline,
+                                    reservation=reserved_at,
+                                ):
+                                    raise WorkerVanished("Initial send lease is no longer current")
+                                yield
+
+                    drive = asyncio.create_task(
+                        self.port.drive(current, resume=resumed, send_guard=send_guard)
+                    )
             while outcome is None:
                 async with self.sm.begin() as db:
                     live = await store.get(
@@ -199,11 +240,12 @@ class LongJobExecutor:
                             outcome = "succeeded" if found.exit_code == 0 else "failed"
                 if outcome is not None:
                     break
-                async with self.sm.begin() as db:
-                    saved = await store.heartbeat(db, current, now=self.clock())
-                if saved is None:
-                    return
-                current = saved
+                async with send_lock:
+                    async with self.sm.begin() as db:
+                        saved = await store.heartbeat(db, current, now=self.clock())
+                    if saved is None:
+                        return
+                    current = saved
                 if drive is None:
                     raise WorkerVanished()
                 await asyncio.wait({drive}, timeout=self.heartbeat_s)
@@ -215,8 +257,9 @@ class LongJobExecutor:
                 exit_code=None, summary=str(exc)[:4000] or "Worker session vanished"
             )
         finally:
-            if drive is not None and not drive.done():
-                drive.cancel()
+            if drive is not None:
+                if not drive.done():
+                    drive.cancel()
                 await asyncio.gather(drive, return_exceptions=True)
         assert outcome is not None
         if (

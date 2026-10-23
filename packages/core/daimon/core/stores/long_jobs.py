@@ -423,3 +423,47 @@ async def finish(
         + manifest.summary[:4000],
     )
     return True
+
+
+async def lock_initial_send(
+    session: AsyncSession,
+    job: LongJob,
+    *,
+    now: datetime,
+    deadline: datetime,
+    reservation: datetime | None = None,
+) -> bool:
+    """Fence the send against claims/cancellation and durably remember uncertain POSTs.
+
+    The caller serializes heartbeats with this boundary. A different lease,
+    version, or an ended job never has send authority. The row lock is
+    held through the POST; claim uses SKIP LOCKED and cannot replace its sender.
+    """
+    await scope(session, job.tenant_id)
+    row = await session.scalar(
+        select(LongJobRecord)
+        .where(
+            LongJobRecord.tenant_id == job.tenant_id,
+            LongJobRecord.id == job.id,
+        )
+        .with_for_update()
+    )
+    if (
+        row is None
+        or row.lease_owner != job.lease_owner
+        or row.version != job.version
+        or row.state != "running"
+        or row.cancel_requested
+        or row.stop_state is not None
+        or row.lease_expires_at is None
+        or row.lease_expires_at <= now
+        or deadline <= now
+        or row.initial_send_at != reservation
+    ):
+        return False
+    if reservation is None:
+        # Commit this intent before any network I/O. An uncertain send is never
+        # retried: recovery replays a user event, or interrupts/archives as lost.
+        row.initial_send_at = now
+        await session.flush()
+    return True

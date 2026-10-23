@@ -310,3 +310,11 @@ def test_handoff_notice_claims_only_what_carried(
     )
     assert (notice.workspace, notice.not_carried) == (workspace, not_carried)
     assert (notice.from_name, notice.from_ma_agent_id) == ("the previous agent", "")
+
+
+async def test_job_target_change_settles_silently_without_notice(db_session_factory, caller):
+    key = await _queue(db_session_factory, caller, "private job summary", reason="job_finished")
+    seeds, notices = await _dispatch(db_session_factory, caller, target_tenant=uuid.uuid4())
+    assert seeds == [] and notices == []
+    status, _ = await _status(db_session_factory, key)
+    assert status in {"cancelled", "skipped"}

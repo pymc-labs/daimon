@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Human-approved long jobs in isolated Managed Agents workers, with admin tenant/agent policy, owner billing, durable restart recovery and read-only completion wakes on Discord, Slack and Teams.
+- Human-approved long jobs in isolated Managed Agents workers, with admin tenant/agent policy, owner billing, durable restart recovery, retained source privacy and read-only completion wakes on Discord after current owner access checks. Slack and Teams completion delivery fails closed pending equivalent access proof.
 
 - On the mux turn path, a turn that reaches a thread whose lease another running turn holds now waits for that turn instead of failing with `LeaseBusy`. The wait ends at the turn's own ceiling, honors Stop, and a holder that dies frees the thread when its lease expires. A turn whose session the holder replaced adopts the replacement.
 

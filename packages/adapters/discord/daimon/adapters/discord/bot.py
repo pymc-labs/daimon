@@ -4276,9 +4276,9 @@ class DaimonBot(commands.Bot):
             else None
         )
 
-        # Watches require a complete REST-only owner snapshot and fail closed.
+        # Watches and long-job completions require fresh REST-only owner access.
         # Other continuations retain their existing requester-role resolution.
-        if row.reason == "watch_fired":
+        if row.reason in ("watch_fired", "job_finished"):
             access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
             member = access.member
             role = (
@@ -4306,12 +4306,15 @@ class DaimonBot(commands.Bot):
             thread_id=row.thread_id,
             role=role,
             role_ids=tuple(_role_ids),
-            verified_membership=True if row.reason == "watch_fired" else None,
+            verified_membership=True if row.reason in ("watch_fired", "job_finished") else None,
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
         )
-        if row.reason == "watch_fired" and admission.account_id != row.requester_account_id:
+        if (
+            row.reason in ("watch_fired", "job_finished")
+            and admission.account_id != row.requester_account_id
+        ):
             raise AdmissionDenied(reason="invoker_not_allowed")
         # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
@@ -4397,10 +4400,11 @@ class DaimonBot(commands.Bot):
         async def watch_binding() -> None:
             from daimon.core.stores.watches import watch_seed
 
-            async with self.runtime.sessionmaker() as db:
-                seed = await watch_seed(db, row, now=datetime.now(UTC))
-            if seed is None:
-                raise AdmissionDenied(reason="runs_elsewhere")
+            if row.reason == "watch_fired":
+                async with self.runtime.sessionmaker() as db:
+                    seed = await watch_seed(db, row, now=datetime.now(UTC))
+                if seed is None:
+                    raise AdmissionDenied(reason="runs_elsewhere")
             access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
             member = access.member
             live_role = (
@@ -4460,7 +4464,7 @@ class DaimonBot(commands.Bot):
                 ),
             )
 
-            if row.reason == "watch_fired":
+            if row.reason in ("watch_fired", "job_finished"):
                 lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
             return lifecycle
 
@@ -4661,6 +4665,8 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_card_intent.id
                 ),
             )
+            if row.reason in ("watch_fired", "job_finished"):
+                new_lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
@@ -4684,7 +4690,9 @@ class DaimonBot(commands.Bot):
                     watch_row=row if row.reason == "watch_fired" else None,
                     job_row=row if row.reason == "job_finished" else None,
                     origin="handoff" if handoff_notice is not None else "chat",
-                    attended=False if row.reason == "watch_fired" else continuation_attended(row),
+                    attended=False
+                    if row.reason in ("watch_fired", "job_finished")
+                    else continuation_attended(row),
                     user_message=(
                         render_turn_origin(
                             origin,
@@ -4712,7 +4720,7 @@ class DaimonBot(commands.Bot):
                     active_turn_message_id=marked_message_id,
                     before_send=(
                         watch_binding
-                        if row.reason == "watch_fired"
+                        if row.reason in ("watch_fired", "job_finished")
                         else completion_root
                         if completion_batch is not None
                         else None

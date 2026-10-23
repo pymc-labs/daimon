@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import shlex
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from decimal import ROUND_CEILING
 
@@ -202,6 +204,7 @@ class ManagedLongJobPort:
             resources=[],
             vault_ids=[],
             metadata={
+                **job.source_metadata,
                 MA_METADATA_KEY_TENANT: str(job.tenant_id),
                 MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id),
                 MA_METADATA_KEY_BUDGET_CHANNEL: job.parent_channel_id,
@@ -233,7 +236,13 @@ class ManagedLongJobPort:
             raise RuntimeError("Worker session has no owner billing")
         return billing.recorder(self.sm, session.id, markup=self.settings.billing.markup)
 
-    async def drive(self, job: LongJob, *, resume: bool) -> None:
+    async def drive(
+        self,
+        job: LongJob,
+        *,
+        resume: bool,
+        send_guard: Callable[[], AbstractAsyncContextManager[None]],
+    ) -> None:
         assert job.worker_session_id is not None and job.deadline_at is not None
         snapshot = await self.snapshot(job)
         if (
@@ -279,6 +288,7 @@ class ManagedLongJobPort:
                 scope=self.scope(job),
                 user_message=worker_prompt(job),
                 resume_existing=resume,
+                send_guard=send_guard,
                 lifecycle=_WorkerLifecycle(),
                 cancel=asyncio.Event(),
                 render_interval_s=20,

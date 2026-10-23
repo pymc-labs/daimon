@@ -114,7 +114,14 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
         id="ses_parent",
         agent=agent,
         environment_id=env.id,
-        metadata={"daimon_tenant": str(tenant.id), "daimon_account": str(owner.id)},
+        metadata={
+            "daimon_tenant": str(tenant.id),
+            "daimon_account": str(owner.id),
+            "daimon_channel": "channel",
+            "daimon_thread": "thread",
+            "daimon_sealed": "prior-seal",
+            "daimon_private_dm": "private-grant",
+        },
     )
     router = MARouter()
     router.add(
@@ -150,6 +157,12 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
             assert len(rows) == (1 if mode == "approved" else 0)
             if rows:
                 [row] = rows
+                assert row.source_metadata == {
+                    "daimon_channel": "channel",
+                    "daimon_thread": "thread",
+                    "daimon_sealed": "prior-seal",
+                    "daimon_private_dm": "private-grant",
+                }
                 assert row.owner_account_id == owner.id and row.parent_session_id == parent.id
                 assert row.agent_id == agent.id and row.agent_version == 8
                 assert row.environment_id == env.id and row.thread_id == "thread"

@@ -76,6 +76,8 @@ NULLIF(current_setting('daimon.tenant_id', true), '')::uuid)"""
     parent_channel_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
     parent_session_id TEXT NOT NULL,
+    source_metadata JSONB DEFAULT '{}' NOT NULL,
+    initial_send_at TIMESTAMP WITH TIME ZONE,
     tool_use_id TEXT NOT NULL,
     command TEXT NOT NULL,
     title TEXT NOT NULL,
@@ -126,4 +128,7 @@ NULLIF(current_setting('daimon.tenant_id', true), '')::uuid)"""
 
 
 def downgrade() -> None:
-    raise NotImplementedError("Long-job history and completion wakes cannot be discarded")
+    raise NotImplementedError(
+        "Downgrade is unsupported: retain long-job execution evidence, "
+        "policy audit history and completion wakes"
+    )
