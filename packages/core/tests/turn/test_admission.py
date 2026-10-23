@@ -1982,7 +1982,9 @@ def test_a_pinned_refusal_names_only_channels_every_rule_allows_and_none_for_a_c
     assert _runs_in(kept, grant(Subject(), "a")) == ("open",), (
         "a member elsewhere never learns of a channel kept to its own agents"
     )
-    assert _runs_in(kept, grant(Subject(is_admin=True), "a")) == ("kept", "open")
+    assert _runs_in(kept, grant(Subject(is_admin=True), "a")) == ("open",), (
+        "the refusal is read by everyone here, so an admin's names no kept channel either"
+    )
 
 
 @pytest.mark.parametrize(

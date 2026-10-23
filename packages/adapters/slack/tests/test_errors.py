@@ -68,6 +68,9 @@ KEY_REJECTED = (
 CREDENTIAL_GUARD = (
     "Daimon stopped this request to keep a credential safe.\n\nTell the team running Daimon."
 )
+CREDENTIAL_MISSING = (
+    "A credential Daimon needs isn't available right now.\n\nTell the team running Daimon."
+)
 MODEL_GONE = (
     "The model this agent uses isn't offered any more.\n\n"
     "Switch the agent's model, or ask its owner or an admin to."
@@ -261,6 +264,10 @@ class TestRenderError:
             (
                 ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
                 CREDENTIAL_GUARD,
+            ),
+            (
+                ProviderError("permission", retryable=False, native_code="gcs_secret_unavailable"),
+                CREDENTIAL_MISSING,
             ),
             (
                 ProviderError(

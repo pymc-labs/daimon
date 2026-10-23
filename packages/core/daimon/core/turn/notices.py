@@ -240,10 +240,11 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "This agent's model provider isn't available here right now.",
         "Ask {who} to check which provider {agent_mid} uses.",
     ),
-    # The hold frees itself as running attempts settle; nobody needs to act.
+    # The hold frees itself as running attempts settle, and a never-settled one expires
+    # after a day (`HOLD_TTL`); nobody can release it sooner.
     "provider_hold_cap_reached": _Copy(
         "This model is at its spending limit for the moment.",
-        "It's temporary. Try again shortly.",
+        "It clears as running requests finish, at most within a day. Try again later.",
     ),
     "provider_setup_pending": _Copy(
         "Couldn't set up GPT for this {scope} yet.",

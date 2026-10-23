@@ -1289,9 +1289,10 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 def _runs_in(policy: TenantAccessPolicy, grant: AdmissionGrant) -> tuple[str, ...]:
     """The channels every rule on the agent allows, for the refusal to name.
 
-    Only those on the requester's side of every line, as the here card shows them:
-    a member never learns of a channel kept to its own agents elsewhere, and a
-    requester from another organisation is told of none.
+    Only those on this place's side of every line, as the here card shows them: the
+    refusal is posted where anyone here reads it, so nobody here learns of a channel
+    kept to its own agents elsewhere, admin or not. A requester from another
+    organisation is told of none.
     """
     rules = agent_permissions(policy, grant.agent.names).runs_in
     if not rules or grant.subject.client:
@@ -1299,18 +1300,17 @@ def _runs_in(policy: TenantAccessPolicy, grant: AdmissionGrant) -> tuple[str, ..
     allowed = set(rules[0])
     for rule in rules[1:]:
         allowed &= rule
-    if not grant.subject.is_admin:
-        place = grant.run_place
-        here = channel_permissions(
-            policy,
-            channel_id=place.channel_id,
-            parent_channel_id=place.parent_channel_id,
-        ).home
-        allowed = {
-            channel
-            for channel in allowed
-            if channel_permissions(policy, channel_id=channel).home == here
-        }
+    place = grant.run_place
+    here = channel_permissions(
+        policy,
+        channel_id=place.channel_id,
+        parent_channel_id=place.parent_channel_id,
+    ).home
+    allowed = {
+        channel
+        for channel in allowed
+        if channel_permissions(policy, channel_id=channel).home == here
+    }
     return tuple(sorted(allowed))
 
 

@@ -109,6 +109,10 @@ _AI_CREDENTIAL_GUARD = (
     "Daimon stopped this request to keep a credential safe.",
     "Tell the team running Daimon.",
 )
+_AI_CREDENTIAL_MISSING = (
+    "A credential Daimon needs isn't available right now.",
+    "Tell the team running Daimon.",
+)
 _AI_MODEL_GONE = (
     "The model this agent uses isn't offered any more.",
     "Switch the agent's model, or ask its owner or an admin to.",
@@ -177,6 +181,8 @@ def _provider_lines(exc: ProviderError) -> tuple[str, str]:
         return _AI_TOO_LARGE
     if _guards_a_credential(exc.native_code):
         return _AI_CREDENTIAL_GUARD
+    if (exc.native_code or "").endswith("_secret_unavailable"):
+        return _AI_CREDENTIAL_MISSING
     if exc.category in {"auth", "permission"} and codes & _PROVIDER_REJECTED:
         return _AI_KEY_REJECTED
     if exc.category == "not_found" and _names_the_model(exc):
@@ -198,7 +204,7 @@ def _guards_a_credential(code: str | None) -> bool:
     """Whether Daimon's own driver stopped the call before it reached the provider,
     because a credential would have been echoed or used outside its binding."""
     code = code or ""
-    return code.endswith("_echo") or "_secret_" in code or code == "gcs_downscoping_failed"
+    return code.endswith(("_echo", "_secret_outside_binding")) or code == "gcs_downscoping_failed"
 
 
 def _names_the_model(exc: ProviderError) -> bool:

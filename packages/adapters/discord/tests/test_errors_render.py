@@ -102,6 +102,9 @@ _KEY_REJECTED = (
 _CREDENTIAL_GUARD = (
     "Daimon stopped this request to keep a credential safe.\n\nTell the team running Daimon."
 )
+_CREDENTIAL_MISSING = (
+    "A credential Daimon needs isn't available right now.\n\nTell the team running Daimon."
+)
 _MODEL_GONE = (
     "The model this agent uses isn't offered any more.\n\n"
     "Switch the agent's model, or ask its owner or an admin to."
@@ -327,6 +330,8 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
         (("auth", False, "authentication_error"), _KEY_REJECTED),
         (("permission", False, "mcp_secret_outside_binding"), _CREDENTIAL_GUARD),
         (("permission", False, "gcs_downscoping_failed"), _CREDENTIAL_GUARD),
+        (("permission", False, "gcs_transform_echo"), _CREDENTIAL_GUARD),
+        (("permission", False, "mcp_secret_unavailable"), _CREDENTIAL_MISSING),
         (("permission", False, None), _REFUSED),
         (("upstream", False, "snapshot_too_large"), _REFUSED),
         (("not_found", False, "404"), _REFUSED),

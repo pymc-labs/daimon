@@ -361,7 +361,7 @@ def test_an_unknown_provider_is_named_generically():
 
 def test_a_gemini_hold_says_it_is_temporary_and_names_no_one_to_ask() -> None:
     text = admission_refusal_text("provider_hold_cap_reached", _NOUNS)
-    assert "temporary" in text and "Try again shortly" in text
+    assert "at most within a day" in text and "Try again later" in text
     assert "admin" not in text and "release" not in text
 
 
@@ -436,7 +436,7 @@ def test_only_reasons_with_several_causes_are_worded_by_the_error() -> None:
         state=state,
         error=AdmissionDenied(reason="provider_hold_cap_reached"),
     )
-    assert held is not None and "temporary" in held.next_step
+    assert held is not None and "at most within a day" in held.next_step
     assert held.in_flight == ("Bash",), "the work lines stay"
 
 
