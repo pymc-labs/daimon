@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import TaskContinuation
@@ -57,7 +58,7 @@ class _Post:
 
 
 async def test_an_ended_run_is_owed_after_a_grace_and_shown_once(pooled):
-    run = await _run(pooled)
+    run = await _run(pooled, deadline_at=datetime.now(UTC) + timedelta(hours=1))
     await _worker(pooled, run, 0)
     assert (await _row(pooled, run)).end_notice is None
     run = await _end(pooled, run)
@@ -267,3 +268,24 @@ async def test_a_thread_s_live_run_card_is_found_until_the_run_ends(pooled):
     )
     await _end(pooled, run, status="cancelled")
     assert await live(run) is None
+
+
+async def test_a_run_ended_past_its_deadline_is_shown_on_the_next_poll(pooled):
+    """J4: no turn of a run is left past its deadline to render the card, so no grace."""
+    run = await _run(pooled, deadline_at=datetime.now(UTC) - timedelta(seconds=30))
+    await _worker(pooled, run, 0)
+    run = await _end(pooled, run)
+    row = await _row(pooled, run)
+    assert row.end_notice == "owed" and row.end_notice_due_at <= row.finished_at
+    post = _Post()
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 1
+    assert [notice.run.id for notice in post.notices] == [run.id]
+
+
+async def test_a_run_ending_just_before_its_deadline_is_due_at_the_deadline(pooled):
+    deadline = datetime.now(UTC) + timedelta(seconds=20)
+    run = await _run(pooled, deadline_at=deadline)
+    await _worker(pooled, run, 0)
+    run = await _end(pooled, run)
+    row = await _row(pooled, run)
+    assert row.end_notice_due_at == deadline
