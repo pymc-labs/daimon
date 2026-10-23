@@ -122,6 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
 
+- The seeded `pymc-artifact-style` skill's dashboard checklist no longer says which engagements its guidance was drawn from; it now reads as general guidance from delivered client work.
+
 - Discord MCP posts from self-hosted agents use their local name and avatar when agent identity is enabled, without an Anthropic lookup.
 
 - Scheduled routines refuse thread destinations with an unknown parent channel and check retained thread backends before resolving Anthropic agents.
