@@ -2345,7 +2345,8 @@ completed cache entries. Unknown evidence cannot satisfy a role gate.
 
 ## Owner-DM routine delivery
 
-Discord `/routines` includes an owner-only delivery choice and delivery failure
+Discord `/routines` includes an admin-only creation modal with schedule and agent
+policy validation, confirmed creator-or-admin deletion, an owner-only delivery choice and delivery failure
 reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
 the authenticated owner; the operator CLI has `routines create --destination dm`
 and a verifying dry-run. Slack and Teams explicitly reject DM writes.

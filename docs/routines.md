@@ -147,7 +147,7 @@ their own error, and an `agent_name` that resolves to no agent in the tenant
 is rejected. The tenant comes from the caller's verified token, never from an
 argument.
 
-The platform surfaces differ, and the difference is deliberate:
+The platform panels support routine management:
 
 - **Slack** `/routines` can create and delete. The panel writes the row
   directly rather than going through the MCP tool, because the Slack
@@ -158,9 +158,16 @@ The platform surfaces differ, and the difference is deliberate:
   (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). The
   shared rules (glyph, label, ordering, admin-or-creator) live in
   `daimon.core.routines`.
-- **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
-  view its last output. Creating one on Discord means asking the agent in
-  chat, which calls `create_routine`
+- **Discord** opening `/routines` remains admin-only. Server admins use **New**
+  to choose an agent, cron schedule, timezone and message. Creation validates
+  the agent and schedule
+  and enforces the agent's routine rules before saving, with the creator's Discord
+  id and verified source. Routines created in threads retain the parent and
+  thread IDs, and count against the parent channel's budget. Unresolved parents
+  and recruitment sources are refused. The creator or a server admin can pause,
+  resume or delete a routine; deletion requires confirmation and rechecks permissions.
+  Server admins include the owner, Administrator and Manage Server. The panel
+  also shows the last output and refreshes after creation or deletion
   (`packages/adapters/discord/daimon/adapters/discord/routines_panel/`).
 - The CLI has no routine CRUD. `daimon routines backfill-agent-names` is an
   admin migration helper, `daimon routines create --destination dm` creates
