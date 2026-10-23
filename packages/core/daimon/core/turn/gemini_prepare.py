@@ -85,7 +85,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     journal, usage = runtime.journal, runtime.usage_store
     # Gemini usage reaches no ledger debit, and a root interaction has no token
     # envelope: the daily model cap refuses plainly here, before anything is
-    # created. Each fallback attempt is checked again (`CappedFlashAccounting`).
+    # created. A fallback of the first request is checked too (`CappedFlashAccounting`).
     from daimon.core.turn.daily_model_cap import check_daily_model_cap
 
     await check_daily_model_cap(

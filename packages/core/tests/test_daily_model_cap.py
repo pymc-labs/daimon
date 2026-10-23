@@ -356,8 +356,8 @@ async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(mon
     assert inner.attempts == ["gemini-3.8-flash"], "no hold for the refused fallback"
 
 
-async def test_a_fallback_without_a_tariff_refuses_as_unpriced():
-    """gemini-flash-latest has no dated tariff: never run uncounted."""
+async def test_a_fallback_without_a_tariff_never_runs_and_the_503_stands():
+    """gemini-flash-latest has no dated tariff: never run uncounted, never 'unpriced'."""
     from contextlib import asynccontextmanager
 
     from daimon.core.turn.daily_model_cap import CappedFlashAccounting
@@ -372,12 +372,95 @@ async def test_a_fallback_without_a_tariff_refuses_as_unpriced():
         now=lambda: NOW,
         deps=SimpleNamespace(sessionmaker=no_db, markup=Decimal(1)),
     )
-    accounting = CappedFlashAccounting(_Inner(), cast(Any, request), {}, Decimal(20))
-    with pytest.raises(AdmissionDenied) as refused:
+    from mux.errors import ProviderError
+
+    inner = _Inner()
+    accounting = CappedFlashAccounting(inner, cast(Any, request), {}, Decimal(20))
+    with pytest.raises(ProviderError) as busy:
         await accounting.before_attempt(
             model=ModelRef(provider="gemini", id="gemini-flash-latest"), attempt=2
+        )
+    assert (busy.value.category, busy.value.native_code) == ("overloaded", "503")
+    assert inner.attempts == [], "no hold for a fallback that never runs"
+    # The turn's own model without a tariff is still refused plainly.
+    with pytest.raises(AdmissionDenied) as refused:
+        await accounting.before_attempt(
+            model=ModelRef(provider="gemini", id="gemini-flash-latest"), attempt=1
         )
     assert (refused.value.reason, refused.value.provider) == (
         "provider_price_unavailable",
         "gemini-flash-latest",
     )
+
+
+async def test_a_continuation_is_never_refused_halfway(monkeypatch):
+    """Once the turn's first request is accepted, later creates skip the cap check."""
+    from daimon.core.turn import daily_model_cap
+    from daimon.core.turn.daily_model_cap import CappedFlashAccounting
+    from mux.drivers.gemini.flash import FlashAttempt
+
+    checked: list[int] = []
+
+    async def cap(_request, *, provider, model, price, cap):
+        checked.append(1)
+
+    monkeypatch.setattr(daily_model_cap, "check_daily_model_cap", cap)
+    inner = _Inner()
+    accounting = CappedFlashAccounting(inner, cast(Any, None), {}, Decimal(20))
+    flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
+    await accounting.before_attempt(model=flash, attempt=1)
+    await accounting.after_attempt(
+        receipt=FlashAttempt(model=flash, attempt=1, outcome="accepted", interaction_id="i1")
+    )
+    await accounting.before_attempt(model=flash, attempt=1)  # a tool-result continuation
+    assert checked == [1]
+    assert inner.attempts == ["gemini-3.8-flash", "gemini-3.8-flash"]
+
+
+async def test_holds_settle_through_the_capped_accounting(monkeypatch):
+    """`HoldSettlement` is a runtime Protocol: the wrapper must satisfy it itself."""
+    from daimon.core.pricing import provider_prices
+    from daimon.core.turn import gemini_prepare
+    from daimon.core.turn.daily_model_cap import CappedFlashAccounting
+    from daimon.core.turn.gemini_prepare import _settle_hold  # pyright: ignore[reportPrivateUsage]
+    from daimon.core.turn.gemini_state import HoldSettlement
+
+    class _Settling(_Inner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settled: list[tuple[str, str]] = []
+
+        async def settle(self, *, interaction_id, model, actual_usd) -> bool:
+            self.settled.append((interaction_id, model))
+            return True
+
+    inner = _Settling()
+    accounting = CappedFlashAccounting(inner, cast(Any, None), {}, Decimal(20))
+    assert isinstance(accounting, HoldSettlement)
+    price = {model: p for (_, model), p in provider_prices("gemini.inline_reuse").items()}[
+        "gemini-3.8-flash"
+    ]
+    session = ResourceRef(
+        provider="gemini",
+        kind="session",
+        id="g-session",
+        account_scope_id="daimon-deployment",
+        tenant_id=str(TENANT),
+        account_id="account",
+    )
+    observation = UsageObservation(
+        id="gemini:one:usage",
+        revision=1,
+        session=session,
+        model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+        grain="turn",
+        basis="cumulative",
+        input_tokens=10,
+        output_tokens=5,
+        completeness="measured",
+        observed_at=NOW,
+        final=True,
+    )
+    monkeypatch.setattr(gemini_prepare, "provider_cost_of", lambda *_a, **_k: Decimal("0.01"))
+    await _settle_hold(accounting, observation, price)
+    assert inner.settled == [("one", "gemini-3.8-flash")]

@@ -68,11 +68,13 @@ async def check_daily_model_cap(
 
 
 class CappedFlashAccounting:
-    """Gemini's per-attempt hold ledger, checking the daily model cap for each attempt.
+    """Gemini's per-attempt hold ledger, checking the daily model cap as a turn starts.
 
     The Flash chain may fall back to another model on a 503 (`FLASH_MODELS`), so the
-    cap is checked for the model each attempt names, before its hold and its create.
-    A fallback without a current tariff refuses rather than running uncounted.
+    cap is checked for the model each attempt names, before its hold and its create,
+    until the turn's first request is accepted. Later requests (tool-result
+    continuations) are never refused halfway through an answer. A fallback without a
+    current tariff is not run uncounted: the turn ends with the primary's 503.
     """
 
     def __init__(
@@ -83,20 +85,45 @@ class CappedFlashAccounting:
         cap: Decimal | None,
     ) -> None:
         self._inner, self._request, self._prices, self._cap = inner, request, prices, cap
+        self._started = False
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
-        await check_daily_model_cap(
-            self._request,
-            provider=model.provider,
-            model=model.id,
-            price=self._prices.get(model.id),
-            cap=self._cap,
-        )
+        if not self._started:
+            try:
+                await check_daily_model_cap(
+                    self._request,
+                    provider=model.provider,
+                    model=model.id,
+                    price=self._prices.get(model.id),
+                    cap=self._cap,
+                )
+            except AdmissionDenied as error:
+                if attempt == 1 or error.reason != "provider_price_unavailable":
+                    raise
+                from mux.contracts.errors import ProviderError
+
+                # The primary was busy; an unpriced fallback never runs.
+                raise ProviderError("overloaded", retryable=True, native_code="503") from None
         await self._inner.before_attempt(model=model, attempt=attempt)
 
     async def after_attempt(self, *, receipt: FlashAttempt) -> None:
+        if receipt.outcome == "accepted":
+            self._started = True
         await self._inner.after_attempt(receipt=receipt)
 
-    def __getattr__(self, name: str) -> object:
-        # Settlement and the rest of the ledger are the inner accounting's own.
-        return getattr(self._inner, name)
+    # Explicit, never forwarded: `HoldSettlement` is a runtime-checkable Protocol,
+    # which does not see methods a `__getattr__` would forward.
+    async def settle(self, *, interaction_id: str, model: str, actual_usd: Decimal) -> bool:
+        from daimon.core.turn.gemini_state import HoldSettlement
+
+        if not isinstance(self._inner, HoldSettlement):
+            return False
+        return await self._inner.settle(
+            interaction_id=interaction_id, model=model, actual_usd=actual_usd
+        )
+
+    async def release_unbilled(self, *, interaction_id: str) -> bool:
+        release = getattr(self._inner, "release_unbilled", None)
+        if release is None:
+            return False
+        return bool(await release(interaction_id=interaction_id))
