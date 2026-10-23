@@ -74,8 +74,13 @@ def build_fleet_view(
     collected: bool = False,
     blocked: bool = False,
     partial: bool = False,
+    without: Sequence[str] = (),
 ) -> discord.ui.LayoutView:
-    """Render only canonical scoped rows; no specs, excerpts or native handles."""
+    """Render only canonical scoped rows; no specs, excerpts or native handles.
+
+    `without` names every login the workers run without, with the reason (frozen
+    with the root), so a login is never dropped silently.
+    """
     if (
         run.platform != "discord"
         or len({worker.id for worker in workers}) != len(workers)
@@ -97,6 +102,8 @@ def build_fleet_view(
         f"{_worker_status(worker)}"
         for worker in sorted(workers, key=lambda row: row.ordinal)
     )
+    if without:
+        facts += ("Workers run without: " + _literal("; ".join(without), 600),)
     actions: tuple[tuple[Control, str], ...] = (("kill", "Stop"), ("resume", "Resume"))
 
     def controls(target: str, version: int, label: str) -> tuple[CardButton, ...]:
@@ -655,6 +662,8 @@ class DiscordFleetCard:
         # The worker_finished wake this turn runs for: its own claim is not a
         # wake still owed to the root, and it settles through the wake owner.
         self._wake_id = wake_id
+        # Logins the workers run without (frozen with the root), read with each snapshot.
+        self._without: tuple[str, ...] = ()
 
     @property
     def run_id(self) -> uuid.UUID | None:
@@ -682,6 +691,7 @@ class DiscordFleetCard:
         run_id = self._run_id or parent.fleet.run_id
         run, workers = await self._service.read_snapshot(parent, policy, run_id)
         self._run_id = run.id
+        self._without = parent.workers_run_without
         return parent, policy, run, workers
 
     def _render(
@@ -699,6 +709,7 @@ class DiscordFleetCard:
             collected=collected,
             blocked=blocked,
             partial=partial,
+            without=self._without,
         )
 
     async def refresh(self) -> bool:

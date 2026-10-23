@@ -22,12 +22,12 @@ import hashlib
 import inspect
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
-from typing import Literal, Protocol, cast, get_args
+from typing import TYPE_CHECKING, Literal, Protocol, cast, get_args
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -95,6 +95,9 @@ from mux.state.operations import request_digest
 from mux.state.store import ConfigRevisionConflict
 from pydantic import JsonValue
 from sqlalchemy.exc import IntegrityError
+
+if TYPE_CHECKING:
+    from daimon.core.fleet_credentials import ConnectorLogin
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -474,6 +477,8 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "drops_required",
         "feature_disabled",
         "invalid_fleet_grant",
+        "invalid_credential_choice",
+        "credential_share_not_allowed",
         "fleet_raise_admin_required",
         "fleet_provider_limits_exceed_budget",
         "fleet_root_credentials",
@@ -1091,6 +1096,10 @@ class AgentBackendService:
                     ),
                     preview_digest=preview.digest,
                     fleet_grant=retained_grant,
+                    # Login sharing is its own confirmed choice; every change keeps it.
+                    fleet_credential_sharing=cast(
+                        JsonValue, current.fleet_credential_sharing if current else None
+                    ),
                     drop_consent=consent_json,
                     model=model,
                     profile=settings.profile,
@@ -1152,6 +1161,98 @@ class AgentBackendService:
                 return
             current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
             await self._require_owner_ceiling(session, agent, current, value, now=now)
+
+    async def set_credential_sharing(
+        self,
+        agent: BackendAgent,
+        choices: Mapping[str, Literal["share", "skip", "ask"]],
+        logins: Sequence[ConnectorLogin],
+        actor: BackendActor,
+        *,
+        requester_account_id: uuid.UUID,
+        run_id: uuid.UUID | None,
+    ) -> AgentBackendRevision:
+        """Save the requester's per-login choice for this agent's fleet workers.
+
+        Saving is an agent-config change: the agent's owner or an admin. "share" also
+        needs `may_share` for that login (an owner shares only logins they set, or
+        their own connections; an admin's need an admin). Unknown logins are never
+        shareable. Every decision is audited by login key (never a value).
+        """
+        from daimon.core.fleet_credentials import CHOICES, may_share
+
+        self._check_editor(agent.tenant_id, actor)
+        known = {login.key: login for login in logins}
+        if not choices or any(
+            key not in known or choice not in CHOICES for key, choice in choices.items()
+        ):
+            raise AgentBackendRefused("invalid_credential_choice")
+        async with policy_store.policy_write_transaction(
+            self._sessions, tenant_id=agent.tenant_id
+        ) as session:
+            admin = await self._authorize_edit(session, agent, actor)
+            owner = await agent_owners.owner_of(session, agent.tenant_id, agent.agent_id, lock=True)
+            for key, choice in choices.items():
+                if choice == "share" and not may_share(
+                    known[key],
+                    actor_account_id=actor.account_id,
+                    requester_account_id=requester_account_id,
+                    is_admin=admin,
+                    is_owner=owner == actor.account_id,
+                ):
+                    raise AgentBackendRefused("credential_share_not_allowed")
+            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            sharing: dict[str, str] = dict(
+                (current.fleet_credential_sharing or {}) if current else {}
+            )
+            sharing.update(choices)
+            local = current.local if current else 0
+            kept = AgentSettings.of(current)
+            backend = current.backend if current else None
+            model = current.model if current else None
+            grant = current.fleet_grant if current else None
+            consent = cast(
+                JsonValue,
+                current.drop_consent.model_dump(mode="json")
+                if current is not None and current.drop_consent is not None
+                else None,
+            )
+            try:
+                revision = await agent_backends.put_revision(
+                    session,
+                    tenant_id=agent.tenant_id,
+                    agent_id=agent.agent_id,
+                    agent_name=agent.name,
+                    local=local + 1,
+                    backend=backend,
+                    previous_local=current.previous_local if current else None,
+                    digest=_revision_digest(agent, backend, grant, consent, model, kept),
+                    preview_digest=current.preview_digest if current else "credential-sharing",
+                    fleet_grant=grant,
+                    fleet_credential_sharing=cast(JsonValue, sharing),
+                    drop_consent=consent,
+                    model=model,
+                    profile=kept.profile,
+                    requires=cast(JsonValue, kept.facts().get("requires")),
+                    thread_mode=kept.thread_mode,
+                )
+            except IntegrityError:
+                raise AgentBackendRefused("stale_revision") from None
+            for key, choice in sorted(choices.items()):
+                await security_audit.append_event(
+                    session,
+                    tenant_id=agent.tenant_id,
+                    account_id=actor.account_id,
+                    agent_id=agent.agent_id,
+                    platform=None,
+                    platform_user_id=None,
+                    tool_name="fleet_credentials",
+                    operation=choice,
+                    outcome="allowed",
+                    reason=f"login={key}" + (f"; run={run_id}" if run_id else ""),
+                    scope=f"agent_backend:{agent.agent_id}:{revision.local}",
+                )
+            return revision
 
     async def read_fleet_grant(
         self, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, now: datetime

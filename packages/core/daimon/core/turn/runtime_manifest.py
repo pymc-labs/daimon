@@ -144,6 +144,43 @@ async def default_fleet_unavailable_here(
     return setting.kind == "default"
 
 
+#: Whether a native worker can be handed a shared login yet (A-2). Until then a saved
+#: "share" is frozen but nothing is handed over, and the card says so.
+LOGIN_SHARING_LIVE = False
+
+
+async def frozen_logins(
+    deps: TurnDeps, source: BackendAgent
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    """The run's shared logins (saved "share", present, shareable) and every login its
+    workers run without, by name with the reason.
+
+    Frozen with the root, so a choice made while the run is going applies from the
+    next run only. Anything unknown, or saved as skip/ask, stays out (fail closed).
+    """
+    from daimon.core.fleet_credentials import fleet_logins, run_without_line
+    from daimon.core.stores import agent_backends
+
+    async with deps.sessionmaker() as db:
+        current = await agent_backends.current(db, source.tenant_id, source.agent_id)
+        sharing = (current.fleet_credential_sharing or {}) if current is not None else {}
+        logins = await fleet_logins(db, source)
+    shared = frozenset(
+        login.key for login in logins if login.shareable and sharing.get(login.key) == "share"
+    )
+    handed: frozenset[str] = shared if LOGIN_SHARING_LIVE else frozenset()
+    without = tuple(
+        run_without_line(login, sharing.get(login.key), sharing_live=LOGIN_SHARING_LIVE)
+        for login in logins
+        if login.key not in handed
+    )
+    return shared, without
+
+
+async def frozen_shared_logins(deps: TurnDeps, source: BackendAgent) -> frozenset[str]:
+    return (await frozen_logins(deps, source))[0]
+
+
 async def read_agent_fleet_grant_or_off(
     deps: TurnDeps, admission: Admission, *, now: datetime
 ) -> AgentFleetGrant | None:
@@ -868,6 +905,13 @@ async def _freeze_root(
             update={"deadline": min(request.deadline, permissions.limits.deadline)}
         ),
     )
+    try:
+        shared, without = await frozen_logins(deps, source)
+    except Exception as error:
+        # Listing logins never fails a root: share nothing, and say so on the card.
+        log.warning("fleet.logins_unlisted", cause=type(error).__name__)
+        shared, without = frozenset[str](), ("this agent's logins (they couldn't be listed)",)
+    permissions = replace(permissions, shared_logins=shared, workers_run_without=without)
     environment = source_environment_record(prepared.admission.environment, scope)
     root = _FrozenRoot(
         intent_id=intent_id,

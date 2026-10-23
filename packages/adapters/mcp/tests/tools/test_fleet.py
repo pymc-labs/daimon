@@ -1688,3 +1688,29 @@ async def test_a_root_refused_in_another_process_is_explained_by_its_own_setup(
         )
     else:
         assert "root_unavailable" in str(refused.value)
+
+
+async def test_the_spawn_reply_names_the_logins_the_workers_run_without() -> None:
+    """Carlos's directive: a login is never dropped silently."""
+    import json as json_module
+
+    without = ("linear (not shared)", "the stored key OPENAI_KEY (skipped)")
+    bridge, orchestrator = plain_bridge(replace(plain_root(), workers_run_without=without))
+    async with Client(registered(bridge)) as client:
+        result = await client.call_tool(
+            "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+        )
+    reply = json_module.loads(result.content[0].text)
+    assert reply["workers_run_without"] == list(without)
+    orchestrator.spawn.assert_awaited_once()
+
+
+async def test_a_spawn_reply_with_no_left_out_logins_is_unchanged() -> None:
+    import json as json_module
+
+    bridge, _ = plain_bridge(plain_root())
+    async with Client(registered(bridge)) as client:
+        result = await client.call_tool(
+            "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+        )
+    assert "workers_run_without" not in json_module.loads(result.content[0].text)

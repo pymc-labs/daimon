@@ -1052,6 +1052,12 @@ class WorkerPermissions:
     seal_ids: frozenset[str] = frozenset()
     memory_read_only: bool = True
     agent_id: uuid.UUID | None = None
+    # The logins the requester chose to share with this run's workers, frozen with the
+    # root (keys from `fleet_credentials`); a later choice applies from the next run.
+    shared_logins: frozenset[str] = frozenset()
+    # Every login this run's workers run without, by name with the reason, so it is
+    # never dropped silently (the fleet card and spawn result show it).
+    workers_run_without: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

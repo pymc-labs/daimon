@@ -436,11 +436,19 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert owner_spec is not None and owner_spec.loader is not None
     owner_module = importlib.util.module_from_spec(owner_spec)
     owner_spec.loader.exec_module(owner_module)
+    sharing_path = path.with_name("0127_fleet_credential_sharing.py")
+    sharing_spec = importlib.util.spec_from_file_location(
+        "credential_sharing_restore", sharing_path
+    )
+    assert sharing_spec is not None and sharing_spec.loader is not None
+    sharing_module = importlib.util.module_from_spec(sharing_spec)
+    sharing_spec.loader.exec_module(sharing_module)
     async with sessions.begin() as session:
         connection = await session.connection()
 
         def downgrade(sync):
             with Operations.context(MigrationContext.configure(sync)):
+                sharing_module.downgrade()
                 owner_module.downgrade()
                 model_module.downgrade()
                 consent_module.downgrade()
@@ -472,6 +480,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
                     consent_module.upgrade()
                     model_module.upgrade()
                     owner_module.upgrade()
+                    sharing_module.upgrade()
 
             await connection.run_sync(upgrade)
     async with sessions() as session:

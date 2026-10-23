@@ -2384,3 +2384,15 @@ def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
     assert "**W1** (without its files, its connected tools) ·" in text
     # Every task worker runs without tools and skills; that isn't news.
     assert "**W2** ·" in text
+
+
+def test_the_card_names_every_login_the_workers_run_without():
+    view = build_fleet_view(
+        run(),
+        (worker(ordinal=0, role="W1"),),
+        without=("linear (not shared)", "the stored key OPENAI_KEY (skipped)"),
+    )
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "Workers run without: linear (not shared); the stored key OPENAI\\_KEY (skipped)" in text

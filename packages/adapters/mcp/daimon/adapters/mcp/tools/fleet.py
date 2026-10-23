@@ -512,7 +512,7 @@ class HostFleetToolService:
             planned_on_provider=planned_on_provider,
             max_runtime_s=worker_runtime_ceiling(parent, provider, backend),
         )
-        return await self._orchestrator.spawn(
+        reply = await self._orchestrator.spawn(
             parent,
             policy,
             now=now,
@@ -533,6 +533,11 @@ class HostFleetToolService:
             result_contract=result_contract,
             reviewer_of=reviewer_of,
         )
+        if parent.workers_run_without:
+            # Never drop a login silently: tell the person which ones and why.
+            without: list[JsonValue] = list(parent.workers_run_without)
+            reply = {**reply, "workers_run_without": without}
+        return reply
 
     async def status(
         self,
@@ -815,7 +820,9 @@ def register_fleet_tools(
         planned_workers (a plain count) is the older form of the same hint. A
         worker on another model than yours runs at that model's default
         effort. Budgets above the grant are refused. After spawning, end your
-        turn; you are woken to fleet_collect.
+        turn; you are woken to fleet_collect. When the reply has
+        workers_run_without, tell the person which of your logins the workers
+        run without and why, in those words.
         To run a worker AS one of this server's agents (its own configured
         model, tools and skills, under your permissions), pass agent=<its name>
         and its task, with no model; fleet_agents lists the agents you can use.

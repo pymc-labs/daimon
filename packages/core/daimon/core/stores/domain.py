@@ -1251,6 +1251,10 @@ class AgentBackendRevision(_BackendConsentFacts):
     created_at: datetime
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
     fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
+    # Per login key: "share" | "skip" | "ask"; a missing key is "ask".
+    fleet_credential_sharing: dict[str, Literal["share", "skip", "ask"]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _read_fleet_grant(self) -> AgentBackendRevision:
