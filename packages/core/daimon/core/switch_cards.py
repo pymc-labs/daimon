@@ -1,0 +1,395 @@
+"""The provider switch card Daimon posts itself, and what pressing it does.
+
+A Claude turn shows the switch card through the provider's own tool
+confirmation. An OpenAI or Gemini turn has none, so the MCP tool records the
+previewed switch (`stores.backend_switch_cards`) and posts a card only its
+requester can press, in the conversation the request came from. Pressing it
+is a fresh request: the card is claimed once, then the same checks as the
+Claude card's click run again (`confirmation.backend_switch_callbacks`) and
+the switch goes through the same `set_backend` write.
+"""
+
+from __future__ import annotations
+
+import datetime
+import re
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from functools import partial
+from typing import TYPE_CHECKING, Final, Literal
+
+import structlog
+from daimon.core.scope import DeploymentDefault
+from mux.contracts.ids import Provider
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
+    from daimon.core.config import TurnSettings
+    from daimon.core.posted_controls import PostedCard
+    from daimon.core.turn.deps import TurnDeps
+
+log = structlog.get_logger()
+
+#: A switch card's buttons: ``bsw:<card id>:confirm`` or ``…:cancel``.
+CUSTOM_ID_PATTERN: Final[str] = r"bsw:(?P<card>[0-9a-f-]{36}):(?P<action>confirm|cancel)"
+_CUSTOM_ID = re.compile(CUSTOM_ID_PATTERN)
+
+SwitchAction = Literal["confirm", "cancel"]
+
+
+def card_custom_id(card_id: uuid.UUID, action: SwitchAction) -> str:
+    return f"bsw:{card_id}:{action}"
+
+
+def parse_custom_id(custom_id: str) -> tuple[uuid.UUID, SwitchAction] | None:
+    match = _CUSTOM_ID.fullmatch(custom_id)
+    if match is None:
+        return None
+    try:
+        return uuid.UUID(match["card"]), match["action"]  # pyright: ignore[reportReturnType]
+    except ValueError:
+        return None
+
+
+async def channel_pin_line(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+) -> str | None:
+    """Say so when this channel pins a provider: the agent's switch won't apply there."""
+    from daimon.core.channel_backend import channel_ref, current_backend
+    from daimon.core.stores import mux_state
+    from daimon.core.turn.notices import provider_name
+
+    channel = channel_ref(tenant_id, platform, channel_id)
+    async with sessionmaker() as session:
+        pinned = await current_backend(session, channel)
+        if (
+            pinned is None
+            or await mux_state.config_origin(session, channel, pinned.local) != "channel"
+        ):
+            return None
+    model = f" ({pinned.model})" if pinned.model else ""
+    return (
+        f"This channel pins {provider_name(pinned.backend)}{model}, so this agent keeps "
+        'answering on that here until an admin clears it: say "clear this channel\'s pin".'
+    )
+
+
+async def move_this_thread(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+    responder_name: str | None,
+    agent_name: str,
+    target: Provider,
+    pinned_here: bool,
+) -> str:
+    """After a confirmed switch, move the requester's own slot of this thread too.
+
+    Only when the switched agent is the one answering here, and never a shared
+    thread (it stays pinned for everyone in it). Says plainly what happens.
+    """
+    from daimon.core.stores import mux_state, thread_agent_bindings
+    from daimon.core.thread_release import caller_slot, request_thread_release
+    from daimon.core.turn.notices import provider_name
+
+    provider = provider_name(target)
+    if pinned_here:
+        return "This channel pins its own provider, so this conversation stays on it."
+    async with sessionmaker() as session:
+        handed = await thread_agent_bindings.get_binding(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent_channel_id,
+            thread_id=thread_id,
+        )
+    # Who answers this conversation's next message: a hand-off's agent, else this
+    # turn's responder. A setup conversation's configuration target never moves it.
+    answering = (
+        handed.responder_name if handed is not None and handed.kind == "handoff" else responder_name
+    )
+    if (handed is not None and handed.kind == "setup") or agent_name != answering:
+        return f"{agent_name} isn't the one answering here, so this conversation is unchanged."
+    slot = caller_slot(
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=parent_channel_id,
+        thread_id=thread_id,
+        account_id=account_id,
+    )
+    async with sessionmaker.begin() as session:
+        shared = slot.model_copy(update={"account_id": None})
+        if await mux_state.get_binding(session, shared) is not None:
+            return (
+                "This conversation is shared, so it stays on its current model; "
+                f"start a new thread to talk to {agent_name} on {provider}."
+            )
+        pinned = await mux_state.get_binding(session, slot, include_released=True)
+        await request_thread_release(
+            session,
+            slot,
+            generation=pinned.generation if pinned is not None else 0,
+            now=datetime.datetime.now(datetime.UTC),
+        )
+    return (
+        f"This conversation moves to {provider} from the next message; "
+        "earlier messages here aren't carried over."
+    )
+
+
+#: The requested card's footer; each renderer fills the requester and the expiry.
+SWITCH_FOOTER: Final[str] = "Only {requester} can confirm. Expires {expires}."
+
+
+def requested_switch_card(
+    card_id: uuid.UUID,
+    *,
+    title: str,
+    facts: tuple[str, ...],
+    requester_platform_user_id: str,
+    expires_at: datetime.datetime,
+) -> PostedCard:
+    """The card as posted: what the switch does, and Confirm / Cancel for its requester."""
+    from daimon.core.posted_controls import CardButton, PostedCard
+
+    return PostedCard(
+        kind="switch",
+        state="requested",
+        headline=f"🔁 {title}",
+        facts=facts,
+        buttons=(
+            CardButton(
+                label="Confirm", style="primary", custom_id=card_custom_id(card_id, "confirm")
+            ),
+            CardButton(
+                label="Cancel", style="primary", custom_id=card_custom_id(card_id, "cancel")
+            ),
+        ),
+        footer=SWITCH_FOOTER,
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at_unix=int(expires_at.timestamp()),
+    )
+
+
+def answered_switch_card(press: SwitchCardPress) -> PostedCard:
+    """The card after a press closed it: what happened, and no buttons."""
+    from daimon.core.posted_controls import PostedCard
+
+    if press.applied:
+        return PostedCard(kind="switch", state="applied", headline=f"✅ {press.text}")
+    if press.text == EXPIRED_TEXT:
+        return PostedCard(kind="switch", state="expired", headline=f"⌛ {press.text}")
+    return PostedCard(kind="switch", state="refused", headline=f"🛡️ {press.text}")
+
+
+@dataclass(frozen=True)
+class SwitchCardPress:
+    """What a press did: the card's new words, and whether the card is now closed."""
+
+    text: str
+    closed: bool
+    applied: bool = False
+
+
+EXPIRED_TEXT: Final[str] = "This request ended before anyone clicked. Ask again to redo it."
+ANSWERED_TEXT: Final[str] = "This card was already answered."
+
+
+async def press_switch_card(
+    *,
+    deps: TurnDeps | None,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    turn_settings: TurnSettings,
+    deployment_default: DeploymentDefault,
+    tenant_id: uuid.UUID,
+    card_id: uuid.UUID,
+    action: SwitchAction,
+    clicker: str,
+    current_admin: Callable[[str], Awaitable[bool]],
+    place_word: str,
+    now: datetime.datetime,
+    message_id: str | None = None,
+) -> SwitchCardPress | None:
+    """Answer one press. None: not the requester's (the card stays as it is).
+
+    The requester is checked before the card is claimed, so nobody else's press
+    can use it up. A claimed card is applied or refused exactly once. `deps`
+    None reads no source (only for a service whose previews read none).
+    """
+    from daimon.core.authz import Place, build_subject
+    from daimon.core.channel_backend import (
+        AgentBackendRefused,
+        BackendActor,
+        BackendUnsupported,
+        load_backend_agent,
+        make_backend_service,
+    )
+    from daimon.core.confirmation import (
+        BackendSwitchReference,
+        ConfirmationPrompt,
+        backend_switch_callbacks,
+        reference_settings,
+    )
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores import backend_switch_cards as cards
+    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.notices import provider_name, switched_meanwhile_text
+
+    async with sessionmaker() as session:
+        card = await cards.get_card(session, tenant_id=tenant_id, card_id=card_id)
+    if (
+        card is None
+        or card.requester_platform_user_id != clicker
+        # Only the message the card was posted as can press it.
+        or (message_id is not None and card.message_id != message_id)
+    ):
+        return None
+    if card.status != "pending":
+        return SwitchCardPress(card.outcome or ANSWERED_TEXT, closed=True)
+    if action == "cancel":
+        async with sessionmaker.begin() as session:
+            await cards.finish(
+                session, card_id=card_id, status="cancelled", outcome="Cancelled. Nothing changed."
+            )
+        return SwitchCardPress("Cancelled. Nothing changed.", closed=True)
+    async with sessionmaker.begin() as session:
+        claimed = await cards.claim(session, tenant_id=tenant_id, card_id=card_id, now=now)
+    if claimed is None:
+        expired = card.expires_at <= now
+        return SwitchCardPress(EXPIRED_TEXT if expired else ANSWERED_TEXT, closed=True)
+
+    async def end(status: Literal["applied", "refused"], text: str) -> SwitchCardPress:
+        async with sessionmaker.begin() as session:
+            await cards.finish(session, card_id=card_id, status=status, outcome=text)
+        return SwitchCardPress(text, closed=True, applied=status == "applied")
+
+    reference = BackendSwitchReference.model_validate(claimed.reference)
+    is_admin = await current_admin(clicker)
+    subject = build_subject(is_admin=is_admin, platform_user_id=clicker)
+    # The source is read in the card's own conversation, as the MCP tool read it
+    # for the preview, so the same agent setup yields the same preview digest.
+    capture = (
+        None
+        if deps is None
+        else partial(
+            capture_backend_source,
+            deps,
+            context=ScopeContext(
+                tenant_id=tenant_id,
+                account_id=claimed.account_id,
+                platform=claimed.platform,
+                channel_id=claimed.channel_id,
+                thread_id=claimed.thread_id,
+            ),
+            subject=subject,
+            place=Place.from_origin(
+                parent_channel_id=claimed.channel_id,
+                thread_id=claimed.thread_id,
+                setup_thread=claimed.setup_thread,
+            ),
+            is_dm=False,
+            slack_turn_context_id=None,
+            private_dm_id=None,
+        )
+    )
+    service = make_backend_service(
+        sessionmaker,
+        turn_settings,
+        capture_source=capture,
+    )
+    _, check = backend_switch_callbacks(
+        service,
+        sessionmaker=sessionmaker,
+        anthropic=anthropic,
+        tenant_id=tenant_id,
+        account_id=claimed.account_id,
+        current_admin=current_admin,
+        default_agent_name=deployment_default.agent_name,
+        place_word=place_word,
+        answering_agent_name=claimed.answering_agent_name,
+    )
+    prompt = ConfirmationPrompt(
+        title="Change the model provider?",
+        requester_platform_user_id=claimed.requester_platform_user_id,
+        expires_at=claimed.expires_at,
+        admin=True,
+        backend_switch=reference,
+    )
+    refusal = await check(prompt, clicker)
+    if refusal is not None:
+        return await end("refused", refusal)
+    actor = BackendActor(tenant_id=tenant_id, account_id=claimed.account_id, subject=subject)
+    try:
+        agent = await load_backend_agent(
+            anthropic, sessionmaker, tenant_id=tenant_id, agent_name=reference.agent
+        )
+    except AgentBackendRefused:
+        return await end("refused", f"{reference.agent} is no longer available. Nothing changed.")
+    try:
+        await service.set_backend(
+            agent,
+            reference.target_backend,
+            reference.expected_revision,
+            actor,
+            expected_preview_digest=reference.preview_digest,
+            model=reference.model,
+            settings=reference_settings(reference),
+            **(
+                {"accepted_drops": reference.accepted_drops}
+                if reference.accepted_drops is not None
+                else {}
+            ),
+        )
+    except AgentBackendRefused as exc:
+        log.warning("switch_card.refused", card_id=str(card_id), reason=exc.reason)
+        if exc.reason == "stale_revision":
+            current = await service.current(agent)
+            return await end(
+                "refused",
+                switched_meanwhile_text(
+                    reference.agent,
+                    current.backend if current is not None else None,
+                    reference.target_backend,
+                )
+                + " Nothing changed.",
+            )
+        return await end(
+            "refused", "This switch was refused when it was confirmed. Nothing changed."
+        )
+    except BackendUnsupported:
+        log.warning("switch_card.unsupported", card_id=str(card_id))
+        return await end(
+            "refused",
+            f"{provider_name(reference.target_backend)} can't run here right now. Nothing changed.",
+        )
+    pin = await channel_pin_line(
+        sessionmaker, tenant_id=tenant_id, platform=claimed.platform, channel_id=claimed.channel_id
+    )
+    moved = await move_this_thread(
+        sessionmaker,
+        tenant_id=tenant_id,
+        account_id=claimed.account_id,
+        platform=claimed.platform,
+        parent_channel_id=claimed.channel_id,
+        thread_id=claimed.thread_id,
+        responder_name=claimed.answering_agent_name,
+        agent_name=reference.agent,
+        target=reference.target_backend,
+        pinned_here=pin is not None,
+    )
+    log.info("switch_card.applied", card_id=str(card_id), target=reference.target_backend)
+    return await end(
+        "applied",
+        f"Switched {reference.agent} to {provider_name(reference.target_backend)}. {moved}",
+    )

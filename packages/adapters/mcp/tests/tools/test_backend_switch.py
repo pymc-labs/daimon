@@ -1312,3 +1312,123 @@ async def test_a_non_default_agent_switches_without_saying_for_everyone(active_c
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview"
+
+
+async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_changes(
+    active_chat, monkeypatch
+):
+    """OpenAI/Gemini turns have no card of their own: the confirm call posts Daimon's."""
+    from unittest.mock import AsyncMock
+
+    import daimon.adapters.mcp.tools.discord._switch_card as switch_card_mod
+    from daimon.core.stores.backend_switch_cards import get_card
+    from daimon.core.switch_cards import parse_custom_id
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    provider_turn = replace(auth, no_confirmation_surface=True)
+    post = AsyncMock(return_value="message-1")
+    monkeypatch.setattr(switch_card_mod, "post_switch_card", post)
+    switch = {
+        "agent_name": "Researcher",
+        "target_backend": "gemini",
+        "origin_context_id": str(origin.id),
+    }
+    # No session card gate is read: a provider turn has none.
+    agent()
+    preview = await _request_agent_backend_switch_impl(runtime, provider_turn, **switch)
+    assert preview.status == "preview"
+    agent()
+    agent()
+    posted = await _request_agent_backend_switch_impl(
+        runtime,
+        provider_turn,
+        **switch,
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert posted.status == "awaiting_confirmation"
+    assert "Nothing changes until the requester presses Confirm" in posted.summary
+    agent()
+    actual = await load_backend_agent_for(runtime, auth)
+    assert await service.current(actual) is None, "posting the card changes nothing"
+    assert await _release_rows(runtime, auth) == []
+    ((_, kwargs),) = [(call.args, call.kwargs) for call in post.await_args_list]
+    assert kwargs["channel_id"] == "thread", "only into the verified origin thread"
+    card = kwargs["card"]
+    assert card.requester_platform_user_id == "123"
+    assert card.headline.startswith("🔁 Switch Researcher to Gemini")
+    card_id, action = parse_custom_id(card.buttons[0].custom_id)
+    assert action == "confirm"
+    async with runtime.session_factory() as session:
+        row = await get_card(session, tenant_id=auth.tenant_id, card_id=card_id)
+    assert row is not None and row.status == "pending" and row.message_id == "message-1"
+    assert (row.channel_id, row.thread_id) == ("channel", "thread")
+    assert row.reference["preview_digest"] == preview.preview_digest
+
+
+async def test_a_provider_turn_card_is_refused_when_the_preview_moved(active_chat, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import daimon.adapters.mcp.tools.discord._switch_card as switch_card_mod
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    provider_turn = replace(auth, no_confirmation_surface=True)
+    post = AsyncMock(return_value="message-1")
+    monkeypatch.setattr(switch_card_mod, "post_switch_card", post)
+    agent()
+    with pytest.raises(ToolError, match="Nothing changed"):
+        agent()
+        await _request_agent_backend_switch_impl(
+            runtime,
+            provider_turn,
+            agent_name="Researcher",
+            target_backend="gemini",
+            origin_context_id=str(origin.id),
+            expected_revision=0,
+            preview_digest="0" * 64,
+        )
+    post.assert_not_awaited()
+
+
+async def test_a_claude_turn_never_self_posts_a_card(active_chat, monkeypatch):
+    """The Claude path keeps its provider-shown card: the confirmed call applies."""
+    from unittest.mock import AsyncMock
+
+    import daimon.adapters.mcp.tools.discord._switch_card as switch_card_mod
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    post = AsyncMock(return_value="message-1")
+    monkeypatch.setattr(switch_card_mod, "post_switch_card", post)
+    switch = {
+        "agent_name": "Researcher",
+        "target_backend": "gemini",
+        "origin_context_id": str(origin.id),
+    }
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(runtime, auth, **switch)
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        **switch,
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert changed.status == "changed"
+    post.assert_not_awaited()
+
+
+async def load_backend_agent_for(runtime, auth):
+    from daimon.core.channel_backend import load_backend_agent
+
+    return await load_backend_agent(
+        runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
+    )

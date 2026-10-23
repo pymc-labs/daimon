@@ -1918,10 +1918,11 @@ async def _capture_source_capabilities(
                 raise ValueError("source has no enabled daimon-mcp toolset")
             # No OpenAI/Gemini turn has a confirmation card, pinned or template:
             # every confirmation-gated or publishing tool stays unavailable (and
-            # the server refuses it for their provider-turn credentials too).
-            from daimon.core.tool_safety import confirmation_gated_tools
+            # the server refuses it for their provider-turn credentials too),
+            # except those whose card Daimon posts itself.
+            from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
 
-            gated = confirmation_gated_tools()
+            gated = confirmation_gated_tools() - self_carded_tools()
             permissions = {
                 name: "ask" if name in gated else permission
                 for name, permission in permissions.items()

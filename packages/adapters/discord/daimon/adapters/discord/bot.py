@@ -1339,6 +1339,11 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.credential_button import CredentialRequestButton
 
         self.add_dynamic_items(CredentialRequestButton)
+        # The provider switch card the MCP process posts for an OpenAI or Gemini
+        # turn (no card of its own); its presses dispatch here for the same reason.
+        from daimon.adapters.discord.posted_controls.switch_card import SwitchCardControl
+
+        self.add_dynamic_items(SwitchCardControl)
         if getattr(getattr(self.runtime.settings, "fleet", None), "enabled", False) is True:
             from daimon.adapters.discord.posted_controls.fleet import FleetControl
 
