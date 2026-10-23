@@ -238,6 +238,7 @@ source_modules = [
     "daimon.core.neutral_resources",
     "daimon.core.mcp_attach",
     "daimon.core.mcp_auth",
+    "daimon.core.memory_tools",
     "daimon.core.mcp_credential_sweep",
     "daimon.core.mcp_oauth",
     "daimon.core.mcp_personal_servers",

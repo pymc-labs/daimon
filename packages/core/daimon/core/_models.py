@@ -1684,6 +1684,43 @@ class McpToken(Base):
     surface: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class TurnMemoryGrant(Base):
+    """Which memory one provider turn's MCP credential may use, from its admission.
+
+    Written by the host in the transaction that mints the turn's `provider_turn`
+    credential, and read by the MCP memory tools only by that credential's jti,
+    never from token claims or tool input. `personal` is whether the turn has a
+    single caller whose personal store it may use; `read_only` is the admitted
+    memory posture (a sealed channel, a read-only DM). Deleted with the token.
+    """
+
+    __tablename__ = "turn_memory_grants"
+
+    jti: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_tokens.jti", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    personal: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_dm: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SlackBotToken(Base):
     """Encrypted per-workspace Slack bot token.
 

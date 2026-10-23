@@ -3711,6 +3711,91 @@
         'type': 'object',
       }),
     }),
+    'memory_delete': dict({
+      'description': 'Delete one memory, only while it still has the content_sha256 you read.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected_content_sha256': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'path',
+          'expected_content_sha256',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_list': dict({
+      'description': '''
+        List your memories (path and content_sha256), and whether memory is read-only here.
+        <blank line>
+        shared/ is this agent's memory for everyone it works with; personal/ is only
+        the person you are talking with, when there is exactly one. Never put one
+        person's private details in shared/.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'memory_read': dict({
+      'description': 'Read one memory by path: shared/<path> or personal/<path>.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'path': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'path',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_write': dict({
+      'description': '''
+        Save a memory at shared/<path> or personal/<path>.
+        <blank line>
+        To replace an existing memory, read it first and pass its content_sha256;
+        a memory that changed since is never overwritten. Refused where memory is
+        read-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'content': dict({
+            'type': 'string',
+          }),
+          'expected_content_sha256': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'path',
+          'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'microsoft_get': dict({
       'description': '''
         GET a Microsoft Graph v1.0 path as the person, e.g. /me/drive/root/children.
