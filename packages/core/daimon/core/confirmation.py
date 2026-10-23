@@ -917,7 +917,8 @@ def backend_switch_callbacks(
         """Who answers this conversation next: a hand-off's agent, else this turn's.
 
         The approved switch moves the conversation of the agent answering here (the
-        hand-off's, once one was made), so the card must say so for that agent.
+        hand-off's, once one was made), so the card must say so for that agent. A
+        setup conversation never moves (`_move_this_thread`), so nobody does there.
         """
         if handoff_thread is None:
             return turn_agent
@@ -932,6 +933,8 @@ def backend_switch_callbacks(
                 parent_channel_id=parent_channel_id,
                 thread_id=thread_id,
             )
+        if handed is not None and handed.kind == "setup":
+            return None
         if handed is not None and handed.kind == "handoff":
             return handed.responder_name
         return turn_agent
