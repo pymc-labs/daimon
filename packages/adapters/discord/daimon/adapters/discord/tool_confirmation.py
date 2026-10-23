@@ -17,6 +17,7 @@ import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
+from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ from daimon.core.confirmation import (
     ConfirmationHook,
     ConfirmationPrompt,
 )
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.posted_controls.confirmation import (
     NO_LONGER_PENDING_MESSAGE,
@@ -108,6 +110,7 @@ class _ConfirmationView(discord.ui.LayoutView):
         check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
         rule_factory: async_sessionmaker[AsyncSession] | None = None,
         rule_subject: Callable[[str], Awaitable[Subject]] | None = None,
+        note: str | None = None,
     ) -> None:
         super().__init__(timeout=None)
         self._prompt = prompt
@@ -163,6 +166,8 @@ class _ConfirmationView(discord.ui.LayoutView):
         if footer is not None:
             for line in footer.splitlines():
                 container.add_item(discord.ui.TextDisplay(f"-# {line}"))
+        if note is not None:
+            container.add_item(discord.ui.TextDisplay(f"-# {note}"))
         self.add_item(container)
 
     def pending_requester(self) -> str | None:
@@ -255,18 +260,19 @@ class _ConfirmationView(discord.ui.LayoutView):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
-        refusal = await check_confirmation_admin(
-            self._prompt, str(interaction.user.id), self._check_admin
-        )
+    async def authorize(self, clicker: str, answer: ConfirmationAnswer) -> str | None:
+        """Take `clicker`'s answer through every check a click runs; the refusal, or None.
+
+        The admin re-check (with the card's own digest) first, then requester,
+        expiry and single use. None means the answer was taken.
+        """
+        refusal = await check_confirmation_admin(self._prompt, clicker, self._check_admin)
         if refusal is not None:
-            await interaction.response.send_message(
-                refusal, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
-            )
-            return
-        refusal = settle_local_confirmation(
-            self._prompt, self._answer, str(interaction.user.id), answer
-        )
+            return refusal
+        return settle_local_confirmation(self._prompt, self._answer, clicker, answer)
+
+    async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
+        refusal = await self.authorize(str(interaction.user.id), answer)
         if refusal is not None:
             if refusal == NOT_YOURS_MESSAGE:
                 refusal = refusal.format(requester=f"<@{self._prompt.requester_platform_user_id}>")
@@ -347,8 +353,6 @@ def discord_confirmation_hook(
                 role, _ = await requester_role(channel.guild, clicker)
                 return role is Role.ADMIN
 
-            from functools import partial
-
             from daimon.core.turn.admission import capture_admitted_backend_source
 
             capture = partial(
@@ -408,6 +412,67 @@ def discord_confirmation_hook(
                 ),
             )
 
+    async def _qa_auto_approve(
+        view: _ConfirmationView, prompt: ConfirmationPrompt
+    ) -> ApprovedConfirmation | None:
+        """On staging, answer a QA bot's own card as that bot; None posts the normal card."""
+        from daimon.adapters.discord import qa_auto_approve as qa
+
+        requester = prompt.requester_platform_user_id
+        try:
+            enabled = await qa.enabled_for(getattr(runtime, "settings", None), requester)
+        except Exception:
+            # The gate never breaks a card: any failure is a normal card.
+            log.exception("discord.qa_auto_approve_gate_failed")
+            enabled = False
+        if not enabled:
+            return None
+        guild = getattr(channel, "guild", None)
+        audit = partial(
+            qa.audit,
+            rule_factory,
+            tenant_id=tenant_id
+            if tenant_id is not None
+            else derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+            if isinstance(guild, discord.Guild)
+            else None,
+            prompt=prompt,
+            channel_id=getattr(channel, "id", None),
+        )
+        if prompt.lasting_public_link:
+            await audit(outcome="denied", reason="manual: publishes a lasting public link")
+            return None
+        refusal = await view.authorize(requester, "approved")
+        if refusal is not None:
+            # Exactly what the requester's own click would get: no answer taken.
+            await audit(outcome="denied", reason=f"refused: {refusal}")
+            return None
+        view.stop()
+        answered = build_confirmation_card(
+            prompt,
+            state="approved",
+            answered_by_platform_user_id=requester,
+            how="once" if prompt.tool_rules_enabled else None,
+        )
+        try:
+            message = await channel.send(
+                view=_ConfirmationView(answered, prompt, answer=None, note=qa.NOTE),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except BaseException as exc:
+            # Approved, but the card never showed: say so, then fail as a post would.
+            await audit(outcome="error", reason=f"card not posted: {type(exc).__name__}")
+            raise
+        view.card_key = ("discord", message.id)
+        view.answered_edit_done.set()
+        await audit(outcome="allowed", reason="auto-approved for QA")
+
+        async def retire_unsent() -> None:
+            view.retired = True
+            await _retire(message, prompt, "stopped", note=qa.NOTE)
+
+        return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
+
     async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
         if prompt.admin:
             if prepare_admin is None or check_admin is None:
@@ -424,6 +489,8 @@ def discord_confirmation_hook(
             allow_always=prompt.tool_rule is not None,
         )
         view = _ConfirmationView(pending, prompt, answer, check_admin, rule_factory, rule_subject)
+        if (approved := await _qa_auto_approve(view, prompt)) is not None:
+            return approved
         message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         view.card_key = ("discord", message.id)
 
@@ -447,13 +514,17 @@ def discord_confirmation_hook(
 
 
 async def _retire(
-    message: discord.Message, prompt: ConfirmationPrompt, state: ConfirmationCardState
+    message: discord.Message,
+    prompt: ConfirmationPrompt,
+    state: ConfirmationCardState,
+    *,
+    note: str | None = None,
 ) -> None:
     card = build_confirmation_card(prompt, state=state)
     # Bounded for the turn, finished in the background (`edit_card_within`).
     await edit_card_within(
         message.edit(
-            view=_ConfirmationView(card, prompt, answer=None),
+            view=_ConfirmationView(card, prompt, answer=None, note=note),
             allowed_mentions=discord.AllowedMentions.none(),
         ),
         card_key=("discord", message.id),
