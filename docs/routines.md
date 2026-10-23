@@ -1,5 +1,13 @@
 # Routines
 
+A routine runs as the person who last authored its behavior. When another
+person changes its trigger message, agent or target, core transfers
+`created_by_user_id` to that editor and records an authority-transfer audit
+in the same transaction. The scheduler uses that author’s current credential
+and permissions. Pause, resume and delete do not transfer authority. A stale
+edit is refused. Transfers erase retained output and pending delivery, and
+private delivery follows the new author.
+
 A routine is a recurring scheduled turn: a cron expression, a timezone, an
 agent and one prompt. The scheduler fires it, the agent runs with no human in
 the thread, and the tail of its final message is written back onto the
@@ -83,7 +91,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | Column | Meaning |
 | --- | --- |
 | `tenant_id` | the partition; cascades on tenant delete |
-| `created_by_user_id` | the **platform** user id of the creator, not an account id |
+| `created_by_user_id` | the **platform** user id of the current behavior author, not an account id |
 | `agent_name` / `agent_id` | the Daimon tag is authoritative; the MA id is a cache, self-healed at fire time |
 | `cron_expr` / `timezone` | a five-field croniter expression and an IANA zone |
 | `trigger_message` | the prompt sent as the turn's user message |
@@ -607,7 +615,6 @@ stamped. Every stamped routine session also carries the private-DM stamp
 credentials, so its transcript stays its owner's alone. No server admin reads it from the hub, as before routine sessions carried a
 channel.
 
-
 ### Durable fire diagnostics
 
 Each dispatched routine owns one content-free `turn_outcomes` observation with
@@ -806,12 +813,10 @@ not an unattended agent routine. Its retention sweep runs even when recruitment
 is disabled; failed or inaccessible threads retain opaque recovery status and
 never deliver candidate data elsewhere.
 
-
 Configured recruitment channels and their threads cannot host general routines.
 Creation refuses reserved sources and destinations. Existing channel routines
 stop at fire after the coordinated settings restart, before using their stored
 trigger, and delivery never redirects their result to a DM or another channel.
-
 
 Recruitment reservations also govern saved content after a settings restart.
 MCP list/get and mutation returns, Discord panels/output controls and CLI

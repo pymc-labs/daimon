@@ -20,13 +20,13 @@ can administer only the actions in `DelegatedAction` in
 - `environments`: agent/channel environments.
 - `model`: model selection.
 - `routing`: who answers where, channel defaults and handoff configuration.
-- `mcp_connections`: third-party MCP connections and coding-tool access.
-- `credentials`: agent keys and shared credentials, excluding GitHub repo binding.
 - `tool_rules`: agent/channel tool rules and their approval panels.
 - `agent_lifecycle`: agent copies and archiving.
 - `hub_pin_exemption`: the hub’s agent-pin exemption when starting a turn.
 
-Every other admin action is platform-only. In particular, GitHub connect,
+Every other admin action is platform-only, including credentials, third-party
+MCP connections, credential-based skill-repository setup, coding-tool access
+and DM enable/disable. GitHub connect,
 request approval and repository binding require platform admins at both the
 adapter and store boundaries. Delegates do not get the hub exception for
 reading other people’s sessions or sealed channel transcripts; that exception
@@ -35,7 +35,7 @@ no transcript access.
 
 Authority changes and all money controls require a human acting directly:
 a platform panel/button rechecks live platform authority, and MCP requires a
-personal CLI/OAuth user credential re-attested live as a platform admin.
+registered personal CLI credential (`token_kind=cli`) re-attested live as a platform admin.
 Chat execution (even an admin’s attended chat), routines, continuations,
 watches and external agent keys cannot grant/revoke admins, read or change
 billing/budgets/caps, redeem promos or create checkout sessions. Operator
@@ -45,6 +45,22 @@ Delegated admin is never cached in account roles or turn origins. The model
 receives `effective_role` separately from the platform `current_role`; these
 controls describe the current turn and grant no additional authority.
 
+Routine execution authority follows the author of its behavior. If another
+person changes a routine’s message, agent or target, the routine transfers to
+that editor and uses their identity for future runs. The transfer is audited
+atomically, old output and pending delivery are cleared, and private delivery
+follows the new author. Pause, resume and delete do not transfer authority.
+
+Account roles are written only by turn admission and the platform-checked
+`/github connect` commands. Setup notices, GitHub link helpers and operator-token
+panels never promote accounts. Slack hides GitHub/operator-token controls from
+non-platform admins and checks platform authority inside removal notices.
+
+Legacy tokens with no registered kind and short-lived billing-panel tokens
+are not personal credentials. Billing-panel tokens serve only the checkout
+HTTP hop after a live-checked button; they cannot grant/revoke or call the
+MCP money tools. Checkout re-attests the bound account as a platform admin.
+
 Open **Who answers where → Permissions → Admins** in Discord, or
 **Who answers where → Admins** in Slack. Each change checks platform
 authority again and records who changed which grant and when. Revocation
@@ -53,8 +69,8 @@ panels and existing credentials. Platform authority and any remaining grants
 still apply. Erasing a user removes their grants and scrubs their attribution.
 
 MCP provides `list_admins` for members and `grant_admin` / `revoke_admin` for
-platform admins acting directly with personal CLI/OAuth user credentials. It
-rechecks platform authority live; every agent-run credential and operator
+platform admins acting directly with registered personal CLI credentials
+(`token_kind=cli`). It rechecks platform authority live; every agent-run credential and operator
 token is refused. Teams uses MCP or the CLI.
 The CLI commands `daimon admins list`, `daimon admins grant USER_ID`, and
 `daimon admins revoke USER_ID` call these same authenticated tools. Set

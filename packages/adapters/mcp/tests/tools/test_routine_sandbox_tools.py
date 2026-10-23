@@ -79,6 +79,7 @@ def _auth(
         "platform_user_id": user_id,
         "is_admin": is_admin,
         "token_jti": uuid.uuid4(),
+        "token_kind": "cli",
         **overrides,
     }
     return AuthIdentity(**fields)

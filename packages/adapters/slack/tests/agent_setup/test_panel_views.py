@@ -289,8 +289,10 @@ def test_agents_view_connect_github_is_admin_only() -> None:
         "attributions": {_MAKER: "<@U1>"},
         "channel_id": _CHANNEL_ID,
     }
-    admin_view = build_agents_view(roster, is_admin=True, **shared)
+    admin_view = build_agents_view(roster, is_admin=True, is_platform_admin=True, **shared)
     member_view = build_agents_view(roster, is_admin=False, **shared)
+    delegate_view = build_agents_view(roster, is_admin=True, is_platform_admin=False, **shared)
+    assert delegate_view == member_view
     admin_actions = admin_view["blocks"][-1]["elements"]
     assert admin_actions[-1]["action_id"] == "agent_setup__github_connect"
     admin_actions.pop()
@@ -1235,3 +1237,35 @@ def _all_views() -> list[dict[str, Any]]:
         ),
         build_creating_view(agent_name="new-agent", meta=meta),
     ]
+
+
+def test_delegated_routing_hides_operator_tokens() -> None:
+    answering_map = _answering_map()
+    common = dict(
+        page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
+        meta=_meta(),
+        is_admin=True,
+        attributions={},
+        setup_links=[],
+        channel_id=_CHANNEL_ID,
+        unrouted_agent_name=None,
+        operator_tokens=[],
+    )
+    delegated = build_routing_view(answering_map, is_platform_admin=False, **common)
+    native = build_routing_view(answering_map, is_platform_admin=True, **common)
+    assert "agent_setup__operator_token:mint" not in json.dumps(delegated)
+    assert "agent_setup__operator_token:mint" in json.dumps(native)
+
+
+def test_delegated_details_hide_github_controls() -> None:
+    common = dict(
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=True,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    delegated = build_details_view(_details(), is_platform_admin=False, **common)
+    native = build_details_view(_details(), is_platform_admin=True, **common)
+    assert "agent_setup__github_repos" not in json.dumps(delegated)
+    assert "agent_setup__github_repos" in json.dumps(native)

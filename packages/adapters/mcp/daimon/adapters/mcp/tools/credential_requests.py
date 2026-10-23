@@ -52,7 +52,6 @@ from daimon.adapters.mcp.tools.teams._send import (
     edit_teams_card_state,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
@@ -120,7 +119,7 @@ def _caller_is_admin(auth: AuthIdentity) -> bool:
     policy, so a mint by an admin-capable token never lets a member store an
     admin-only name.
     """
-    return auth.admin_for(DelegatedAction.CREDENTIALS) and auth.agent_id is None
+    return auth.admin_for() and auth.agent_id is None
 
 
 _PENDING_TASK_DESCRIPTION = (
@@ -289,11 +288,7 @@ async def _decide_attachment_write(
     )
     return decide_operation(
         operation,
-        is_admin=(
-            auth.admin_for()
-            if operation == "repo_bind"
-            else auth.admin_for(DelegatedAction.CREDENTIALS)
-        ),
+        is_admin=auth.admin_for(),
         target=facts,
     ), facts
 
@@ -426,7 +421,13 @@ async def _mint_and_post(
     replaces_updated_at: datetime | None = None,
     branch: str | None = None,
 ) -> RequestCredentialResult:
-    await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
+    await require_pin_write_access(
+        runtime,
+        auth,
+        ma_agent=ma_agent,
+        origin=origin,
+        action=None,
+    )
     # A tool-supplied channel cannot redirect a private-input request.
     channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
     if auth.platform == "teams" and runtime.teams_client is None:

@@ -19,6 +19,7 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_subject_resolver,
     production_tenant_resolver,
 )
+from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._ctx import _require_platform_admin
 from daimon.adapters.mcp.tools.admins import change_admin
 from daimon.adapters.mcp.tools.channel_budgets import (
@@ -71,10 +72,12 @@ def _mcp(verifier: DaimonJWTVerifier, sessions, settings) -> FastMCP:
     return mcp
 
 
-async def test_delegate_launders_grant_and_money_through_platform_admins_routine(
+@pytest.mark.parametrize("routine_run", [True, False])
+async def test_routine_runs_as_editor_and_execution_never_has_human_money_authority(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    routine_run: bool,
 ) -> None:
     tenant = await make_tenant(db_session, workspace_id="999999999999999999")
     owner = await make_platform_principal(
@@ -149,17 +152,33 @@ async def test_delegate_launders_grant_and_money_through_platform_admins_routine
     assert seen["delegate"].is_admin and not seen["delegate"].is_platform_admin
     async with db_session_factory() as db:
         row = await routines_store.get_routine(db, routine.id, tenant_id=tenant.id)
-    assert row is not None and row.created_by_user_id == OWNER
+    assert row is not None and row.created_by_user_id == DELEGATE
     assert TARGET in row.trigger_message
 
-    # Step 2: the routine fires as its creator; its chat credential is the
-    # owner's, re-attested live as platform admin. It still cannot grant or move money.
+    # Match the scheduler: the current author's principal selects the
+    # execution credential. An attended admin chat remains money-refused too.
+    if routine_run:
+        assert row.created_by_user_id == delegate.external_id
+        async with db_session_factory.begin() as db:
+            run_token, _, _ = await mint_chat_mcp_token(
+                db,
+                account_id=delegate.account_id,
+                agent_id=uuid.uuid4(),
+                secret=SECRET,
+                now=datetime.now(UTC),
+                routine_execution=(row.id, uuid.uuid4()),
+            )
+    else:
+        run_token = tokens[OWNER]
     mcp2 = _mcp(verifier, db_session_factory, settings)
 
     @mcp2.tool
     async def as_owner_routine(ctx: Context) -> bool:
         auth = await ctx.get_state("auth")
         seen["owner"] = auth
+        async with db_session_factory() as db:
+            assert await current_admin(db, auth) is (not routine_run)
+        assert auth.admin_for() is (not routine_run)
         with pytest.raises(ToolError, match="personal user credential"):
             _require_platform_admin(auth)
         for revoke in (False, True):
@@ -189,9 +208,10 @@ async def test_delegate_launders_grant_and_money_through_platform_admins_routine
                 await call
         return True
 
-    result = await call_mcp_tool(mcp2.http_app(), token=tokens[OWNER], name="as_owner_routine")
+    result = await call_mcp_tool(mcp2.http_app(), token=run_token, name="as_owner_routine")
     assert "error" not in result, result
-    assert seen["owner"].is_chat_execution and seen["owner"].is_platform_admin
+    assert seen["owner"].is_chat_execution
+    assert seen["owner"].is_platform_admin is (not routine_run)
     async with db_session_factory() as db:
         grants = await list_admins(db, tenant_id=tenant.id)
     assert [(g.subject_id, g.granted_by) for g in grants] == [(DELEGATE, OWNER)]

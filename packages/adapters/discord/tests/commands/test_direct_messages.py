@@ -29,7 +29,7 @@ _OVER_BUDGET = "This channel's budget is used up.\n\nAn admin can raise it."
 @pytest.mark.parametrize(
     ("admin", "action", "expected"),
     [
-        (False, "enable", "Only a server admin can turn Daimon DMs on or off here."),
+        (False, "enable", "Only a platform admin can turn Daimon DMs on or off here."),
         (True, "enable", "Daimon DMs are on for this server."),
         (True, "disable", "Daimon DMs are off for this server."),
     ],
@@ -44,6 +44,7 @@ async def test_dm_policy_replies_use_server_words(
     await provision_tenant(db_session_factory, platform="discord", workspace_id=str(_GUILD))
     save = AsyncMock()
     monkeypatch.setattr(dm_module, "set_dm_enabled", save)
+    monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
     member = MagicMock()
     member.guild_permissions.administrator = admin
     member.guild_permissions.manage_guild = admin

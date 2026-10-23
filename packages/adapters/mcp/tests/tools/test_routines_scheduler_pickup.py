@@ -227,7 +227,11 @@ async def test_owner_dm_created_via_mcp_is_picked_up_without_recipient_channel_l
     now = datetime.now(UTC).replace(microsecond=0)
     async with committing_sessionmaker.begin() as session:
         await update_routine(
-            session, created.id, tenant_id=tenant.id, next_fire_at=now - timedelta(minutes=1)
+            session,
+            created.id,
+            edited_by=created.created_by_user_id,
+            tenant_id=tenant.id,
+            next_fire_at=now - timedelta(minutes=1),
         )
         claimed = await claim_due_fireable(
             session, now=now, max_age=timedelta(minutes=15), limit=20

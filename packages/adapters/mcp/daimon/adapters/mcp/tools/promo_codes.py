@@ -99,7 +99,7 @@ def register_promo_code_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         code: str,
     ) -> RedeemPromoCodeResult:
-        """Redeem credit with a direct personal platform-admin CLI/OAuth credential.
+        """Redeem credit with a direct personal platform-admin CLI credential.
         For example, apply the code someone was given to add credit to the balance.
 
         Case, spaces and dashes in ``code`` do not matter. Each code works once

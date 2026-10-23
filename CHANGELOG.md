@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Transfer routine execution authority to the editor of its behavior, confine
+  role snapshots to platform admission/connect commands, and keep credential,
+  MCP-connection and DM-toggle administration platform-only. Human authority
+  requires a registered personal CLI token; billing-panel tokens are checkout-only.
+
 - Require direct human platform-admin authority for admin delegation and money
   controls; refuse agent-run credentials, keep GitHub platform-only, and apply
   delegated configuration through an explicit action allow-list.

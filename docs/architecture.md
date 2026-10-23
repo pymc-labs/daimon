@@ -2571,42 +2571,41 @@ covered between deleted message IDs, including parent-channel starter events.
 
 ### Tenant admin delegation
 
-`core/native_admins.py` combines live platform authority with uncached, tenant-scoped
-`daimon_admins` grants. Discord interaction gates are asynchronous; Slack binds each
-per-event Web API client to its verified workspace; Teams adds grants at its runtime
-admin boundary. Delegation is request-local: account roles and turn-origin role
-snapshots record only live platform authority. Hub stored-role readers retain
-their platform-only transcript exception. Revocation deletes the grant and records
-the audit in one transaction, without changing platform-admin snapshots. Platform
-authority is re-derived from the platform and is never a grant row.
+`core/native_admins.py` combines live platform authority with uncached,
+tenant-scoped `daimon_admins` grants. The single `DelegatedAction` allow-list
+limits which admin gates accept delegation. Adapter boundaries pass their
+live verdict into configuration services and stores. Unnamed actions,
+credentials, MCP connections, GitHub connect/approval/repo binding and DM
+toggles require platform authority.
 
-Discord's Permissions panel and Slack's Who answers where panel link to Admins.
-The screen lists grants and gives platform admins grant/revoke controls; every
-mutation checks current platform authority. Teams uses CLI/MCP. The CLI's admins
-commands use authenticated MCP calls. MCP middleware independently attests live
-platform authority and delegation for platform principals on each request, ignoring
-stale internal admin claims. The token verifier distinguishes validated chat
-execution bindings from external agent keys; ordinary chat retains live
-configuration authority only for the delegated action allow-list. Authority
-changes and money require direct human platform authority; every agent-run
-credential and operator token is refused. Operator-token minting uses the live
-platform-admin signal. Grant/revoke
-audit events include the actor, subject kind, subject ID and timestamp. Privacy
-erasure removes user grants and scrubs grantor and audit identifiers.
+Discord interaction gates are asynchronous; Slack binds each per-event Web
+API client to its verified workspace; Teams resolves grants at its runtime
+admin boundary. MCP independently attests platform authority and current
+grants on each request. The verifier distinguishes chat execution from
+external agent keys. Authority changes and money require a directly clicked,
+live-checked platform panel or a registered personal CLI credential with live
+platform attestation. Every execution binding and operator credential is
+refused for those operations, including an attended admin chat. Billing-panel
+tokens are dedicated checkout HTTP credentials and cannot exercise personal
+user authority or MCP money tools.
 
+Account roles have exactly three write sites: turn admission and the
+Discord/Slack GitHub connect commands, all from live platform facts. GitHub
+link helpers, removal notices and operator-token minting never write roles.
+Turn-origin roles also record platform authority; `effective_role` is
+rendered separately for the model. The hub retains its platform-only
+transcript exception. Its live delegated agent-pin exemption grants no
+transcript access. Revocation removes only the grant, with an atomic audit.
 
-Admin authority uses the single `DelegatedAction` allow-list in core. Adapter
-boundaries pass current platform facts and grants into configuration services;
-stores with authorization checks consume that live verdict. An unnamed action
-is platform-only, including GitHub connect/approval/repo binding. Account roles
-and stored origin roles record only platform authority. `effective_role` is
-rendered separately for the model. Hub transcript access still uses the
-platform snapshot; its agent-pin exemption accepts live Daimon admins.
+Discord's Permissions panel and Slack's Who answers where panel link to
+Admins. The screen lists grants and gives platform admins grant/revoke
+controls; every mutation rechecks platform authority. Teams uses CLI/MCP.
+The CLI uses authenticated MCP calls. Slack notice handlers check platform
+authority internally and hide GitHub/operator-token controls from delegates.
+Grant/revoke audits record actor, subject and timestamp; privacy erasure
+removes user grants and scrubs attribution.
 
-MCP distinguishes verified chat execution from external keys for configuration.
-A separate shared credential predicate excludes every execution binding from
-authority changes and money operations; this includes an attended admin chat
-and a routine running with an admin creator’s credential. Those operations
-require either a directly clicked platform panel or a personal CLI/OAuth user
-credential with live platform attestation. Scoped operator tokens cannot pass
-the human money gate.
+Material routine edits transfer the execution author in the core store,
+with atomic audit, revision checks and output/delivery erasure. Scheduler
+credential selection and private delivery follow the new author.
+Pause/resume/delete retain authority.

@@ -849,7 +849,7 @@ async def _update_routine_impl(
             destination_id=destination_id,
             clear_destination=clear_destination,
             channel_id=new_destination_channel_id,
-            edited_by=str(auth.account_id),
+            edited_by=auth.platform_user_id or "unknown",
         )
         if updated is None:
             raise ToolError("routine not found")

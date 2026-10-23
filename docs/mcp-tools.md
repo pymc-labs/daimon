@@ -107,7 +107,7 @@ Channel budgets for platform admins acting directly with personal user credentia
 | --- | --- | --- |
 | `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
 | `get_channel_budget` | Discord callers, Slack callers, Teams callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
-| `list_channel_budgets` | admin only, operator tokens with tenant:read | List channel budgets with a personal platform-admin CLI/OAuth credential. |
+| `list_channel_budgets` | admin only, operator tokens with tenant:read | List channel budgets with a personal platform-admin CLI credential. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
 ## `channel_copies`
@@ -305,7 +305,7 @@ Promo code tools: redeem an operator-issued code for the caller's server or work
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem credit with a direct personal platform-admin CLI/OAuth credential. |
+| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem credit with a direct personal platform-admin CLI credential. |
 
 ## `promo_issuing`
 
@@ -412,7 +412,7 @@ Billing and tenant configuration summaries for direct personal platform admins.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_tenant_summary` | admin only, operator tokens with tenant:read | Read billing and configuration with a personal platform-admin CLI/OAuth credential. |
+| `get_tenant_summary` | admin only, operator tokens with tenant:read | Read billing and configuration with a personal platform-admin CLI credential. |
 
 ## `thread_model`
 

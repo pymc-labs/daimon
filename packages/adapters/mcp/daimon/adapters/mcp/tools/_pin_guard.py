@@ -50,6 +50,7 @@ async def require_pin_write_access(
     *,
     ma_agent: BetaManagedAgentsAgent | Callable[[], Awaitable[BetaManagedAgentsAgent]],
     origin: TurnOriginRow | None,
+    action: DelegatedAction | None = DelegatedAction.AGENT_SETTINGS,
 ) -> None:
     """Raise unless this caller may change ``ma_agent`` from ``origin``.
 
@@ -59,7 +60,7 @@ async def require_pin_write_access(
     A trusted admin credential may write from anywhere; agent keys never are trusted.
     """
     trusted = _trusted_credential(auth)
-    if trusted and auth.admin_for(DelegatedAction.AGENT_SETTINGS):
+    if trusted and auth.admin_for(action):
         return
     async with runtime.session_factory() as session:
         try:

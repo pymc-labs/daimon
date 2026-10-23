@@ -39,7 +39,7 @@ def test_the_panel_never_offers_the_deployment_scope() -> None:
     assert PANEL_SCOPES == ("tenant:read", "channels:write", "agents:archive", "promo:redeem")
 
 
-async def test_mint_stores_the_admin_role_and_refuses_promo_create(
+async def test_mint_does_not_promote_the_account_and_refuses_promo_create(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -49,7 +49,7 @@ async def test_mint_stores_the_admin_role_and_refuses_promo_create(
     (row,) = await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW)
     identity = await get_account_with_tenant(db_session, account_id=row.account_id)
     assert row.jti == minted.jti and row.label == "ci" and row.scopes == ("tenant:read",)
-    assert identity is not None and identity.role is Role.ADMIN
+    assert identity is not None and identity.role is Role.USER
     assert minted.expires_at == NOW + dt.timedelta(days=30)
 
 

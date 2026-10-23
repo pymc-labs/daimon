@@ -755,18 +755,28 @@ async def _reclassify(db: AsyncSession, row: RoutineRow, change: str, **back: An
     from daimon.core.stores.routines import update_routine
 
     if change == "agent":
-        await update_routine(db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b")
+        await update_routine(
+            db,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            agent_id="ag_b",
+            agent_name="b",
+        )
         return
     await update_routine(
         db,
         row.id,
+        edited_by=row.created_by_user_id,
         tenant_id=row.tenant_id,
         destination_kind="channel",
         destination_id=BUDGET,
         channel_id=BUDGET,
     )
     if change == "aba":
-        await update_routine(db, row.id, tenant_id=row.tenant_id, **back)
+        await update_routine(
+            db, row.id, edited_by=row.created_by_user_id, tenant_id=row.tenant_id, **back
+        )
 
 
 async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(harness: Harness):
@@ -1116,6 +1126,7 @@ async def test_private_failure_after_destination_change_does_not_publish_error(
         await update_routine(
             db,
             row.id,
+            edited_by=row.created_by_user_id,
             tenant_id=row.tenant_id,
             **(
                 {"clear_destination": True}
@@ -1213,13 +1224,19 @@ async def test_owner_and_destination_are_rechecked_during_real_delivery(
         elif change == "agent":
             async with harness.factory.begin() as db:
                 await update_routine(
-                    db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b"
+                    db,
+                    row.id,
+                    edited_by=row.created_by_user_id,
+                    tenant_id=row.tenant_id,
+                    agent_id="ag_b",
+                    agent_name="b",
                 )
         else:
             async with harness.factory.begin() as db:
                 await update_routine(
                     db,
                     row.id,
+                    edited_by=row.created_by_user_id,
                     tenant_id=row.tenant_id,
                     destination_kind="channel",
                     destination_id=BUDGET,
@@ -1604,7 +1621,13 @@ async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(
                 return await execute(statement, *args, **kwargs)
 
             monkeypatch.setattr(db, "execute", paused_execute)
-            await routines.update_routine(db, public.id, tenant_id=public.tenant_id, **edits)
+            await routines.update_routine(
+                db,
+                public.id,
+                edited_by=public.created_by_user_id,
+                tenant_id=public.tenant_id,
+                **edits,
+            )
 
     async def private_answer(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
         await upstream.wait(lambda: bool(upstream.events(sid, "user.message")))
@@ -1619,7 +1642,11 @@ async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(
     await asyncio.wait_for(read.wait(), 15)
     async with harness.factory.begin() as db:
         private = await routines.update_routine(
-            db, public.id, tenant_id=public.tenant_id, destination_kind="dm"
+            db,
+            public.id,
+            edited_by=public.created_by_user_id,
+            tenant_id=public.tenant_id,
+            destination_kind="dm",
         )
     assert private is not None
     fire_task = asyncio.create_task(harness.fire(private))
@@ -1643,7 +1670,9 @@ async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(
     # An explicit retry reads the DM revision, so erasure and the new
     # classification happen together. Late enqueue also compares that revision.
     async with harness.factory.begin() as db:
-        changed = await routines.update_routine(db, public.id, tenant_id=public.tenant_id, **edits)
+        changed = await routines.update_routine(
+            db, public.id, edited_by=public.created_by_user_id, tenant_id=public.tenant_id, **edits
+        )
     assert changed is not None and changed.updated_at > private.updated_at
     release_fire.set()
     await fire_task
@@ -1702,6 +1731,7 @@ async def test_destination_free_fire_has_no_personal_memory_or_reclassified_resu
             row = await routines.update_routine(
                 db,
                 row.id,
+                edited_by=row.created_by_user_id,
                 tenant_id=row.tenant_id,
                 clear_destination=True,
                 next_fire_at=datetime.now(UTC) - timedelta(seconds=1),

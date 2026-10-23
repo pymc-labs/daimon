@@ -43,6 +43,7 @@ from daimon.core.stores.domain import (
     SandboxPin,
     UnattendedRequester,
 )
+from daimon.core.stores.security_audit import append_event
 from sqlalchemy import and_, delete, false, func, or_, select, true, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -298,8 +299,9 @@ async def update_routine(
     and `channel_id`, so the routine's spend still counts toward the same budget.
     A concurrent edit raises StoreError; callers can also supply the revision
     used for authorization so a stale authorized view cannot be applied.
-    `edited_by` names the editor in the sandbox history when the edit clears
-    an admin's sandbox opt-in (`_SANDBOX_MATERIAL`).
+    `edited_by` must be the authenticated platform user id for behavior edits.
+    Changing the message, agent or target transfers execution authority to
+    that editor and audits the transfer atomically. Pause/resume retain it.
     """
     # Read exactly once: validation, erasure and the write share this revision.
     # A concurrent edit must fail the CAS rather than reuse stale classification.
@@ -389,9 +391,21 @@ async def _save_routine_edit(
     transaction, so the owner cannot carry an opt-in over to a new agent,
     prompt or destination.
     """
-    sandbox_cleared = current.sandbox_tools_enabled and any(
+    material_changed = any(
         key in values and values[key] != getattr(current, key) for key in _SANDBOX_MATERIAL
     )
+    if material_changed and (not edited_by.strip() or edited_by == "unknown"):
+        raise StoreError("Changing a routine's behavior requires its editor's platform user id.")
+    authority_transferred = material_changed and edited_by != current.created_by_user_id
+    if authority_transferred:
+        values["created_by_user_id"] = edited_by
+        if values.get("destination_kind", current.destination_kind) == "dm":
+            # Private delivery follows the new author, never the prior author's
+            # credential, inbox or personal memory.
+            values["destination_id"] = await _resolve_destination(
+                session, current.tenant_id, "dm", None, edited_by
+            )
+    sandbox_cleared = current.sandbox_tools_enabled and material_changed
     cleared_at = datetime.now(UTC)
     if sandbox_cleared:
         values.update(
@@ -402,11 +416,15 @@ async def _save_routine_edit(
         )
     if expected_updated_at is not None and current.updated_at != expected_updated_at:
         raise StoreError("Routine changed while being edited; reload it and try again.")
-    if current.destination_kind == "dm" or (
-        "agent_id" in values
-        or "agent_name" in values
-        or "destination_kind" in values
-        or "destination_id" in values
+    if (
+        authority_transferred
+        or current.destination_kind == "dm"
+        or (
+            "agent_id" in values
+            or "agent_name" in values
+            or "destination_kind" in values
+            or "destination_id" in values
+        )
     ):
         # Any private edit or producer/destination change invalidates content.
         # This also erases retained previews from legacy owner-only routines.
@@ -428,6 +446,8 @@ async def _save_routine_edit(
                 if current.destination_kind == "dm"
                 else "destination_changed"
                 if "destination_kind" in values
+                else "authority_changed"
+                if authority_transferred
                 else "agent_changed"
             ),
             delivery_lease_owner=None,
@@ -454,6 +474,25 @@ async def _save_routine_edit(
     orm = result.scalar_one_or_none()
     if orm is None:
         raise StoreError("Routine changed while being edited; reload it and try again.")
+    if authority_transferred:
+        tenant = await session.get(Tenant, current.tenant_id)
+        if tenant is None:
+            raise StoreError("Routine tenant no longer exists.")
+        await append_event(
+            session,
+            tenant_id=current.tenant_id,
+            account_id=None,
+            agent_id=None,
+            platform=tenant.platform,
+            platform_user_id=edited_by,
+            admin_subject_kind="user" if current.created_by_user_id is not None else None,
+            admin_subject_id=current.created_by_user_id,
+            tool_name="routines",
+            operation="transfer_authority",
+            outcome="allowed",
+            reason="material_edit",
+            turn_ref=f"routine:{current.id}",
+        )
     if sandbox_cleared:
         session.add(
             RoutineSandboxHistoryRecord(

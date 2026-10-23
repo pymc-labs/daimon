@@ -52,6 +52,7 @@ from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
     decide_operation,
+    delegated_action_for_operation,
     needs_reachability_read,
 )
 from slack_sdk.web.async_client import AsyncWebClient
@@ -166,7 +167,7 @@ async def refuse_unless_allowed(
     live sessions out of the sharing read; None counts them.
     """
     is_admin = await resolve_is_admin(
-        client, user_id=user_id, action=DelegatedAction.CHANNEL_PERMISSIONS
+        client, user_id=user_id, action=delegated_action_for_operation(operation)
     )
     if operation == "repo_bind":
         is_admin = await resolve_is_platform_admin(client, user_id=user_id)
@@ -249,7 +250,7 @@ async def refuse_unless_allowed_for_agent_name(
     read, is decided as it is rather than looked up again by name.
     """
     is_admin = await resolve_is_admin(
-        client, user_id=user_id, action=DelegatedAction.CHANNEL_PERMISSIONS
+        client, user_id=user_id, action=delegated_action_for_operation(operation)
     )
     if operation == "repo_bind":
         is_admin = await resolve_is_platform_admin(client, user_id=user_id)

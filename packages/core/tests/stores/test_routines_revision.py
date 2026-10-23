@@ -61,6 +61,7 @@ async def test_schedule_transition_rejects_concurrent_cron_timezone_edit(
         newer = await routines.update_routine(
             db,
             row.id,
+            edited_by=row.created_by_user_id,
             tenant_id=tenant.id,
             cron_expr="0 9 * * *",
             timezone_="Asia/Tokyo",
@@ -143,7 +144,11 @@ async def test_panel_transition_uses_the_revision_it_authorized(db_engine, db_cl
         assert captured.updated_at == row.updated_at
         async with factory.begin() as other:
             await routines.update_routine(
-                other, row.id, tenant_id=tenant.id, trigger_message="newer"
+                other,
+                row.id,
+                edited_by=row.created_by_user_id,
+                tenant_id=tenant.id,
+                trigger_message="newer",
             )
         return True
 

@@ -429,6 +429,7 @@ def build_agents_view(
     page: Page[RosterAgent],
     meta: PanelMetadata,
     is_admin: bool,
+    is_platform_admin: bool = False,
     attributions: Mapping[uuid.UUID, str],
     channel_id: str,
     routed_agent_names: Collection[str] | None = None,
@@ -473,7 +474,7 @@ def build_agents_view(
     )
     elements.append(_button(action_id=ACTION_NEW, label=NEW_AGENT_LABEL))
     elements.append(_button(action_id=ACTION_ROUTING, label=ROUTING_LABEL))
-    if is_admin:
+    if is_platform_admin:
         elements.append(_button(action_id=ACTION_GITHUB_CONNECT, label="🐙 GitHub"))
     blocks.append({"type": "actions", "elements": elements})
     blocks.extend(_pager_blocks(page, meta=meta))
@@ -520,6 +521,7 @@ def build_details_view(
     *,
     meta: PanelMetadata,
     is_admin: bool,
+    is_platform_admin: bool = False,
     coding_tools_available: bool,
     channel_id: str,
     attribution: str | None,
@@ -611,9 +613,12 @@ def build_details_view(
             picker["initial_option"] = current
         blocks.append(_section("*Model backend*", accessory=picker))
     actions = [
-        _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name),
         _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
     ]
+    if is_platform_admin:
+        actions.insert(
+            0, _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name)
+        )
     if coding_tools_available:
         actions.insert(
             0,
@@ -812,6 +817,7 @@ def build_routing_view(
     page: Page[ChannelAnswer],
     meta: PanelMetadata,
     is_admin: bool,
+    is_platform_admin: bool = False,
     attributions: Mapping[uuid.UUID, str],
     setup_links: Sequence[str],
     channel_id: str,
@@ -892,7 +898,7 @@ def build_routing_view(
         blocks.extend(_permissions_blocks(channel_id=channel_id, status=rule_status))
     if channel_skills is not None and _is_channel(channel_id):
         blocks.extend(_channel_skills_blocks(channel_skills, channel_id=channel_id))
-    if operator_tokens is not None:
+    if is_platform_admin and operator_tokens is not None:
         blocks.extend(_operator_token_blocks(operator_tokens))
     blocks.append(
         _context(

@@ -130,7 +130,7 @@ def _identity(
         platform="discord",
         platform_user_id="u-admin",
         is_admin=True,
-        token_kind="operator" if jti is not None else None,
+        token_kind="operator" if jti is not None else "cli",
         token_jti=jti,
         scopes=scopes,
     )

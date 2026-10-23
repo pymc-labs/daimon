@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 CHAT_EXECUTION_CLAIM = "daimon_chat_execution"
 TOKEN_KIND_CLAIM = "daimon_token_kind"
 TOKEN_JTI_CLAIM = "daimon_token_jti"
+TOKEN_LABEL_CLAIM = "daimon_token_label"
 SCOPES_CLAIM = "daimon_scopes"
 
 REFUSAL_AUDIT_TOOL = "auth/verify"
@@ -196,6 +197,7 @@ class DaimonJWTVerifier(JWTVerifier):
             CHAT_EXECUTION_CLAIM,
             TOKEN_KIND_CLAIM,
             TOKEN_JTI_CLAIM,
+            TOKEN_LABEL_CLAIM,
             SCOPES_CLAIM,
             "bound_channel_id",
             "platform_role_ids",
@@ -270,6 +272,7 @@ class DaimonJWTVerifier(JWTVerifier):
                 row.kind == "agent" and access.claims.get("chat_agent_id") is not None
             )
             access.claims[TOKEN_KIND_CLAIM] = row.kind
+            access.claims[TOKEN_LABEL_CLAIM] = row.label
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)
             if row.kind == "operator":
                 access.claims[SCOPES_CLAIM] = list(row.scopes)

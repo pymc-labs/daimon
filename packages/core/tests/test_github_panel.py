@@ -356,15 +356,16 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
     account = await db_session.get(Account, member_id)
     assert account is not None
     await db_session.refresh(account)
-    assert account.role == "admin", "only verified platform authority synchronizes the snapshot"
-    assert await connect_link(
-        db_session,
-        settings=settings,
-        tenant_id=tenant_id,
-        platform="discord",
-        platform_user_id="former-holder",
-        verified_tenant_admin=True,
-    )
+    assert account.role == "user", "GitHub helpers must never write role snapshots"
+    with pytest.raises(ValueError, match="tenant admin"):
+        await connect_link(
+            db_session,
+            settings=settings,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id="former-holder",
+            verified_tenant_admin=True,
+        )
     with pytest.raises(ValueError, match="workspace admin"):
         await connect_link(
             db_session,

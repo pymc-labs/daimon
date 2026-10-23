@@ -37,7 +37,6 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import (
     FormPinRefused,
     agent_pin_names,
@@ -409,9 +408,7 @@ class TeamsCredentialRequests:
             return dialog_message(_UNCONFIGURED)
         if row.kind == "env":
             # The name is re-checked against the submitter's live role.
-            problem = env_name_problem(
-                row.target, is_admin=actor.admin_for(DelegatedAction.CREDENTIALS)
-            )
+            problem = env_name_problem(row.target, is_admin=actor.admin_for())
             if problem is not None:
                 return dialog_message(env_name_refusal(row.target, problem))
         entries: tuple[EnvEntry, ...] = ()
@@ -425,9 +422,7 @@ class TeamsCredentialRequests:
             # cannot be read costs nothing, and the form stays open to fix it.
             try:
                 text = decode_env_bytes(secret.encode())
-                entries = parse_env_file(
-                    text, member_writable_only=not actor.admin_for(DelegatedAction.CREDENTIALS)
-                )
+                entries = parse_env_file(text, member_writable_only=not actor.admin_for())
             except EnvFileRejected as err:
                 log.info(
                     "teams.credential.env_file_rejected",
@@ -453,7 +448,7 @@ class TeamsCredentialRequests:
             refused = await self._repo_refusal(row, agent, secret.strip(), actor, url)
             if refused is not None:
                 return refused
-        is_admin = actor.admin_for(DelegatedAction.CREDENTIALS)
+        is_admin = actor.admin_for()
         work: Awaitable[None]
         if row.kind == "env":
             work = self._save_env(row, agent, secret, is_admin=is_admin, service_url=url)
@@ -490,9 +485,7 @@ class TeamsCredentialRequests:
         """
         skills = row.kind == "skill_repo"
         operation: OperationKind = "skill_repo_connect" if skills else "repo_bind"
-        if await self._attachment_refused(
-            row, agent, operation, is_admin=actor.admin_for(DelegatedAction.CREDENTIALS)
-        ):
+        if await self._attachment_refused(row, agent, operation, is_admin=actor.admin_for()):
             async with self._runtime.sessionmaker.begin() as session:
                 await store.set_credential_request_outcome(
                     session, token=row.token, outcome="write_failed"

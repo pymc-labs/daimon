@@ -394,6 +394,7 @@ async def run_new_agent_submission(
                     tenant_id=tenant_id,
                     meta=meta.with_view("agents").with_page(meta.page),
                     is_admin=is_admin,
+                    user_id=user_id,
                 ),
             )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:

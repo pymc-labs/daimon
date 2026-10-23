@@ -122,6 +122,7 @@ async def test_granted_admin_cannot_write_delegations_over_mcp(
         tenant_id=tenant.id,
         platform="discord",
         platform_user_id="delegate",
+        token_kind="cli",
         role=Role.ADMIN,
         is_admin=True,
     )

@@ -3,9 +3,8 @@
 The panel offers only the tenant scopes; `promo:create` acts for the whole
 deployment, so only `daimon mcp mint-operator-token` mints it, and a token
 carrying it is neither listed nor revoked here. The adapter
-checks the clicker is a server admin live before calling in; minting stores
-that role on their account, as a turn does, because the verifier reads the
-stored role on every call.
+checks live platform authority before calling in. Minting never changes
+account roles; the token verifier independently enforces the platform snapshot.
 """
 
 from __future__ import annotations
@@ -24,8 +23,7 @@ from daimon.core.operator_tokens import (
     OperatorTokenError,
     parse_operator_scopes,
 )
-from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import McpTokenRow, Role
+from daimon.core.stores.domain import McpTokenRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens, revoke_mcp_token
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,7 +80,6 @@ async def mint_panel_operator_token(
     principal = await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
-    await set_role(session, principal.account_id, Role.ADMIN)
     token = await mint_operator_mcp_token(
         session,
         account_id=principal.account_id,

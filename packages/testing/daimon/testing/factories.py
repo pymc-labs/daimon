@@ -23,6 +23,7 @@ from daimon.core._models import (
     Account,
     AgentMemoryStore,
     CliPrincipal,
+    GitHubRemovalNotice,
     PlatformPrincipal,
     PrincipalLink,
     SecurityAuditEvent,
@@ -644,3 +645,24 @@ async def make_security_audit_event(
     session.add(event)
     await session.flush()
     return SecurityAuditRow.model_validate(event)
+
+
+async def make_github_removal_notice(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    installation_id: int = 42,
+    account_login: str = "acme",
+) -> None:
+    """Queue a confirmed GitHub removal for adapter notice regressions."""
+    now = datetime.now(UTC)
+    session.add(
+        GitHubRemovalNotice(
+            tenant_id=tenant_id,
+            installation_id=installation_id,
+            account_login=account_login,
+            queued_at=now,
+            confirmed_at=now,
+        )
+    )
+    await session.flush()

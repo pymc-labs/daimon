@@ -234,19 +234,6 @@ async def test_explicit_action_admits_delegate_without_promoting_account(
             actor_account_id=principal.account_id,
         )
         assert skill.skill_id == "skill_test"
-    elif action in {DelegatedAction.MCP_CONNECTIONS, DelegatedAction.CREDENTIALS}:
-        import uuid
-
-        from daimon.core.stores.agent_mcp_credentials import upsert_credential
-
-        credential = await upsert_credential(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=uuid.uuid4(),
-            mcp_server_url="https://example.org/mcp",
-            encrypted_token=b"encrypted-test-token",
-        )
-        assert credential.encrypted_token == b"encrypted-test-token"
     elif action is DelegatedAction.CHANNEL_PERMISSIONS:
         from daimon.core.channel_rules import set_channel_rule
         from daimon.core.scope import DeploymentDefault

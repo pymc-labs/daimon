@@ -492,6 +492,8 @@ async def _create_agent_impl(
     spec: AgentSpec,
     origin_context_id: str | None = None,
 ) -> AgentInfo:
+    if spec.mcp_servers:
+        _require_admin(auth)
     if spec.skills:
         raise ToolError(
             "create_agent: skills must be empty. To add skills, either sync a "
@@ -615,6 +617,7 @@ async def _update_agent_impl(
     if all(v is None for v in scalars.values()) and all(v is None for v in list_fields):
         raise ToolError("update_agent: at least one field is required")
     if mcp_servers is not None:
+        _require_admin(auth)
         _reject_reserved_servers(runtime, mcp_servers)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     agent = await resolve_setup_agent(
@@ -842,6 +845,7 @@ async def _attach_mcp_server_impl(
     expected_ma_agent_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> AgentInfo:
+    _require_admin(auth)
     # Guard the reserved daimon-mcp entry before even looking at the agent.
     # Also reject any URL that points at the deployment's own public_url under a
     # different name — that would make the next reconcile append a second daimon-mcp.

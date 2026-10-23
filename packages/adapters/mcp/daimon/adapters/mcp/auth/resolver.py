@@ -67,6 +67,7 @@ class AuthIdentity:
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
     is_chat_execution: bool = False
     token_kind: McpTokenKind | None = None
+    token_label: str | None = None
     token_jti: uuid.UUID | None = None
     # What an operator token may call, read from its row on every request.
     scopes: frozenset[str] = frozenset()
@@ -89,6 +90,7 @@ class AuthIdentity:
         """Human-held user credentials only; execution shape never confers human intent."""
         return is_personal_user_credential(
             token_kind=self.token_kind,
+            token_label=self.token_label,
             is_chat_execution=self.is_chat_execution,
             execution_bindings=(
                 self.agent_id,

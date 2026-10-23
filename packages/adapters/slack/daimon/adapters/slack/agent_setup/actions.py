@@ -355,6 +355,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 page=paginate(roster.rows, page=0, page_size=PANEL_PAGE_SIZE),
                 meta=meta,
                 is_admin=is_admin,
+                is_platform_admin=await resolve_is_platform_admin(client, user_id=user_id),
                 attributions=attributions,
                 channel_id=channel_id,
                 routed_agent_names=routed_agent_names(answering_map),
@@ -514,12 +515,18 @@ async def load_agents_view(
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
     is_admin: bool,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the Agents view for `meta`'s page.
 
     Shared with the new-agent submission, which re-renders this same view on
     the root once the created agent exists.
     """
+    platform_admin = False
+    if user_id is not None:
+        client = await resolve_web_client(runtime, team_id=meta.team_id)
+        if client is not None:
+            platform_admin = await resolve_is_platform_admin(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -547,6 +554,7 @@ async def load_agents_view(
         page=page,
         meta=meta.with_page(page.page),
         is_admin=is_admin,
+        is_platform_admin=platform_admin,
         attributions=attributions,
         channel_id=meta.channel_id,
         routed_agent_names=routed_agent_names(answering_map),
@@ -567,6 +575,9 @@ async def load_routing_view(
 
     `user_id` identifies the caller; workspace admins may select an environment.
     """
+    platform_admin = user_id is not None and await resolve_is_platform_admin(
+        client, user_id=user_id
+    )
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
             session,
@@ -578,7 +589,7 @@ async def load_routing_view(
         )
         operator_tokens = (
             await list_panel_operator_tokens(session, tenant_id=tenant_id, now=datetime.now(UTC))
-            if is_admin and runtime.settings.mcp.jwt_secret is not None
+            if platform_admin and runtime.settings.mcp.jwt_secret is not None
             else None
         )
         rule_status = (
@@ -640,6 +651,7 @@ async def load_routing_view(
         environment_picker=environment_picker,
         rule_status=rule_status,
         operator_tokens=operator_tokens,
+        is_platform_admin=platform_admin,
         channel_skills=channel_skills,
     )
 
@@ -651,8 +663,14 @@ async def load_details_view(
     meta: PanelMetadata,
     agent_name: str,
     is_admin: bool,
+    user_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Build the Details view for `agent_name`, or None when it is gone."""
+    platform_admin = False
+    if user_id is not None:
+        client = await resolve_web_client(runtime, team_id=meta.team_id)
+        if client is not None:
+            platform_admin = await resolve_is_platform_admin(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -713,6 +731,7 @@ async def load_details_view(
         details,
         meta=meta.with_view("details", agent_name=agent_name),
         is_admin=is_admin,
+        is_platform_admin=platform_admin,
         coding_tools_available=coding_tools_available(runtime),
         channel_id=meta.channel_id,
         attribution=attributions.get(details.created_by_account_id)
@@ -756,7 +775,9 @@ async def _update_paged_view(
             runtime, client, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
         )
         if meta.view == "routing"
-        else await load_agents_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
+        else await load_agents_view(
+            runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
+        )
     )
     try:
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -847,6 +868,7 @@ async def _dispatch_panel_action(
                 meta=meta.with_view("details", agent_name=name),
                 agent_name=name,
                 is_admin=True,
+                user_id=user_id,
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -981,6 +1003,7 @@ async def _dispatch_panel_action(
             meta=meta.with_view("details", agent_name=name),
             agent_name=name,
             is_admin=is_admin,
+            user_id=user_id,
         )
         if view is not None:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -1105,7 +1128,7 @@ async def _dispatch_panel_action(
 
     if action_id == panel_views.ACTION_GITHUB_BACK:
         roster_view = await load_agents_view(
-            runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin
+            runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
         )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id, view=roster_view
@@ -1117,11 +1140,16 @@ async def _dispatch_panel_action(
         if not agent_name:
             return
         details_view = await load_details_view(
-            runtime, tenant_id=tenant_id, meta=meta, agent_name=agent_name, is_admin=is_admin
+            runtime,
+            tenant_id=tenant_id,
+            meta=meta,
+            agent_name=agent_name,
+            is_admin=is_admin,
+            user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
-                runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin
+                runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
@@ -1178,6 +1206,7 @@ async def _dispatch_panel_action(
             meta=meta.toggled(expansion),
             agent_name=agent_name,
             is_admin=is_admin,
+            user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
@@ -1185,6 +1214,7 @@ async def _dispatch_panel_action(
                 tenant_id=tenant_id,
                 meta=meta.with_view("agents"),
                 is_admin=is_admin,
+                user_id=user_id,
             )
             details_view = _with_stale_notice(stale_view, agent_name=agent_name)
         try:

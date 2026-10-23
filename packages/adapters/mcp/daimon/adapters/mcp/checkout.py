@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import structlog
 from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.web_shell import render_page
-from daimon.core.admin_actions import is_personal_user_credential
+from daimon.core.admin_actions import is_checkout_credential
 from daimon.core.admin_authority import resolve_authority
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
@@ -60,7 +60,7 @@ def build_checkout_route(
             return Response(status_code=401)
         # Authority and money require a human-held user credential. Every
         # execution binding is refused, including an attended admin chat.
-        if not is_personal_user_credential(
+        if not is_checkout_credential(
             token_kind=access.claims.get(TOKEN_KIND_CLAIM),
             is_chat_execution=access.claims.get(CHAT_EXECUTION_CLAIM) is True,
             execution_bindings=tuple(

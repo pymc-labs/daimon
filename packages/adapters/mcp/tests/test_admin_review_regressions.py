@@ -10,7 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 import jwt
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, DaimonJWTVerifier
+from daimon.adapters.mcp.auth.verifier import (
+    CHAT_EXECUTION_CLAIM,
+    TOKEN_LABEL_CLAIM,
+    DaimonJWTVerifier,
+)
 from daimon.adapters.mcp.middleware.mcp_identity import (
     IdentityMiddleware,
     production_agent_id_resolver,
@@ -40,7 +44,12 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_panel import sync_connect_admin
-from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token, mint_cli_mcp_token
+from daimon.core.mcp_auth import (
+    mint_agent_mcp_token,
+    mint_chat_mcp_token,
+    mint_cli_mcp_token,
+    mint_panel_mcp_token,
+)
 from daimon.core.membership import Membership
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_operator_tokens import mint_panel_operator_token
@@ -142,6 +151,19 @@ async def test_real_chat_mint_verifier_middleware_preserves_config_but_refuses_h
                 kind != "member"
             )
         runtime = SimpleNamespace(session_factory=db_session_factory, settings=settings)
+        if kind != "platform":
+            from daimon.adapters.mcp.tools.agents import _attach_mcp_server_impl
+            from daimon.adapters.mcp.tools.credential_requests import _caller_is_admin
+
+            assert not _caller_is_admin(auth)
+            with pytest.raises(ToolError):
+                await _attach_mcp_server_impl(
+                    runtime,
+                    auth,
+                    agent_name="daimon",
+                    server_name="third-party",
+                    url="https://example.test/mcp",
+                )
         for revoke in (False, True):
             if execution or kind != "platform":
                 with pytest.raises(ToolError):
@@ -329,3 +351,93 @@ async def test_malformed_execution_binding_never_becomes_a_personal_credential(
     result = await call_mcp_tool(mcp.http_app(), token=malformed, name="human_operation")
     assert "error" in result
     assert not invoked
+
+
+@pytest.mark.parametrize("panel", [True, False])
+async def test_only_personal_cli_tokens_can_exercise_human_authority(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    panel: bool,
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id="999999999999999995")
+    principal = await make_platform_principal(
+        db_session, tenant=tenant, platform="discord", external_id="111111111111111111"
+    )
+    if panel:
+        token = await mint_panel_mcp_token(
+            db_session, account_id=principal.account_id, secret=SECRET, now=datetime.now(UTC)
+        )
+    else:
+        token = await mint_cli_mcp_token(
+            db_session,
+            account_id=principal.account_id,
+            tenant_id=tenant.id,
+            secret=SECRET,
+            now=datetime.now(UTC),
+            ttl_days=1,
+        )
+    await db_session.commit()
+    # A token may not smuggle a different verifier-owned label.
+    claims = jwt.decode(token, SECRET, algorithms=["HS256"])
+    claims[TOKEN_LABEL_CLAIM] = "personal"
+    token = jwt.encode(claims, SECRET, algorithm="HS256")
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=db_session_factory)
+    access = await verifier.verify_token(token)
+    assert access is not None
+    assert access.claims[TOKEN_LABEL_CLAIM] == ("billing-panel" if panel else None)
+    monkeypatch.setattr(
+        DiscordRestMembershipResolver,
+        "resolve",
+        AsyncMock(return_value=Membership(is_member=True, is_admin=True)),
+    )
+    settings = MagicMock(discord=DiscordSettings(bot_token=SecretStr("test")))
+    runtime = SimpleNamespace(session_factory=db_session_factory, settings=settings)
+    mcp = FastMCP(name="personal-only", auth=verifier)
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=production_subject_resolver,
+            tenant_resolver=production_tenant_resolver,
+            role_resolver=production_role_resolver,
+            agent_id_resolver=production_agent_id_resolver,
+            is_admin_resolver=production_is_admin_resolver,
+            internal_resolver=production_internal_resolver,
+            sessionmaker=db_session_factory,
+            settings=settings,
+        )
+    )
+
+    @mcp.tool
+    async def probe_personal(ctx: Context) -> bool:
+        auth = await ctx.get_state("auth")
+        assert isinstance(auth, AuthIdentity) and auth.is_platform_admin
+        assert auth.is_personal_user is (not panel)
+        if panel:
+            with pytest.raises(ToolError, match="personal user credential"):
+                _require_platform_admin(auth)
+            with pytest.raises(ToolError, match="personal user credential"):
+                await change_admin(runtime, auth, subject_id="target")
+        else:
+            _require_platform_admin(auth)
+            await change_admin(runtime, auth, subject_id="target")
+        return True
+
+    result = await call_mcp_tool(mcp.http_app(), token=token, name="probe_personal")
+    assert "error" not in result
+
+
+def test_legacy_or_billing_panel_identity_is_never_a_personal_credential() -> None:
+    from dataclasses import replace
+
+    base = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
+    assert base.is_personal_user
+    for denied in (replace(base, token_kind=None), replace(base, token_label="billing-panel")):
+        assert not denied.is_personal_user
+        with pytest.raises(ToolError):
+            _require_platform_admin(denied)

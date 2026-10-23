@@ -9,8 +9,6 @@ from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.native_admins import AdminCaller, load_live_subject, read_stored_admin
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
 from daimon.core.stores.github_connect import (
     PINNED_AGENT_MESSAGE,
@@ -102,13 +100,12 @@ async def sync_connect_admin(
     platform_user_id: str,
     is_platform_admin: bool,
 ) -> None:
-    """Synchronize only freshly attested platform authority for native-only stores."""
+    """Ensure a verified platform caller has a principal; never persist authority."""
     if is_platform_admin is not True:
         raise ValueError("Only a platform admin can connect GitHub.")
-    principal = await get_or_create_platform_principal(
+    await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
-    await set_role(session, principal.account_id, Role.ADMIN)
 
 
 _PUBLIC_ERRORS = frozenset(

@@ -45,6 +45,7 @@ async def test_dm_resolves_owner_and_retains_source_budget(db_session: AsyncSess
     updated = await update_routine(
         db_session,
         row.id,
+        edited_by=row.created_by_user_id,
         tenant_id=row.tenant_id,
         destination_kind="channel",
         destination_id="456",
@@ -75,7 +76,11 @@ async def test_dm_update_preserves_origin_and_refuses_new_source_seal(db_session
         db_session, destination_kind="channel", destination_id="456", channel_id="456"
     )
     updated = await update_routine(
-        db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm"
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=row.tenant_id,
+        destination_kind="dm",
     )
     assert updated is not None and updated.channel_id == "456" and updated.destination_id == "123"
     await set_access_policy(
@@ -84,7 +89,13 @@ async def test_dm_update_preserves_origin_and_refuses_new_source_seal(db_session
         policy=TenantAccessPolicy(channel_rules={"456": ChannelRule(readers="inside")}),
     )
     with pytest.raises(StoreError, match="restricted source"):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        await update_routine(
+            db_session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
 
 
 @pytest.mark.parametrize("platform", ["slack", "teams"])
@@ -129,6 +140,7 @@ async def test_result_computed_for_dm_cannot_be_queued_after_public_redirect(db_
     await update_routine(
         db_session,
         row.id,
+        edited_by=row.created_by_user_id,
         tenant_id=row.tenant_id,
         destination_kind="channel",
         destination_id="456",
@@ -154,6 +166,7 @@ async def test_unknown_thread_never_promotes_from_a_new_budget_channel(db_sessio
             await update_routine(
                 db_session,
                 row.id,
+                edited_by=row.created_by_user_id,
                 tenant_id=row.tenant_id,
                 destination_kind="dm",
                 channel_id=budget,
@@ -169,10 +182,20 @@ async def test_thread_conversion_preserves_source_and_checks_later_seals(db_sess
     policy = TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")})
     await set_access_policy(db_session, tenant_id=row.tenant_id, policy=policy)
     with pytest.raises(StoreError, match="restricted source"):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        await update_routine(
+            db_session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
     await set_access_policy(db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy())
     converted = await update_routine(
-        db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm"
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=row.tenant_id,
+        destination_kind="dm",
     )
     assert converted is not None
     assert (converted.channel_id, converted.source_thread_id) == ("456", "789")
@@ -180,7 +203,11 @@ async def test_thread_conversion_preserves_source_and_checks_later_seals(db_sess
     assert keeps_routine_inside(policy, converted), "the fire-time gate retains thread provenance"
     with pytest.raises(StoreError, match="restricted source"):
         await update_routine(
-            db_session, row.id, tenant_id=row.tenant_id, trigger_message="admin edit"
+            db_session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            trigger_message="admin edit",
         )
 
 
@@ -192,19 +219,36 @@ async def test_unknown_legacy_source_cannot_be_converted_to_dm(db_session):
         text("UPDATE routines SET source_provenance_known = false WHERE id = :id"), {"id": row.id}
     )
     with pytest.raises(StoreError, match="Recreate the routine"):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        await update_routine(
+            db_session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
 
 
 async def test_unknown_thread_clears_without_changing_creation_provenance(db_session):
     row = await _create(db_session, destination_kind="thread", destination_id="789")
     cleared = await update_routine(
-        db_session, row.id, tenant_id=row.tenant_id, clear_destination=True, channel_id="456"
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=row.tenant_id,
+        clear_destination=True,
+        channel_id="456",
     )
     assert cleared is not None
     assert (cleared.source_channel_id, cleared.source_thread_id) == (None, "789")
     assert not cleared.source_provenance_known
     with pytest.raises(StoreError, match="Recreate the routine"):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        await update_routine(
+            db_session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
 
 
 async def test_source_pair_survives_changing_budget_and_clearing_delivery(db_session):
@@ -214,6 +258,7 @@ async def test_source_pair_survives_changing_budget_and_clearing_delivery(db_ses
     moved = await update_routine(
         db_session,
         row.id,
+        edited_by=row.created_by_user_id,
         tenant_id=row.tenant_id,
         destination_kind="channel",
         destination_id="999",
@@ -222,7 +267,11 @@ async def test_source_pair_survives_changing_budget_and_clearing_delivery(db_ses
     assert moved is not None and moved.channel_id == "999"
     assert (moved.source_channel_id, moved.source_thread_id) == ("456", "789")
     cleared = await update_routine(
-        db_session, row.id, tenant_id=row.tenant_id, clear_destination=True
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=row.tenant_id,
+        clear_destination=True,
     )
     assert cleared is not None and cleared.channel_id == "999"
     assert (cleared.source_channel_id, cleared.source_thread_id) == ("456", "789")
@@ -232,7 +281,13 @@ async def test_source_pair_survives_changing_budget_and_clearing_delivery(db_ses
         policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
     )
     with pytest.raises(StoreError, match="restricted source"):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        await update_routine(
+            db_session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
@@ -259,6 +314,7 @@ async def test_legacy_public_edits_never_promote_creation_provenance(
         edited = await update_routine(
             db_session,
             row.id,
+            edited_by=row.created_by_user_id,
             tenant_id=row.tenant_id,
             destination_kind=kind,
             destination_id=target,
@@ -275,4 +331,10 @@ async def test_legacy_public_edits_never_promote_creation_provenance(
             "legacy public runs remain available"
         )
     with pytest.raises(StoreError):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        await update_routine(
+            db_session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )

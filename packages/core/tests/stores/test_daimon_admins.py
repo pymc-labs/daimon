@@ -296,4 +296,15 @@ async def test_shared_configuration_helpers_recheck_delegation(
             caller=caller,
             default=DeploymentDefault(),
         )
-        assert (decision == "allow") is not revoke
+        assert decision != "allow", "MCP connections stay platform-only even before revocation"
+        assert (
+            await decide_mcp_replacement(
+                db_session_factory,
+                tenant_id=tenant.id,
+                platform="discord",
+                agent=agent,
+                caller=AdminCaller(platform_user_id="native", is_server_admin=True),
+                default=DeploymentDefault(),
+            )
+            == "allow"
+        )

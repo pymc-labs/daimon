@@ -14,7 +14,11 @@ from urllib.parse import parse_qsl
 import httpx
 import pytest
 import pytest_asyncio
-from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_KIND_CLAIM
+from daimon.adapters.mcp.auth.verifier import (
+    CHAT_EXECUTION_CLAIM,
+    TOKEN_KIND_CLAIM,
+    TOKEN_LABEL_CLAIM,
+)
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.admin_authority import AdminAuthority
 from daimon.core.billing import BillingConfig
@@ -160,6 +164,7 @@ def _build_app(
                     "client_id": "test",
                     "tenant_id": str(_TENANT_ID),
                     "sub": str(_ACCOUNT_ID),
+                    TOKEN_KIND_CLAIM: "cli",
                     **(verified_claims or {}),
                 }
             }
@@ -455,6 +460,31 @@ async def test_checkout_distinguishes_verified_chat_from_external_agent_keys(
     if external:
         claims["agent_id"] = str(uuid.uuid4())
     app = _build_app(sessionmaker, stripe, verified_claims=claims)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/billing/checkout",
+            json={"amount": 10},
+            headers={"Authorization": f"Bearer {_VALID_TOKEN}"},
+        )
+    assert response.status_code == expected
+    assert (stripe.last_post_data is not None) is (expected == 200)
+
+
+@pytest.mark.parametrize("kind,label,expected", [(None, None, 403), ("cli", "billing-panel", 200)])
+async def test_checkout_accepts_only_registered_human_checkout_credentials(
+    sessionmaker, kind, label, expected
+) -> None:
+    stripe = _FakeStripeHTTPClient(_CANNED_SESSION)
+    app = _build_app(
+        sessionmaker,
+        stripe,
+        verified_claims={
+            TOKEN_KIND_CLAIM: kind,
+            TOKEN_LABEL_CLAIM: label,
+        },
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:

@@ -2,11 +2,12 @@
 
 Billing, budget reads/writes, caps, promo redemption and checkout require a
 platform admin acting directly through a live-checked platform panel or a
-personal CLI/OAuth user credential. Chat execution, routines, continuations,
+registered personal CLI credential. Chat execution, routines, continuations,
 watches, external agent keys and operator tokens are refused, including when
 their owner is a platform admin. Use the local operator CLI for deployment-wide
-promo issuing; it is unavailable through MCP credentials.
-
+promo issuing; it is unavailable through MCP credentials. Legacy tokens and
+billing-panel tokens cannot exercise MCP money tools. The short-lived
+billing-panel token serves only the live-checked checkout HTTP hop.
 
 Page-watch wakes recheck balance, member monthly caps and their attributed channel
 budget before each model or confirmation send and each report write. Admission
@@ -839,7 +840,6 @@ An outcome's `unpriced_calls` describes diagnostic price coverage, not whether
 the live recorder inserted a debit. Check `usage_events` and `tenant_ledger`
 by `(managed_session_id, event_id)` to establish the money consequence.
 
-
 ## Per-turn usage telemetry
 
 `daimon usage turns TENANT_UUID --days 7 --json` lists content-free turn
@@ -988,7 +988,6 @@ commit, so a batch failure rolls back every debit and emits no usage sample.
 Gemini Flash currently retains interaction usage; this API refuses to invent
 independent child meters or add delegated costs to potentially inclusive totals.
 
-
 ### Explicit offline footer accounting hooks
 
 `daimon.testing.footer_accounting.FooterAccountingHook` joins real
@@ -1040,7 +1039,6 @@ charges remain idempotent, and later verified revisions settle only their delta.
 An unavailable final meter does not establish zero cost or release an unverified
 reservation. Local storage, validation and accounting failures still propagate.
 
-
 `evaluate_turn` consumes the read-only `TurnAccountingReader` API with independent
 normalized native receipts, per-revision `RevisionRateAttribution` evidence and
 `TurnUsageInventory`. A sealed, completely priced and settled request walk can
@@ -1050,7 +1048,6 @@ signed corrections once, and parses the actual posted footer. Unknown rates,
 container time or inventory leave the result PENDING; a known debit cannot fill
 in an unknown cost. The complete-turn path leaves the original `evaluate`
 contract available and changes no posted cost or default product behavior.
-
 
 The additive `FooterAccountingHook.evaluate_turn` joins that complete per-turn
 snapshot to actual Discord, Slack or Teams adapter captures. Every post receipt
@@ -1063,7 +1060,6 @@ OpenAI/Gemini footers even when controlled host arithmetic passes. Unknown facts
 still return typed PENDING. The older `evaluate` interface remains unchanged;
 controlled component results are not live-spend or full catalog certificates.
 
-
 Native OpenAI/Gemini platform footers can show settled turn cost with
 `DAIMON_TURN__NATIVE_FOOTER_COST=true` (default `false`). The host must supply
 verified rates for the resolved model and complete native usage, infrastructure
@@ -1073,7 +1069,6 @@ markup and follows the ledger's per-charge rounding. Unknown measurement shows
 subtotal. This option supplies no rates and starts no reconciliation timer.
 With the option off, native footers keep their previous appearance. Anthropic
 footers keep their existing appearance and arithmetic with either value.
-
 
 Admin backend cost previews use `pricing.list_price_preview(model, rates)` with
 rates from the existing pricing table or the explicitly supplied native runtime
@@ -1085,7 +1080,6 @@ billing markup, hosted runtime, external tools and cache storage. The worst-case
 per-turn cost remains explicitly unknown: token limits on one request do not
 bound a turn's request count or other charges. A preview neither reserves spend
 nor establishes a financial cap.
-
 
 Host-worker accounting reads use `usage_delegation.read_delegated_usage` with
 host-authorized worker bindings and resolved tariffs. The read preserves each
@@ -1122,7 +1116,6 @@ stay pending; replay never substitutes a fresh observer. `attribution_complete`
 certifies only this reference join, not final usage, price, runtime, settlement
 or permission to release a reservation. Existing no-selector reads are unchanged.
 
-
 Fleet monetary interfaces are opt-in host seams; ordinary turns do not call
 them. `channel_budget.admit_fleet_worker` is the single transactional spawn and
 reservation entry point. Its producer retains ambiguous charges at their whole
@@ -1153,7 +1146,6 @@ deadline: `run_prepared_turn` owns it. Complete native execution, operator-funde
 admission, replacement inventory and exact final settlement remain unavailable
 here. These interfaces create no ledger charge or provider-native hard cap;
 other runs' undebited native floors are discovered by their own refresh.
-
 
 At the bound worker's before-input edge, hosts call the same
 `require_fleet_worker_admission` with the actual prepared `binding`. It requires
@@ -1201,7 +1193,6 @@ Native internal inference, token overshoot and remote cancellation delay are
 not bounded by that host input count. Requested hard token or model-request
 limits retain their separate unsupported-capability refusal.
 
-
 For an explicitly budgeted worker, the Anthropic session composer sends the
 canonical amount as positive integer USD cents in `budget.max_list_cost.amount`.
 The shared lifecycle codec carries that field through the SDK's extra body for
@@ -1212,7 +1203,6 @@ The OpenAI preparation edge compiles the amount into the existing
 or missing, malformed or changed native echoes. Native rejection never retries
 without the control. Unconfigured calls omit these additional request fields;
 soft controls do not make provider-internal inference a hard bounded bill.
-
 
 An explicitly budgeted worker's scoped OpenAI creation acknowledgement is retained as a provisioning receipt
 before its native spend-control echo is validated. The receipt includes the
@@ -1249,7 +1239,6 @@ totals additionally permit the existing independently proven disjoint child
 inventory; this does not enable delegation configuration. Usage DTOs carry only
 a provider, so accounting reads the registered profiles' shared mode and refuses
 an ambiguous declaration rather than picking a different billing protocol.
-
 
 Production native runtime registrars obtain paid Standard direct-API text rates
 from `daimon.core.pricing.provider_prices(profile)`. Their provider identities come from the existing profile owner, and validity

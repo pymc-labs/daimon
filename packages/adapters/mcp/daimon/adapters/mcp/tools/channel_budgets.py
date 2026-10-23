@@ -325,7 +325,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Show a channel's spending budget: its limit, window and what it has spent.
 
         Pass the channel id; a thread id resolves to its parent channel. Only a
-        platform admin acting directly with a personal CLI/OAuth
+        platform admin acting directly with a personal CLI
         credential may read budgets; chat and routines are refused. ``budget`` is null when the
         channel has none. Read ``summary`` back to the user.
         """
@@ -335,7 +335,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_channel_budgets(ctx: Context) -> list[ChannelBudgetResult]:  # pyright: ignore[reportUnusedFunction]
-        """List channel budgets with a personal platform-admin CLI/OAuth credential."""
+        """List channel budgets with a personal platform-admin CLI credential."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})

@@ -34,6 +34,7 @@ from daimon.adapters.mcp.auth.verifier import (
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
+    TOKEN_LABEL_CLAIM,
 )
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
 from daimon.core.admin_authority import resolve_authority
@@ -477,6 +478,7 @@ class IdentityMiddleware(Middleware):
 class _TokenFields(TypedDict):
     is_chat_execution: bool
     token_kind: McpTokenKind | None
+    token_label: str | None
     token_jti: uuid.UUID | None
     scopes: frozenset[str]
 
@@ -489,9 +491,11 @@ def _token_fields(claims: Mapping[str, object]) -> _TokenFields:
     kind = claims.get(TOKEN_KIND_CLAIM)
     jti = claims.get(TOKEN_JTI_CLAIM)
     scopes = claims.get(SCOPES_CLAIM)
+    label = claims.get(TOKEN_LABEL_CLAIM)
     return _TokenFields(
         is_chat_execution=claims.get(CHAT_EXECUTION_CLAIM) is True,
         token_kind=_TOKEN_KINDS.get(kind) if isinstance(kind, str) else None,
+        token_label=label if isinstance(label, str) else None,
         token_jti=_uuid_or_none(jti) if isinstance(jti, str) else None,
         scopes=(
             frozenset(s for s in cast("list[object]", scopes) if isinstance(s, str))

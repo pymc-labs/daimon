@@ -35,7 +35,6 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -145,7 +144,7 @@ async def send_coding_tools_access(
                 tenant_id=tenant_id,
                 platform="discord",
                 caller=caller,
-                action=DelegatedAction.MCP_CONNECTIONS,
+                action=None,
             )
     except AccessPolicyUnreadable:
         await interaction.response.send_message(POLICY_UNREADABLE_REFUSAL, ephemeral=True)

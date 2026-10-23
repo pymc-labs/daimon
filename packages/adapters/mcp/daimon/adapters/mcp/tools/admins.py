@@ -74,7 +74,7 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Grant Daimon admin to a user or Discord role (platform admins only).
 
-        Only live platform admins using a personal CLI/OAuth credential may grant.
+        Only live platform admins using a personal CLI credential may grant.
         Chat, routines and all agent-run credentials are refused. Delegates cannot delegate.
         This grants configuration access; billing and spend caps remain platform-only.
         """
@@ -91,7 +91,7 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Revoke an explicit Daimon admin grant immediately (platform admins only).
 
-        Requires a personal CLI/OAuth credential; chat and routines are refused.
+        Requires a personal CLI credential; chat and routines are refused.
         Deletes the grant and records its audit atomically; delegated authority is never cached.
         Platform authority cannot be revoked; remaining grants still apply.
         """

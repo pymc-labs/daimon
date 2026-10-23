@@ -88,6 +88,7 @@ def _auth(
         platform=platform,
         is_admin=admin,
         is_platform_admin=admin,
+        token_kind="cli",
     )
 
 

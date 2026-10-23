@@ -38,7 +38,7 @@ from daimon.core.config import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_panel_mcp_token
+from daimon.core.mcp_auth import mint_cli_mcp_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role, RoutineRow
@@ -1866,9 +1866,11 @@ async def test_required_destination_on_authenticated_public_mcp_surface(
             anthropic=client,
         )
         async with committing_sessionmaker.begin() as token_db:
-            token = await mint_panel_mcp_token(
+            token = await mint_cli_mcp_token(
                 token_db,
                 account_id=account.id,
+                tenant_id=tenant.id,
+                ttl_days=1,
                 secret=secret if valid_token else b"different-synthetic-signing-key",
                 now=datetime.now(UTC),
             )
@@ -2156,8 +2158,14 @@ async def test_authenticated_mcp_dm_conversion_enforces_thread_seal(
 ):
     from daimon.core.access_policy import ChannelRule
     from daimon.core.config import DiscordSettings
-    from daimon.core.discord_membership import verify_discord_source
+    from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
+    from daimon.core.membership import Membership
 
+    monkeypatch.setattr(
+        DiscordRestMembershipResolver,
+        "resolve",
+        AsyncMock(return_value=Membership(is_member=True, is_admin=True)),
+    )
     tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
     from daimon.core.stores.accounts import set_role
 
@@ -2221,8 +2229,13 @@ async def test_authenticated_mcp_dm_conversion_enforces_thread_seal(
         anthropic=client,
     )
     async with committing_sessionmaker.begin() as session:
-        token = await mint_panel_mcp_token(
-            session, account_id=account.id, secret=secret, now=datetime.now(UTC)
+        token = await mint_cli_mcp_token(
+            session,
+            account_id=account.id,
+            tenant_id=tenant.id,
+            ttl_days=1,
+            secret=secret,
+            now=datetime.now(UTC),
         )
     try:
         if clear_first:
@@ -2544,9 +2557,16 @@ async def test_authenticated_retarget_never_rewrites_creation_source(
 ):
     from daimon.core.access_policy import ChannelRule
     from daimon.core.config import DiscordSettings
+    from daimon.core.discord_membership import DiscordRestMembershipResolver
+    from daimon.core.membership import Membership
     from daimon.core.routine_delivery import poll_deliveries_once
     from daimon.core.stores.accounts import set_role
 
+    monkeypatch.setattr(
+        DiscordRestMembershipResolver,
+        "resolve",
+        AsyncMock(return_value=Membership(is_member=True, is_admin=True)),
+    )
     tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
     account = await make_account(db_session, tenant=tenant)
     await set_role(db_session, account.id, Role.ADMIN)
@@ -2608,8 +2628,13 @@ async def test_authenticated_retarget_never_rewrites_creation_source(
         anthropic=client,
     )
     async with committing_sessionmaker.begin() as session:
-        token = await mint_panel_mcp_token(
-            session, account_id=account.id, secret=secret, now=datetime.now(UTC)
+        token = await mint_cli_mcp_token(
+            session,
+            account_id=account.id,
+            tenant_id=tenant.id,
+            ttl_days=1,
+            secret=secret,
+            now=datetime.now(UTC),
         )
     try:
         response = await call_mcp_tool(
@@ -2731,13 +2756,19 @@ async def test_concurrent_public_edit_cannot_expose_private_metadata(
                 return await execute(statement, *args, **kwargs)
 
             monkeypatch.setattr(db, "execute", paused_execute)
-            await routines.update_routine(db, public.id, tenant_id=tenant.id, **edits)
+            await routines.update_routine(
+                db, public.id, edited_by=public.created_by_user_id, tenant_id=tenant.id, **edits
+            )
 
     task = asyncio.create_task(stale_edit())
     await asyncio.wait_for(read.wait(), 15)
     async with committing_sessionmaker.begin() as db:
         private = await routines.update_routine(
-            db, public.id, tenant_id=tenant.id, destination_kind="dm"
+            db,
+            public.id,
+            edited_by=public.created_by_user_id,
+            tenant_id=tenant.id,
+            destination_kind="dm",
         )
         assert private is not None
         await routines.record_result(
@@ -2759,7 +2790,9 @@ async def test_concurrent_public_edit_cannot_expose_private_metadata(
     assert await _list_routines_impl(runtime, owner) == []
 
     async with committing_sessionmaker.begin() as db:
-        await routines.update_routine(db, public.id, tenant_id=tenant.id, **edits)
+        await routines.update_routine(
+            db, public.id, edited_by=public.created_by_user_id, tenant_id=tenant.id, **edits
+        )
     readers = (admin, owner) if change == "agent" else (admin,)
     for reader in readers:
         fetched = await _get_routine_impl(runtime, reader, routine_id=public.id)
@@ -2796,7 +2829,9 @@ async def test_update_rejects_a_revision_changed_after_mcp_authorization(
 
         async def intervening_edit(db, routine_id, **kwargs):
             async with committing_sessionmaker.begin() as other:
-                await original_update(other, routine_id, tenant_id=tenant.id, destination_kind="dm")
+                await original_update(
+                    other, routine_id, tenant_id=tenant.id, destination_kind="dm", edited_by="123"
+                )
             return await original_update(db, routine_id, **kwargs)
 
         monkeypatch.setattr(routines, "update_routine", intervening_edit)
