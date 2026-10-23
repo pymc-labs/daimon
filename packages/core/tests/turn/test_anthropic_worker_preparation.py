@@ -614,3 +614,58 @@ async def test_a_task_worker_runs_when_the_provider_echoes_its_default_model_con
     )
     assert result.status == "succeeded"
     assert not any(call.path.endswith("/new-worker/archive") for call in trace.requests)
+
+
+async def _refused_and_archived(native_worker, fault):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = fault
+    with pytest.raises(AdmissionDenied):
+        await run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert not any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+    archived = [call.path for call in trace.requests if call.path.endswith("/archive")]
+    assert archived == ["/v1/agents/new-worker/archive"]
+
+
+async def test_an_echoed_default_on_a_different_model_is_still_refused(native_worker):
+    """#1380 review: only the model id may differ in form, never in value."""
+    request, root, claimed, trace, controls = native_worker
+    assert not claimed.spec.get("extensions")
+    await _refused_and_archived(native_worker, "echo_other_model")
+
+
+@pytest.mark.parametrize("native_worker", ["live_root_effort"], indirect=True)
+async def test_a_spec_with_model_controls_needs_an_exact_echo(native_worker):
+    """#1380 review: the id-only comparison applies only when the spec declares no controls."""
+    request, root, claimed, trace, controls = native_worker
+    assert root.spec.extensions  # the worker asked for effort "medium"
+    await _refused_and_archived(native_worker, "echo_other_effort")
+
+
+async def test_an_unknown_agent_create_outcome_never_archives(native_worker):
+    """#1380 review: a lost ACK is retried and must find the same agent, so nothing archives."""
+    from daimon.core.headless_runner import run_worker
+    from mux.errors import ProviderError
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = "lost_ack"
+    with pytest.raises((ProviderError, Exception)):
+        await run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert sum(call.method == "POST" and call.path == "/v1/agents" for call in trace.requests) == 1
+    assert not any(call.path.endswith("/archive") for call in trace.requests)

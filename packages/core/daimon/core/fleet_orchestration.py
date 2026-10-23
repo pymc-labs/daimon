@@ -146,7 +146,15 @@ def _admission_cause(
             # No installed or default runtime row serves this worker's model/profile.
             if (current.site or "").startswith("turn.runtime_manifest.select_runtime_manifest:"):
                 return "worker_runtime_missing"
-        current = current.__cause__ or current.__context__
+        # The chain a traceback shows: an explicit cause, else an implicit context
+        # unless `raise ... from None` suppressed it (that refusal was replaced).
+        current = (
+            current.__cause__
+            if current.__cause__ is not None
+            else None
+            if current.__suppress_context__
+            else current.__context__
+        )
     return None
 
 

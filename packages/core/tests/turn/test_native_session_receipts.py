@@ -407,6 +407,16 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
                 # SMOKE-1 J3: MA fills its default controls on a bare-id model.
                 model = raw["model"]["id"] if isinstance(raw["model"], dict) else raw["model"]
                 raw["model"] = {"id": model, "speed": "standard", "effort": {"type": "medium"}}
+            if controls["fault"] == "echo_other_model" and agent.id == "new-worker":
+                # Default-looking controls, but on a model the worker never asked for.
+                raw["model"] = {
+                    "id": "claude-sonnet-4-6",
+                    "speed": "standard",
+                    "effort": {"type": "medium"},
+                }
+            if controls["fault"] == "echo_other_effort" and agent.id == "new-worker":
+                model = raw["model"]["id"] if isinstance(raw["model"], dict) else raw["model"]
+                raw["model"] = {"id": model, "speed": "standard", "effort": {"type": "high"}}
             if controls["fault"] == "builtin_widening" and agent.id == "new-worker":
                 for config in raw["tools"][0]["configs"]:
                     if config["name"] == "bash":
