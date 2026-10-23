@@ -178,8 +178,9 @@ class FleetRefused(ValueError):
 
     def __init__(self, reason: str, *, detail: str | None = None) -> None:
         self.reason = reason
-        plain = " ".join(part for part in (detail, _PLAIN_REFUSALS.get(reason)) if part)
-        super().__init__(f"fleet: {reason}" + (f". {plain}" if plain else ""))
+        # The real limits and what the user can do, for whoever relays the refusal.
+        self.plain = " ".join(part for part in (detail, _PLAIN_REFUSALS.get(reason)) if part)
+        super().__init__(f"fleet: {reason}" + (f". {self.plain}" if self.plain else ""))
 
 
 def fleet_limits_sentence(max_workers: int, budget_usd: Decimal) -> str:
