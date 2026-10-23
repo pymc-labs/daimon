@@ -40,7 +40,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mux_compat import update_agent
-from daimon.core.native_admins import AdminCaller
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
@@ -98,10 +98,14 @@ async def decide_mcp_replacement(
     session counts, the caller's own included. The facts are read only when the
     answer depends on them.
     """
+    async with session_factory() as session:
+        is_admin = (
+            await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+        ).is_admin
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     facts = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
     if needs_reachability_read(
-        "mcp_replace", is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
+        "mcp_replace", is_admin=is_admin, is_daimon_managed=is_daimon_managed
     ):
         async with session_factory() as session:
             facts = await load_target_facts(
@@ -115,7 +119,7 @@ async def decide_mcp_replacement(
                 caller=caller,
                 is_daimon_managed=is_daimon_managed,
             )
-    return decide_operation("mcp_replace", is_admin=caller.is_server_admin, target=facts)
+    return decide_operation("mcp_replace", is_admin=is_admin, target=facts)
 
 
 @dataclass(frozen=True, slots=True)

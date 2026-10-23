@@ -14,7 +14,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
-    _require_admin,  # pyright: ignore[reportPrivateUsage]
+    _require_platform_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core import promo_credit
@@ -50,7 +50,7 @@ async def _redeem_promo_code_impl(
     runtime: McpRuntime, auth: AuthIdentity, code: str
 ) -> RedeemPromoCodeResult:
     require_scope(auth, "promo:redeem")
-    _require_admin(auth)
+    _require_platform_admin(auth)
     result = await promo_credit.redeem_promo_code(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -58,7 +58,7 @@ async def _redeem_promo_code_impl(
         code=code,
         now=datetime.now(UTC),
         channel=None,  # no channel here: a channel code is refused as needs_channel
-        is_admin=True,  # checked by _require_admin above
+        is_admin=True,  # checked by _require_platform_admin above
     )
     if isinstance(result, promo_credit.PromoRedeemRefused):
         return RedeemPromoCodeResult(

@@ -27,6 +27,7 @@ from daimon.core.confirmation import (
     ToolRuleCardReference,
     prompt_for_tool_call,
 )
+from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
@@ -46,10 +47,12 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.common import Client, ClientOptions
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
     CONVERSATION_ID,
+    ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     SERVICE_URL,
     USER_NAME,
@@ -652,13 +655,18 @@ async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
 
 async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
     monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Clicking a card repeatedly must not cost a Graph owner read each time."""
     from daimon.core import confirmation
 
     team = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
     owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
-    runtime = MagicMock(team_owners=owners, group_members=GroupMembersCache())
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    runtime = MagicMock(
+        team_owners=owners, group_members=GroupMembersCache(), sessionmaker=db_session_factory
+    )
+    runtime.settings.teams.tenant_id = ENTRA_TENANT_ID
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
     runtime.settings.teams.admin_team_id = team
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))

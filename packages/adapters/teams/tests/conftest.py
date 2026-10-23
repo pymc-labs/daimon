@@ -44,6 +44,7 @@ from daimon.testing import (
     make_agent_env_echo_handler,
 )
 from daimon.testing.asgi import asgi_lifespan
+from daimon.testing.db import build_test_engine
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
@@ -54,7 +55,7 @@ from jsonschema.exceptions import best_match
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 # Synthetic identifiers only.
 ENTRA_TENANT_ID = str(uuid.UUID(int=1))
@@ -678,3 +679,28 @@ def isolate_agent_faces() -> Iterator[None]:
 
     yield
     cancel_pending_agent_faces()
+
+
+@pytest.fixture
+async def service_session_factory(
+    db_engine: AsyncEngine,
+    db_schema: str,
+    db_clean: None,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Independent pooled transactions for services and background demotions.
+
+    Preparation opens another authorization read while holding its fence. The
+    shared fixture connection cannot model this concurrency, and its pool
+    reserves one of only two slots for the fixture itself.
+    """
+    engine = build_test_engine(
+        db_engine.url.render_as_string(hide_password=False),
+        db_schema,
+        pool_size=4,
+        max_overflow=2,
+        pool_timeout=10,
+    )
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()

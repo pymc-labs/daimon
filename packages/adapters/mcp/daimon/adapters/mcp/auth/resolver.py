@@ -52,9 +52,13 @@ class AuthIdentity:
     # Ordinary chat execution identity (see the module docstring).
     chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
-    # True when the minted JWT carries is_admin=True.
-    # Derived by the adapter from Discord owner/manage_guild/administrator or CLI context.
+    # Resolved from current platform authority and grants at the request boundary.
+    # Platform callers never inherit a baked JWT admin claim.
     is_admin: bool = False
+    # Separately attested; delegated admins never acquire this bit.
+    is_platform_admin: bool = False
+    # Live membership evidence, never copied from token claims or account role ids.
+    verified_role_ids: tuple[str, ...] = ()
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
     # Signed grant for one isolated provider session, never a tool argument.

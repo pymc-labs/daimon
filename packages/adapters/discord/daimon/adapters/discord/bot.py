@@ -4072,7 +4072,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -4233,7 +4233,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -4281,7 +4281,7 @@ class DaimonBot(commands.Bot):
                 responder_name=admission.config.agent_name or agent.name,
                 configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                 configuration_target_name=admission.config.configuration_target_name,
-                role=role,
+                role=Role.ADMIN if admission.is_admin else Role.USER,
                 is_setup=admission.config.thread_binding_kind == "setup",
             ) as origin:
                 outcome = await run_prepared_turn(
@@ -4828,6 +4828,7 @@ class DaimonBot(commands.Bot):
             if err.reason != "writers_none":
                 await target.send(admission_refusal_message(err.reason, self.runtime.settings))
             return
+        is_admin = admission.is_admin
 
         agent = admission.agent
 
@@ -5160,7 +5161,7 @@ class DaimonBot(commands.Bot):
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
             configuration_target_name=admission.config.configuration_target_name,
-            role=role,
+            role=Role.ADMIN if admission.is_admin else Role.USER,
             is_setup=admission.config.thread_binding_kind == "setup",
             message_text=message.content,
             queued_message=content_override is not None,

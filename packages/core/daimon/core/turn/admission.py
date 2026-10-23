@@ -84,7 +84,7 @@ from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.accounts import set_platform_role_ids, set_role
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -243,6 +243,11 @@ class Admission:
     # The stored agent before the conversation's model was put in `agent`; set
     # only with `model_override`. A fleet root or worker runs it (`authored`).
     authored_agent: BetaManagedAgentsAgent | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def is_admin(self) -> bool:
+        """The effective authority admitted for this turn; absent evidence denies."""
+        return self.grant is not None and self.grant.subject.is_admin
 
     def authored(self) -> Admission:
         """This admission without the conversation's model choice: the agent as authored.
@@ -450,32 +455,36 @@ async def admit_impl(
 
     # --- Identity resolution ---
     async with deps.sessionmaker() as session:
+        from daimon.core.stores.daimon_admins import lock_authority
+
+        await lock_authority(session, tenant_id=tenant_id)
         principal = await get_or_create_platform_principal(
             session,
             tenant_id=tenant_id,
             platform=platform,
             external_id=external_user_id,
         )
-        if role is not None:
-            await set_role(session, principal.account_id, role)
-        await session.commit()
-        mark("identity")
-        # Read after the role commit, so a refused turn still records the role.
-        policy = await load_access_policy(session, tenant_id=tenant_id)
-        mark("policy_and_admins")
+        from daimon.core.native_admins import is_daimon_admin
 
-        # Refusals must happen before config is read. Keeping the session here
-        # reuses its connection for the config cascade after authorization.
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        admin = await is_daimon_admin(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            platform_user_id=external_user_id,
+            is_platform_admin=role is Role.ADMIN,
+            role_ids=role_ids,
+        )
         subject = build_subject(
-            is_admin=role is Role.ADMIN,
+            is_admin=admin,
             platform_user_id=external_user_id,
             role_ids=role_ids,
             verified_membership=verified_membership,
         )
         if (
             platform == "discord"
-            and verified_membership is None
-            and (policy.invoker_role_ids or deps.membership_resolver is not None)
+            and (is_dm or verified_membership is None)
+            and (is_dm or policy.invoker_role_ids or deps.membership_resolver is not None)
         ):
             subject = await resolve_subject(
                 deps.sessionmaker,
@@ -485,9 +494,28 @@ async def admit_impl(
                 require_fresh=is_dm,
                 session=session,
             )
-            if subject.verified_membership is not True:
-                raise AdmissionDenied(reason="invoker_not_allowed")
-        if is_dm and platform == "discord" and subject.verified_membership is not True:
+        # Keep role writes in the same tenant lock as the grant read. Revocation
+        # waits for this write, then demotes it; stale grants cannot resurrect it.
+        if role is not None or subject.is_admin:
+            await set_role(
+                session, principal.account_id, Role.ADMIN if subject.is_admin else Role.USER
+            )
+        if platform == "discord":
+            await set_platform_role_ids(session, principal.account_id, subject.role_ids)
+        await session.commit()
+        mark("identity")
+        mark("policy_and_admins")
+        if (
+            platform == "discord"
+            and (
+                (
+                    verified_membership is None
+                    and (policy.invoker_role_ids or deps.membership_resolver is not None)
+                )
+                or is_dm
+            )
+            and subject.verified_membership is not True
+        ):
             raise AdmissionDenied(reason="invoker_not_allowed")
         turn_place = build_turn_place(
             channel_id=channel_id,

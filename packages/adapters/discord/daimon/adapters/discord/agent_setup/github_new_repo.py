@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_home import GitHubLinkView, connect_button_view
-from daimon.adapters.discord.checks import is_guild_admin, is_member_guild_admin
+from daimon.adapters.discord.checks import is_guild_admin, is_member_daimon_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_notice_visibility import new_repo_notice_copy, visible_new_repo_names
@@ -61,7 +61,7 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
         )
     except discord.HTTPException:
         member = None
-    if member is None or not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
+    if member is None or not await is_member_daimon_admin(member, runtime=runtime):
         await interaction.followup.send("Only a server admin can connect repos.", ephemeral=True)
         return True
     async with runtime.sessionmaker.begin() as session:
@@ -112,7 +112,7 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                 tenant_id=tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+                verified_tenant_admin=await is_member_daimon_admin(member, runtime=runtime),
             )
             url = await connect_link(
                 session,
@@ -120,7 +120,7 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
                 tenant_id=tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+                verified_tenant_admin=await is_member_daimon_admin(member, runtime=runtime),
                 workspace_label=guild.name,
                 requester_label=member.display_name,
                 origin_parent_channel_id=str(interaction.channel_id),
@@ -196,7 +196,7 @@ class NewRepoCard(discord.ui.View):
             or interaction.guild_id is None
             or derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
             != self.group.tenant_id
-            or not is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+            or not await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
         ):
             await interaction.response.send_message(
                 "Only the server admin who received this card can use it.", ephemeral=True
@@ -213,7 +213,7 @@ class NewRepoCard(discord.ui.View):
                     tenant_id=self.group.tenant_id,
                     platform="discord",
                     platform_user_id=str(interaction.user.id),
-                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                    verified_tenant_admin=await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                 )
                 url = await connect_link(
                     session,
@@ -221,7 +221,7 @@ class NewRepoCard(discord.ui.View):
                     tenant_id=self.group.tenant_id,
                     platform="discord",
                     platform_user_id=str(interaction.user.id),
-                    verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                    verified_tenant_admin=await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                     workspace_label=interaction.guild.name if interaction.guild else None,
                     requester_label=interaction.user.display_name,
                     origin_parent_channel_id=str(interaction.channel_id),
@@ -299,7 +299,7 @@ async def send_pending_notice(
     tenant_id: uuid.UUID,
 ) -> None:
     """Try one queued card after an admin opens the setup panel."""
-    if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+    if not await is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
         return
     async with runtime.sessionmaker.begin() as session:
         group = await claim_notice_group(session, tenant_id=tenant_id, now=datetime.now(UTC))

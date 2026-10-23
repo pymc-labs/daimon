@@ -75,3 +75,38 @@ async def test_a_group_chat_click_is_answered(
     assert await card_actor(_runtime(db_session_factory), click) is not None, (
         "a group chat may hold other organisations"
     )
+
+
+async def test_granted_clicker_gets_setup_authority_but_no_billing_authority(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.ma_identity import derive_tenant_uuid
+    from daimon.core.stores.daimon_admins import change_grant
+
+    runtime = build_teams_runtime(db_session_factory, admins=())
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        await change_grant(
+            session,
+            tenant_id=tenant_id,
+            platform="teams",
+            subject_kind="user",
+            subject_id=AAD_OBJECT_ID,
+            actor_user_id="owner",
+            is_platform_admin=True,
+        )
+    actor = await card_actor(runtime, _click())
+    assert actor is not None and actor.is_admin and not actor.is_platform_admin
+    async with db_session_factory.begin() as session:
+        await change_grant(
+            session,
+            tenant_id=tenant_id,
+            platform="teams",
+            subject_kind="user",
+            subject_id=AAD_OBJECT_ID,
+            actor_user_id="owner",
+            is_platform_admin=True,
+            revoke=True,
+        )
+    actor = await card_actor(runtime, _click())
+    assert actor is not None and not actor.is_admin

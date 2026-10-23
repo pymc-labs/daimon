@@ -26,6 +26,8 @@ class SecurityAuditEntry(BaseModel):
     agent_name: str | None = None
     platform: str | None
     platform_user_id: str | None
+    admin_subject_kind: str | None = None
+    admin_subject_id: str | None = None
     tool_name: str
     operation: str | None
     outcome: Literal["allowed", "denied", "error"]
@@ -107,6 +109,8 @@ async def append_event(
     agent_name: str | None = None,
     platform: str | None,
     platform_user_id: str | None,
+    admin_subject_kind: str | None = None,
+    admin_subject_id: str | None = None,
     tool_name: str,
     operation: str | None,
     outcome: Literal["allowed", "denied", "error"],
@@ -149,6 +153,8 @@ async def append_event(
             account_id = None
             platform_user_id = None
     event = SecurityAuditEvent(
+        admin_subject_kind=admin_subject_kind,
+        admin_subject_id=admin_subject_id,
         tenant_id=tenant_id,
         account_id=account_id,
         agent_id=agent_id,
@@ -307,3 +313,33 @@ async def prune_events(session: AsyncSession, *, tenant_id: uuid.UUID, older_tha
             )
         )
     return cast(CursorResult[Any], result).rowcount
+
+
+async def erase_admin_subject(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+) -> None:
+    """Erase target and actor ids even when the user never created an account."""
+    async with _maintenance(session):
+        await session.execute(
+            update(SecurityAuditEvent)
+            .where(
+                SecurityAuditEvent.tenant_id == tenant_id,
+                SecurityAuditEvent.platform == platform,
+                SecurityAuditEvent.admin_subject_kind == "user",
+                SecurityAuditEvent.admin_subject_id == platform_user_id,
+            )
+            .values(admin_subject_id=None)
+        )
+        await session.execute(
+            update(SecurityAuditEvent)
+            .where(
+                SecurityAuditEvent.tenant_id == tenant_id,
+                SecurityAuditEvent.platform == platform,
+                SecurityAuditEvent.platform_user_id == platform_user_id,
+            )
+            .values(platform_user_id=None)
+        )

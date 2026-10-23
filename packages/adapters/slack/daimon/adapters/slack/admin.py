@@ -13,7 +13,13 @@ resolves once per interaction; no cross-interaction cache.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
+
+from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.native_admins import is_daimon_admin
+
+if TYPE_CHECKING:
+    from daimon.adapters.slack.runtime import SlackRuntime
 
 import aiohttp
 import structlog
@@ -24,7 +30,7 @@ log = structlog.get_logger()
 
 #: Slack's own name for the person a member is sent to when a change needs
 #: elevated permission. Copy never says "admin" in the abstract.
-ADMIN_NOUN: Final = "a workspace admin"
+ADMIN_NOUN: Final = "a Daimon admin"
 
 #: Longest display name rendered into a prompt attribute.
 _DISPLAY_NAME_MAX: Final = 80
@@ -36,7 +42,7 @@ def _is_admin_signal(user: dict[str, Any]) -> bool:
     Reads ``is_admin``, ``is_owner``, and ``is_primary_owner``: every field
     Slack exposes for elevated privilege. Pure: no I/O.
     """
-    return bool(user.get("is_admin") or user.get("is_owner") or user.get("is_primary_owner"))
+    return any(user.get(key) is True for key in ("is_admin", "is_owner", "is_primary_owner"))
 
 
 @dataclass(frozen=True)
@@ -98,7 +104,17 @@ async def resolve_requester(client: AsyncWebClient, *, user_id: str) -> SlackReq
     except (TimeoutError, SlackApiError, aiohttp.ClientError) as exc:
         log.warning("slack.is_admin.lookup_failed", user=user_id, exc_info=exc)
         return None
-    u: dict[str, Any] = resp["user"]  # pyright: ignore[reportUnknownVariableType, reportAssignmentType]  # SlackResponse subscript is untyped
+    raw: object = resp.get("user")  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]  # SlackResponse SDK boundary
+    if not isinstance(raw, dict):
+        return None
+    u = cast(dict[str, Any], raw)
+    if isinstance(client, WorkspaceWebClient) and (
+        u.get("id") != user_id
+        or u.get("team_id") != client.team_id
+        or u.get("deleted") is not False
+        or u.get("is_bot") is not False
+    ):
+        return None
     return SlackRequester(is_admin=_is_admin_signal(u), display_name=_display_name(u))
 
 
@@ -113,7 +129,7 @@ async def resolve_admin_status(client: AsyncWebClient, *, user_id: str) -> bool 
     return None if requester is None else requester.is_admin
 
 
-async def resolve_is_admin(client: AsyncWebClient, *, user_id: str) -> bool:
+async def resolve_is_platform_admin(client: AsyncWebClient, *, user_id: str) -> bool:
     """Return True if the Slack user is a workspace admin, fail-closed.
 
     Thin wrapper over ``resolve_admin_status`` that collapses "not an admin"
@@ -131,3 +147,32 @@ async def resolve_is_admin(client: AsyncWebClient, *, user_id: str) -> bool:
         ``False`` otherwise, including on any ``users.info`` failure.
     """
     return bool(await resolve_admin_status(client, user_id=user_id))
+
+
+class WorkspaceWebClient(AsyncWebClient):
+    """A per-event client bound to the verified workspace, never caller input."""
+
+    runtime: SlackRuntime
+    team_id: str
+
+    def bind_workspace(self, runtime: SlackRuntime, team_id: str) -> WorkspaceWebClient:
+        self.runtime, self.team_id = runtime, team_id
+        return self
+
+
+async def resolve_is_admin(client: AsyncWebClient, *, user_id: str) -> bool:
+    """Live platform authority or an uncached grant in this client's workspace."""
+    status = await resolve_admin_status(client, user_id=user_id)
+    if status is None:
+        return False
+    if not isinstance(client, WorkspaceWebClient):
+        return status
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=client.team_id)
+    async with client.runtime.sessionmaker() as session:
+        return await is_daimon_admin(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            platform_user_id=user_id,
+            is_platform_admin=status,
+        )

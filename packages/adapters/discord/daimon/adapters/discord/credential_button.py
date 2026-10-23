@@ -331,7 +331,7 @@ class CredentialRequestButton(
         `_PRE_FILTER_TIMEOUT_SECONDS` — see the module docstring for why
         falling through to `send_modal` on a timeout is sound.
         """
-        if is_guild_admin(interaction):
+        if await is_guild_admin(interaction):
             await interaction.response.send_modal(RepoBindModal(runtime=runtime, request_row=row))
             return
         try:

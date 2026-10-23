@@ -23,7 +23,7 @@ from daimon.adapters.mcp.tools._channel_policy import require_within_hold
 from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
-    _require_admin,  # pyright: ignore[reportPrivateUsage]
+    _require_platform_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
@@ -99,7 +99,9 @@ _NEEDS_BUDGET_ADMIN = (
 
 def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
     """Raise ``ToolError`` unless the caller may set, clear or raise ``channel_id``'s budget."""
-    decision = may_set_channel_budget(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
+    decision = may_set_channel_budget(
+        mcp_subject(auth, is_admin=auth.is_platform_admin), channel_id
+    )
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_BUDGET, decision.reason)
         raise ToolError(_NEEDS_BUDGET_ADMIN)
@@ -246,7 +248,7 @@ async def _list_channel_budgets_impl(
     runtime: McpRuntime, auth: AuthIdentity
 ) -> list[ChannelBudgetResult]:
     require_scope(auth, "tenant:read")
-    _require_admin(auth)
+    _require_platform_admin(auth)
     platform = _require_platform(auth)
     now = datetime.now(UTC)
     async with runtime.session_factory() as session:

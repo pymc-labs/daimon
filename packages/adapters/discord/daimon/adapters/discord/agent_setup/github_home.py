@@ -120,7 +120,7 @@ class GitHubHomeView(PanelViewBase):
         ):
             await interaction.response.send_message("This panel is private.", ephemeral=True)
             return
-        if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if not await is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
             await interaction.response.send_message(
                 "Ask a server admin to connect GitHub.", ephemeral=True
             )

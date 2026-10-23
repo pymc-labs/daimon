@@ -21,7 +21,7 @@ async def test_removal_notice_uses_ephemeral_reconnect_button_without_dm(
 ) -> None:
     tenant_id = uuid.uuid4()
 
-    def is_admin(_interaction: object) -> bool:
+    async def is_admin(_interaction: object) -> bool:
         return True
 
     monkeypatch.setattr(github_removal, "is_guild_admin", is_admin)

@@ -111,7 +111,7 @@ async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
         return False
     for fresh in (False, True):
         owners = admin_team_owners(runtime, fresh=fresh)
-        if not await is_deployment_admin(settings, owners, user_id=clicker):
+        if not await is_deployment_admin(settings, owners, user_id=clicker, runtime=runtime):
             return False
     return True
 

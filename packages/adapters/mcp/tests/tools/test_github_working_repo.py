@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import github_working_repo as working_tool
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
@@ -50,6 +52,7 @@ async def test_set_working_repo_admin_none_and_member_refusal(
         external_id="workspace",
         platform_user_id="admin",
         is_admin=True,
+        is_platform_admin=True,
     )
     result = await working_tool.set_working_repo_impl(
         runtime,  # type: ignore[arg-type]
@@ -82,17 +85,33 @@ async def test_set_working_repo_admin_none_and_member_refusal(
             origin_context_id=str(uuid.uuid4()),
             repo_name="none",
         )
-    manage_check = AsyncMock(return_value=True)
-    monkeypatch.setattr(working_tool, "requester_manages_agent", manage_check)
+    key = dict(
+        tenant_id=tenant.id,
+        platform="discord",
+        subject_kind="user",
+        subject_id="member",
+        actor_user_id="admin",
+        is_platform_admin=True,
+    )
+    async with committing_sessionmaker.begin() as session:
+        await change_grant(session, **key)
+    delegated = replace(member, is_admin=True)
     allowed = await working_tool.set_working_repo_impl(
         runtime,  # type: ignore[arg-type]
-        member,
+        delegated,
         origin_context_id=str(uuid.uuid4()),
         repo_name="none",
     )
     assert allowed.working_repo is None
-    assert allowed.message == "Agent has no working repo now. To set one, ask me for a repo."
-    manage_check.assert_awaited_once()
+    async with committing_sessionmaker.begin() as session:
+        await change_grant(session, **key, revoke=True)
+    with pytest.raises(ToolError, match="Ask a server admin"):
+        await working_tool.set_working_repo_impl(
+            runtime,  # type: ignore[arg-type]
+            delegated,
+            origin_context_id=str(uuid.uuid4()),
+            repo_name="none",
+        )
     monkeypatch.setattr(working_tool, "set_working_repo", AsyncMock(return_value="owner/repo"))
     active = await working_tool.set_working_repo_impl(
         runtime,  # type: ignore[arg-type]
@@ -141,6 +160,7 @@ async def test_teams_admin_sets_working_repo(
         external_id="entra-tenant",
         platform_user_id="aad-admin",
         is_admin=True,
+        is_platform_admin=True,
     )
     result = await working_tool.set_working_repo_impl(
         runtime,  # type: ignore[arg-type]

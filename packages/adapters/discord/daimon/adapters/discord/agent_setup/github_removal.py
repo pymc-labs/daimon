@@ -20,7 +20,7 @@ async def send_pending_notice(
     runtime: DiscordRuntime, interaction: discord.Interaction, *, tenant_id: uuid.UUID
 ) -> None:
     """Deliver one queued removal notice when an admin opens setup."""
-    if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+    if not await is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
         return
     async with runtime.sessionmaker.begin() as session:
         notice = await claim_notice(session, tenant_id=tenant_id, now=datetime.now(UTC))

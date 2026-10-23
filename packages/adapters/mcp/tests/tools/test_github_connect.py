@@ -196,6 +196,7 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
         external_id="entra-tenant",
         platform_user_id="aad-admin",
         is_admin=True,
+        is_platform_admin=True,
     )
     sent = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, auth, origin_context_id=str(uuid.uuid4())

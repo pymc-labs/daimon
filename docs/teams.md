@@ -158,31 +158,12 @@ by its Entra group ID in `DAIMON_TEAMS__ADMIN_TEAM_ID` (the team's ⋯ → **Get
 `groupId` parameter). The app must be installed in that team: its
 `TeamMember.Read.Group` consent is what lets Daimon read the owners. Making
 someone an owner makes them an admin, with no redeploy; the owner list is
-cached for a minute, so a removed owner loses admin within about a minute,
-everywhere: each owner read also takes the stored admin role, which routines,
-tools and MCP clients act on, from anyone no longer an admin. A failed read
-falls back to the last successful one for up to an hour, and demotes no one. If
-the app is removed from the admin team, or no owner list has been read within
-an hour, nobody is an admin in chats and cards until the next good read, while
-stored admin roles stand until then; re-adding the app restores the owners.
-Admins' turns run with the admin role, and the
-panels unlock the admin actions for them. Every card click and dialog
-re-checks the organisation, the clicker and their role. Boot does the same
-demotion; support requests and budget notices for "the admins" reach the team's owners.
-A refusal in a channel is a private
-message, toast, dialog message or card edit only its sender or clicker sees.
-Channel budgets (`set_channel_budget`) and channel environments
-(`set_channel_environment`) work as on Discord and Slack. Who answers where
-lists each channel's environment, and its **Channel settings** dialog changes
-a selected channel's environment, permissions, and skills. Channel skills are
-extra skills for whatever agent answers in that channel, added by name,
-`agent/name` or skill id and removed by ticking them, as on Discord and Slack. Channel rules work as on Discord and Slack,
-with `set_channel_rule` or `daimon channels rule set`. A thread (`;messageid=`)
-counts as its channel, and a channel's own agents send nothing to 1:1 chats. The
-CLI can't read channel names, so a copy it makes is named from the channel id.
-Members see only the responders and agents explicitly allowed at the panel's
-channel/thread. A panel opened in a 1:1 chat has no verified channel and lists
-no agents for members; an admin retains the existing full panel roster.
+read fresh for authorization. A failed owner lookup grants no platform
+admin authority. Tenant-wide Daimon user grants are checked without a cache;
+only platform admins can change them through CLI/MCP. Billing and promo
+redemption use the separate live platform check. Notification recipient
+lookups may still use the bounded owner cache. Successful owner reads demote
+unlisted stored admins while preserving explicit Daimon user grants.
 
 ### Group chats
 

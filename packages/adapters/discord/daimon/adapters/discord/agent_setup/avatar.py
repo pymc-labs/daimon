@@ -57,7 +57,7 @@ async def _may_edit(
     change: bool,
 ) -> bool:
     identity_on = identity_enabled_for(runtime.settings, "discord", interaction.guild_id)
-    admin = identity_on and is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+    admin = identity_on and await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
     if admin:
         agent = await find_agent_by_daimon_tag(
             runtime.anthropic, tenant_id=tenant_id, name=agent_name

@@ -9,6 +9,7 @@ import traceback
 
 import click
 import typer
+from daimon.adapters.cli.commands.admins import admins_app
 from daimon.adapters.cli.commands.agents import agents_app
 from daimon.adapters.cli.commands.audit import audit_app
 from daimon.adapters.cli.commands.backup import backup_app
@@ -40,6 +41,7 @@ from daimon.core.observability import install_log_redaction, redact_text
 # errors go through `main` instead, which prints a redacted traceback.
 app = typer.Typer(help="Daimon CMA CLI", pretty_exceptions_enable=False)
 app.add_typer(agents_app, name="agents")
+app.add_typer(admins_app, name="admins")
 app.add_typer(backup_app, name="backup")
 app.add_typer(channels_app, name="channels")
 app.add_typer(environments_app, name="environments")

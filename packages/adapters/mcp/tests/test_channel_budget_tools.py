@@ -87,6 +87,7 @@ def _auth(
         role=Role.ADMIN if admin else Role.USER,
         platform=platform,
         is_admin=admin,
+        is_platform_admin=admin,
         chat_session_id="test-session",
     )
 
@@ -239,7 +240,9 @@ async def test_mutations_and_listing_are_admin_only(
     async with committing_sessionmaker.begin() as session:
         await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
 
-    with pytest.raises(ToolError, match="(requires|needs) a workspace or server admin"):
+    with pytest.raises(
+        ToolError, match="(requires|needs) a (workspace or server admin|live platform admin)"
+    ):
         if call == "list":
             await _list_channel_budgets_impl(runtime, member)
         elif call == "set":

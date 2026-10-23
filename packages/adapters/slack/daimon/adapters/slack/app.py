@@ -25,7 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_admin_status, resolve_requester
+from daimon.adapters.slack.admin import WorkspaceWebClient, resolve_admin_status, resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
@@ -1487,11 +1487,11 @@ class SlackApp:
 
             # (3) PER-EVENT CLIENT — decrypt and construct; NEVER cache on self/runtime.
             token = decrypt_token(self.runtime.fernet, row.encrypted_token)
-            client = AsyncWebClient(  # per-event only
+            client = WorkspaceWebClient(  # per-event only
                 token=token,
                 retry_handlers=build_retry_handlers(),
                 session=self.runtime.slack_http,
-            )
+            ).bind_workspace(self.runtime, team_id)
 
             # (4) EXPLICIT MENTION GATE — Slack has been observed delivering
             # app_mention events for un-mentioned thread replies; require the
@@ -2185,6 +2185,7 @@ class SlackApp:
                     text=admission_refusal_message(err.reason, self.runtime.settings),
                 )
             return
+        is_admin = admission.is_admin
 
         agent = admission.agent
         _lc_agent_name: str = agent.name
@@ -2807,7 +2808,7 @@ class SlackApp:
                     responder_name=admission.config.agent_name or agent.name,
                     configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                     configuration_target_name=admission.config.configuration_target_name,
-                    role=Role.ADMIN if is_admin else Role.USER,
+                    role=Role.ADMIN if admission.is_admin else Role.USER,
                 ) as origin:
                     outcome = await run_prepared_turn(
                         self.runtime.turn_deps,
@@ -3181,7 +3182,7 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=follow_cancel,
             author_id=row.requester_external_user_id,
-            requester_is_admin=role is Role.ADMIN,
+            requester_is_admin=follow_admission.is_admin,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
             agent_name=follow_admission.agent.name,
@@ -3278,7 +3279,7 @@ class SlackApp:
                 thread_ts=thread_id,
                 cancel=cancel,
                 author_id=row.requester_external_user_id,
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=follow_admission.is_admin,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 agent_name=follow_admission.agent.name,
@@ -3329,7 +3330,7 @@ class SlackApp:
                     follow_admission.config.configuration_target_ma_agent_id
                 ),
                 configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=role,
+                role=Role.ADMIN if follow_admission.is_admin else Role.USER,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
             ) as follow_origin:
                 await run_prepared_turn(

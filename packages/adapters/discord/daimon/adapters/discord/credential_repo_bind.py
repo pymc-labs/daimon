@@ -185,7 +185,7 @@ async def refuse_if_shared_and_not_admin_for_request(
         )
         await _send_ephemeral(interaction, _WRONG_GUILD_MESSAGE)
         return True
-    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    if await is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
         return False
     agent = await resolve_ma_agent_for_uuid(
         runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id

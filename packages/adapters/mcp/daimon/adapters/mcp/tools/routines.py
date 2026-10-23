@@ -885,13 +885,13 @@ _SANDBOX_PERSON_ONLY = (
 _SANDBOX_ADMIN_ONLY = (
     "A routine's sandbox tools are changed by the operator with "
     "`daimon routines sandbox-tools`, the supported way today. This tool accepts "
-    "only a live Discord server admin's own token, which no Daimon surface issues "
+    "only a live Discord Daimon admin's own token, which no Daimon surface issues "
     "yet; the routine's owner cannot. Do not retry."
 )
 
 
 async def _sandbox_admin(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
-    """The caller, only if they are a person and a Discord server admin right now.
+    """The caller, only if they are a person and a Discord Daimon admin right now.
 
     An allowlist, not a denylist: the token must carry a jti (no legacy
     vault token from before the sweep), must not be an operator token, an
@@ -1131,7 +1131,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         They are off for every unattended run by default. The supported way today is the
         operator's ``daimon routines sandbox-tools``. This tool accepts only a live Discord
-        server admin's own token, re-checked against the server on each call; no Daimon
+        Daimon admin's own token, re-checked against the server on each call; no Daimon
         surface issues such a token yet, and the tool is kept for a future admin surface.
         Owning the routine is not enough, and agent keys, agents in a conversation, operator
         tokens, legacy tokens and other platforms are refused. DM routines cannot be opted

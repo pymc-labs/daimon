@@ -126,7 +126,8 @@ class PermissionsView(PanelViewBase):
             container.add_item(select_row)
         row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         buttons: list[tuple[str, discord.ButtonStyle, _Callback]] = [
-            (BACK_LABEL, discord.ButtonStyle.secondary, self._on_back)
+            (BACK_LABEL, discord.ButtonStyle.secondary, self._on_back),
+            ("Admins", discord.ButtonStyle.secondary, self._on_admins),
         ]
         if status.rule.readers != "own":
             buttons.append((COPY_LABEL, discord.ButtonStyle.secondary, self._on_copy))
@@ -233,3 +234,14 @@ class PermissionsView(PanelViewBase):
             allowed_user_id=self.allowed_user_id,
         )
         await self.swap_to(interaction, routing)
+
+    async def _on_admins(self, interaction: discord.Interaction) -> None:
+        from daimon.adapters.discord.agent_setup.admins_view import build_admins_view
+
+        if interaction.guild_id != self.state.guild_id:
+            return
+        await interaction.response.defer()
+        await self.swap_to(
+            interaction,
+            await build_admins_view(interaction, self.state, self.runtime, self.allowed_user_id),
+        )

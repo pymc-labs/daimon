@@ -67,7 +67,7 @@ async def _redeem(
     *,
     channel: str = "c1",
     code: str = "CHANNEL-CODE-2026",
-    admin: bool = False,
+    admin: bool = True,
 ) -> PromoRedeemResult:
     return await redeem_promo_code(
         factory,

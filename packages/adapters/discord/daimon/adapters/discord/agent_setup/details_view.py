@@ -603,7 +603,7 @@ class DetailsView(PanelViewBase):
             tenant_id=preview.tenant_id,
             account_id=self.state.account_id,
             subject=build_subject(
-                is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                is_admin=await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                 platform_user_id=str(interaction.user.id),
             ),
         )

@@ -35,9 +35,12 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_KIND_CLAIM,
 )
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
+from daimon.core.admin_authority import resolve_authority
+from daimon.core.config import Settings
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import McpTokenKind, Role
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -125,9 +128,11 @@ class IdentityMiddleware(Middleware):
         operator_rate_limiter: RateLimiter | None = None,
         tool_safety: ToolSafetyPolicy | None = None,
         public_url: str | None = None,
+        settings: Settings | None = None,
     ) -> None:
         # Agent-wide `deny` rules on Daimon's own tools are enforced here; see
         # `tool_rule_backstop`. Both unset (the default) leaves that off.
+        self._settings = settings
         self._tool_safety = tool_safety
         self._public_url = public_url
         self._sessionmaker = sessionmaker
@@ -317,22 +322,46 @@ class IdentityMiddleware(Middleware):
         chat_agent_id = signed_uuid("chat_agent_id")
         agent_id: uuid.UUID | None
         if raw_agent_id is None:
+            if _token is not None and _token.claims.get(TOKEN_KIND_CLAIM) == "agent":
+                raise AuthorizationError("agent credential missing agent_id")
             agent_id = None
         else:
             try:
                 agent_id = uuid.UUID(raw_agent_id)
             except (ValueError, TypeError):
-                # Malformed claim is treated as absent.
-                # Fail-closed downstream at the gcloud provider via NoBindingError.
-                agent_id = None
+                raise AuthorizationError("malformed agent_id after verifier") from None
         is_admin_claim = (await self._is_admin_resolver(context)) == "true"
         internal_claim = (await self._internal_resolver(context)) == "true"
-        # Admin gate: a Discord vault token's baked is_admin claim alone
-        # MUST NOT elevate a non-admin caller. The internal discriminator distinguishes
-        # historical internal claims (jti-less tokens are refused by the verifier)
-        # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
-        # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
+        # Local operator roles remain valid. Platform accounts are rebound and
+        # attested below; their stored role and signed internal claims never elevate.
         is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
+        is_platform_admin = False
+        verified_role_ids: tuple[str, ...] = ()
+        # Platform callers never inherit authority from a baked internal claim.
+        # Bind to a current principal before the live attestation, also for agent keys.
+        async with self._sessionmaker() as session:
+            current = await get_account_with_tenant(session, account_id=account_id)
+        if current is not None and current.platform in {"discord", "slack", "teams"}:
+            platform, external_id = current.platform, current.external_id
+            platform_user_id = current.platform_user_id
+            is_admin = False
+            if (
+                self._settings is not None
+                and current.tenant_id == tenant_id
+                and platform_user_id is not None
+            ):
+                authority = await resolve_authority(
+                    self._sessionmaker,
+                    self._settings,
+                    tenant_id=tenant_id,
+                    platform_user_id=platform_user_id,
+                )
+                is_admin, is_platform_admin = authority.daimon_admin, authority.platform_admin
+                verified_role_ids = authority.role_ids
+            role = Role.ADMIN if is_admin else Role.USER
+        elif platform in {"discord", "slack", "teams"}:
+            is_admin = False
+            role = Role.USER
         slack_turn_context_id = (
             None if internal_claim or agent_id is not None else signed_uuid("slack_turn_context_id")
         )
@@ -359,6 +388,8 @@ class IdentityMiddleware(Middleware):
             ),
             platform_user_id=platform_user_id,
             is_admin=is_admin,
+            is_platform_admin=is_platform_admin,
+            verified_role_ids=verified_role_ids,
             # Set by the verifier from the token's row; an agent key's only.
             bound_channel_id=(
                 raw_bound_channel

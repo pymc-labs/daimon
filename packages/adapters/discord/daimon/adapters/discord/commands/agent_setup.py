@@ -87,7 +87,7 @@ class AgentSetupCog(commands.Cog):
         try:
             runtime = _get_runtime(interaction)
             assert interaction.guild_id is not None, "require_registered_guild guarantees guild"
-            is_admin = is_guild_admin(interaction)
+            is_admin = await is_guild_admin(interaction)
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
             assert tenant_id is not None, "require_registered_guild guarantees a tenant"
             async with runtime.sessionmaker() as session:

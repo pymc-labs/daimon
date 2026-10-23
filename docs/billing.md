@@ -520,10 +520,9 @@ all turns; the cap gate applies even without Stripe.
 
 An operator can hand out credit as a code. A **server-wide** code is redeemed
 by a server or workspace admin and credits the whole tenant. A **channel**
-code (`--channel-cap`) can be redeemed by any member and credits the channel
+code (`--channel-cap`) can be redeemed by a platform admin and credits the channel
 they redeem it in. Nothing is visible until some code can be redeemed: only
-then does `/billing` show a **Redeem code** button, to admins for any code
-and to members for a channel code, and the Discord ready message and the
+then does `/billing` show a **Redeem code** button to platform admins, and the Discord ready message and the
 Slack install page point people at it.
 
 ```sh
@@ -548,10 +547,10 @@ at most once.
 - **Credit** codes add a `promo_credit` ledger entry at once, keyed
   `promo:{code_id}:{tenant_id}`. It is ordinary credit and never expires.
 - **Channel** codes are credit codes with `--channel-cap`, which must be at
-  least `--amount`; a timed code cannot have one. Anyone can redeem one from
+  least `--amount`; a timed code cannot have one. A platform admin can redeem one from
   `/billing` in a channel (a thread counts as its parent channel), once per
   person per channel, until that channel has taken `--channel-cap` from the
-  code: with `--amount 10 --channel-cap 30`, three people in a channel can
+  code: with `--amount 10 --channel-cap 30`, three platform admins in a channel can
   each add $10. Each redemption writes a `promo_credit` entry with the
   channel's `channel_id`, keyed `promo:{code_id}:{tenant_id}:{channel_id}:{account_id}`,
   and raises the channel's [budget](#channel-budgets) limit by the amount, so
@@ -605,8 +604,8 @@ timed credit with its end date, soonest first (five, then a count of the rest). 
 `billing` on Teams, or, server-wide codes only, with the admin-only MCP tool
 `redeem_promo_code`. Admin rights are read again when the code is submitted.
 Refusals are one of `invalid`, `revoked`, `not_started`, `expired`,
-`exhausted`, `already_redeemed`, `throttled`, `admin_only` (a member tried a
-server-wide code), `needs_channel` (a channel code outside a channel),
+`exhausted`, `already_redeemed`, `throttled`, `admin_only` (someone without platform admin authority tried a
+code), `needs_channel` (a channel code outside a channel),
 `already_redeemed_in_channel` and `channel_cap_reached`, each shown as one
 plain sentence. Every attempt, allowed or refused, writes a
 `panel:promo_redeem` security audit row with the channel it was made in.

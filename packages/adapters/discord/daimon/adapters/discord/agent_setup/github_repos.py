@@ -105,7 +105,7 @@ class GitHubReposView(PanelViewBase):
         if live_agent is None:
             return False
         managed = live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-        admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        admin = await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
         async with self.runtime.sessionmaker() as session:
             account = await get_account(session, self.state.account_id)
             if account is None or account.tenant_id != tenant_id:
@@ -151,7 +151,7 @@ async def mint_agent_connect_url(
     agent: RosterAgent,
 ) -> str:
     """Mint a private browser link after live manager authorization."""
-    admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+    admin = await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
     async with runtime.sessionmaker.begin() as session:

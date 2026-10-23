@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 137 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 140 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -35,6 +35,16 @@ A caller does not necessarily receive this list in one response: the server appl
 BM25 search transform, so an ordinary session discovers tools by searching the catalogue
 rather than listing it in full. Sessions narrowed to agent-chat tools or to an operator
 token's scopes skip the transform and see their tools directly.
+
+## `admins`
+
+Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `grant_admin` | admin only | Grant Daimon admin to a user or Discord role (platform admins only). |
+| `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
+| `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
 
 ## `agent_chat`
 

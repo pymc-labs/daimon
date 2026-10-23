@@ -109,9 +109,9 @@ async def _live(db_factory: async_sessionmaker[AsyncSession]) -> list[ThreadAgen
 
 
 async def test_setup_lists_every_agent_with_the_panel_actions(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as (
+    async with _running(service_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as (
         service,
         _,
     ):
@@ -124,9 +124,9 @@ async def test_setup_lists_every_agent_with_the_panel_actions(
 
 
 async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         await set_fields(
             session,
             scope=ChannelScopeRef(tenant_id=TENANT, channel_id=CONVERSATION_ID),
@@ -134,7 +134,7 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
             agent_name="analyst",
             mode="agent",
         )
-    async with _running(db_session_factory, teams_api_fake) as (service, _):
+    async with _running(service_session_factory, teams_api_fake) as (service, _):
         details = await post_activity(service, _click("details", agent="analyst"))
         routing = await post_activity(service, _click("routing"))
         gone = await post_activity(service, _click("details", agent="deleted-one"))
@@ -147,14 +147,14 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
 
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
 async def test_routing_hides_an_isolated_channels_environment_from_outside(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    service_session_factory: async_sessionmaker[AsyncSession],
     teams_api_fake: TeamsApiFake,
     admin: bool,
 ) -> None:
     """As on Discord and Slack: a member outside an isolated channel never sees its
     environment in Who answers where; an admin sees every channel's."""
     isolated, open_channel = "19:vault@thread.tacv2", "19:lobby@thread.tacv2"
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         await set_access_policy(
             session,
             tenant_id=TENANT,
@@ -170,7 +170,7 @@ async def test_routing_hides_an_isolated_channels_environment_from_outside(
                 environment_name=environment,
             )
     admins = (AAD_OBJECT_ID,) if admin else ()
-    async with _running(db_session_factory, teams_api_fake, admins=admins) as (service, _):
+    async with _running(service_session_factory, teams_api_fake, admins=admins) as (service, _):
         routing = json.dumps(await post_activity(service, _click("routing")))
 
     assert "lobby-env" in routing, "an open channel's environment is listed"
@@ -179,14 +179,14 @@ async def test_routing_hides_an_isolated_channels_environment_from_outside(
 
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
 async def test_the_agents_list_hides_an_isolated_channels_own_agent_from_outside(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    service_session_factory: async_sessionmaker[AsyncSession],
     teams_api_fake: TeamsApiFake,
     admin: bool,
 ) -> None:
     """The panel lives in the 1:1 chat, outside every channel: a member never sees
     an isolated channel's own agent there, nor opens its Details; an admin does."""
     isolated = "19:vault@thread.tacv2"
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         await set_access_policy(
             session,
             tenant_id=TENANT,
@@ -197,7 +197,7 @@ async def test_the_agents_list_hides_an_isolated_channels_own_agent_from_outside
             ),
         )
     admins = (AAD_OBJECT_ID,) if admin else ()
-    async with _running(db_session_factory, teams_api_fake, admins=admins) as (service, _):
+    async with _running(service_session_factory, teams_api_fake, admins=admins) as (service, _):
         await _say(service, "setup")
         details = json.dumps(await post_activity(service, _click("details", agent="analyst")))
 
@@ -208,14 +208,14 @@ async def test_the_agents_list_hides_an_isolated_channels_own_agent_from_outside
 
 
 async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake) as (service, turns):
+    async with _running(service_session_factory, teams_api_fake) as (service, turns):
         toast = await post_activity(service, _click("manage", agent=ANALYST_ID))
-        [binding] = await _live(db_session_factory)
+        [binding] = await _live(service_session_factory)
         await _say(service, "please add a skill")
         await _say(service, "new")
-        after = await _live(db_session_factory)
+        after = await _live(service_session_factory)
         await _say(service, "back to normal")
 
     assert toast["value"] == setup_panel.STARTED
@@ -227,22 +227,22 @@ async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
     assert ['"is_setup":true' in o for o in origins] == [True, False], "setup, then the usual"
     assert after == [], "new ends the setup conversation"
     assert any(ENDED in json.dumps(r.body) for r in teams_api_fake.activity_requests)
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         keys = set((await session.execute(select(ThreadSession.thread_id))).scalars())
     assert keys == {binding.thread_id, CONVERSATION_ID}, "setup never touches the chat's session"
 
 
 async def test_end_button_ends_once_and_reopening_replaces_the_live_conversation(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake) as (service, _):
+    async with _running(service_session_factory, teams_api_fake) as (service, _):
         await post_activity(service, _click("manage", agent=""))
-        [first] = await _live(db_session_factory)
+        [first] = await _live(service_session_factory)
         await post_activity(service, _click("manage", agent=ANALYST_ID))
-        [second] = await _live(db_session_factory)
+        [second] = await _live(service_session_factory)
         stale = await post_activity(service, _click("end", thread=first.thread_id))
         ended = await post_activity(service, _click("end", thread=second.thread_id))
-        remaining = await _live(db_session_factory)
+        remaining = await _live(service_session_factory)
 
     assert first.thread_id != second.thread_id, "one live setup conversation per chat"
     assert setup_panel.ALREADY_ENDED in json.dumps(stale)
@@ -250,7 +250,7 @@ async def test_end_button_ends_once_and_reopening_replaces_the_live_conversation
 
 
 async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    service_session_factory: async_sessionmaker[AsyncSession],
     teams_api_fake: TeamsApiFake,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,7 +262,7 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
     )
     state = _ma_state()
     form = {"action": "agent_create", "purpose": "Scout leads", "model": DEFAULT_AGENT_MODEL}
-    async with _running(db_session_factory, teams_api_fake, state=state) as (service, _):
+    async with _running(service_session_factory, teams_api_fake, state=state) as (service, _):
         opened = await post_activity(service, _dialog("fetch", {"dialog_id": "agent_create"}))
         bad = await post_activity(service, _dialog("submit", form | {"name": "bad name!"}))
         good = await post_activity(service, _dialog("submit", form | {"name": "scout"}))
@@ -279,12 +279,12 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
 
 
 async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     fetch = {"dialog_id": "agent_coding_tools", "agent": "analyst"}
     admins = (AAD_OBJECT_ID,)
     with structlog.testing.capture_logs() as logs:
-        async with _running(db_session_factory, teams_api_fake, admins) as (service, _):
+        async with _running(service_session_factory, teams_api_fake, admins) as (service, _):
             refused = await post_activity(
                 service, _dialog("fetch", fetch, user=OTHER_AAD_OBJECT_ID)
             )
@@ -305,10 +305,10 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
     assert other["task"]["value"] == setup_panel.NOT_MINTER
     assert mine["task"]["value"] == "Token revoked."
     assert "already revoked" in again["task"]["value"]
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         row = await get_mcp_token(session, jti=uuid.UUID(jti))
     assert row is not None and row.revoked_at is not None
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         events = await list_events(session, tenant_id=TENANT)
     assert [(e.tool_name, e.outcome, e.reason) for e in events] == [
         ("panel:coding_token_mint", "denied", "authz:admin_required"),
@@ -324,16 +324,16 @@ PINNED, ELSEWHERE = "19:pinned@thread.tacv2", "19:elsewhere@thread.tacv2"
 
 
 async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_cannot(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     dialog_id = setup_card.OPERATOR_DIALOG
     mint = {"action": dialog_id, "op": "mint", "scopes": "tenant:read,promo:redeem", "label": "ci"}
-    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):
+    async with _running(service_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):
         refused = await post_activity(service, _dialog("submit", mint, user=OTHER_AAD_OBJECT_ID))
         forged = await post_activity(service, _dialog("submit", mint | {"scopes": "promo:create"}))
         minted = await post_activity(service, _dialog("submit", mint))
         listing = await post_activity(service, _dialog("fetch", {"dialog_id": dialog_id}))
-        async with db_session_factory() as session:
+        async with service_session_factory() as session:
             (row,) = await list_mcp_tokens(session, now=datetime.now(UTC), tenant_id=TENANT)
         revoke = {"action": dialog_id, "op": "revoke", "jti": str(row.jti)}
         revoked = await post_activity(service, _dialog("submit", revoke))
@@ -345,7 +345,7 @@ async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_can
     listed = json.dumps(listing)
     assert str(row.jti)[:8] in listed and "Bearer" not in listed, "the listing has no secret"
     assert "Token revoked." in json.dumps(revoked)
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         assert await list_mcp_tokens(session, now=datetime.now(UTC), tenant_id=TENANT) == []
         events = await list_events(session, tenant_id=TENANT)
     assert [(e.tool_name, e.outcome) for e in events] == [

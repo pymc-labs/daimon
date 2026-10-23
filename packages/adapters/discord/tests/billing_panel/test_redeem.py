@@ -120,8 +120,8 @@ def test_the_redeem_button_shows_while_a_code_the_viewer_may_redeem_is_redeemabl
         "Refresh",
         "Done",
     ], "without a redeemable code the admin view should not offer redemption"
-    assert _buttons(_view(is_admin=False)) == ["Redeem code", "Refresh", "Done"], (
-        "a member view should offer redemption while a channel code is redeemable"
+    assert _buttons(_view(is_admin=False)) == ["Refresh", "Done"], (
+        "only platform admins may redeem a code"
     )
     assert "Redeem code" not in _buttons(_view(is_admin=False, has_redeemable_promo_code=False))
 
@@ -180,9 +180,10 @@ def test_redeem_result_text() -> None:
     )
 
 
-async def test_redeem_button_opens_the_modal_for_anyone_it_is_shown_to() -> None:
-    """Members and admins both get the modal; what a code may do is decided on submit."""
-    view = _view(is_admin=False)
+async def test_only_platform_admins_see_redeem_and_submit_rechecks_authority() -> None:
+    """A stale button can open a modal, whose submit still checks platform authority."""
+    assert not any(isinstance(c, _RedeemButton) for c in _view(is_admin=False).walk_children())
+    view = _view(is_admin=True)
     button = next(c for c in view.walk_children() if isinstance(c, _RedeemButton))
     for admin in (False, True):
         click = _interaction(admin=admin)
@@ -215,7 +216,7 @@ async def test_a_member_cannot_redeem_a_server_wide_code(
     interaction = _interaction(admin=False)
     await modal.on_submit(interaction)
     assert interaction.followup.send.call_args.args[0] == (
-        "🎟️ Only an admin can redeem that code, because it adds credit for everyone here."
+        "🎟️ Only a platform admin can redeem that code."
     ), "a member should be told who can redeem it"
     rerender.assert_not_awaited()
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("0")
@@ -461,10 +462,10 @@ async def test_cli_issued_code_redeems_once_through_the_panel(
     unknown.edit_original_response.assert_not_awaited()
 
 
-async def test_a_member_redeems_a_channel_code_into_this_channel_through_the_panel(
+async def test_a_platform_admin_redeems_a_channel_code_into_this_channel_through_the_panel(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A member's panel offers a channel code; it raises this channel's budget only."""
+    """A platform admin's panel offers a channel code; it raises this channel's budget only."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
     tenant = await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
     for channel_id in (CHANNEL_ID, CHANNEL_ID + 1):
@@ -489,30 +490,30 @@ async def test_a_member_redeems_a_channel_code_into_this_channel_through_the_pan
         guild=MagicMock(spec=discord.Guild),
         guild_id=str(GUILD_ID),
         caller_user_id="42",
-        is_admin=False,
+        is_admin=True,
         since=SINCE,
         now=now,
         channel_id=str(CHANNEL_ID),
     )
-    assert state.has_redeemable_promo_code, "a channel code is offered to a member"
+    assert state.has_redeemable_promo_code, "a channel code is offered to a platform admin"
     view = BillingPanelView(
         state,
         runtime=runtime,
         allowed_user_id=42,
-        is_admin=False,
+        is_admin=True,
         account_id=principal.account_id,
         now=now,
         since=SINCE,
     )
     button = next(c for c in view.walk_children() if isinstance(c, _RedeemButton))
-    click = _live_interaction(admin=False)
+    click = _live_interaction(admin=True)
     await button.callback(click)
     modal = click.response.send_modal.call_args.args[0]
     assert isinstance(modal, RedeemCodeModal)
 
-    first = _submitted(modal, shown, admin=False)
+    first = _submitted(modal, shown, admin=True)
     await modal.on_submit(first)
-    again = _submitted(modal, shown, admin=False)
+    again = _submitted(modal, shown, admin=True)
     await modal.on_submit(again)
 
     assert first.followup.send.call_args.args[0] == (

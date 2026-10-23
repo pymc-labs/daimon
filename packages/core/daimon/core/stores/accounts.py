@@ -50,7 +50,8 @@ async def get_account_with_tenant(
         .outerjoin(
             PlatformPrincipal,
             (PlatformPrincipal.account_id == Account.id)
-            & (PlatformPrincipal.platform == Tenant.platform),
+            & (PlatformPrincipal.platform == Tenant.platform)
+            & (PlatformPrincipal.tenant_id == Tenant.id),
         )
         .where(Account.id == account_id)
     )
@@ -113,10 +114,18 @@ async def demote_unlisted_admins(
     only on a person's next turn, and routines and MCP clients act on the
     stored one until then. Returns how many accounts were demoted.
     """
+    from daimon.core._models import DaimonAdmin
+
+    granted = select(DaimonAdmin.subject_id).where(
+        DaimonAdmin.tenant_id == tenant_id,
+        DaimonAdmin.platform == platform,
+        DaimonAdmin.subject_kind == "user",
+    )
     unlisted = select(PlatformPrincipal.account_id).where(
         PlatformPrincipal.tenant_id == tenant_id,
         PlatformPrincipal.platform == platform,
         PlatformPrincipal.external_id.not_in(admin_ids),
+        PlatformPrincipal.external_id.not_in(granted),
     )
     stmt = (
         update(Account)

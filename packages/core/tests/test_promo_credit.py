@@ -639,7 +639,7 @@ async def _channel_redeem(
     code: str,
     channel: PromoChannel | None,
     *,
-    is_admin: bool = False,
+    is_admin: bool = True,
 ) -> PromoRedeemResult:
     return await redeem_promo_code(
         factory,
@@ -660,7 +660,7 @@ async def _limit(session: AsyncSession, tenant: TenantRow, channel_id: str) -> D
     return None if budget is None else budget.limit_usd
 
 
-async def test_a_member_redeems_a_channel_code_into_their_own_channel_only(
+async def test_a_platform_admin_redeems_a_channel_code_into_their_channel_only(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     """The credit lands in the ledger for that channel, and only its budget limit rises."""
@@ -741,8 +741,12 @@ async def test_who_may_redeem_what_and_where(
     )
 
     member_server = await _channel_redeem(
-        db_session_factory, tenant, person.id, "SERVER-WIDE-2026", _in("team-a")
+        db_session_factory, tenant, person.id, "SERVER-WIDE-2026", _in("team-a"), is_admin=False
     )
+    member_channel = await _channel_redeem(
+        db_session_factory, tenant, person.id, "TEAM-ROOM-2026", _in("team-a"), is_admin=False
+    )
+    assert member_channel == PromoRedeemRefused("admin_only")
     in_dm = await _channel_redeem(db_session_factory, tenant, person.id, "TEAM-ROOM-2026", None)
     invalid = await _channel_redeem(
         db_session_factory, tenant, person.id, "NOT-A-REAL-CODE", _in("team-a")

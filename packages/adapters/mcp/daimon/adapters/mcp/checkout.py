@@ -16,9 +16,13 @@ from typing import TYPE_CHECKING
 import structlog
 from daimon.adapters.mcp.auth.verifier import TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.web_shell import render_page
+from daimon.core.admin_authority import resolve_authority
 from daimon.core.billing import BillingConfig
+from daimon.core.config import Settings
+from daimon.core.stores.accounts import get_account_with_tenant
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.auth import TokenVerifier
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 
@@ -34,6 +38,8 @@ def build_checkout_route(
     stripe_client: StripeClient,
     billing_config: BillingConfig,
     auth: TokenVerifier,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
 ) -> Callable[[Request], Awaitable[Response]]:
     """Construct the /billing/checkout POST handler with dependencies bound.
 
@@ -52,7 +58,10 @@ def build_checkout_route(
         if access is None:
             return Response(status_code=401)
         # An operator token reaches only its scopes' tools; buying credit is not one.
-        if access.claims.get(TOKEN_KIND_CLAIM) == "operator":
+        if (
+            access.claims.get(TOKEN_KIND_CLAIM) in {"operator", "agent"}
+            or access.claims.get("agent_id") is not None
+        ):
             return Response(status_code=403)
 
         # --- parse + validate request body ---
@@ -69,6 +78,23 @@ def build_checkout_route(
         try:
             tenant_id = uuid.UUID(token_tenant_raw)
         except ValueError:
+            return Response(status_code=403)
+
+        subject = access.claims.get("sub")
+        try:
+            account_id = uuid.UUID(subject) if isinstance(subject, str) else None
+        except ValueError:
+            return Response(status_code=403)
+        if account_id is None:
+            return Response(status_code=403)
+        async with sessionmaker() as session:
+            identity = await get_account_with_tenant(session, account_id=account_id)
+        if identity is None or identity.tenant_id != tenant_id or identity.platform_user_id is None:
+            return Response(status_code=403)
+        authority = await resolve_authority(
+            sessionmaker, settings, tenant_id=tenant_id, platform_user_id=identity.platform_user_id
+        )
+        if not authority.platform_admin:
             return Response(status_code=403)
 
         try:

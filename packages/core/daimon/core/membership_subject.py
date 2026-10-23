@@ -6,6 +6,7 @@ from uuid import UUID
 
 from daimon.core.authz import Subject, build_subject
 from daimon.core.membership import MembershipResolver
+from daimon.core.native_admins import is_daimon_admin
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,8 +40,24 @@ async def resolve_subject(
     facts = await resolver.resolve(
         tenant_id, tenant.external_id, user_id, require_fresh=require_fresh
     )
+
+    async def authority(lookup: AsyncSession) -> bool:
+        return facts.is_member is True and await is_daimon_admin(
+            lookup,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id=user_id,
+            is_platform_admin=facts.is_admin,
+            role_ids=(*facts.role_ids, tenant.external_id),
+        )
+
+    if session is None:
+        async with sessionmaker() as lookup:
+            admin = await authority(lookup)
+    else:
+        admin = await authority(session)
     return build_subject(
-        is_admin=facts.is_member is True and facts.is_admin,
+        is_admin=admin,
         platform_user_id=user_id,
         role_ids=facts.role_ids if facts.is_member is True else (),
         verified_membership=facts.is_member,

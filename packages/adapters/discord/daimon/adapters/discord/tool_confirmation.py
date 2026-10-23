@@ -406,8 +406,19 @@ def discord_confirmation_hook(
             async def current_admin(clicker: str) -> bool:
                 if not isinstance(channel, (discord.Thread, discord.TextChannel)):
                     return False
-                role, _ = await requester_role(channel.guild, clicker)
-                return role is Role.ADMIN
+                role, _roles = await requester_role(channel.guild, clicker)
+                async with runtime.sessionmaker() as session:
+                    subject = await load_live_subject(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="discord",
+                        caller=AdminCaller(
+                            platform_user_id=clicker,
+                            is_server_admin=role is Role.ADMIN,
+                            role_ids=tuple(_roles),
+                        ),
+                    )
+                return subject.is_admin
 
             from functools import partial
 
@@ -479,6 +490,7 @@ def discord_confirmation_hook(
                 caller=AdminCaller(
                     platform_user_id=clicker,
                     is_server_admin=role is Role.ADMIN,
+                    role_ids=tuple(_roles),
                 ),
             )
 

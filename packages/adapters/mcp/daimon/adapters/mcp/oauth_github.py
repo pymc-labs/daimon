@@ -43,7 +43,11 @@ from daimon.core.github_connect_cards import (
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.github_requester_access import list_github_pages
-from daimon.core.native_admins import AdminAttestationUnavailable, attest_discord_admin
+from daimon.core.native_admins import (
+    AdminAttestationUnavailable,
+    attest_discord_membership,
+    is_daimon_admin,
+)
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import get_account_with_tenant
@@ -111,12 +115,21 @@ async def _attest_native_admin(
     if user_id is None:
         raise AdminAttestationUnavailable("platform principal unavailable")
     if requester.platform == "discord":
-        return await attest_discord_admin(
+        facts = await attest_discord_membership(
             guild_id=requester.external_id,
             platform_user_id=user_id,
             settings=settings,
             http_client=http_client,
         )
+        async with sessionmaker() as session:
+            return await is_daimon_admin(
+                session,
+                tenant_id=requester.tenant_id,
+                platform="discord",
+                platform_user_id=user_id,
+                is_platform_admin=facts.is_admin,
+                role_ids=(*facts.role_ids, requester.external_id),
+            )
     if requester.platform == "slack":
         try:
             async with sessionmaker() as session:
@@ -164,7 +177,14 @@ async def _attest_native_admin(
             flags = ("is_admin", "is_owner", "is_primary_owner")
             if any(type(user.get(flag)) is not bool for flag in flags):
                 raise ValueError("Missing Slack admin facts")
-            return any(user[flag] for flag in flags)
+            async with sessionmaker() as session:
+                return await is_daimon_admin(
+                    session,
+                    tenant_id=requester.tenant_id,
+                    platform="slack",
+                    platform_user_id=user_id,
+                    is_platform_admin=any(user[flag] for flag in flags),
+                )
         except (httpx.HTTPError, TimeoutError, ValueError) as exc:
             raise AdminAttestationUnavailable("Slack lookup failed") from exc
     if requester.platform == "teams":
@@ -193,7 +213,14 @@ async def _attest_native_admin(
                         owners = await teams_lookup(client)
                 else:
                     owners = await teams_lookup(http_client)
-            return user_id.lower() in owners
+            async with sessionmaker() as session:
+                return await is_daimon_admin(
+                    session,
+                    tenant_id=requester.tenant_id,
+                    platform="teams",
+                    platform_user_id=user_id.lower(),
+                    is_platform_admin=user_id.lower() in owners,
+                )
         except (GraphUnavailable, httpx.HTTPError, TimeoutError, ValueError) as exc:
             raise AdminAttestationUnavailable("Teams lookup failed") from exc
     raise AdminAttestationUnavailable("unsupported platform")

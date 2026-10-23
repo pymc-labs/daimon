@@ -122,11 +122,15 @@ async def _choose(view: discord.ui.LayoutView, index: int, value: str, click: Ma
 def test_screen_offers_both_sides_a_copy_and_a_release(account_id: uuid.UUID) -> None:
     runtime = _runtime(MagicMock())
     open_view = _view(runtime, account_id)
-    assert _labels(open_view) == {"◀ Back", COPY_LABEL, "Done"}, "an open channel can take a copy"
+    assert _labels(open_view) == {"◀ Back", "Admins", COPY_LABEL, "Done"}, (
+        "an open channel can take a copy"
+    )
     defaults = [next(o.value for o in s.options if o.default) for s in _selects(open_view)]
     assert defaults == ["any", "any"], "each select shows the current side"
     kept = _view(runtime, account_id, rule=OWN, agents=("alpha",))
-    assert _labels(kept) == {"◀ Back", "Done"}, "own agents are released by changing readers"
+    assert _labels(kept) == {"◀ Back", "Admins", "Done"}, (
+        "own agents are released by changing readers"
+    )
     assert (
         "Who can read it: Only its own agents\n\nWho can post: Only its own agents\n\n"
         "Agents kept here: alpha"

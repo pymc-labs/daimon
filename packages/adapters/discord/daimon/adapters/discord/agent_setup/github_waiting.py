@@ -315,7 +315,7 @@ class GitHubWaitingView(PanelViewBase):
         ):
             await interaction.response.send_message("This panel is private.", ephemeral=True)
             return False
-        server_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        server_admin = await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
         if admin and not server_admin:
             await interaction.response.send_message("This request is unavailable.", ephemeral=True)
             return False
@@ -393,7 +393,7 @@ class GitHubWaitingView(PanelViewBase):
                         tenant_id=tenant_id,
                         platform="discord",
                         platform_user_id=str(interaction.user.id),
-                        verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                        verified_tenant_admin=await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                     )
                     url = await connect_link(
                         session,
@@ -401,7 +401,7 @@ class GitHubWaitingView(PanelViewBase):
                         tenant_id=tenant_id,
                         platform="discord",
                         platform_user_id=str(interaction.user.id),
-                        verified_tenant_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                        verified_tenant_admin=await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
                         workspace_label=interaction.guild.name if interaction.guild else None,
                         requester_label=interaction.user.display_name,
                         origin_parent_channel_id=str(interaction.channel_id),

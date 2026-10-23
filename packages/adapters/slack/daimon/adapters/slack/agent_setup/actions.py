@@ -1412,6 +1412,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
     """
     team_info: dict[str, Any] = payload.get("team") or {}
     team_id: str = team_info.get("id") or payload.get("team_id") or ""  # type: ignore[assignment]
+    verified_team_id = team_id
     user_info: dict[str, Any] = payload.get("user") or {}
     user_id: str = user_info.get("id") or ""
     actions: list[dict[str, Any]] = payload.get("actions") or []
@@ -1439,6 +1440,21 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
 
     try:
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        from daimon.adapters.slack.agent_setup.admins import ACTIONS, handle_admin_action
+
+        if action_id in ACTIONS:
+            if panel_meta is not None:
+                await handle_admin_action(
+                    runtime,
+                    client,
+                    payload=payload,
+                    meta=panel_meta,
+                    user_id=user_id,
+                    team_id=verified_team_id,
+                    action_id=action_id,
+                )
+            return
 
         # Revoke is the one panel action clicked on an ephemeral rather than
         # inside a view, so it carries no panel metadata and is routed first.

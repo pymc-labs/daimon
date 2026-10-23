@@ -26,6 +26,7 @@ from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.context import Context
 from fastmcp.server.transforms import Visibility
+from mcp.shared.exceptions import McpError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
@@ -405,13 +406,10 @@ async def test_identity_middleware_agent_id_none_when_claim_absent(
     assert got.agent_id is None, "agent_id should be None when claim is absent"
 
 
-async def test_identity_middleware_agent_id_malformed_treated_as_absent(
+async def test_identity_middleware_malformed_binding_never_reaches_a_tool(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Malformed agent_id claim is treated as absent.
-
-    Fail-closed: gcloud provider raises NoBindingError downstream.
-    """
+    """Malformed agent identity refuses initialization, without invoking a tool."""
     account_id = uuid.uuid4()
     tenant_id = uuid.uuid4()
     captured: list[AuthIdentity | None] = []
@@ -447,12 +445,10 @@ async def test_identity_middleware_agent_id_malformed_treated_as_absent(
         captured.append(auth)
         return "ok"
 
-    async with Client(mcp) as client:
-        await client.call_tool("whoami", {})
-
-    got = captured[0]
-    assert isinstance(got, AuthIdentity), "state should be AuthIdentity"
-    assert got.agent_id is None, "malformed agent_id should be treated as None, not raise"
+    with pytest.raises(McpError, match="Invalid request parameters"):
+        async with Client(mcp) as client:
+            await client.call_tool("whoami", {})
+    assert captured == [], "malformed agent credentials never become a person"
 
 
 async def test_identity_middleware_populates_platform_user_id_from_injected_claim(
@@ -752,37 +748,22 @@ async def test_identity_middleware_no_agent_id_exposes_regular_tools_not_agent_c
 async def test_identity_middleware_malformed_agent_id_fails_closed(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A malformed agent_id claim does NOT fire the narrowing branch (fail-closed).
-
-    The malformed claim is silently nulled at l.141-144 of mcp_identity.py
-    (T-19-04-07 / existing behavior). This means the narrowing branch (agent_id
-    is not None) is skipped — the session sees both tools, exactly as the
-    no-agent_id case above. Crucially, it does NOT expose admin tools either.
-    """
+    """Malformed agent bindings refuse the request instead of widening tool access."""
     token = "bad-agent-token"
     token_map = {
         token: {
             "sub": str(uuid.uuid4()),
             "tenant_id": str(uuid.uuid4()),
             "role": "user",
-            "agent_id": "not-a-uuid",  # malformed — must be silently nulled
+            "agent_id": "not-a-uuid",  # malformed binding cannot become a person
             "client_id": "test",
         }
     }
     app = _make_narrowing_app(sessionmaker, token_map)
 
-    tool_names = await _list_tools(app, token=token)
-
-    # Malformed agent_id is treated as None — narrowing branch does NOT fire.
-    # Both tools visible confirms no disable_components(match_all=True) ran.
-    assert "regular_tool" in tool_names, (
-        "regular_tool must be visible when agent_id is malformed "
-        "(narrowing must NOT fire on malformed claim)"
-    )
-    assert "agent_tool" in tool_names, (
-        "agent_tool must also be visible — disable_components did not run "
-        "because the malformed agent_id was silently nulled (fail-closed)"
-    )
+    result = await mcp_session(app, token=token, method="tools/list")
+    assert "error" in result
+    assert "result" not in result
 
 
 # ---------------------------------------------------------------------------

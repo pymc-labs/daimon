@@ -1,8 +1,38 @@
 # Permissions
 
+## Who is a Daimon admin
+
+Daimon has one admin role per server or workspace, shared by all its agents
+and channels. Platform admins always have this role, checked live: Discord
+owners and members with Administrator or Manage Server, Slack workspace
+admins and owners, and Teams owners of the configured admin team. Their
+platform authority cannot be revoked inside Daimon.
+
+Platform admins can grant Daimon admin to a user ID, or on Discord to a role
+ID. A role grant applies while the member holds that role. Delegated admins
+can configure agents, shared credentials and channel permissions. Only
+platform admins can grant or revoke; delegated admins cannot delegate.
+Billing, promo redemption, and turn and spending caps remain platform-only.
+
+Open **Who answers where → Permissions → Admins** in Discord, or
+**Who answers where → Admins** in Slack. Each change checks platform
+authority again and records who changed which grant and when. Revocation
+takes effect on the next click or MCP request, including already-open
+panels and existing credentials. Platform authority and any remaining grants
+still apply. Erasing a user removes their grants and scrubs their attribution.
+
+MCP provides `list_admins` for members and `grant_admin` / `revoke_admin` for
+authenticated platform admins. It rechecks platform authority live; an agent
+key or operator token cannot change grants. Teams uses MCP or the CLI.
+The CLI commands `daimon admins list`, `daimon admins grant USER_ID`, and
+`daimon admins revoke USER_ID` call these same authenticated tools. Set
+`DAIMON_ADMINS_URL` to the MCP endpoint and `DAIMON_ADMINS_TOKEN` to your
+platform-user MCP credential. Add `--role` for a Discord role ID. Local
+operator context or a supplied actor ID does not prove platform authority.
+
 ## Agent tool rules
 
-A current human workspace admin can set `allow`, `ask` or `deny` for one
+A current human Daimon admin can set `allow`, `ask` or `deny` for one
 third-party MCP tool on one agent with `daimon agents tool-rules` or the
 `set_agent_tool_rule` MCP tool. An agent-wide
 rule applies where the agent runs; a channel rule applies in its parent
@@ -84,7 +114,7 @@ can't use; the cause (`daimon_tool_rules`) is in the operator log under
 `turn.backend_unsupported`. Nothing runs before the refusal.
 
 With both settings on, a card for a third-party MCP write classified as needing
-approval also has **Always allow**. A current workspace admin can press it to
+approval also has **Always allow**. A current Daimon admin can press it to
 save an agent-wide `allow` rule for chat.
 The admin may be someone other than the requester. The click approves the
 pending call and saves the rule for that agent, tool and attached server URL.
@@ -204,7 +234,7 @@ agent defines it; custom tools are still removed.
 
 The operator CLI, `daimon routines sandbox-tools`, is the supported way to opt
 a routine in today. The `set_routine_sandbox_tools` MCP tool accepts only a
-live Discord server admin's own token, re-checked against the server on every
+live Discord Daimon admin's own token, re-checked against the server on every
 call; no Daimon surface issues such a token yet, and the tool is kept for a
 future admin surface. It refuses agent keys, agents acting in a conversation
 on an admin's behalf, operator tokens, legacy tokens without a token id, and
@@ -352,12 +382,12 @@ allow.
 
 ## Changing agent setup
 
-Server or workspace admins may change an agent's setup. A non-admin must
+Daimon admins may change an agent's setup. A non-admin must
 administer every channel named by the agent's rule, and every place the agent
 answers or runs must stay inside those channels. This applies to instructions,
 model, description, tools, skills and MCP server attachments, including token
 forms and OAuth connections. Unbound agents, tenant defaults and agents serving
-other channels require a server or workspace admin. Creation metadata and a
+other channels require a Daimon admin. Creation metadata and a
 channel default alone do not grant permission to edit setup. Defaults-managed
 specs retain their existing protections, including for admins.
 
@@ -385,7 +415,7 @@ publishes.
 
 ## Exemptions
 
-- **Server admins** are exempt where the output reaches them alone: their own
+- **Daimon admins** are exempt where the output reaches them alone: their own
   DM and hub turns, and hub reads of sessions inside limited channels. They
   configure agents with rules from anywhere and see every agent listed.
   Discord cold-DM admission and all private Discord delivery enforce agent
@@ -400,7 +430,7 @@ Agent keys and tokens with no person behind them are never exempt.
 
 ## Changing the rules
 
-Rules are server or workspace admins' calls, :
+Rules are Daimon admins' calls, :
 
 - chat: `set_channel_rule` and `set_agent_rule` ([MCP tools](mcp-tools.md));
 - panels: the channel's **Permissions** screen, from Who answers where in the

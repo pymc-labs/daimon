@@ -392,12 +392,28 @@ class ChannelConfig(Base):
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
 
 
-class ChannelAdmin(Base):
-    """The roles and users who administer one channel, on top of server admins.
+class DaimonAdmin(Base):
+    """A tenant-wide user grant, or a Discord role grant; never platform authority."""
 
-    No row means nobody beyond the server or workspace admins, which is every
-    tenant's starting state.
-    """
+    __tablename__ = "daimon_admins"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "platform", "subject_kind", "subject_id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        CheckConstraint("platform IN ('discord', 'slack', 'teams')"),
+        CheckConstraint("subject_kind IN ('user', 'role')"),
+        CheckConstraint("subject_kind = 'user' OR platform = 'discord'"),
+        CheckConstraint("length(subject_id) > 0"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    platform: Mapped[str] = mapped_column(Text)
+    subject_kind: Mapped[str] = mapped_column(Text)
+    subject_id: Mapped[str] = mapped_column(Text)
+    granted_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChannelAdmin(Base):
+    """Legacy channel grants retained only for privacy erasure."""
 
     __tablename__ = "channel_admins"
     __table_args__ = (
@@ -3244,6 +3260,9 @@ class SecurityAuditEvent(Base):
     """Append-only security metadata with dedicated erasure and retention maintenance."""
 
     __tablename__ = "security_audit_events"
+    admin_subject_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    admin_subject_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     __table_args__ = (
         CheckConstraint(
             "outcome IN ('allowed', 'denied', 'error')", name="ck_security_audit_outcome"

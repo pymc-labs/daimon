@@ -252,3 +252,37 @@ async def test_a_failed_read_is_logged_even_when_a_channel_grant_made_it() -> No
         assert not await _is_admin(runtime, _settings(), AAD_OBJECT_ID), "fails closed"
     failed = [log for log in logs if log["event"] == "teams.admin_team.lookup_failed"]
     assert len(failed) == 1 and graph.reads == 1, f"one read, logged once: {logs}"
+
+
+async def test_delegated_user_admin_gate_rechecks_revoke(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.daimon_admins import change_grant
+    from daimon.testing.factories import make_tenant
+
+    settings = _settings()
+    tenant = await make_tenant(db_session, platform="teams", workspace_id=settings.tenant_id)
+    key = dict(
+        tenant_id=tenant.id,
+        platform="teams",
+        subject_kind="user",
+        subject_id=OTHER_AAD_OBJECT_ID,
+        actor_user_id=AAD_OBJECT_ID,
+        is_platform_admin=True,
+    )
+    await change_grant(db_session, **key)
+    await db_session.commit()
+    runtime = _runtime(_Owners(AAD_OBJECT_ID))
+    runtime.sessionmaker = db_session_factory
+    assert await is_deployment_admin(
+        settings, admin_team_owners(runtime), user_id=OTHER_AAD_OBJECT_ID, runtime=runtime
+    )
+    assert not await is_deployment_admin(
+        settings, admin_team_owners(runtime), user_id=OTHER_AAD_OBJECT_ID
+    ), "platform-only billing has no delegation"
+    await change_grant(db_session, **key, revoke=True)
+    await db_session.commit()
+    assert not await is_deployment_admin(
+        settings, admin_team_owners(runtime), user_id=OTHER_AAD_OBJECT_ID, runtime=runtime
+    )

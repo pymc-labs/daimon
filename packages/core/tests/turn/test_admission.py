@@ -1067,9 +1067,9 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
 
 
 async def _seed_admittable_tenant(
-    db_session: AsyncSession, *, policy: TenantAccessPolicy | None
+    db_session: AsyncSession, *, policy: TenantAccessPolicy | None, platform: str = "discord"
 ) -> TenantRow:
-    tenant = await make_tenant(db_session)
+    tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
     )
@@ -2126,7 +2126,7 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     On Teams the adapter passes ADMIN for an owner of the admin team
     in a personal chat, so the same rule covers them.
     """
-    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON, platform=platform)
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
     )
@@ -2201,7 +2201,7 @@ async def _admit_as(
     return await admit(
         deps,
         tenant_id=tenant.id,
-        platform="teams",
+        platform=tenant.platform,
         external_user_id="guest-1",
         channel_id=channel_id,
         thread_id=thread_id,
@@ -2231,3 +2231,40 @@ async def test_a_caller_in_an_isolated_channel_may_be_an_admin(
         "no one is held to a user's grant by where they are from"
     )
     assert await _stored_role(db_session, admission) == Role.ADMIN.value
+
+
+async def test_explicit_grant_records_admin_even_when_platform_role_is_unavailable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    from daimon.core.stores.accounts import get_account
+    from daimon.core.stores.daimon_admins import change_grant
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None, platform="teams")
+    await change_grant(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        subject_kind="user",
+        subject_id="user-1",
+        actor_user_id="owner",
+        is_platform_admin=True,
+    )
+    await db_session.commit()
+    admission = await admit(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        tenant_id=tenant.id,
+        platform="teams",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+        role=None,
+    )
+    assert admission.grant.subject.is_admin
+    account = await get_account(db_session, admission.account_id)
+    assert account is not None and account.role is Role.ADMIN

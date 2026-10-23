@@ -382,7 +382,7 @@ async def _decide_key_replacement(
     the consume's transaction opens, so no row lock is ever held across an
     MA listing.
     """
-    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    if await is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
         return "allow"
     agent = await resolve_ma_agent_for_uuid(
         runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
@@ -438,9 +438,7 @@ async def _decide_mcp_connect_at_submit(
         server_name=row.target,
         url=row.mcp_server_url,
         platform="discord",
-        caller=admin_caller(interaction.user).model_copy(
-            update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
-        ),
+        caller=admin_caller(interaction.user),
         default=runtime.deployment_default,
         shares_token=True,
     )
@@ -496,7 +494,7 @@ class EnvCredentialModal(discord.ui.Modal):
         # The name a member may store is re-checked against the submitter's
         # live role: a key minted while they were an admin must not land as a
         # member. `key_add` itself needs no gate, but the NAME does.
-        is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
+        is_admin = await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
         name_problem = env_name_problem(self._row.target, is_admin=is_admin)
         if name_problem is not None:
             await interaction.followup.send(
@@ -674,7 +672,7 @@ class EnvFileModal(discord.ui.Modal):
         try:
             entries = parse_env_file(
                 decode_env_bytes(raw),
-                member_writable_only=not is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                member_writable_only=not await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
             )
         except EnvFileRejected as rejected:
             # The request is deliberately NOT consumed: a typo in the file
@@ -1145,7 +1143,7 @@ class SkillRepoModal(discord.ui.Modal):
                         path=path,
                         tenant_id=consumed_row.tenant_id,
                         seeded_skill_names=seeded_skill_names,
-                        is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
+                        is_admin=await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # see refuse_if_shared_and_not_admin_for_request
                         token=pat,
                     )
             except DaimonError:

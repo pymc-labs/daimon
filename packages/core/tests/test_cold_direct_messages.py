@@ -8,14 +8,17 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.direct_messages import admit_cold_dm, start_cold_dm
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.direct_messages import (
     claim_message,
     finish_message,
@@ -56,7 +59,13 @@ async def seed(factory):
         environment=ma_environment(id="env_1", name="default", tenant_id=tenant.id),
         config=ResolvedConfig(agent_name="private", environment_name="default"),
     )
-    return tenant, admission, deps_for(None, factory)
+    deps = replace(
+        deps_for(None, factory),
+        membership_resolver=CachedMembershipResolver(
+            AsyncMock(return_value=Membership(is_member=True))
+        ),
+    )
+    return tenant, admission, deps
 
 
 async def test_cold_start_serializes_absent_route_and_pins_scope_only(db_engine, db_clean):
@@ -383,3 +392,41 @@ async def test_disabling_dms_after_admission_prevents_session_use(db_session_fac
     with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
         await reauthorize(deps, admission)
     await client.close()
+
+
+async def test_dm_admission_does_not_trust_a_previously_resolved_admin(db_session_factory):
+    tenant, fake_admission, deps = await seed(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await make_tenant_config(
+            session, tenant=tenant, agent_name="different", environment_name="default"
+        )
+        await make_ledger_entry(session, tenant=tenant, delta_usd=Decimal("10"))
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("other",))
+        )
+        key = dict(
+            tenant_id=tenant.id,
+            platform="discord",
+            subject_kind="user",
+            subject_id="999",
+            actor_user_id="owner",
+            is_platform_admin=True,
+        )
+        await change_grant(session, **key)
+        await change_grant(session, **key, revoke=True)
+    client = build_fake_anthropic(
+        resolved_agent_env_router(fake_admission.agent, fake_admission.environment).dispatch
+    )
+    try:
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await admit_cold_dm(
+                replace(deps, anthropic=client),
+                tenant_id=tenant.id,
+                external_user_id="999",
+                channel_id="555",
+                role=Role.ADMIN,
+                role_ids=(),
+                verified_membership=True,
+            )
+    finally:
+        await client.close()

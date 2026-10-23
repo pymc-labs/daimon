@@ -69,7 +69,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             runtime,
             interaction,
             tenant_id=tenant_id,
-            is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+            is_admin=await is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
         )
         home = await load_home(state, runtime=runtime, user_id=interaction.user.id)
         message = await interaction.edit_original_response(
@@ -78,7 +78,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             allowed_mentions=discord.AllowedMentions.none(),
         )
         home.attach_message(message)
-        if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if await is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
             from daimon.adapters.discord.agent_setup.github_new_repo import (
                 send_pending_notice as send_pending_new_repo_notice,
             )
@@ -94,7 +94,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
     @require_registered_guild
     async def connect(self, interaction: BotInteraction, agent: str | None = None) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not is_guild_admin(interaction):
+        if not await is_guild_admin(interaction):
             await interaction.followup.send(
                 "Only an admin can connect repos. Ask one to run /github.", ephemeral=True
             )

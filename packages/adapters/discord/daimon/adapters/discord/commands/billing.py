@@ -12,7 +12,7 @@ import structlog
 from daimon.adapters.discord.billing_panel.panel import BillingPanelView
 from daimon.adapters.discord.billing_panel.read import (
     invoking_channel_id,
-    is_guild_admin,
+    is_platform_admin,
     load_billing_snapshot,
 )
 from daimon.adapters.discord.checks import require_registered_guild
@@ -57,7 +57,7 @@ class BillingCog(commands.Cog):
             assert interaction.guild is not None, "guild_only ensures guild context"
             now = datetime.now(UTC)
             since = datetime(now.year, now.month, 1, tzinfo=UTC)
-            is_admin = is_guild_admin(interaction)
+            is_admin = is_platform_admin(interaction)
             async with runtime.sessionmaker() as session:
                 state = await load_billing_snapshot(
                     session,

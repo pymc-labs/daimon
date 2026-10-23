@@ -4,8 +4,8 @@
 ``view_submission`` is evaluated purely before the ack (an empty code is a field
 error; anything else acks with a "Redeeming…" update), then the background
 side reads admin rights live and redeems through ``daimon.core.promo_credit``:
-a server-wide code needs a workspace admin, a channel code credits the channel
-/billing ran in for anyone (never a DM or group DM, read from Slack's own
+all codes require a platform admin; a channel code credits the channel
+/billing ran in (never a DM or group DM, read from Slack's own
 description of the conversation). It either shows the result and
 refreshes the panel underneath, or reopens the form with the refusal so the
 person can retry.
@@ -21,7 +21,7 @@ from typing import Any, cast
 
 import aiohttp
 import structlog
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.billing_panel.names import name_shown_spenders
 from daimon.adapters.slack.billing_panel.views import build_billing_view, slack_time
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
@@ -267,7 +267,7 @@ async def run_redeem_submission(
     )
     audited = False
     try:
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_platform_admin(client, user_id=user_id)
         async with runtime.sessionmaker() as session, session.begin():
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id

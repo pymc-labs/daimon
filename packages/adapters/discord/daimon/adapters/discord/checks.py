@@ -2,7 +2,7 @@
 
 ``require_registered_guild`` verifies the invoking guild is in the workspace
 registry (DB check).  ``require_manage_guild`` verifies the invoking
-user has Discord-native manage_guild (or administrator, or is the owner).
+user has live platform authority or a current tenant Daimon admin grant.
 
 Both decorators consume the interaction response on rejection (ephemeral error)
 and return early.  The happy path falls through to the wrapped handler, which
@@ -18,8 +18,9 @@ from typing import Any, Concatenate, ParamSpec, cast
 
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.native_admins import AdminCaller, is_guild_admin_by_permissions
+from daimon.core.native_admins import AdminCaller, is_daimon_admin, is_guild_admin_by_permissions
 from daimon.core.stores.tenants import get_tenant
+from sqlalchemy.exc import SQLAlchemyError
 
 import discord
 from discord import Interaction
@@ -27,11 +28,11 @@ from discord.ext import commands
 
 P = ParamSpec("P")
 
-_ADMIN_ONLY_MESSAGE = "That action needs Manage Server — ask a server admin to do it."
+_ADMIN_ONLY_MESSAGE = "That action needs a Daimon admin — ask one to do it."
 
 #: Discord's own name for the person a member is sent to when a change needs
 #: elevated permission. Copy never says "admin" in the abstract.
-ADMIN_NOUN = "someone with Manage Server"
+ADMIN_NOUN = "a Daimon admin"
 
 
 def is_member_guild_admin(member: discord.Member, *, guild_owner_id: int | None) -> bool:
@@ -60,10 +61,11 @@ def admin_caller(user: discord.User | discord.Member) -> AdminCaller:
     return AdminCaller(
         platform_user_id=str(user.id),
         is_server_admin=is_member_guild_admin(user, guild_owner_id=user.guild.owner_id),
+        role_ids=(*member_role_ids(user), str(user.guild.id)),
     )
 
 
-def is_guild_admin(interaction: Interaction[commands.Bot]) -> bool:
+def is_platform_admin(interaction: discord.Interaction) -> bool:
     """Discord-native admin check: owner OR manage_guild OR administrator.
 
     Returns False for DM contexts (user is not a Member).
@@ -74,6 +76,28 @@ def is_guild_admin(interaction: Interaction[commands.Bot]) -> bool:
     guild = interaction.guild
     owner_id = guild.owner_id if guild is not None else None
     return is_member_guild_admin(user, guild_owner_id=owner_id)
+
+
+async def is_guild_admin(interaction: Interaction[commands.Bot]) -> bool:
+    """Daimon authority, re-read from this interaction and uncached tenant grants."""
+    if interaction.guild_id is None or not isinstance(interaction.user, discord.Member):
+        return False
+    if is_platform_admin(interaction):
+        return True
+    runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
+    try:
+        async with runtime.sessionmaker() as session:
+            return await is_daimon_admin(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                platform_user_id=str(interaction.user.id),
+                is_platform_admin=False,
+                role_ids=[*member_role_ids(interaction.user), str(interaction.guild_id)],
+            )
+    except (SQLAlchemyError, ValueError):
+        return False  # unavailable grants never confer authority
 
 
 async def refuse_if_not_admin(interaction: Interaction[commands.Bot]) -> bool:
@@ -90,7 +114,7 @@ async def refuse_if_not_admin(interaction: Interaction[commands.Bot]) -> bool:
     Call it before any ``defer()`` or response in the callback, so the refusal
     owns the interaction's first response.
     """
-    if is_guild_admin(interaction):
+    if await is_guild_admin(interaction):
         return False
     if interaction.response.is_done():
         await interaction.followup.send(_ADMIN_ONLY_MESSAGE, ephemeral=True)
@@ -150,9 +174,9 @@ def require_registered_guild(  # noqa: UP047  -- ParamSpec used for decorator ge
 def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generics; PEP 695 syntax not adopted here
     func: Callable[Concatenate[Any, Interaction[commands.Bot], P], Coroutine[Any, Any, None]],
 ) -> Callable[Concatenate[Any, Interaction[commands.Bot], P], Coroutine[Any, Any, None]]:
-    """Reject interaction if the user lacks Discord-native manage_guild (or administrator / owner).
+    """Reject interaction unless the caller has live Daimon admin authority.
 
-    DB-role-free: checks Discord permissions only, not the daimon accounts.role column.
+    Reads current platform permissions and uncached tenant grants.
     Rejects plain Users (DM context) with the same ephemeral message.
     """
 
@@ -163,9 +187,9 @@ def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generi
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> None:
-        if not is_guild_admin(interaction):
+        if not await is_guild_admin(interaction):
             await interaction.response.send_message(
-                "🛡️ Viewing scheduled routines needs a server admin (Manage Server). "
+                "🛡️ Viewing scheduled routines needs a Daimon admin. "
                 "Ask one: “Please open `/routines` to review this server’s scheduled routines.”",
                 ephemeral=True,
             )
@@ -173,3 +197,34 @@ def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generi
         await func(self, interaction, *args, **kwargs)
 
     return wrapper
+
+
+async def is_member_daimon_admin(
+    member: discord.Member,
+    *,
+    runtime: DiscordRuntime,
+) -> bool:
+    """Current member permissions/roles plus fresh tenant delegation."""
+    if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id):
+        return True
+    async with runtime.sessionmaker() as session:
+        return await is_daimon_admin(
+            session,
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(member.guild.id)),
+            platform="discord",
+            platform_user_id=str(member.id),
+            is_platform_admin=is_member_guild_admin(member, guild_owner_id=member.guild.owner_id),
+            role_ids=[*member_role_ids(member), str(member.guild.id)],
+        )
+
+
+async def refuse_if_not_platform_admin(interaction: discord.Interaction) -> bool:
+    """Money controls must never consume the delegated Daimon admin check."""
+    if is_platform_admin(interaction):
+        return False
+    message = "That action needs Manage Server — ask a platform admin to do it."
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+    return True

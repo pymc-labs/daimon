@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection, Iterable, Sequence
 
-from daimon.core.native_admins import AdminCaller
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.operation_policy import OperationKind, TargetFacts
 from daimon.core.scope import (
     AnsweringPlace,
@@ -170,8 +170,10 @@ async def may_bind_as_channel_default(
     is_daimon_managed: bool,
     caller_account_id: uuid.UUID | None = None,
 ) -> bool:
-    """A server admin may bind an agent once its channel rule passes."""
-    return caller.is_server_admin
+    """A Daimon admin may bind an agent once its channel rule passes."""
+    return (
+        await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+    ).is_admin
 
 
 async def load_target_facts(

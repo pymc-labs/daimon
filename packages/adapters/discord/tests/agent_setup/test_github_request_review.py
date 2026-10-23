@@ -68,8 +68,8 @@ async def test_shared_review_requires_live_admin_and_returns_ephemeral_detail(
             )
         ),
     )
-    admin = MagicMock(return_value=False)
-    monkeypatch.setattr(module, "is_member_guild_admin", admin)
+    admin = AsyncMock(return_value=False)
+    monkeypatch.setattr(module, "is_member_daimon_admin", admin)
     sync = AsyncMock()
     monkeypatch.setattr(module, "sync_connect_admin", sync)
     guild = SimpleNamespace(owner_id=1, get_member=lambda _id: object())
@@ -178,7 +178,7 @@ async def test_uncached_member_decision_edits_requester_thread_card(
             )
         ),
     )
-    monkeypatch.setattr(module, "is_member_guild_admin", MagicMock(return_value=True))
+    monkeypatch.setattr(module, "is_member_daimon_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "dismiss_delivery", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "approve_connected_request", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "update_requester_card", AsyncMock())

@@ -53,6 +53,7 @@ async def test_teams_admin_reaches_remove_repo(
         external_id="entra-tenant",
         platform_user_id="aad-admin",
         is_admin=True,
+        is_platform_admin=True,
     )
     with pytest.raises(ToolError, match="not on this agent's list"):
         await tool.remove_repo_impl(

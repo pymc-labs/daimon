@@ -46,7 +46,7 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
     interaction.application_id = 456
     interaction.token = "interaction-token"
     interaction.client.runtime = runtime
-    monkeypatch.setattr(github_command, "is_guild_admin", lambda _interaction: True)  # pyright: ignore[reportUnknownArgumentType,reportUnknownLambdaType]
+    monkeypatch.setattr(github_command, "is_guild_admin", AsyncMock(return_value=True))  # pyright: ignore[reportUnknownArgumentType,reportUnknownLambdaType]
     monkeypatch.setattr(
         github_command, "resolve_tenant_for_interaction", AsyncMock(return_value=tenant_id)
     )

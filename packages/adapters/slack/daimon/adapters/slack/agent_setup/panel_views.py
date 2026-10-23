@@ -870,6 +870,18 @@ def build_routing_view(
         blocks.append(_section(line))
     else:
         blocks.append(_section("_no deployment default_"))
+    blocks.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": "agent_setup__admins:open",
+                    "text": {"type": "plain_text", "text": "Admins"},
+                }
+            ],
+        }
+    )
     blocks.append({"type": "divider"})
     blocks.extend(_environment_blocks(answering_map, picker=environment_picker))
     links = list(setup_links[:MAX_SETUP_LINKS])

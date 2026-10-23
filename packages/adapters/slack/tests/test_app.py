@@ -4356,6 +4356,22 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
         "text": "<@U_BOT> hello",
     }
 
+    _override_users_info(
+        fake_slack_web_client.mock,
+        payload={
+            "ok": True,
+            "user": {
+                "id": event["user"],
+                "team_id": team_id,
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+            },
+        },
+    )
+
     with (
         patch(
             "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
@@ -4573,6 +4589,22 @@ async def test_bind_phase_failure_leaves_no_cancel_registry_entry(
         "user": "U_AUTHOR_BIND_FAIL",
         "text": "<@U_BOT> hello",
     }
+
+    _override_users_info(
+        fake_slack_web_client.mock,
+        payload={
+            "ok": True,
+            "user": {
+                "id": event["user"],
+                "team_id": team_id,
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+            },
+        },
+    )
 
     with (
         patch(
@@ -6117,6 +6149,9 @@ class TestPerTurnRoleUpsert:
                 "ok": True,
                 "user": {
                     "id": "U_ROLE_ADMIN",
+                    "team_id": team_id,
+                    "deleted": False,
+                    "is_bot": False,
                     "name": "admin_user",
                     "is_admin": True,
                     "is_owner": False,
@@ -6211,8 +6246,21 @@ class TestPerTurnRoleUpsert:
             )
             await s.commit()
 
-        # conftest's default users.info payload (non-admin) is already registered
-        # by fake_slack_web_client; no override needed.
+        _override_users_info(
+            fake_slack_web_client.mock,
+            payload={
+                "ok": True,
+                "user": {
+                    "id": "U_ROLE_USER",
+                    "team_id": team_id,
+                    "deleted": False,
+                    "is_bot": False,
+                    "is_admin": False,
+                    "is_owner": False,
+                    "is_primary_owner": False,
+                },
+            },
+        )
 
         app, _ = make_orchestrate_app(db_session_factory)
 
@@ -6399,6 +6447,9 @@ class TestPerTurnRoleUpsert:
                 "ok": True,
                 "user": {
                     "id": "U_ROLE_ADMISSION_DENIED",
+                    "team_id": team_id,
+                    "deleted": False,
+                    "is_bot": False,
                     "name": "member",
                     "is_admin": False,
                     "is_owner": False,

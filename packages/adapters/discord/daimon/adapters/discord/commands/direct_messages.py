@@ -19,7 +19,7 @@ from daimon.adapters.discord.bot import (
     log_anthropic_overload,
 )
 from daimon.adapters.discord.checks import (
-    is_member_guild_admin,
+    is_member_daimon_admin,
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
@@ -466,7 +466,7 @@ class DirectMessageCog(commands.Cog):
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
         try:
             member = await guild.fetch_member(interaction.user.id)
-            is_admin = is_member_guild_admin(member, guild_owner_id=guild.owner_id)
+            is_admin = await is_member_daimon_admin(member, runtime=self.bot.runtime)
             if action in {"enable", "disable", "agent", "clear-agent"}:
                 if not is_admin:
                     await interaction.followup.send(

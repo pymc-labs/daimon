@@ -137,7 +137,7 @@ async def refuse_if_reachable_and_not_admin(
     if entry is None:
         log.debug("agent_setup.authz.no_target")
         return True
-    is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    is_admin = await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
     facts = await _target_facts(
         interaction, runtime=runtime, entry=entry, operation="agent_spec_edit", is_admin=is_admin
     )
@@ -183,7 +183,7 @@ async def refuse_if_shared_and_not_admin(
     if entry is None:
         log.debug("agent_setup.authz.no_target")
         return True
-    is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    is_admin = await is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
     if is_admin:
         return False
     facts = await _target_facts(

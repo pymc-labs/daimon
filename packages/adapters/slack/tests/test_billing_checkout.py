@@ -8,7 +8,7 @@ Covers (create_checkout itself is covered in core's test_billing_panel.py):
 
 Transport-level fakes:
   - MCP /billing/checkout: httpx.MockTransport (injected via _http_client parameter)
-  - Slack Web API: aioresponses (for resolve_is_admin users.info + chat.postEphemeral)
+  - Slack Web API: aioresponses (for resolve_is_platform_admin users.info + chat.postEphemeral)
 
 No stripe imports anywhere in billing_panel. No method-level AsyncMock.
 """
@@ -161,6 +161,9 @@ async def test_handle_topup_select_admin_posts_checkout_and_sends_ephemeral(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
+            "deleted": False,
+            "is_bot": False,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -229,6 +232,9 @@ async def test_handle_topup_select_admin_ephemeral_text_contains_url(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
+            "deleted": False,
+            "is_bot": False,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -351,6 +357,9 @@ async def test_handle_topup_select_invalid_amount_issues_no_checkout_post(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
+            "deleted": False,
+            "is_bot": False,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -410,6 +419,9 @@ async def test_handle_topup_select_updates_modal_when_checkout_route_is_missing(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
+            "deleted": False,
+            "is_bot": False,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -464,6 +476,9 @@ async def test_handle_topup_select_admin_success_sends_no_views_update(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
+            "deleted": False,
+            "is_bot": False,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,

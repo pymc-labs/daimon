@@ -129,7 +129,7 @@ class HereCog(commands.Cog):
                     public_mcp_url=str(runtime.settings.mcp.public_url)
                     if runtime.settings.mcp.public_url is not None
                     else None,
-                    is_admin=is_guild_admin(interaction),
+                    is_admin=await is_guild_admin(interaction),
                     caller_account_id=principal.account_id if principal else None,
                     visible_channel_ids=visible_ids,
                     bot_can_view=bot_view,

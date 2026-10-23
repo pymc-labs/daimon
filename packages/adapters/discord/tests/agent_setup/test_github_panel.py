@@ -60,7 +60,7 @@ async def test_discord_repo_read_rechecks_external_and_admin_actor(
             )
         ),
     )
-    monkeypatch.setattr(repos_module, "is_guild_admin", lambda _: True)
+    monkeypatch.setattr(repos_module, "is_guild_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(
         repos_module,
         "get_account",
@@ -380,7 +380,7 @@ async def test_discord_new_repo_card_releases_failed_delivery(
     finish = AsyncMock(return_value=True)
     monkeypatch.setattr(notice_module, "claim_notice_group", claim)
     monkeypatch.setattr(notice_module, "finish_notice", finish)
-    monkeypatch.setattr(notice_module, "is_guild_admin", lambda _: True)
+    monkeypatch.setattr(notice_module, "is_guild_admin", AsyncMock(return_value=True))
     session = MagicMock()
     session.__aenter__ = AsyncMock(return_value=object())
     session.__aexit__ = AsyncMock(return_value=None)
