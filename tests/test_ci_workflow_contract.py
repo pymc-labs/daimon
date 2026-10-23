@@ -15,6 +15,15 @@ import yaml
 _WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 _ROOT = _WORKFLOWS.parents[1]
 
+#: deploy.yml appends this to every step after its freshness check
+#: (tests/test_deploy_superseded.py proves it); a step's own condition is the rest.
+_FRESHNESS = " && steps.fresh.outputs.superseded != 'true'"
+
+
+def without_freshness(condition: str) -> str:
+    own = condition.removesuffix(_FRESHNESS)
+    return own[1:-1] if own != condition and own.startswith("(") and own.endswith(")") else own
+
 
 def _workflow(name: str) -> dict[str, Any]:
     return yaml.safe_load((_WORKFLOWS / name).read_text())
@@ -257,7 +266,7 @@ def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
     assert "gcloud artifacts tags create" in script
     assert "gcloud artifacts docker tags add" not in script
     assert script.rfind("steps.tags.outputs.daimon") > script.rfind("steps.tags.outputs.report")
-    assert deploy[promotable]["if"] == "steps.images.outputs.prebuilt == 'true'"
+    assert without_freshness(deploy[promotable]["if"]) == "steps.images.outputs.prebuilt == 'true'"
 
 
 def test_defaults_verify_qa_exception_is_staging_only() -> None:
@@ -285,7 +294,7 @@ def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
     assert "gcloud artifacts docker images describe" in select["run"]
     for step in steps:
         if step.get("name", "").startswith("Build + push"):
-            assert step["if"] == "steps.images.outputs.prebuilt != 'true'"
+            assert without_freshness(step["if"]) == "steps.images.outputs.prebuilt != 'true'"
     promote = _workflow("promote.yml")["jobs"]
     assert promote["deploy"]["needs"] == "validate"
     assert promote["deploy"]["with"]["environment"] == "production"

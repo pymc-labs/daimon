@@ -89,7 +89,28 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
 
+      # A main CI run that main has already moved past must not deploy: an older run
+      # that reached the deploy after a newer one rolled staging back mid-smoke. The
+      # newer run deploys a superset. Checked once this job holds the environment's
+      # concurrency slot: a queued older run starts only after the newer one finishes.
+      # Skips only when the SHA is not main's head and is provably its ancestor; the
+      # head, a commit off main, or an unreadable history always deploy.
+      - name: Skip a deploy main has already superseded
+        id: fresh
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          result="$(bash scripts/ci/deploy_superseded.sh "$SHA")"
+          echo "$result" | tee -a "$GITHUB_OUTPUT"
+          if echo "$result" | grep -qx 'superseded=true'; then
+            head="$(echo "$result" | sed -n 's/^head=//p')"
+            echo "::notice::Deploy of $SHA skipped: superseded by $head (main's newer run deploys it)."
+            echo "superseded by $head"
+          fi
+
       - id: auth
+        if: steps.fresh.outputs.superseded != 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
@@ -97,13 +118,16 @@ jobs:
 
       # The runner image ships gcloud; installing another copy cost ~20s.
       - uses: google-github-actions/setup-gcloud@v2
+        if: steps.fresh.outputs.superseded != 'true'
         with:
           skip_install: true
 
       - name: Configure Docker for Artifact Registry
+        if: steps.fresh.outputs.superseded != 'true'
         run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
 
       - name: Compute image tags
+        if: steps.fresh.outputs.superseded != 'true'
         id: tags
         run: |
           # Deterministic 7-char truncation, NOT `git rev-parse --short`:
@@ -117,6 +141,7 @@ jobs:
           echo "report=$BASE/report-host:$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Select immutable prebuilt images or canonical build tags
+        if: steps.fresh.outputs.superseded != 'true'
         id: images
         env:
           DAIMON_DIGEST: ${{ inputs.daimon_digest }}
@@ -149,7 +174,7 @@ jobs:
           done
 
       - name: Start staging IAP SSH key registration
-        if: inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           REPO_NAME: ${{ vars.GCP_AR_REPO }}
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
@@ -163,12 +188,12 @@ jobs:
       # SBOM attestations: they would turn the push into an image index, while
       # existing consumers expect a plain image manifest.
       - uses: docker/setup-buildx-action@v3
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Build + push daimon image
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -180,7 +205,7 @@ jobs:
           cache-from: type=gha,scope=daimon
 
       - name: Build + push notebook-host image
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -192,7 +217,7 @@ jobs:
           cache-from: type=gha,scope=notebook-host
 
       - name: Build + push report-host image
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -204,6 +229,7 @@ jobs:
           cache-from: type=gha,scope=report-host
 
       - name: Run migrations (blocking gate)
+        if: steps.fresh.outputs.superseded != 'true'
         run: |
           gcloud run jobs update ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}"
@@ -213,6 +239,7 @@ jobs:
       # Update it before any drain, using a bounded compatibility window on
       # the initial cutover. All later deployments keep strict admission.
       - name: Deploy MCP registered minters
+        if: steps.fresh.outputs.superseded != 'true'
         id: mcp_minters
         env:
           DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
@@ -260,6 +287,7 @@ jobs:
           echo "$(( $(date +%s) + REQUEST_TIMEOUT ))" > "$RUNNER_TEMP/mcp-legacy-minters-until"
 
       - name: Resolve seam URL for report-host
+        if: steps.fresh.outputs.superseded != 'true'
         id: seam
         run: |
           # report-host's DAIMON_REPORT__MCP_URL points at the same mcp
@@ -272,13 +300,13 @@ jobs:
           echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
 
       - name: Wait for staging IAP SSH key registration
-        if: inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
         run: scripts/ci/iap-ssh-key.sh wait "$IAP_SSH_STATE" 190
 
       - name: Register the IAP SSH key
-        if: inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true'
+        if: (inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         run: |
           # Keep this inline: rollback workflows check out the requested old
           # SHA, which may not contain the helper script used by current main.
@@ -305,6 +333,7 @@ jobs:
           fi
 
       - name: Start notebook-host VM refresh (in the background)
+        if: steps.fresh.outputs.superseded != 'true'
         id: notebook_refresh
         run: |
           # Runs alongside the worker refresh below; the two VMs share nothing.
@@ -389,6 +418,7 @@ jobs:
           ) > "$RUNNER_TEMP/notebook-refresh.log" 2>&1 < /dev/null &
 
       - name: Refresh worker VM containers (recreate in place)
+        if: steps.fresh.outputs.superseded != 'true'
         run: |
           # Skip the refresh when the workers VM is stopped (nothing to recreate).
           STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-workers \
@@ -536,7 +566,7 @@ jobs:
       - name: Wait for notebook-host VM refresh
         # Also after a failed worker refresh, so the notebook-host outcome is
         # always on record; not after a cancel, which ends the job anyway.
-        if: ${{ !cancelled() && steps.notebook_refresh.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.notebook_refresh.outcome == 'success' && steps.fresh.outputs.superseded != 'true' }}
         run: |
           # 15 minutes; the refresh's own gates give up well before that.
           for _ in $(seq 1 450); do
@@ -551,6 +581,7 @@ jobs:
           exit "$(cat "$RUNNER_TEMP/notebook-refresh.rc")"
 
       - name: Drain legacy MCP turns before first verifier cutover
+        if: steps.fresh.outputs.superseded != 'true'
         id: mcp_cutover
         env:
           LEGACY_WINDOW: ${{ steps.mcp_minters.outputs.window }}
@@ -572,6 +603,7 @@ jobs:
           fi
 
       - name: Health gate
+        if: steps.fresh.outputs.superseded != 'true'
         run: |
           URL=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --format='value(status.url)')
@@ -585,7 +617,7 @@ jobs:
           echo "mcp did not become healthy" >&2; exit 1
 
       - name: Post-deploy smoke turn
-        if: inputs.environment == 'staging'
+        if: (inputs.environment == 'staging') && steps.fresh.outputs.superseded != 'true'
         timeout-minutes: 5
         run: |
           # Deliberately no VM-status precheck and no error-suppressing fallback
@@ -602,6 +634,7 @@ jobs:
             '
 
       - name: Let the adapters' boot reconcile settle
+        if: steps.fresh.outputs.superseded != 'true'
         env:
           DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
         run: |
@@ -698,6 +731,7 @@ jobs:
           fi
 
       - name: Verify deployed installs match shipped defaults
+        if: steps.fresh.outputs.superseded != 'true'
         # No environment gate, deliberately: this runs on every staging deploy
         # AND every production promote — unlike the smoke turn above, which is
         # scoped to staging only. A production install drifting from the
@@ -743,7 +777,7 @@ jobs:
           fi
 
       - name: Mark tested staging images promotable
-        if: steps.images.outputs.prebuilt == 'true'
+        if: (steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
         run: |
