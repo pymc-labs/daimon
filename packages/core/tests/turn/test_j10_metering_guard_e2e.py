@@ -136,7 +136,7 @@ async def test_slow_but_successful_reads_never_cancel_a_worker(monkeypatch):
     monkeypatch.setattr(channel_budget, "read_fleet_budget_snapshot", slow)
     monkeypatch.setattr(channel_budget, "_lock_holder", holder)
     outcome = await _watch_for(
-        15, sessions=_Sessions(lock_busy=False), parent=parent, cancelled=cancelled
+        15, sessions=_Sessions(lock_busy=True), parent=parent, cancelled=cancelled
     )
     reasons = [event.reason for event in cancelled.values() if event.is_set()]
     assert outcome == "finished" and reasons == [], (
