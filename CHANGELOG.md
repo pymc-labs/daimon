@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord `/routines` now supports admin creation and confirmed creator-or-admin
   deletion, with schedule validation and agent policy checks. Pause and resume
-  also recognize server owners and Administrator permissions.
+  also recognize server owners and Administrator permissions. Thread-created
+  routines retain verified parent/thread provenance and use the parent channel's
+  budget; unresolved sources are refused.
 
 ### Fixed
 

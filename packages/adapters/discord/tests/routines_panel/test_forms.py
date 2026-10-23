@@ -3,6 +3,7 @@
 # pyright: reportPrivateUsage=false
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,8 +17,10 @@ from daimon.adapters.discord.routines_panel.state import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
-from daimon.core.config import RecruitmentSettings
+from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.config import RecruitmentSettings, RecruitmentTenantSettings
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.channel_budgets import set_channel_budget
 from daimon.core.stores.routines import (
     create_routine,
     delete_routine,
@@ -36,6 +39,9 @@ def interaction(*, admin=True, user_id=42):
     result.guild.owner_id = 999
     result.guild_id = 123456
     result.channel_id = 987654
+    result.channel = MagicMock(spec=discord.TextChannel)
+    result.channel.id = result.channel_id
+    result.channel.guild.id = result.guild_id
     result.response.send_message = AsyncMock()
     result.response.send_modal = AsyncMock()
     result.response.edit_message = AsyncMock()
@@ -92,6 +98,9 @@ async def test_admin_creates_attributed_scheduled_routine(setup_panel, db_sessio
     assert row.created_by_user_id == "42"
     assert row.next_fire_at is not None and row.next_fire_at > before
     assert row.channel_id == "987654"
+    assert row.source_channel_id == "987654"
+    assert row.source_thread_id is None
+    assert row.source_provenance_known
     assert (row.agent_id, row.agent_name, row.trigger_message) == (
         "agent_a",
         "daimon",
@@ -282,4 +291,113 @@ async def test_cross_tenant_delete_is_gone(setup_panel, db_session_factory):
     submit.response.send_message.assert_awaited_once_with(embeds.GONE, ephemeral=True)
     async with db_session_factory() as session:
         assert await get_routine(session, row.id, tenant_id=tenant.id) is not None
+    refresh.assert_not_awaited()
+
+
+def thread_interaction(*, parent_id=987654):
+    event = interaction()
+    event.channel_id = 111111
+    event.channel = MagicMock(spec=discord.Thread)
+    event.channel.id = event.channel_id
+    event.channel.guild.id = event.guild_id
+    event.channel.parent_id = parent_id
+    event.channel.parent = None  # A verified parent id does not require a warm channel cache.
+    return event
+
+
+def recruitment_settings():
+    return RecruitmentSettings(
+        tenants={
+            "123456": RecruitmentTenantSettings(channel_ids=("987654",), recruiter_user_ids=("42",))
+        }
+    )
+
+
+async def test_thread_creation_preserves_source_and_parent_budget(setup_panel, db_session_factory):
+    view, tenant, refresh, _ = setup_panel
+    async with db_session_factory.begin() as session:
+        await set_channel_budget(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="987654",
+            limit_usd=Decimal("0"),
+            window="total",
+            starts_at=None,
+            ends_at=None,
+            set_by_account_id=None,
+        )
+    click = thread_interaction()
+    modal = await open_modal(view, click)
+    await modal.on_submit(thread_interaction())
+    async with db_session_factory() as session:
+        rows = await list_routines_for_tenant(session, tenant_id=tenant.id)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.channel_id == "987654", "scheduler must use the parent's budget key"
+        assert row.source_channel_id == "987654"
+        assert row.source_thread_id == "111111"
+        assert row.source_provenance_known
+        assert row.created_by_user_id == "42" and row.next_fire_at is not None
+        assert (
+            await list_routines_for_tenant(
+                session, tenant_id=tenant.id, recruitment=recruitment_settings()
+            )
+            == []
+        ), "a later settings restart must withhold a routine from this parent"
+    assert await is_over_channel_budget(
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id=row.channel_id,
+        now=datetime.now(UTC),
+    ), "the scheduler's budget gate must reject this thread-created routine"
+    assert not await is_over_channel_budget(
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="111111",
+        now=datetime.now(UTC),
+    ), "using the thread id would bypass the parent's exhausted budget"
+    refresh.assert_awaited_once_with(click, view)
+
+
+@pytest.mark.parametrize("in_thread", [False, True])
+async def test_creation_refuses_recruitment_origin_at_submit(
+    setup_panel, db_session_factory, in_thread
+):
+    view, tenant, refresh, resolver = setup_panel
+    click = thread_interaction() if in_thread else interaction()
+    modal = await open_modal(view, click)
+    view.runtime.settings.recruitment = recruitment_settings()
+    submit = thread_interaction() if in_thread else interaction()
+    await modal.on_submit(submit)
+    submit.response.send_message.assert_awaited_once_with(embeds.SOURCE_UNAVAILABLE, ephemeral=True)
+    async with db_session_factory() as session:
+        assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
+    resolver.assert_not_awaited()
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "invalid", ["missing_channel", "unresolved_parent", "wrong_guild", "wrong_id"]
+)
+async def test_creation_refuses_unverified_source(setup_panel, db_session_factory, invalid):
+    view, tenant, refresh, resolver = setup_panel
+    click = thread_interaction()
+    if invalid == "missing_channel":
+        click.channel = None
+    elif invalid == "unresolved_parent":
+        click.channel.parent_id = None
+    elif invalid == "wrong_guild":
+        click.channel.guild.id = 555555
+    else:
+        click.channel.id = 222222
+    modal = await open_modal(view, click)
+    submit = interaction()
+    await modal.on_submit(submit)
+    submit.response.send_message.assert_awaited_once_with(embeds.SOURCE_UNVERIFIED, ephemeral=True)
+    async with db_session_factory() as session:
+        assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
+    resolver.assert_not_awaited()
     refresh.assert_not_awaited()

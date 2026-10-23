@@ -24,6 +24,7 @@ import discord
 
 ADMIN_ONLY = "Only a server admin can create routines."
 INVALID_SCHEDULE = "That schedule or time zone isn't valid.\n\nCheck both and try again."
+SOURCE_UNVERIFIED = "The routine's source channel could not be verified."
 AGENT_UNAVAILABLE = "No agent with that name exists on this server."
 SAVE_REFUSED = (
     "This agent's rules do not allow a routine without a channel destination. Nothing was saved."

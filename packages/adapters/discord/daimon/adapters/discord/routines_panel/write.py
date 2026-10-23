@@ -56,6 +56,9 @@ async def create_routine_via_panel(
     trigger_message: str,
     next_fire_at: datetime,
     channel_id: str,
+    source_thread_id: str | None,
+    source_channel_id: str,
+    source_provenance_known: bool,
 ) -> RoutineRow:
     return await _create_core(
         session,
@@ -68,6 +71,9 @@ async def create_routine_via_panel(
         trigger_message=trigger_message,
         next_fire_at=next_fire_at,
         channel_id=channel_id,
+        source_thread_id=source_thread_id,
+        source_channel_id=source_channel_id,
+        source_provenance_known=source_provenance_known,
     )
 
 

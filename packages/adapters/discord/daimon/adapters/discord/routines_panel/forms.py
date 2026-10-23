@@ -82,12 +82,26 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
             if not self.message.value.strip() or not self.agent.value.strip():
                 await interaction.response.send_message(embeds.FIELDS_REQUIRED, ephemeral=True)
                 return
+            channel = self.origin.channel
+            if (
+                not isinstance(channel, (discord.Thread, discord.abc.GuildChannel))
+                or channel.guild.id != self.origin.guild_id
+                or channel.id != self.origin.channel_id
+            ):
+                await interaction.response.send_message(embeds.SOURCE_UNVERIFIED, ephemeral=True)
+                return
+            source_thread_id = str(channel.id) if isinstance(channel, discord.Thread) else None
+            parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
+            if parent_id is None:
+                await interaction.response.send_message(embeds.SOURCE_UNVERIFIED, ephemeral=True)
+                return
+            source_channel_id = str(parent_id)
+            runtime = self.panel.runtime
             await interaction.response.defer(ephemeral=True, thinking=True)
             tenant_id = derive_tenant_uuid(
                 platform="discord", workspace_id=str(self.origin.guild_id)
             )
             name = self.agent.value.strip()
-            runtime = self.panel.runtime
             agent = await find_agent_by_daimon_tag(
                 runtime.anthropic, tenant_id=tenant_id, name=name
             )
@@ -105,12 +119,8 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
                     agent=build_agent_ref(agent.name, agent.metadata, name),
                     place=Place(),
                     origin=Place(
-                        channel_id=str(self.origin.channel_id),
-                        parent_channel_id=(
-                            str(self.origin.channel.parent_id)
-                            if isinstance(self.origin.channel, discord.Thread)
-                            else None
-                        ),
+                        channel_id=str(channel.id),
+                        parent_channel_id=source_channel_id if source_thread_id else None,
                     ),
                 ):
                     await interaction.followup.send(embeds.SAVE_REFUSED, ephemeral=True)
@@ -125,7 +135,10 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
                     timezone_=timezone,
                     trigger_message=self.message.value.strip(),
                     next_fire_at=next_fire_at,
-                    channel_id=str(self.origin.channel_id),
+                    channel_id=source_channel_id,
+                    source_thread_id=source_thread_id,
+                    source_channel_id=source_channel_id,
+                    source_provenance_known=True,
                 )
             await _rerender(self.origin, self.panel)
             await interaction.followup.send(
@@ -204,7 +217,6 @@ class DeleteConfirmation(discord.ui.View):
                     session,
                     self.routine_id,
                     tenant_id=tenant_id,
-                    recruitment=self.panel.runtime.settings.recruitment,
                 )
                 if row is None:
                     await interaction.response.send_message(embeds.GONE, ephemeral=True)
