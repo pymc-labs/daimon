@@ -1,4 +1,4 @@
-"""Opt-in fleet tools over the authorized host orchestration service.
+"""Fleet tools (on by default) over the authorized host orchestration service.
 
 These tools accept resource handles, never authority. The host service resolves
 current root membership, authorization, attenuation, reservations and operations;

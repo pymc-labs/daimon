@@ -25,6 +25,7 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
+    FleetSettings,
     Settings,
     ThreadNamingSettings,
     TurnSettings,
@@ -158,7 +159,10 @@ async def setup(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         discord=DiscordSettings(bot_token=SecretStr("offline")),
         thread_naming=ThreadNamingSettings(enabled=False),
-        turn=TurnSettings(channel_backends=True),
+        # The legacy path these conformance cases were written for; the mux
+        # retention case below selects mux itself.
+        turn=TurnSettings(path="legacy", channel_backends=True, agent_backends=False),
+        fleet=FleetSettings(enabled=False),
     )
     runtime = dataclasses.replace(
         runtime,

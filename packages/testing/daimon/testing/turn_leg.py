@@ -21,7 +21,7 @@ from mux.contracts.ids import Scope
 
 # The legacy leg is the emergency stop: every turn flag off, as an operator sets it.
 LEGACY_LEG = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
-MUX_LEG = TurnSettings(path="mux", channel_backends=True)
+MUX_LEG = TurnSettings(path="mux", channel_backends=True, agent_backends=True)
 
 
 def turn_leg() -> TurnSettings:

@@ -70,18 +70,17 @@ async def _never_dispatched(*_: object) -> None:
 @pytest.mark.parametrize(
     "stop",
     [
-        {"fleet_enabled": False},
         {"turn_path": "legacy"},
         {"channel_backends": False},
         {"agent_backends": False},
     ],
-    ids=["fleet", "turn_path", "channel_backends", "agent_backends"],
+    ids=["turn_path", "channel_backends", "agent_backends"],
 )
 async def test_a_stopped_flag_refuses_a_worker_before_it_is_funded(
     stop: dict[str, object],
 ) -> None:
     """Admission refuses first, so no money is reserved and no slot is claimed."""
-    deps = replace(deps_for(leg=MUX_LEG), **{"fleet_enabled": True, **cast(dict[str, Any], stop)})
+    deps = replace(deps_for(leg=MUX_LEG), **cast(dict[str, Any], stop))
 
     def no_session() -> None:
         raise AssertionError("refused before any database read")

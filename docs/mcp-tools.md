@@ -191,7 +191,7 @@ Environment tools: list / get / create / update / archive.
 
 ## `fleet`
 
-Opt-in fleet tools over the authorized host orchestration service.
+Fleet tools (on by default) over the authorized host orchestration service.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
