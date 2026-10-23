@@ -788,8 +788,8 @@ async def test_an_admins_off_can_not_be_turned_back_on_by_the_owner(people_defau
     assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).grant
 
 
-async def test_review_bypass_a_owner_revoking_again_never_lifts_an_admins_off(people_default):
-    """#1361 review, sequence A: admin off -> owner revokes again -> owner sets the default."""
+async def test_an_owner_revoking_again_never_lifts_an_admins_off(people_default):
+    """Admin off -> the owner revokes again -> the owner sets the default: still off."""
     from daimon.core.channel_backend import AgentBackendRefused
 
     service, agent, actors, _, default = people_default
@@ -802,8 +802,8 @@ async def test_review_bypass_a_owner_revoking_again_never_lifts_an_admins_off(pe
     assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).kind == "off"
 
 
-async def test_review_bypass_b_owner_tightening_never_lowers_the_admins_ceiling(people_default):
-    """#1361 review, sequence B: admin 2 -> owner 1 -> owner 4 must not undo the admin."""
+async def test_an_owner_tightening_never_lowers_the_admins_ceiling(people_default):
+    """Admin 2 -> owner 1 -> owner 4 is refused; the owner may come back up to 2."""
     from daimon.core.channel_backend import AgentBackendRefused
 
     service, agent, actors, _, default = people_default
