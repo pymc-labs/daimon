@@ -1631,10 +1631,22 @@ async def _request_agent_backend_switch_impl(
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
         status: Literal["preview", "changed"] = "preview"
+        from daimon.core.confirmation import drop_words
+        from daimon.core.turn.notices import provider_name
+
+        losses = (
+            f"On {provider_name(target_backend)}, {agent.name} won't have "
+            f"{drop_words(preview.declared_drops)}. "
+            if preview.declared_drops
+            else ""
+        )
         summary = (
-            "Show this compatibility and cost preview. If they want to proceed, call "
-            "request_agent_backend_switch again with its expected_revision and preview_digest; "
-            "the requester must Confirm on the card. Nothing has changed yet."
+            f"{losses}Tell the person that, with this compatibility and cost preview, before "
+            "anything else. Only if they want to go ahead, call request_agent_backend_switch "
+            "again with its expected_revision, preview_digest and declared_drops as "
+            "accepted_drops: that only puts the switch card in front of them, and they "
+            "approve it themselves. Never confirm, approve or accept the switch for them, and "
+            "never say you did. Nothing has changed yet."
         )
         if preview_digest is not None:
             reference = BackendSwitchReference.model_validate(
@@ -2024,12 +2036,15 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             hand this conversation to the copy with hand_off_task while it is still on
             this provider, then switch the copy here; the confirmed switch moves this
             conversation to Gemini from the next message.
-            First call without preview_digest and show the returned compatibility,
-            shared-thread limits, what won't be available, and the cost line. Call again
-            with the same model and that preview's expected_revision, preview_digest and
-            exact declared_drops as accepted_drops: the requester must Confirm
-            on the card before anything is changed. A stale preview or expired card
-            changes nothing; preview again. Pass this active turn's origin_context_id.
+            First call without preview_digest and tell the person, in plain words, what
+            the agent won't have there (the returned summary names it), the compatibility,
+            shared-thread limits and the cost line. Only if they want to go ahead, call
+            again with the same model and that preview's expected_revision, preview_digest
+            and exact declared_drops as accepted_drops: that posts the switch card, and the
+            person approves it themselves before anything changes. Never confirm, approve
+            or accept it on their behalf, and never say you did. A stale preview or
+            expired card changes nothing; preview again. Pass this active turn's
+            origin_context_id.
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
             to share threads where the channel allows it, admins only; or "per_caller") and
             ``required_capabilities`` (a channel that can't give one refuses the turn).
