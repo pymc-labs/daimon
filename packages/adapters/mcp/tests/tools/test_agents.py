@@ -3729,7 +3729,9 @@ async def test_create_agent_impl_rejects_guild_stamped_name_collision() -> None:
         await _create_agent_impl(_runtime(client), auth, spec)
 
 
-async def test_fork_agent_impl_rejects_guild_stamped_name_collision() -> None:
+async def test_fork_agent_impl_rejects_guild_stamped_name_collision(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """fork_agent raises ToolError when a guild-stamped agent with the fork target name exists."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3764,7 +3766,68 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="already exists"):
-        await _fork_agent_impl(_runtime(client), auth, source_name="source", new_name="myfork")
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            source_name="source",
+            new_name="myfork",
+        )
+
+
+async def test_fork_agent_impl_new_copy_if_taken_takes_the_next_free_name(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J2: "make a copy of yourself" makes a NEW copy beside earlier ones, never reuses them."""
+    tenant_id = uuid.uuid4()
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+
+    def tagged(agent_id: str, name: str) -> dict[str, Any]:
+        meta = {"daimon_tenant": str(tenant_id), "daimon_name": name}
+        return ma_agent(id=agent_id, name=name, metadata=meta).model_dump(mode="json")
+
+    created: list[dict[str, Any]] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = ma_agent(id="ag_new", name="daimon-argon-3")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                tagged("ag_src", "daimon"),
+                tagged("ag_old", "daimon-argon"),
+                tagged("ag_old2", "daimon-argon-2"),
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(200, json=tagged("ag_src", "daimon")),
+    )
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    result = await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="daimon",
+        new_name="daimon-argon",
+        new_copy_if_taken=True,
+    )
+    assert len(created) == 1, "a new copy is created even though daimon-argon exists"
+    assert created[0]["metadata"]["daimon_name"] == "daimon-argon-3", (
+        "the copy takes the first free name, not an earlier copy's"
+    )
+    assert result.name == "daimon-argon-3", "the result names the new copy"
 
 
 async def test_create_agent_rejects_name_held_by_other_owner() -> None:
@@ -3810,7 +3873,9 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
         await _create_agent_impl(_runtime(client), auth, spec)
 
 
-async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
+async def test_fork_agent_rejects_new_name_held_by_other_owner(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """fork_agent raises ToolError when the new name exists for any owner in the tenant.
     Personal-stamped agents now also block — tenant-scoped uniqueness regardless of owner.
     """
@@ -3848,7 +3913,12 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="already exists"):
-        await _fork_agent_impl(_runtime(client), auth, source_name="source", new_name="myfork")
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            source_name="source",
+            new_name="myfork",
+        )
 
 
 # --- skill-boundary tests -----------------------------------------------------
@@ -5889,6 +5959,71 @@ async def test_two_people_creating_one_name_get_one_agent_and_one_owner(
     winner = first.id if not isinstance(results[0], ToolError) else second.id
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_0")
     assert await agent_owner(sessions, tenant_id=tenant.id, agent_id=agent_id) == winner
+
+
+async def test_two_copies_of_yourself_at_once_take_two_new_names(
+    db_preflight, db_nullpool_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The free name is picked and created under the name's lock: two copies at
+    once get daimon-argon-2 and daimon-argon-3, never both the same one."""
+    import asyncio
+
+    from daimon.testing.db import require_owned_sessionmaker
+
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+    real_create = agent_fork.create_agent
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        # Widen the gap between picking a free name and creating it.
+        await asyncio.sleep(0.2)
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(agent_fork, "create_agent", slow_create)
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+
+    def tagged(agent_id: str, name: str) -> dict[str, Any]:
+        meta = {"daimon_tenant": str(tenant.id), "daimon_name": name}
+        return ma_agent(id=agent_id, name=name, metadata=meta).model_dump(mode="json")
+
+    stored = [tagged("ag_src", "daimon"), tagged("ag_old", "daimon-argon")]
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        payload = {**tagged(f"ag_{len(stored)}", body["name"]), "metadata": body["metadata"]}
+        stored.append(payload)
+        return httpx.Response(200, json=payload)
+
+    def on_get(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(200, json=next(a for a in stored if a["id"] == m.group(1)))
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(list(stored)))
+    router.add("POST", r"/v1/agents", on_create)
+    router.add("GET", r"/v1/agents/([^/]+)", on_get)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch), session_factory=sessions, fernet=fernet
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+
+    results = await asyncio.gather(
+        *(
+            _fork_agent_impl(
+                runtime, auth, source_name="daimon", new_name="daimon-argon", new_copy_if_taken=True
+            )
+            for _ in range(2)
+        )
+    )
+    assert sorted(r.name for r in results) == ["daimon-argon-2", "daimon-argon-3"]
+    assert sorted(a["metadata"]["daimon_name"] for a in stored[2:]) == [
+        "daimon-argon-2",
+        "daimon-argon-3",
+    ], "two creates, each under its own new name"
 
 
 async def test_an_agent_named_after_the_check_is_refused_not_rewritten(
