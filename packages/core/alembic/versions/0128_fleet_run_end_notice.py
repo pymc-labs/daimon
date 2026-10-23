@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0128_fleet_run_end_notice"
-down_revision: str | None = "0122_thread_provider_release"
+down_revision: str | None = "0123_tenant_backends_explicit"
 branch_labels: str | None = None
 depends_on: str | None = None
 

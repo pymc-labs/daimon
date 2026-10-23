@@ -396,7 +396,8 @@ async def show_fleet_ended(
     if card is not None:
         try:
             shown = await card.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
-        except discord.NotFound:
+        except (discord.NotFound, discord.Forbidden):
+            # Gone, or no longer ours to edit: post the final card afresh below.
             log.info("fleet.card_end_edit_failed", run_id=str(run.id))
         else:
             shown = shown or card

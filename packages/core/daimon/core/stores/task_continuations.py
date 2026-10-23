@@ -425,8 +425,9 @@ async def cancel_wake_row(
     return cancelled is not None
 
 
-def _run_wakes(run: FleetRun) -> list[ColumnElement[bool]]:
-    """This run's worker_finished rows that may still schedule a turn.
+def _run_wakes(run: FleetRun, *, open_only: bool = True) -> list[ColumnElement[bool]]:
+    """This run's worker_finished rows that may still schedule a turn (all of
+    them, settled ones too, without `open_only`).
 
     Frozen waits use canonical JSON with run_id first. Match that closed prefix
     without casting untrusted text, so a corrupt wait cannot roll back run end.
@@ -439,7 +440,7 @@ def _run_wakes(run: FleetRun) -> list[ColumnElement[bool]]:
         TaskContinuation.thread_id == run.thread_id,
         TaskContinuation.requester_account_id == run.orchestrator_account_id,
         TaskContinuation.requested_work.startswith(f'{{"run_id":"{run.id}",'),
-        TaskContinuation.status.in_(("pending", "claimed")),
+        *((TaskContinuation.status.in_(("pending", "claimed")),) if open_only else ()),
     ]
 
 
@@ -486,7 +487,7 @@ async def run_end_wakes(session: AsyncSession, *, run: FleetRun) -> tuple[dateti
     rows = (
         await session.execute(
             select(TaskContinuation.status, TaskContinuation.started_at).where(
-                *_run_wakes(run)[:-1]
+                *_run_wakes(run, open_only=False)
             )
         )
     ).all()

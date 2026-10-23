@@ -2557,9 +2557,13 @@ async def test_a_lost_card_is_posted_again_and_remembered():
     from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
 
     notice = _notice((worker(ordinal=1, status="succeeded"),), card_message_id="700")
-    for card in (None, _ended_card()):
+    for card, failure in (
+        (None, None),
+        (_ended_card(), discord.NotFound(MagicMock(status=404), "gone")),
+        (_ended_card(), discord.Forbidden(MagicMock(status=403), "not ours")),
+    ):
         if card is not None:
-            card.edit.side_effect = discord.NotFound(MagicMock(status=404), "gone")
+            card.edit.side_effect = failure
         thread = _ended_thread(card)
         record = AsyncMock()
         await show_fleet_ended(thread, notice, record)
