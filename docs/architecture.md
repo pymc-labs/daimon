@@ -1434,7 +1434,12 @@ in FK-safe order in one transaction (a Teams message receipt is cleared of the
 person but kept for 24 hours, as the duplicate guard), and
 `packages/core/daimon/core/privacy.py` is its read-only mirror for the preview
 panel. A schema-reflecting drift-guard test fails when a new person-scoped
-table joins one path and not the other.
+table joins one path and not the other. A field-to-render guard also requires every
+preview category to reach the Discord, Slack and Teams deletion cards. The export
+summaries in Slack and Teams omit only the account itself and principal-link
+bookkeeping; Discord retains its export placeholder. Main-panel explanations stay
+brief, while the deletion cards enumerate all nonzero categories and distinguish
+removing requester attribution from deleting an agent's posts.
 Account erasure also queues its account and tenant IDs in the same transaction
 before removing principals. The scheduler retries Managed Agents session deletion
 on each tick, retaining the queue row through upstream errors and failed deletes

@@ -20,12 +20,14 @@ import json
 import uuid
 from typing import Any
 
+from daimon.adapters.slack.modal_limits import MAX_SECTION_TEXT_CHARS
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.privacy import (
     DELETE_PAUSED,
     PRIVACY_TITLE,
     PurgePreview,
     delete_scope_lines,
+    preview_example,
     privacy_lines,
 )
 from daimon.core.purge import AccountPurgeResult
@@ -47,7 +49,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         return f"*{count}* {singular if count == 1 else plural or singular + 's'}"
 
     if preview.linked_principals.count > 0:
-        ex = escape_mrkdwn(preview.linked_principals.example or "—")
+        ex = escape_mrkdwn(preview_example(preview.linked_principals))
         n = amount(preview.linked_principals.count, "linked account")
         will_happen_lines.append(f"• 🔑 Remove {n}, for example `{ex}`")
     if preview.routines.count > 0:
@@ -59,9 +61,15 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     if preview.user_configs.count > 0:
         will_happen_lines.append("• ⚙ Remove your saved settings")
     if preview.user_skills.count > 0:
-        ex = escape_mrkdwn(preview.user_skills.example or "—")
+        ex = escape_mrkdwn(preview_example(preview.user_skills))
         n = amount(preview.user_skills.count, "skill")
         will_happen_lines.append(f"• 🧰 Forget {n} you synced, for example `{ex}`")
+    if preview.github_connect_requests.count > 0:
+        n = amount(preview.github_connect_requests.count, "GitHub setup request")
+        will_happen_lines.append(f"• 🔑 Delete {n}")
+    if preview.github_connect_click_intents.count > 0:
+        n = amount(preview.github_connect_click_intents.count, "GitHub connect button")
+        will_happen_lines.append(f"• 🔑 Delete {n}")
     if preview.github_user_links.count > 0:
         will_happen_lines.append(
             f"• 🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}"
@@ -70,6 +78,9 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         will_happen_lines.append(
             f"• 🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}"
         )
+    if preview.gemini_records.count > 0:
+        n = amount(preview.gemini_records.count, "Gemini conversation record")
+        will_happen_lines.append(f"• 💬 Delete {n}")
     if preview.slack_user_tokens.count > 0:
         will_happen_lines.append(
             f"• 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
@@ -80,16 +91,46 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     if preview.direct_message_conversations.count > 0:
         n = amount(preview.direct_message_conversations.count, "private conversation")
         will_happen_lines.append(f"• 💬 Delete Daimon's saved data for {n}")
+    if preview.credential_requests.count > 0:
+        n = amount(preview.credential_requests.count, "credential request")
+        will_happen_lines.append(f"• Delete {n}")
+    if preview.wizard_sessions.count > 0:
+        n = amount(preview.wizard_sessions.count, "wizard session")
+        will_happen_lines.append(f"• Delete {n}")
+    if preview.message_feedback.count > 0:
+        n = amount(preview.message_feedback.count, "message feedback record")
+        will_happen_lines.append(f"• Delete {n}")
+    if preview.support_escalations.count > 0:
+        n = amount(preview.support_escalations.count, "support escalation")
+        will_happen_lines.append(f"• Delete {n}")
     if preview.channel_admins.count > 0:
         will_happen_lines.append(
             f"• Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
         )
+    if preview.agent_post_requesters.count > 0:
+        n = amount(
+            preview.agent_post_requesters.count,
+            "post an agent made for you",
+            "posts agents made for you",
+        )
+        will_happen_lines.append(f"• Forget that you requested {n}; keep the posts")
+    if preview.platform_user_names.count > 0:
+        n = amount(preview.platform_user_names.count, "remembered name")
+        will_happen_lines.append(f"• Delete {n}")
+    if preview.teams_messages.count > 0:
+        n = amount(preview.teams_messages.count, "Teams message record")
+        will_happen_lines.append(f"• Delete {n}")
     if preview.account.count > 0:
         will_happen_lines.append("• 🪪 Remove your account")
 
-    will_happen_text = "⚡ *What will happen*\n\n" + (
-        "\n".join(will_happen_lines) if will_happen_lines else "_Nothing to delete._"
-    )
+    # Split between rows, never truncate a counted category. Escaped example
+    # labels can expand, even though their source text is bounded.
+    sections = ["⚡ *What will happen*\n"]
+    for line in will_happen_lines or ["_Nothing to delete._"]:
+        if len(sections[-1]) + 1 + len(line) > MAX_SECTION_TEXT_CHARS:
+            sections.append(line)
+        else:
+            sections[-1] += "\n" + line
 
     kept_text = (
         "📋 *What is intentionally kept elsewhere*\n\n"
@@ -100,7 +141,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     )
 
     return [
-        {"type": "section", "text": {"type": "mrkdwn", "text": will_happen_text}},
+        *({"type": "section", "text": {"type": "mrkdwn", "text": text}} for text in sections),
         {"type": "divider"},
         {"type": "section", "text": {"type": "mrkdwn", "text": kept_text}},
     ]
