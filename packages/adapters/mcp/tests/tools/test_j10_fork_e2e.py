@@ -1,7 +1,8 @@
-"""J10 end to end, offline: a member forks the built-in agent across Opus, Astra and Argon.
+"""J10 end to end, offline: a member forks the built-in agent across Opus, Astra and Gemini.
 
 No runtime rows and no stored fleet grant: only code defaults. A NON-admin member in
-a fresh channel says "fork yourself across opus, astra and argon and compare X"; the
+a fresh channel says "fork yourself across opus, astra and argon (or flash) and compare
+X"; the
 root agent calls the real fleet_spawn tool once per model. From there everything is
 the production path: grant -> plan -> spawn -> run_worker -> native dispatch, with
 fake provider transports (Anthropic, OpenAI, Gemini), and on to the fleet card.
@@ -66,9 +67,10 @@ from packages.core.tests.test_fleet_permissions import POLICY, parent
 from packages.core.tests.turn.conftest import make_agent_message, make_status_idle
 from packages.core.tests.turn.test_frozen_root import run_root_input
 from packages.core.tests.turn.test_openai_conversation_worker import ConversationWire
-from packages.core.tests.turn.test_openai_host import SESSION_ID, Wire
+from packages.core.tests.turn.test_openai_host import Wire
 
-PLANNED = ["opus", "astra", "argon"]
+#: The Gemini worker, on each model the smoke may use (Argon primary; Flash kept).
+GEMINI = {"flash": "gemini-3.8-flash", "argon": "gemini-4-argon"}
 
 
 @pytest.fixture
@@ -93,7 +95,7 @@ async def j10_root(
             tenant_id=tenant.id,
             delta_usd=Decimal("10"),
             reason="trial_credit",
-            idempotency_key="j10-credit",
+            idempotency_key=f"j10-credit:{tenant.id}",
         )
     root = parent("anthropic")
     scope = resource_scope(
@@ -123,8 +125,10 @@ async def j10_root(
         rf"/v1/environments/{environment.id}",
         lambda request, match: httpx.Response(200, json=environment.model_dump(mode="json")),
     )
-    # The Opus worker: its own agent and session on the same fake Managed Agents API.
+    # The Opus worker: its own agent and session on the same fake Managed Agents API
+    # (ids unique per test: the committing database keeps every test's journal).
     opus: dict = {}
+    opus_session = f"opus-worker-session-{uuid4().hex[:8]}"
 
     def create_worker_agent(call, match):
         payload = json.loads(call.content)
@@ -155,7 +159,7 @@ async def j10_root(
                 }
             )
         opus["session"] = ma_session(
-            id="opus-worker-session",
+            id=opus_session,
             agent=session_agent,
             environment_id=payload["environment_id"],
             metadata=payload["metadata"],
@@ -174,27 +178,27 @@ async def j10_root(
     router.add("POST", r"/v1/sessions", create_session)
     router.add(
         "POST",
-        r"/v1/sessions/opus-worker-session/archive",
+        rf"/v1/sessions/{opus_session}/archive",
         lambda call, match: httpx.Response(200, json=opus["session"].model_dump(mode="json")),
     )
     router.add(
         "GET",
-        r"/v1/sessions/opus-worker-session",
+        rf"/v1/sessions/{opus_session}",
         lambda call, match: httpx.Response(200, json=opus["session"].model_dump(mode="json")),
     )
     router.add(
         "POST",
-        r"/v1/sessions/opus-worker-session/events",
+        rf"/v1/sessions/{opus_session}/events",
         lambda call, match: send_events_response(),
     )
     router.add(
         "GET",
-        r"/v1/sessions/opus-worker-session/events",
+        rf"/v1/sessions/{opus_session}/events",
         lambda call, match: httpx.Response(200, json={"data": [], "has_more": False}),
     )
     router.add(
         "GET",
-        r"/v1/sessions/opus-worker-session/events/stream",
+        rf"/v1/sessions/{opus_session}/events/stream",
         lambda call, match: sse_response(
             [
                 make_agent_message(event_id="opus-output", text="opus says X").model_dump(
@@ -426,7 +430,7 @@ class AstraWire(ConversationWire):
             self.session_bodies.append(body)
             internal = httpx.Request(
                 "POST",
-                "https://openai.invalid/v1/agents/sessions/" + SESSION_ID + "/events",
+                "https://openai.invalid/v1/agents/sessions/" + self.session_id + "/events",
                 headers={"OpenAI-Beta": "agents=v1", "Idempotency-Key": "fixture:send"},
                 json={"events": [{"type": "agent.session.input", "input": body["input"]}]},
             )
@@ -446,7 +450,7 @@ class AstraWire(ConversationWire):
         return value
 
 
-class ArgonCatalog:
+class GeminiCatalog:
     """The Gemini agent catalog: a worker's agent is created, then read back."""
 
     def __init__(self):
@@ -465,7 +469,7 @@ class ArgonCatalog:
         return httpx.Response(404, json={"error": {"message": "not found"}})
 
 
-class ArgonTransport(FakeTransport):
+class GeminiTransport(FakeTransport):
     """Gemini interactions: every create completes at once with one answer."""
 
     async def count_input_tokens(self, request):
@@ -475,13 +479,13 @@ class ArgonTransport(FakeTransport):
     async def create(self, request):
         self.requests.append(json.loads(json.dumps(dict(request))))
         response = {
-            "id": f"argon-{len(self.requests)}",
+            "id": f"gemini-{len(self.requests)}",
             "status": "completed",
             "created": "2026-10-23T15:00:00Z",
             "updated": "2026-10-23T15:00:05Z",
             "tools": request.get("tools", []),
             "steps": [
-                {"type": "model_output", "content": [{"type": "text", "text": "argon says X"}]}
+                {"type": "model_output", "content": [{"type": "text", "text": "gemini says X"}]}
             ],
             "usage": {"total_input_tokens": 10, "total_output_tokens": 2},
         }
@@ -502,11 +506,11 @@ class J10:
     card: list[str]
     opus_agent: dict
     astra_sessions: list[dict]
-    argon_requests: list[dict]
-    argon_counted: list[dict]
+    gemini_requests: list[dict]
+    gemini_counted: list[dict]
 
 
-async def run_j10(j10_root, monkeypatch) -> J10:
+async def run_j10(j10_root, monkeypatch, gemini: str) -> J10:
     """The member's one message, then the root's three fleet_spawn calls and fleet_collect."""
     import mux.drivers.gemini as gemini_sdk
     import mux.drivers.openai as openai_sdk
@@ -516,17 +520,19 @@ async def run_j10(j10_root, monkeypatch) -> J10:
     from mux.drivers.openai.transport import SDKTransport
     from mux.testing.isolated_sdk import build_async_openai, build_gemini_client
 
+    planned = ["opus", "astra", gemini]
     deps, prepared, _, _, seed, scope, _, transport = j10_root
     # The deployment keys each provider; there are no runtime rows, so the code
     # defaults serve every worker.
     for provider in ("openai", "gemini"):
         monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
     wire = AstraWire()
+    wire.session_id = f"native-openai-session-{uuid4().hex[:8]}"
     wire.session_bodies = []
-    argon = ArgonTransport()
-    argon.counted = []
-    monkeypatch.setattr(gemini_sdk, "configured_transport", lambda **kwargs: argon)
-    catalog = ArgonCatalog()
+    gemini_wire = GeminiTransport()
+    gemini_wire.counted = []
+    monkeypatch.setattr(gemini_sdk, "configured_transport", lambda **kwargs: gemini_wire)
+    catalog = GeminiCatalog()
     gemini_client = build_gemini_client(
         transport=httpx.MockTransport(catalog.handle),
         api_key="offline",
@@ -611,10 +617,10 @@ async def run_j10(j10_root, monkeypatch) -> J10:
                             reviewer_of=None,
                             task="Compare X from your model's point of view.",
                             model=model,
-                            planned_models=PLANNED,
+                            planned_models=planned,
                         )
                     )
-                    for key, model in zip(("W1", "W2", "W3"), PLANNED, strict=True)
+                    for key, model in zip(("W1", "W2", "W3"), planned, strict=True)
                 ]
                 settled = await _settled(ports, root, len(replies))
                 collected = dict(
@@ -664,8 +670,8 @@ async def run_j10(j10_root, monkeypatch) -> J10:
         ],
         opus_agent=transport_opus(j10_root),
         astra_sessions=wire.session_bodies,
-        argon_requests=argon.requests,
-        argon_counted=argon.counted,
+        gemini_requests=gemini_wire.requests,
+        gemini_counted=gemini_wire.counted,
     )
 
 
@@ -673,8 +679,11 @@ def transport_opus(j10_root) -> dict:
     return j10_root[7].opus.get("created", {})
 
 
-async def test_a_member_forks_the_default_agent_across_opus_astra_and_argon(j10_root, monkeypatch):
-    seen = await run_j10(j10_root, monkeypatch)
+@pytest.mark.parametrize("gemini", sorted(GEMINI))
+async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
+    j10_root, monkeypatch, gemini
+):
+    seen = await run_j10(j10_root, monkeypatch, gemini)
     # A member, in a fresh channel, with nothing set up: the code-default fleet.
     assert not seen.root.subject.is_admin and seen.root.subject.platform_user_id == "requester"
     # All three were admitted, dispatched, and finished.
@@ -682,7 +691,7 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_argon(j10_
     assert [(row.backend, row.model, row.status) for row in seen.settled] == [
         ("anthropic", "claude-opus-5-5", "succeeded"),
         ("openai", "gpt-6-astra", "succeeded"),
-        ("gemini", "gemini-4-argon", "succeeded"),
+        ("gemini", GEMINI[gemini], "succeeded"),
     ]
     assert all(row.error_code is None and row.result is not None for row in seen.settled)
     # Each provider got its worker, on the model the member named.
@@ -691,14 +700,15 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_argon(j10_
     (astra,) = seen.astra_sessions
     assert astra["agent"]["model"] == "gpt-6-astra"
     assert "spend_control" not in astra  # Astra runs with no native cap (#1394/#1398)
-    (argon,) = seen.argon_requests
-    assert argon["model"] == "gemini-4-argon" and "tools" in argon
-    assert seen.argon_counted  # Argon's bounded envelope was sized before the send
+    (sent,) = seen.gemini_requests
+    assert sent["model"] == GEMINI[gemini] and "tools" in sent
+    if gemini == "argon":
+        assert seen.gemini_counted  # Argon's bounded envelope was sized before the send
     # fleet_collect: three results, one per worker.
     assert seen.collected["status"] == "ready"
     assert sorted(item["result"] for item in seen.collected["results"]) == [
         "answer turn-1",
-        "argon says X",
+        "gemini says X",
         "opus says X",
     ]
     # The fleet card: every worker, its model, and succeeded.
@@ -706,7 +716,7 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_argon(j10_
     # The root may give its answer, and the card ends collected, the run completed.
     assert seen.gate == (True, None)
     assert seen.card[0] == "**Fleet — collected**" and seen.run_status == "completed"
-    for model in ("claude-opus-5-5", "gpt-6-astra", "gemini-4-argon"):
+    for model in ("claude-opus-5-5", "gpt-6-astra", GEMINI[gemini]):
         assert f"{model} — succeeded" in text
     # Nothing a worker lacks goes unsaid: each loss of the root's own setup is named
     # on its card line, and a dropped login (when there is one) in the spawn reply.
@@ -727,7 +737,8 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_argon(j10_
 
 
 @pytest.mark.xfail(strict=True, reason="nc-portable's tools sentinel has not landed yet")
-async def test_the_argon_worker_never_sends_gemini_an_empty_tools_list(j10_root, monkeypatch):
-    seen = await run_j10(j10_root, monkeypatch)
-    (argon,) = seen.argon_requests
-    assert argon["tools"] != []
+@pytest.mark.parametrize("gemini", sorted(GEMINI))
+async def test_the_gemini_worker_never_sends_an_empty_tools_list(j10_root, monkeypatch, gemini):
+    seen = await run_j10(j10_root, monkeypatch, gemini)
+    (sent,) = seen.gemini_requests
+    assert sent["tools"] != []
