@@ -200,7 +200,7 @@ class EventNormalizer:
                 name = "session.turn_ended"
                 # A refusal idles as `end_turn`; only `stop_details` tells it apart.
                 details = data.get("stop_details")
-                refused = details is not None and _object(details).get("type") == "refusal"
+                refused = isinstance(details, dict) and details.get("type") == "refusal"
                 payload = {
                     "root_turn_id": self.root_turn_id or event_id,
                     "outcome": "errored"

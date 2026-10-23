@@ -199,7 +199,7 @@ def make_status_idle(
     *,
     event_id: str,
     stop_reason: StopReason | None = None,
-    stop_details: dict[str, str] | None = None,
+    stop_details: object = None,
 ) -> BetaManagedAgentsSessionStatusIdleEvent:
     """`stop_details` is not modelled by the pinned SDK; it validates as an extra field."""
     if stop_reason is None:

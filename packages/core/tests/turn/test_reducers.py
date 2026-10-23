@@ -479,10 +479,19 @@ def test_apply_finalizes_refusal_idle_as_refused_error() -> None:
     assert state.termination is TerminationReason.REFUSED, "refusal has its own reason"
 
 
-def test_apply_leaves_end_turn_idle_without_refusal_details_unfinalized() -> None:
-    state = apply(TurnState(), make_status_idle(event_id="s_1", stop_details={"type": "other"}))
+@pytest.mark.parametrize("details", [{"type": "other"}, {}, "refusal", ["refusal"]], ids=str)
+def test_apply_leaves_end_turn_idle_without_refusal_details_unfinalized(details: object) -> None:
+    """An unexpected `stop_details` shape must not crash the turn."""
+    state = apply(TurnState(), make_status_idle(event_id="s_1", stop_details=details))
     assert state.error is None, "only a refusal in stop_details is a failure"
     assert state.termination is None, "the driver decides an ordinary end"
+
+
+def test_apply_reads_a_refusal_with_an_odd_category() -> None:
+    details = {"type": "refusal", "category": 5}
+    state = apply(TurnState(), make_status_idle(event_id="s_1", stop_details=details))
+    assert state.error is not None, "a refusal must not depend on the category's shape"
+    assert "no category" in state.error.message, state.error.message
 
 
 # --- session.status_terminated: finalizes as an upstream error ---

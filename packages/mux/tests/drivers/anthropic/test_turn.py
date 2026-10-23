@@ -688,6 +688,19 @@ def test_refusal_idle_records_an_errored_turn_with_refusal_reason():
     }, "a refusal is not a completed turn"
 
 
+@pytest.mark.parametrize("details", [{}, "refusal", ["refusal"]], ids=str)
+def test_malformed_stop_details_ends_the_turn_as_completed(details):
+    normalizer = EventNormalizer(SESSION)
+    normalizer.normalize(native("session.status_running", "root"), observed_at=NOW)
+    event = normalizer.normalize(
+        native(
+            "session.status_idle", "ended", stop_reason={"type": "end_turn"}, stop_details=details
+        ),
+        observed_at=NOW,
+    )
+    assert event.payload["outcome"] == "completed", "an odd shape must not fail the turn"
+
+
 @pytest.mark.parametrize("permission", ["ask", "allow", "deny", None])
 def test_tool_permission_preserves_ask_and_defaults_other_values_to_auto(permission):
     event = EventNormalizer(SESSION).normalize(

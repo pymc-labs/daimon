@@ -309,22 +309,23 @@ _MCP_FAILURE_TYPES = ("mcp_connection_failed_error", "mcp_authentication_failed_
 
 
 class _StopDetails(BaseModel):
-    type: str
-    category: str | None = None
+    type: object = None
+    category: object = None
 
 
 def _refusal(event: BetaManagedAgentsSessionStatusIdleEvent) -> TurnError | None:
-    """The API's refusal, read from `stop_details`, which the pinned SDK keeps as an extra."""
+    """The API's refusal, read from `stop_details`, which the pinned SDK keeps as an extra.
+
+    Read leniently: an unexpected shape is no refusal, never a crashed turn.
+    """
     raw: object = (event.model_extra or {}).get("stop_details")
-    if raw is None:
+    if not isinstance(raw, dict):
         return None
     details = _StopDetails.model_validate(raw)
     if details.type != "refusal":
         return None
-    return TurnError(
-        kind="refused",
-        message=f"the model refused the request ({details.category or 'no category'})",
-    )
+    category = details.category if isinstance(details.category, str) else "no category"
+    return TurnError(kind="refused", message=f"the model refused the request ({category})")
 
 
 def _apply_session_error(
