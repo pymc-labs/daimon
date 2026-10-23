@@ -20,7 +20,9 @@ rules still deny, explicit agent `ask` rules still ask, and failed rule reads
 still require confirmation. Publishing from sessions that ask before
 publishing, confirmed Daimon tools (watch creation/resumption/key rotation,
 skill addition, lead resolution, backend switches and Microsoft sends/writes),
-and admin-confirmed prompts keep their fixed gates. Routines, wakes and other
+and admin-confirmed prompts keep their fixed gates. Connections to Daimon's own
+MCP endpoint remain subject to those gates under any name, including legacy
+URL aliases; new aliases are refused when attached. Routines, wakes and other
 unattended runs still use `unattended_writes` alone.
 
 Use the admin selector on `/here` (Teams: `here`) for the current channel or,
@@ -29,21 +31,30 @@ use the CLI or MCP tool for a Slack thread. All controls check native server
 admin authority again when used. Agent keys, agents acting in conversations,
 operator MCP tokens and legacy tokens without registry entries cannot change this setting.
 
-The CLI requires a platform administrator's user id and checks it live:
+The CLI calls the authenticated MCP setter with your registered personal
+credential. The server derives the tenant and actor from that credential and
+checks the actor's current native admin authority. A claimed user id cannot
+authorize a change. Set `DAIMON_APPROVALS_URL` to your tenant's MCP endpoint
+and `DAIMON_APPROVALS_TOKEN` to your personal MCP credential (or pass `--url`
+and `--token`):
 
 ```bash
 # Server default, then a channel exception and a Slack thread exception.
-daimon channels approvals set discord GUILD_ID off --admin-user-id USER_ID
-daimon channels approvals set discord GUILD_ID on --channel-id CHANNEL_ID --admin-user-id USER_ID
-daimon channels approvals set slack TEAM_ID off --channel-id CHANNEL_ID:THREAD_TS --thread --admin-user-id USER_ID
-daimon channels approvals clear discord GUILD_ID --channel-id CHANNEL_ID --admin-user-id USER_ID
+daimon channels approvals set off
+daimon channels approvals set on --channel-id CHANNEL_ID
+daimon channels approvals set off --channel-id CHANNEL_ID:THREAD_TS --thread
+daimon channels approvals clear --channel-id CHANNEL_ID
 ```
 
 The `set_approval_gate` MCP tool takes `value` (`on`, `off`, `inherit`), optional
 `channel_id` (omitted for the server) and `thread` (default false). Thread ids
 are Discord thread ids, Slack `channel:timestamp`, or Teams full
 `channel;messageid=root` ids. Authorization and inheritance stay within the
-selected tenant. Changes take effect on the next admitted chat turn. The generic
+credential's tenant. The effective setting is read again before each automatic
+allowance, including in prepared and running turns. Switching `off` to `on` or
+clearing it to an asking parent takes effect on the next write. An unreadable
+setting requires confirmation. A prepared turn with a stale looser gate is
+refused before sending and must be prepared again. The generic
 `tenants access-policy set --clear` refuses while approval overrides remain;
 clear them with the dedicated admin command first.
 

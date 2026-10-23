@@ -25,6 +25,7 @@ from anthropic.types.beta.beta_managed_agents_mcp_toolset_params import (
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
+from daimon.core.mcp_server_url import same_mcp_endpoint
 
 _log = structlog.get_logger(__name__)
 
@@ -36,8 +37,8 @@ def get_reserved_mcp_rejection(*, server_name: str, url: str, public_url: str | 
     the reserved daimon-mcp entry, or None when the attach/add is allowed.
 
     - Name check is unconditional: fires even when public_url is None.
-    - URL check is gated on public_url is not None and uses trailing-slash-insensitive
-      comparison.
+    - URL check is gated on public_url is not None and excludes all aliases
+      of the same HTTP endpoint.
 
     Pure. Raises nothing, performs no I/O. Callers decide how to surface the
     rejection (ToolError in chat, ephemeral message in the panel).
@@ -47,7 +48,7 @@ def get_reserved_mcp_rejection(*, server_name: str, url: str, public_url: str | 
             f"'{DAIMON_MCP_SERVER_NAME}' is the reserved built-in daimon server and cannot be "
             "replaced or re-pointed. Pick a different server name."
         )
-    if public_url is not None and url.rstrip("/") == public_url.rstrip("/"):
+    if public_url is not None and same_mcp_endpoint(url, public_url):
         return (
             f"'{url}' is the deployment's own MCP endpoint (already registered as "
             f"'{DAIMON_MCP_SERVER_NAME}'). Attaching it under another name would create a "

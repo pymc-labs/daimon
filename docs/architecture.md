@@ -1126,12 +1126,18 @@ with a plain explanation that it cannot refresh the tool safety gate. This rule
 applies with safety on or off; the model receives a denial and the turn can
 continue or end. Unattended turns never invoke a human provider-action hook.
 Approval gate overrides are resolved from the tenant access policy at admission,
-then passed to `chat_tool_confirmation`. Only `interactive_decider` can relax a
+then refreshed from storage immediately before each automatic allowance in
+`interactive_decider`; unreadable settings require confirmation. The final
+pre-send authorization rejects a stale looser gate for attended turns.
+Session endpoint bindings identify Daimon's own server, including legacy URL
+aliases, for toolset configuration and fixed-gate decisions.
+Only `interactive_decider` can relax a
 third-party write verdict, and only with the deployment opt-in enabled. Fixed
 Daimon gates and unattended decisions keep their existing paths. The shared
 `approval_gate` setter authorizes the `SET_APPROVAL_GATE` action and atomically
-writes the policy and audit event; CLI, MCP and `/here` adapters obtain fresh
-native admin evidence before invoking it.
+writes the policy and audit event. CLI changes use a personal authenticated
+FastMCP client to call the MCP setter; MCP and `/here` adapters obtain fresh
+native admin evidence before invoking the core setter.
 
 Tool rules come from the session's
 conversation channel (`session_rules_channel`), never its budget channel. The decider comes

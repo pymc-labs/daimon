@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add opt-in server-admin overrides for third-party MCP write approvals at
   server, channel and thread scope, with audited CLI/MCP and `/here` controls.
-  Fixed confirmations, deny rules and unattended writes retain their gates.
+  CLI changes require a personal MCP credential; the server verifies the actor's
+  current native admin authority. Changes apply to the next write in prepared
+  and running turns, with failed setting reads requiring confirmation. Fixed
+  confirmations (including own-endpoint aliases), deny rules and unattended
+  writes retain their gates.
 
 - Hide saved routine triggers/results from MCP, CLI and Discord controls when
   their source or destination becomes reserved for recruitment, including

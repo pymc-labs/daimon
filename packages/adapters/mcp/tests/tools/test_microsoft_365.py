@@ -861,3 +861,73 @@ async def test_connect_failing_before_delivery_leaves_no_link(
             session, tenant_id=auth.tenant_id, user_id=OID, now=datetime.now(UTC)
         )
     assert live is None, "a failed connect must leave no live link behind"
+
+
+async def test_personal_credential_own_endpoint_alias_requires_card_before_workbook_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+) -> None:
+    """A connected person's credential makes the legacy alias executable, not third-party."""
+    import uuid
+    from unittest.mock import AsyncMock
+
+    from daimon.core.approval_gate import ApprovalGate
+    from daimon.core.tool_safety import (
+        ToolCall,
+        ToolSafetyPolicy,
+        microsoft_send_tools,
+        trusted_servers_for,
+    )
+    from daimon.core.turn.approvals import interactive_decider
+
+    _, chat_auth = await _person(committing_sessionmaker)
+    auth = dataclasses.replace(
+        chat_auth,
+        chat_agent_id=None,
+        chat_session_id=None,
+        token_kind="cli",
+        token_jti=uuid.uuid4(),
+    )
+    await _connect(committing_sessionmaker, auth)
+    runtime = _runtime(committing_sessionmaker, fake)
+    public_url = "https://d.example/mcp"
+    bindings = {"office": public_url + "?alias=office"}
+    path = "/me/drive/items/i1/workbook/tables/T/rows"
+    fake.graph[("POST", path)] = httpx.Response(200, json={"index": 0})
+    card = AsyncMock(return_value="denied")
+    decide = interactive_decider(
+        ToolSafetyPolicy(enabled=True, allow_gate_overrides=True),
+        requester_platform_user_id=OID,
+        confirm=card,
+        trusted_servers=trusted_servers_for(public_url, bindings),
+        confirmed_tools=microsoft_send_tools(
+            enabled=runtime.settings.microsoft_accounts.configured,
+            tool_safety_on=True,
+        ),
+        server_urls=bindings,
+        approval_gate_for=AsyncMock(
+            return_value=ApprovalGate("off", "server", "admin", auth.tenant_id)
+        ),
+    )
+    call = ToolCall(
+        tool_use_id="t1",
+        server_name="office",
+        tool_name="microsoft_write",
+        input={"method": "POST", "path": path, "body": {"values": [["value"]]}},
+    )
+    assert not (await decide(call)).allow
+    card.assert_awaited_once()
+    assert not fake.graph_requests
+    # Prove the authenticated connection really can write once its fixed card is approved.
+    card.return_value = "approved"
+    assert (await decide(call.model_copy(update={"tool_use_id": "t2"}))).allow
+    await graph_module.microsoft_write_impl(
+        runtime,
+        auth,
+        method="POST",
+        path=path,
+        body={"values": [["value"]]},
+        file_handle=None,
+        origin_context_id="",
+    )
+    assert len(fake.graph_requests) == 1

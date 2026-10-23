@@ -3103,7 +3103,13 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         admission=dataclasses.replace(
             _admission(
                 account_id=account.id,
-                agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+                agent=ma_agent(
+                    id="ag_1",
+                    tenant_id=tenant.id,
+                    mcp_servers=[
+                        {"type": "url", "name": "linear", "url": "https://linear.example/mcp"}
+                    ],
+                ),
                 env=ma_environment(id="env_1", tenant_id=tenant.id),
             ),
             approval_gate=ApprovalGate("off", gate_scope, "admin") if gate_scope else None,
@@ -3114,6 +3120,10 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         mapping_id=row.id,
         session_account_id=account.id,
     )
+    from unittest.mock import AsyncMock
+
+    refresh = AsyncMock(return_value=prepared.admission.approval_gate)
+    monkeypatch.setattr("daimon.core.turn.run.refresh_approval_gate", refresh)
     postures: list[object] = []
 
     async def _fake_run_turn(**kwargs: object) -> TurnState:

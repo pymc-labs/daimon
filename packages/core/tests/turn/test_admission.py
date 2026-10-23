@@ -2296,3 +2296,87 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
     assert admission.approval_gate == (
         ApprovalGate("inherit", "server", None, tenant.id) if enabled else None
     )
+
+
+@pytest.mark.parametrize("scope", ["server", "channel", "thread"])
+@pytest.mark.parametrize("revoked", ["on", "inherit"])
+@pytest.mark.parametrize("between_calls", [False, True])
+async def test_gate_revocation_reaches_prepared_and_running_turns(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    scope: str,
+    revoked: str,
+    between_calls: bool,
+) -> None:
+    from typing import cast
+    from unittest.mock import AsyncMock
+
+    from daimon.core.access_policy import Approvals
+    from daimon.core.approval_gate import set_approval_gate
+    from daimon.core.authz import Subject
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.admission import decide_before_send, refresh_approval_gate
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.errors import SessionBusyError
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    deps = replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=resolved_agent_env_router(
+                ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+                ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+            ),
+        ),
+        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=True),
+    )
+    target = {"server": None, "channel": "chan-1", "thread": "thread-1"}[scope]
+
+    async def change(value: Approvals) -> None:
+        await set_approval_gate(
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            target=target,
+            value=value,
+            subject=Subject(is_admin=True, platform_user_id="admin"),
+        )
+
+    await change("off")
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        thread_id="thread-1",
+        now=_NOW,
+    )
+    card = AsyncMock(return_value="denied")
+    posture = chat_tool_confirmation(
+        deps.tool_safety,
+        requester_platform_user_id="user-1",
+        confirm=card,
+        approval_gate_for=lambda: refresh_approval_gate(deps, admission),
+        server_urls={"third": "https://third.example/mcp"},
+    )
+    assert isinstance(posture, PolicyApproval)
+    call = ToolCall(tool_use_id="first", server_name="third", tool_name="create_issue")
+    if between_calls:
+        assert (await posture.decide(call)).allow
+        card.assert_not_awaited()
+    await change(cast(Approvals, revoked))
+    with pytest.raises(SessionBusyError):
+        await decide_before_send(deps, admission)()
+    # Unattended policy is unaffected by approval-gate changes.
+    await decide_before_send(deps, admission, attended=False)()
+    assert not (await posture.decide(call.model_copy(update={"tool_use_id": "next"}))).allow
+    card.assert_awaited_once()

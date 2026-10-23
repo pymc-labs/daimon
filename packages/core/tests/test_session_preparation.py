@@ -2983,9 +2983,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     original_decide = turn_run.decide_before_send
     decisions = 0
 
-    def paused_decide(*args):
+    def paused_decide(*args, **kwargs):
         nonlocal decisions
-        decide = original_decide(*args)
+        decide = original_decide(*args, **kwargs)
         decisions += 1
         first_decision = decisions == 1
 

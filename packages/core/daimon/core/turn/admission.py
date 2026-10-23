@@ -1135,6 +1135,16 @@ def _approval_gate_for(
     return replace(gate, tenant_id=grant.tenant_id)
 
 
+async def refresh_approval_gate(deps: TurnDeps, admission: Admission) -> ApprovalGate | None:
+    """Read the effective gate for this admitted tenant and actual origin, uncached."""
+    grant = admission.grant
+    if grant is None or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides):
+        return None
+    async with deps.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+    return _approval_gate_for(deps, policy, grant)
+
+
 def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
     return not authorize(
         policy,
@@ -1326,7 +1336,9 @@ async def require_current_spend(
             raise AdmissionDenied(reason="channel_budget_exceeded")
 
 
-def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awaitable[None]]:
+def decide_before_send(
+    deps: TurnDeps, admission: Admission, *, attended: bool = True
+) -> Callable[[], Awaitable[None]]:
     """A last decision to run right before a message is sent into a session.
 
     Opening the stream and building the message await network calls after the
@@ -1342,6 +1354,12 @@ def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awa
             current.origin_seal_ids != admission.origin_seal_ids
             or current.memory_read_only != admission.memory_read_only
             or (current.asks_before_publishing and not admission.asks_before_publishing)
+            or (
+                attended
+                and admission.approval_gate is not None
+                and admission.approval_gate.value == "off"
+                and (current.approval_gate is None or current.approval_gate.value != "off")
+            )
         ):
             raise SessionBusyError(
                 pending_reasons=("seal",), retry_after=datetime.now(UTC) + timedelta(seconds=1)
