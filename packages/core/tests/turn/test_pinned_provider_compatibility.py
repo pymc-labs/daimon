@@ -30,6 +30,7 @@ from mux.contracts.config import BackendConfig
 from pydantic import ValidationError
 from sqlalchemy import delete
 
+from ..turn_path_support import TurnIOSpy
 from .native_counterpart_support import db_preflight as db_preflight
 from .test_backend_selection import (
     initial_backend as initial_backend,
@@ -87,7 +88,7 @@ async def _admit(host, thread_id: str):
     )
 
 
-async def _run_legacy_turn(host, thread_id: str) -> None:
+async def _run_legacy_turn(host, thread_id: str, turn_io_used: TurnIOSpy) -> None:
     admission = await _admit(host, thread_id)
     assert admission.backend_revision is None, "legacy admission must ignore native choices"
     deps = _legacy_deps(host)
@@ -123,6 +124,7 @@ async def _run_legacy_turn(host, thread_id: str) -> None:
     await drain_outcomes()
 
     assert outcome.state.error is None, "the pinned legacy turn should complete"
+    turn_io_used.assert_ran("legacy")
     assert "Hello from the agent!" in str(outcome.state.content), (
         "the scripted MA response should reach output"
     )
@@ -142,7 +144,11 @@ async def _run_legacy_turn(host, thread_id: str) -> None:
 @pytest.mark.parametrize("selector", ["none", "channel", "agent"])
 @pytest.mark.parametrize("keys", [(), ("openai",), ("gemini",), ("openai", "gemini")])
 async def test_legacy_pin_keeps_managed_agents_execution_with_saved_native_choices(
-    selector_host, monkeypatch: pytest.MonkeyPatch, selector: str, keys: tuple[str, ...]
+    selector_host,
+    monkeypatch: pytest.MonkeyPatch,
+    turn_io_used: TurnIOSpy,
+    selector: str,
+    keys: tuple[str, ...],
 ) -> None:
     host = selector_host
     for provider in keys:
@@ -190,12 +196,12 @@ async def test_legacy_pin_keeps_managed_agents_execution_with_saved_native_choic
     assert policy.enabled_backends == expected, "default policy should reflect deployment keys"
     assert not policy.backends_explicit, "the default should remain a read-time choice"
 
-    await _run_legacy_turn(host, f"thread-{selector}")
+    await _run_legacy_turn(host, f"thread-{selector}", turn_io_used)
 
 
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 async def test_explicit_restricted_policy_and_tenant_default_stay_separate(
-    selector_host, monkeypatch: pytest.MonkeyPatch
+    selector_host, monkeypatch: pytest.MonkeyPatch, turn_io_used: TurnIOSpy
 ) -> None:
     host = selector_host
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "synthetic-key")
@@ -236,12 +242,12 @@ async def test_explicit_restricted_policy_and_tenant_default_stay_separate(
         await service.set_backend(agent, "openai", 0, actor)
     with pytest.raises(AgentBackendRefused, match="tenant mismatch"):
         await service.set_backend(agent, "openai", 0, replace(actor, tenant_id=other_tenant))
-    await _run_legacy_turn(host, "restricted-thread")
+    await _run_legacy_turn(host, "restricted-thread", turn_io_used)
 
 
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 async def test_explicit_native_allowlist_still_runs_the_legacy_provider(
-    selector_host, monkeypatch: pytest.MonkeyPatch
+    selector_host, monkeypatch: pytest.MonkeyPatch, turn_io_used: TurnIOSpy
 ) -> None:
     host = selector_host
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "synthetic-key")
@@ -269,7 +275,7 @@ async def test_explicit_native_allowlist_still_runs_the_legacy_provider(
         "the explicit list should include both keyed providers"
     )
     assert chosen.backends_explicit, "the stored list must not be mistaken for a default"
-    await _run_legacy_turn(host, "explicit-native-thread")
+    await _run_legacy_turn(host, "explicit-native-thread", turn_io_used)
 
 
 def test_explicit_empty_allowlist_is_rejected_by_policy_validation() -> None:

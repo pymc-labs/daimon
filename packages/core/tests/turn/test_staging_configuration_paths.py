@@ -9,6 +9,7 @@ and shows the same request admitted, so the refusal is the switch's doing.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -18,17 +19,25 @@ from daimon.core._models import AgentBackendRevisionRecord
 from daimon.core.config import load_settings, load_turn_settings
 from daimon.core.fleet_configuration import is_default_fleet
 from daimon.core.neutral_resources import WorkerSpecRefused
+from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.openai_io import OpenAITurnIO
+from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
+from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtime_manifest import (
     read_agent_fleet_grant,
     read_frozen_root,
     read_preparation_counterpart,
 )
+from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.actions import UserMessage
+from mux.contracts.config import BackendConfig
 from mux.contracts.events import TextPart
 from sqlalchemy import delete
 
+from ..turn_path_support import TurnIOSpy
 from .native_counterpart_support import application as application
 from .native_counterpart_support import clean_sdk_environment as clean_sdk_environment
 from .native_counterpart_support import db_preflight as db_preflight
@@ -36,10 +45,13 @@ from .native_counterpart_support import owned as owned
 from .native_counterpart_support import owned_database_preflight as owned_database_preflight
 from .native_counterpart_support import provider as provider
 from .test_agent_native_runtime import explicit_worker_request as explicit_worker_request
+from .test_backend_selection import initial_backend as initial_backend
+from .test_backend_selection import selector_host as selector_host
 from .test_fleet_default import _spawn_three_default_workers
 from .test_frozen_root import freeze
 from .test_frozen_root import root_turn as root_turn
 from .test_gemini_codec import interaction
+from .test_provider_dispatch import ACCOUNT, PROFILE, TENANT
 
 if "DAIMON_CI_CONFIGURATION" not in os.environ:
     pytest.skip("the staging configuration matrix runs this module", allow_module_level=True)
@@ -150,3 +162,95 @@ async def test_ci_selected_fleet_admission_path(root_turn):
     # Control: the same frozen root is readable with only the fleet switch on.
     parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
     assert parent.fleet.depth == 0
+
+
+async def _run_channel_turn(host, deps, thread_id: str):
+    """Admit, bind and run one Slack turn on `deps`, as a platform adapter does."""
+    admission = await admit_impl(
+        deps,
+        tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
+        platform="slack",
+        external_user_id="caller",
+        channel_id="channel",
+        thread_id=thread_id,
+        now=datetime.now(UTC),
+    )
+    prepared = await bind_session_impl(
+        deps,
+        admission,
+        tenant_id=TENANT,
+        platform="slack",
+        external_user_id="caller",
+        thread_id=thread_id,
+        session_account_id=ACCOUNT,
+        reuse_existing=True,
+    )
+
+    async def reseed_user_message() -> str:
+        return "which provider answers?"
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id=thread_id,
+        external_user_id="caller",
+        user_message="which provider answers?",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed_user_message,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        render_interval_s=0.01,
+        operation_key=f"staging-config-{thread_id}",
+    )
+    await drain_outcomes()
+    return admission, prepared, outcome
+
+
+def _ma_sends(host) -> int:
+    return len([r for r in host.calls if r.method == "POST" and r.url.path.endswith("/events")])
+
+
+@pytest.mark.parametrize("selector_host", ["postgres"], indirect=True)
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_ci_selected_channel_backend_execution_path(selector_host, turn_io_used: TurnIOSpy):
+    """A saved channel choice runs on its provider only when the leg turns it on."""
+    host = selector_host
+    turn = selected_turn()
+    saved = await host.change(BackendConfig(backend="openai", profile=PROFILE, model="gpt-6-luna"))
+    assert saved.backend == "openai"
+    deps = replace(
+        host.deps,
+        turn_path=turn.path,
+        channel_backends=turn.channel_backends,
+        agent_backends=turn.agent_backends,
+    )
+    admission, prepared, outcome = await _run_channel_turn(host, deps, "selected-thread")
+    if turn.channel_backends:
+        assert admission.backend_revision == saved, "the saved channel choice must be admitted"
+        assert prepared.session_ref is not None and prepared.session_ref.provider == "openai"
+        assert outcome.state.error is None, "the native turn should complete"
+        assert turn_io_used.classes == [OpenAITurnIO], "the turn must run on OpenAI's turn I/O"
+        assert any(r.method == "POST" for r in host.wire.requests), "OpenAI must run the turn"
+        assert _ma_sends(host) == 0, "Managed Agents must not receive the turn"
+        return
+    assert admission.backend_revision is None, "the off leg must ignore the saved choice"
+    assert outcome.state.error is None, "the legacy turn should complete"
+    turn_io_used.assert_ran("legacy")
+    assert _ma_sends(host) == 1, "Managed Agents must run the turn"
+    assert host.wire.requests == [], "OpenAI must receive no request"
+    # Control: the same saved choice is admitted once mux and channel backends are on.
+    enabled = replace(deps, turn_path="mux", channel_backends=True)
+    on = await admit_impl(
+        enabled,
+        tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
+        platform="slack",
+        external_user_id="caller",
+        channel_id="channel",
+        thread_id="control-thread",
+        now=datetime.now(UTC),
+    )
+    assert on.backend_revision == saved
