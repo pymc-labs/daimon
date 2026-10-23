@@ -478,6 +478,40 @@ def _reject_unknown_model(model: ModelSelection) -> None:
         raise ToolError(f"Model '{choice_id}' is not available. Choose one of: {allowed}")
 
 
+async def _hand_off_to_new_copy(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, agent_name: str
+) -> None:
+    """Hand this thread to `agent_name` if it is a new copy of this turn's responder
+    that does not answer here yet; anything else is left as it is."""
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_FORKED_FROM
+    from daimon.core.stores import thread_agent_bindings
+
+    if agent_name == origin.responder_name:
+        return
+    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    copy = next((a for a in agents if a.metadata.get(MA_METADATA_KEY_NAME) == agent_name), None)
+    if copy is None or copy.metadata.get(MA_METADATA_KEY_FORKED_FROM) != (
+        origin.responder_ma_agent_id
+    ):
+        return
+    async with runtime.session_factory() as session:
+        handed = await thread_agent_bindings.get_binding(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=origin.platform,
+            parent_channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+        )
+    if handed is not None and handed.responder_name == agent_name:
+        return
+    await _hand_off_task_impl(
+        runtime, auth, origin_context_id=str(origin.id), agent_id=copy.id, keep_provider=True
+    )
+
+
 async def _move_this_thread(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1665,6 +1699,12 @@ async def _request_agent_backend_switch_impl(
 
             before = await service.current(agent)
             old_provider = provider_name((before.backend if before else None) or DEFAULT_BACKEND)
+            # J1: approving the switch of a new copy of this conversation's responder
+            # also hands it this thread, first, while both are on one provider (a
+            # thread only moves to an agent on its own provider; the switch then moves
+            # it). The model's own order was a coin toss: a copy handed the thread
+            # without its switch posted the card again instead of answering.
+            await _hand_off_to_new_copy(runtime, auth, origin, agent_name)
             try:
                 await service.set_backend(
                     agent,

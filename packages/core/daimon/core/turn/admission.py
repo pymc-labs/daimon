@@ -1503,6 +1503,43 @@ def _memory_read_only(policy: TenantAccessPolicy, grant: AdmissionGrant, sealed:
     )
 
 
+async def _new_copy_of_responder(
+    deps: TurnDeps, source: BackendAgent, config: ResolvedConfig, context: ScopeContext
+) -> bool:
+    """`source` is a copy fork_agent made of this place's current responder."""
+    from daimon.core.defaults.ma_index import list_agents_by_tenant
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_FORKED_FROM, MA_METADATA_KEY_NAME
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.mux_compat import retrieve_agent
+
+    if source.source is None or config.agent_name is None:
+        return False
+    responder = config.responder_ma_agent_id
+    if responder is None:
+        # This place's responder by name (its id is only pinned after a hand-off).
+        agents = await list_agents_by_tenant(deps.anthropic, tenant_id=context.tenant_id)
+        responder = next(
+            (
+                a.id
+                for a in agents
+                if (a.metadata or {}).get(MA_METADATA_KEY_NAME) == config.agent_name
+            ),
+            None,
+        )
+        if responder is None:
+            return False
+    actual = await retrieve_agent(
+        deps.anthropic,
+        source.source.ref.id,
+        scope=resource_scope(
+            tenant_id=str(context.tenant_id),
+            account_id=str(context.account_id),
+            authorization_id="backend-preview",
+        ),
+    )
+    return (actual.metadata or {}).get(MA_METADATA_KEY_FORKED_FROM) == responder
+
+
 async def capture_backend_source(
     deps: TurnDeps,
     source: BackendAgent,
@@ -1573,6 +1610,22 @@ async def capture_backend_source(
                         source.source.ref.id,
                     )
                 )
+            if (
+                not target_matches
+                and explicit_target_name is None
+                and config.configuration_target_name is None
+                and await _new_copy_of_responder(deps, source, config, context)
+            ):
+                # J1/J2: a new copy of this place's responder being switched here. Its
+                # card's approval hands it this thread first, so read it as it will
+                # answer here (a hand-off before the switch is refused now).
+                config = config.model_copy(
+                    update={
+                        "agent_name": source.name,
+                        "responder_ma_agent_id": source.source.ref.id,
+                    }
+                )
+                target_matches = True
             if not target_matches and explicit_target_name is None:
                 # An agent-level setting (provider, model) names any agent the requester
                 # may edit, e.g. a copy that isn't this place's responder: read that

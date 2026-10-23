@@ -310,11 +310,15 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
         new_copy_if_taken=True,
     )
     assert copy.name == "Daimon-2"
-    # 3. This thread is handed to the copy while it is still on this provider.
-    handed = await _hand_off_task_impl(
-        chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
-    )
-    assert handed.destination_ma_agent_id == copy.id
+    # 3. The BAD order (smoke-6 J1): handing this thread to the copy before its switch.
+    #    Refused, with the plain next step, and nothing changes: the copy would otherwise
+    #    answer the next message with a switch card instead of on GPT.
+    with pytest.raises(ToolError) as early:
+        await _hand_off_task_impl(
+            chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
+        )
+    assert "post its switch card now" in str(early.value)
+    assert "Nothing was changed" in str(early.value)
     # 4. The copy switches to GPT: preview, then the confirmed call the card runs.
     preview = await _request_agent_backend_switch_impl(
         chat.runtime,
@@ -384,6 +388,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
         preview_digest=preview.preview_digest,
         accepted_drops=preview.declared_drops,
     )
+    # The approval itself handed this thread to the copy, then switched it: one step.
     assert "This conversation moves to OpenAI from the next message" in changed.summary
     # The server's default agent is unchanged, for everyone.
     service = AgentBackendService(chat.runtime.session_factory, enabled=True)

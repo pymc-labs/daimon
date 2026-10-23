@@ -323,11 +323,13 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         expected_ma_agent_id="agent_daimon",
         new_copy_if_taken=True,
     )
-    # 3. This thread is handed to the copy.
-    handed = await _hand_off_task_impl(
-        chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
-    )
-    assert handed.destination_ma_agent_id == copy.id
+    # 3. Handing this thread to the copy before its switch is refused (J1's coin-toss
+    #    order): the card's approval hands it over and switches it, in one step.
+    with pytest.raises(ToolError) as early:
+        await _hand_off_task_impl(
+            chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
+        )
+    assert "post its switch card now" in str(early.value)
     # 4. The copy switches to Argon: the preview, then the confirmed call the card runs.
     preview = await _request_agent_backend_switch_impl(
         chat.runtime,

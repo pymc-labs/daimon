@@ -24,6 +24,7 @@ from anthropic.types.beta.agent_create_params import (
     Tool,
 )
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_FORKED_FROM,
     MA_METADATA_KEY_ISOLATED,
     build_metadata,
     tenant_scoped_display_title,
@@ -265,7 +266,8 @@ async def test_fork_create_preserves_pre_refactor_sdk_bytes_and_face_metadata(
             model=cast(Model, source.model.model_dump(mode="json")),
             description=None,
             system="Preserve this prompt.",
-            metadata=metadata,
+            # J1: a copy records the agent it was forked from.
+            metadata=metadata | {MA_METADATA_KEY_FORKED_FROM: "source"},
             tools=tools,
             mcp_servers=servers,
             skills=[{"type": "anthropic", "skill_id": "pdf", "version": "latest"}],

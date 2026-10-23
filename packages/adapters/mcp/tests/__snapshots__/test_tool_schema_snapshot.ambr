@@ -3161,6 +3161,11 @@
             'default': None,
             'description': "Null unless the person explicitly asked the destination to continue or finish NAMED work, in their own words. 'Take over' alone, with no named work, is null. Never restate work that already finished.",
           }),
+          'keep_provider': dict({
+            'default': False,
+            'description': 'True only for a new copy of you that should stay on your model provider. A copy being switched to another provider is handed the thread after its switch card is approved, never before.',
+            'type': 'boolean',
+          }),
           'origin_context_id': dict({
             'type': 'string',
           }),

@@ -47,6 +47,9 @@ MA_METADATA_KEY_CHANNEL_COPY = "daimon_isolation_copy"
 # can tell "unchanged source, reuse the variant" from "source moved, update
 # it" without re-deriving the whole spec first.
 MA_METADATA_KEY_READER_OF = "daimon_reader_of"
+# A copy made by fork_agent names the agent it was copied from (its MA id). A fresh
+# copy still on its source's provider can't be handed a thread mid-switch (J1).
+MA_METADATA_KEY_FORKED_FROM = "daimon_forked_from"
 # Also stamped on a reader variant: the source agent's names (its config name
 # and its MA name, newline-separated). A reader answers as its source, so a
 # pin on the source holds for the reader too (`daimon.core.agent_pins`).

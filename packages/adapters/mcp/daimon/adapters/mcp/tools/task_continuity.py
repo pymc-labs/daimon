@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
@@ -42,9 +43,15 @@ from daimon.core.continuity.tool_messages import (
     render_tool_unsaved_work_question,
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_FORKED_FROM,
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+)
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
 from daimon.core.security_audit import record_authz_denial
+from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform, TurnOriginRow
 from daimon.core.stores.task_continuations import record_continuation
@@ -112,6 +119,51 @@ class TaskFreshStartResult:
     """What to do with `confirmation`."""
 
 
+async def _refuse_a_copy_mid_switch(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    destination: BetaManagedAgentsAgent,
+    destination_name: str,
+    *,
+    keep_provider: bool,
+) -> None:
+    """A fresh copy of this responder, still on its provider, gets the thread from
+    its switch card's approval, which hands over and switches in one step (J1).
+
+    The model chose the order before: sometimes it handed the thread to the copy and
+    stopped, and the copy's next turn posted the switch card instead of answering.
+    A copy meant to stay on this provider says so with `keep_provider`.
+    """
+    if keep_provider or destination.metadata.get(MA_METADATA_KEY_FORKED_FROM) != (
+        origin.responder_ma_agent_id
+    ):
+        return
+    async with runtime.session_factory() as session:
+        revisions = [
+            await agent_backends.current(
+                session,
+                auth.tenant_id,
+                derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id),
+            )
+            for ma_agent_id in (destination.id, origin.responder_ma_agent_id)
+        ]
+    copy, source = (
+        (revision.backend if revision is not None and revision.backend else "anthropic")
+        for revision in revisions
+    )
+    if copy != source:
+        return
+    raise ToolError(
+        f"{destination_name} is a new copy of you, still on your model provider. If the "
+        "person asked for it on another provider, post its switch card now instead "
+        f"(request_agent_backend_switch for {destination_name}, with the preview's "
+        "digest): approving the card hands this thread to it and switches it, in one "
+        "step. If the copy should stay on this provider, call hand_off_task again with "
+        "keep_provider=true. Nothing was changed."
+    )
+
+
 async def _hand_off_task_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -120,6 +172,7 @@ async def _hand_off_task_impl(
     agent_id: str,
     continuation: str | None = None,
     unsaved_work: Literal["copy", "leave"] | None = None,
+    keep_provider: bool = False,
 ) -> TaskHandoffResult:
     """Bind this thread's responder to another agent, optionally queueing work.
 
@@ -149,6 +202,9 @@ async def _hand_off_task_impl(
             "That agent has no configuration name, so nobody can reach it by name. "
             "Choose a named agent here. Nothing was changed."
         )
+    await _refuse_a_copy_mid_switch(
+        runtime, auth, origin, destination, destination_name, keep_provider=keep_provider
+    )
     continuation = sanitize_requested_work(continuation, echoes=(destination_name,))
     if continuation is not None and auth.platform_user_id is None:
         raise ToolError(
@@ -478,6 +534,16 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             Literal["copy", "leave"] | None,
             Field(description="Only after the person answers the uncommitted-work question."),
         ] = None,
+        keep_provider: Annotated[
+            bool,
+            Field(
+                description=(
+                    "True only for a new copy of you that should stay on your model "
+                    "provider. A copy being switched to another provider is handed the "
+                    "thread after its switch card is approved, never before."
+                )
+            ),
+        ] = False,
     ) -> TaskHandoffResult:
         """Hand this task over to another agent in the same conversation: "have that one take over", "let churn-explorer finish this".
 
@@ -506,6 +572,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             agent_id=agent_id,
             continuation=continuation,
             unsaved_work=unsaved_work,
+            keep_provider=keep_provider,
         )
 
     @mcp.tool

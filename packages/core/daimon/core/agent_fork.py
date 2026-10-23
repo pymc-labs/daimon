@@ -40,6 +40,7 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_FORKED_FROM,
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
     build_metadata,
@@ -278,9 +279,13 @@ async def copy_agent(
     params = source_ma.model_dump(mode="json")
     fork_params: dict[str, object] = {k: params[k] for k in _FORK_COPY_FIELDS if k in params}
     fork_params["name"] = new_name
-    fork_params["metadata"] = build_metadata(
-        tenant_id=tenant_id, name=new_name, account_id=derive_guild_account_uuid(tenant_id)
-    ) | dict(extra_metadata or {})
+    fork_params["metadata"] = (
+        build_metadata(
+            tenant_id=tenant_id, name=new_name, account_id=derive_guild_account_uuid(tenant_id)
+        )
+        | {MA_METADATA_KEY_FORKED_FROM: str(source.id)}
+        | dict(extra_metadata or {})
+    )
     fork_params["mcp_servers"] = merge_default_mcp_server(
         cast("list[BetaManagedAgentsURLMCPServerParams] | None", fork_params.get("mcp_servers")),
         public_url,
