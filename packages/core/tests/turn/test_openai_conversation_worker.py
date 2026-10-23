@@ -31,7 +31,7 @@ from mux.testing.isolated_sdk import build_async_openai
 from .test_fleet_native_dispatch import _settled
 from .test_frozen_preparation import default_source_turn
 from .test_frozen_root import freeze, root_turn
-from .test_openai_host import SESSION_ID, Wire
+from .test_openai_host import SESSION_ID, Wire, openai_native_spend_cap
 from .test_openai_worker_plan import db_preflight as db_preflight
 from .test_openai_worker_plan import owned_database_preflight as owned_database_preflight
 
@@ -102,6 +102,8 @@ class ConversationWire(Wire):
 async def conversation_root(
     db_preflight, db_clean, db_committing_engine, monkeypatch, tmp_path, request
 ):
+    # These workers carry a native budget: exercise a project that honours it.
+    openai_native_spend_cap(monkeypatch)
     async with aclosing(
         root_turn.__wrapped__(db_preflight, db_committing_engine, live_root=True)
     ) as roots:

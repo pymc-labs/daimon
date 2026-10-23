@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import IO, Any, Literal
@@ -386,30 +386,6 @@ def _openai_session_spec(rig: Rig, **update: Any) -> SessionSpec:
     )
 
 
-async def _openai_spend_control(rig: Rig) -> object:
-    """The session body carries the native spend limit the host asked for."""
-    from mux.drivers.openai import OpenAIDriver
-    from mux.drivers.openai.session_controls import SessionControls
-    from mux.drivers.openai.turn import MemoryRecoveryJournal
-    from mux.drivers.openai.usage import MemoryUsageRevisions
-
-    wire = rig.harness
-    wire.replies[("GET", "/agents/agent_probe")] = {"id": "agent_probe", "metadata": {}}
-    driver = OpenAIDriver(
-        wire,
-        account_scope_id=OPENAI_SCOPE_ID,
-        journal=MemoryRecoveryJournal(),
-        usage_revisions=MemoryUsageRevisions(),
-        authorization=lambda scope, kind, id_: scope == SCOPE,
-        session_controls=SessionControls(spend_limit_usd_cents=100),
-    )
-    with suppress(Reached):
-        await driver.sessions.create(rig.scope, _openai_session_spec(rig), key="spend")
-    posted = [body for method, path, body in wire.requests if method == "POST"]
-    assert posted and posted[0] is not None and posted[0]["spend_control"] == {"limit": 100}
-    return posted
-
-
 def _openai_ext[T](rig: Rig, port: type[T], namespace: str) -> T:
     return rig.driver.extension(port, namespace=namespace, version=1)
 
@@ -474,7 +450,6 @@ def _openai_probes(*, workspace: bool) -> dict[Capability, Probe]:
             _ref("openai", "agent", "agent_probe", OPENAI_SCOPE_ID, r.scope),
             key="delete",
         ),
-        "session_spend_control": _openai_spend_control,
         "turn_lifecycle": _openai_send,
         "cancel": lambda r: r.driver.events.cancel(r.scope, r.session, turn_id="t", key="c"),
         "tool_loop": _openai_tool_loop,

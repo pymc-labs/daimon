@@ -2061,6 +2061,8 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     manifest(monkeypatch, tmp_path / "runtime.json", [openai_entry()])
     monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline")
     wire = Wire()
+    # The OpenAI profile has no native session cap: the row's limit isn't sent.
+    wire.expected_spend_limit = None
     clients = clients_for(monkeypatch, wire.handle)
     runtime = build_channel_runtime(application)
     config = application.admission.backend_revision

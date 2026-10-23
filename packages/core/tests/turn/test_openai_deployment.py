@@ -272,18 +272,13 @@ async def test_omitted_native_spend_control_is_preserved(
     assert runtime.controls.container_size == "small"
 
 
-@pytest.mark.parametrize("budget", [None, Decimal("0.20")])
-async def test_a_luna_root_sends_no_native_spend_control(
-    application, monkeypatch, tmp_path, budget
-):
+async def test_a_luna_root_sends_no_native_spend_control(application, monkeypatch, tmp_path):
     """Our OpenAI project rejects `spend_control` on every create (HTTP 400, Ref Y7D94P).
 
-    Luna may run under the host's own budget guard, so its creates never carry the
-    field, with or without a native budget, and no echo is required.
+    The profile says so, so a row's limit never compiles to the field and no echo is
+    required; admission and the turn deadline bound the turn.
     """
-    row = entry()
-    del row["spend_limit_usd_cents"]
-    manifest(monkeypatch, tmp_path / "runtime.json", [row])
+    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
     monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline-only")
     wire = Wire()
     wire.expected_spend_limit = None
@@ -296,7 +291,7 @@ async def test_a_luna_root_sends_no_native_spend_control(
         return wire.handle(request)
 
     monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handle))
-    runtime = build_openai_runtime(replace(application, native_budget_usd=budget))
+    runtime = build_openai_runtime(application)
     assert runtime.controls.spend_limit_usd_cents is None
     assert runtime.controls.require_spend_control_echo is False
     spec = await runtime.session_plan(application)
@@ -305,6 +300,15 @@ async def test_a_luna_root_sends_no_native_spend_control(
     backend.sessions.validate_spend_control(acknowledged)
     assert len([call for call in wire.requests if call.method == "POST"]) == 1
     assert not wire.turns
+
+
+async def test_a_native_budget_is_refused_not_dropped(application, monkeypatch, tmp_path):
+    """No native cap here: a root's native budget refuses rather than run without it."""
+    row = entry()
+    del row["spend_limit_usd_cents"]
+    manifest(monkeypatch, tmp_path / "runtime.json", [row])
+    with pytest.raises(AdmissionDenied):
+        build_openai_runtime(replace(application, native_budget_usd=Decimal("0.20")))
 
 
 @pytest.mark.parametrize(

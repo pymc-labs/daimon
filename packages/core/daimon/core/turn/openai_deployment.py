@@ -402,6 +402,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     budget = (
         request.worker.limits.native_budget_usd if request.worker is not None else native_budget_usd
     )
+    # Whether this project honours a native session cap: the profile says it doesn't
+    # (OpenAI answers `spend_control` with HTTP 400), so nothing below may count on one.
+    native_cap = get_profile(deployment.profile).support_for("session_spend_control") == "native"
+    if budget is not None and not native_cap:
+        # Admission and the fleet ceilings refuse a native budget here first; never drop it.
+        raise AdmissionDenied(reason="backend_unsupported")
     if budget is not None:
         if request.worker is not None:
             request.worker.limits.require_native_dispatch(request.now())
@@ -412,7 +418,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         if spend_limit is not None and spend_limit != requested:
             raise AdmissionDenied(reason="backend_unsupported")
         spend_limit = requested
-    if revision.model in SPEND_CAPPED_MODELS and spend_limit is None:
+    if revision.model in SPEND_CAPPED_MODELS and (spend_limit is None or not native_cap):
         # Astra's tariff tops out at $50/M output (x1.5 above 272k): never run it uncapped.
         raise AdmissionDenied(reason="backend_unsupported")
     scope = request.scope
@@ -644,12 +650,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         worker_agent = row.agent.ref
         return row
 
-    # Our OpenAI project rejects `spend_control` on every session create (docs/mux.md),
-    # so an agent's own turn asks for it only on a model that must never run uncapped;
-    # the host's own budget guard applies either way. Workers keep their native budget.
-    native_limit = (
-        spend_limit if request.worker is not None or revision.model in SPEND_CAPPED_MODELS else None
-    )
+    # A row's limit compiles to `spend_control` only where the project honours it. Without
+    # it, a turn is bounded by admission (balance, user and channel caps) and its deadline.
+    native_limit = spend_limit if native_cap else None
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
@@ -667,7 +670,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             multi_agent_enabled=False,
             container_size="small" if deployment.profile == PROFILE else None,
             spend_limit_usd_cents=native_limit,
-            require_spend_control_echo=budget is not None and native_limit is not None,
+            require_spend_control_echo=budget is not None,
         ),
     )
 
