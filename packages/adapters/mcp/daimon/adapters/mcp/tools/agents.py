@@ -1739,9 +1739,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         description, model, skills) are not. Members see the channel/thread
         responders, agents explicitly allowed to run here, and their own agents;
         other unrouted agents and other channels' agents are hidden.
-        Pass this turn's ``origin_context_id`` to verify its location. Without
-        a verified location a member cannot list unrestricted agents. Admins
-        retain their existing visibility. ``page`` is reserved for pagination.
+        Always pass this turn's ``origin_context_id`` to verify its location: without
+        it a member sees only their own agents. Admins retain their existing
+        visibility. ``page`` is reserved for pagination.
         """
         return await _list_agents_impl(
             runtime, await _auth(ctx), page, origin_context_id, mine=mine

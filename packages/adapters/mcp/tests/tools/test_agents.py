@@ -6130,3 +6130,87 @@ async def test_the_owner_sees_the_setup_they_edit(
     mine = await _list_agents_impl(runtime, auth, None, mine=True)
     assert [(a.name, a.owned_by_you) for a in mine] == [("scoped-agent", True)]
     assert mine[0].mcp_servers is not None
+
+
+async def test_a_member_who_creates_an_agent_in_chat_lists_gets_and_edits_it(
+    db_preflight, db_nullpool_engine
+) -> None:
+    """The real chat path, with no origin: the owner row (the requester's account,
+    not the workspace account stamped on the agent) is what finds the draft."""
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.factories import make_account
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        creator = await make_account(session, tenant=tenant)
+        other = await make_account(session, tenant=tenant)
+    stored: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        payload = {
+            **ma_agent(id="ag_draft", name=body["name"]).model_dump(mode="json"),
+            "metadata": body["metadata"],
+            "system": body.get("system") or "",
+        }
+        stored.append(payload)
+        return httpx.Response(200, json=payload)
+
+    def on_get(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(200, json=stored[0])
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        updates.append(body)
+        stored[0] = {**stored[0], **{k: v for k, v in body.items() if k == "system"}}
+        stored[0]["version"] = stored[0].get("version", 1) + 1
+        return httpx.Response(200, json=stored[0])
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(list(stored)))
+    router.add("POST", r"/v1/agents", on_create)
+    router.add("GET", r"/v1/agents/([^/]+)", on_get)
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=sessions)
+
+    def person(account: uuid.UUID, user: str) -> AuthIdentity:
+        return AuthIdentity(
+            account_id=account,
+            tenant_id=tenant.id,
+            role=Role.USER,
+            is_admin=False,
+            platform="discord",
+            platform_user_id=user,
+        )
+
+    me, them = person(creator.id, "creator"), person(other.id, "other")
+    await _create_agent_impl(runtime, me, AgentSpec(name="draft", model="claude-opus-4-5"))
+    # The agent is stamped with the workspace account, never the requester's.
+    assert stored[0]["metadata"]["daimon_account"] != str(creator.id)
+
+    listed = await _list_agents_impl(runtime, me, None)
+    assert [(a.name, a.owned_by_you) for a in listed] == [("draft", True)]
+    assert [a.name for a in await _list_agents_impl(runtime, me, None, mine=True)] == ["draft"]
+    got = await _get_agent_impl(runtime, me, "draft", expected_ma_agent_id="ag_draft")
+    assert got.owned_by_you is True and got.system is not None
+    await _update_agent_impl(
+        runtime,
+        me,
+        name="draft",
+        model=None,
+        description=None,
+        system="my prompt",
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+        expected_ma_agent_id="ag_draft",
+    )
+    assert updates and updates[-1]["system"].endswith("my prompt")
+
+    # Someone else's draft stays out of sight.
+    assert await _list_agents_impl(runtime, them, None) == []
+    with pytest.raises(ToolError):
+        await _get_agent_impl(runtime, them, "draft", expected_ma_agent_id="ag_draft")
