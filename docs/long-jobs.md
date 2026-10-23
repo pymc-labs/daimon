@@ -5,6 +5,10 @@ session. The parent conversation ends its turn normally and can be used while th
 job runs. Completion queues a durable wake in that same thread to read the job and
 report its outcome.
 
+Starting a job is currently supported only from Discord threads. `start_long_job`
+refuses Slack, Teams and other unsupported origins before registration, worker
+launch or spend: “long jobs report back only in Discord threads for now”.
+
 Jobs are disabled by default. A current human admin configures tenant policy, with
 an optional complete override for each agent. Without a policy row the deadline
 default is 60 minutes, the maximum deadline is 70 minutes, and the maximum provider-priced spend is
@@ -46,7 +50,7 @@ ceilings. Policy changes govern new registrations and are checked again at launc
 
 ## Starting and inspecting a job
 
-In an attended conversation, ask the agent to call `start_long_job` with the exact
+In an attended Discord thread, ask the agent to call `start_long_job` with the exact
 command and title. The approval card shows the command and requested limits.
 Optional `deadline_minutes` and `max_usd` use effective policy when omitted. The
 registration binds the owner, tenant, agent version, environment revision, thread,

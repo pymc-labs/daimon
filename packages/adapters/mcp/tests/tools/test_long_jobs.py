@@ -170,3 +170,64 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
                 assert row.state == "queued"
     finally:
         await ma.close()
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+async def test_start_refuses_origins_without_completion_before_registration_or_spend(
+    monkeypatch, platform
+):
+    from unittest.mock import MagicMock
+
+    auth = AuthIdentity(
+        tenant_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        platform="discord",  # The verified origin, not the token platform, controls delivery.
+        role=Role.USER,
+        platform_user_id="user",
+    )
+    origin = SimpleNamespace(attended=True, platform=platform)
+    monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
+    monkeypatch.setattr(tools, "require_turn_origin", AsyncMock(return_value=origin))
+    approval = AsyncMock()
+    registration = AsyncMock()
+    admission = AsyncMock()
+    monkeypatch.setattr(tools._session_gate, "session_card_gap", approval)
+    monkeypatch.setattr(tools.store, "register", registration)
+    monkeypatch.setattr(tools, "require_admission", admission)
+    sm = MagicMock(spec=async_sessionmaker)
+    sm.begin.side_effect = AssertionError("Unsupported origins must not access job storage")
+    router = MARouter()  # No routes: any provider call fails this test.
+    ma = build_fake_anthropic(router.dispatch)
+    mcp = FastMCP("unsupported long jobs")
+    tools.register_long_job_tools(
+        mcp,
+        McpRuntime(
+            session_factory=sm,
+            client=ma,
+            settings=Settings(
+                database=DatabaseSettings(url="postgresql+asyncpg://unused/db"),
+                anthropic=AnthropicSettings(api_key=SecretStr("fake")),
+                _env_file=None,
+            ),
+            deployment_default=DeploymentDefault(),
+        ),
+    )
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(
+                ToolError, match="long jobs report back only in Discord threads for now"
+            ):
+                await client.call_tool(
+                    "start_long_job",
+                    {
+                        "command": "sleep 600",
+                        "title": "fit",
+                        "origin_context_id": str(uuid.uuid4()),
+                    },
+                )
+        approval.assert_not_awaited()
+        registration.assert_not_awaited()
+        admission.assert_not_awaited()
+        sm.begin.assert_not_called()
+    finally:
+        await ma.close()

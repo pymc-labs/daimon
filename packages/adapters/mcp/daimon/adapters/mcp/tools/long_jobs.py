@@ -60,6 +60,8 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         origin = await require_turn_origin(runtime, auth, origin_context_id)
+        if origin.platform != "discord":
+            raise ToolError("long jobs report back only in Discord threads for now")
         if (
             not origin.attended
             or not auth.platform_user_id
