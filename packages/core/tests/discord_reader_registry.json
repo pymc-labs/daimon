@@ -563,6 +563,19 @@
       "boundary": "stored_internal",
       "note": "Creator/execution/mutation bookkeeping only; not a stored trigger/result projection."
     },
+    "packages/adapters/discord/daimon/adapters/discord/routines_panel/forms.py:CreateRoutineModal:persistent_control:13801fa348cf": {
+      "count": 1,
+      "boundary": "controls"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/routines_panel/forms.py:DeleteConfirmation.confirm:stored_routine:a46f086e16b0": {
+      "count": 1,
+      "boundary": "stored_controls",
+      "note": "Confirmation re-reads with current recruitment settings before authorizing deletion; withheld and missing routines share the gone response."
+    },
+    "packages/adapters/discord/daimon/adapters/discord/routines_panel/forms.py:DeleteConfirmation:persistent_control:0dfa486c2a7a": {
+      "count": 1,
+      "boundary": "controls"
+    },
     "packages/adapters/discord/daimon/adapters/discord/routines_panel/panel.py:RoutinesPanelView:persistent_control:05791b90753b": {
       "count": 1,
       "boundary": "controls"
