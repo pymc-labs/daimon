@@ -44,6 +44,7 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.fleet_credentials import LoginCandidate
 from daimon.core.mux_backend import resource_scope
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
@@ -1061,6 +1062,10 @@ class WorkerPermissions:
     # The stored-row version each shared login was approved at, frozen with the root:
     # a worker gets the row only at that exact version (a rotation never reaches it).
     shared_versions: tuple[tuple[str, str], ...] = ()
+    # The logins this run may hand its workers, frozen with the root. The run decides
+    # once, at its first spawn (`fleet_run.login_decision`); `shared_logins` is then
+    # that decision ∩ these, applied by every reader of the frozen root.
+    login_candidates: tuple[LoginCandidate, ...] = ()
     # Every login this run's workers run without, by name with the reason, so it is
     # never dropped silently (the fleet card and spawn result show it).
     workers_run_without: tuple[str, ...] = ()

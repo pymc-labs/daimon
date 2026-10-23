@@ -202,6 +202,7 @@ source_modules = [
     "daimon.core.fleet",
     "daimon.core.fleet_configuration",
     "daimon.core.fleet_credentials",
+    "daimon.core.fleet_login_decision",
     "daimon.core.fleet_orchestration",
     "daimon.core.fonts",
     "daimon.core.github_app_auth",

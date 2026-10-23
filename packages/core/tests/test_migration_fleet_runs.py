@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 TABLES = {"fleet_run", "fleet_worker"}
 
 
-def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0093_fleet_runs.py"
-    spec = importlib.util.spec_from_file_location("fleet_runs_migration", path)
+def migration(name: str = "0093_fleet_runs") -> ModuleType:
+    path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
+    spec = importlib.util.spec_from_file_location(f"migration_{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -30,6 +30,8 @@ async def test_fleet_migration_upgrade_downgrade_upgrade_matches_the_models(
 ) -> None:
     connection = await db_session.connection()
     module = migration()
+    # Later migrations that add fleet_run columns, re-applied after the table returns.
+    later = [migration("0130_fleet_run_login_decision")]
 
     def cycle(sync: Connection) -> None:
         here = sync.scalar(text("SELECT current_schema()"))
@@ -38,6 +40,8 @@ async def test_fleet_migration_upgrade_downgrade_upgrade_matches_the_models(
             module.downgrade()
             assert not TABLES.intersection(inspect(sync).get_table_names(schema=here))
             module.upgrade()
+            for step in later:
+                step.upgrade()
             assert sync.scalar(text("SHOW lock_timeout")) == "5s"
             assert set(inspect(sync).get_table_names(schema=here)) - TABLES == before
             for name in TABLES:

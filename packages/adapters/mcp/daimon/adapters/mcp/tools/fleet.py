@@ -431,6 +431,16 @@ class HostFleetToolService:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id
         )
+        from daimon.core.fleet_login_decision import await_run_decision, spawn_waits_for_logins
+
+        if self._deps is not None and spawn_waits_for_logins(parent):
+            # The run's first spawn asks which logins its workers get and waits for
+            # the answer (at most 60 s); no worker starts before it. The worker's
+            # own deadline starts after the wait.
+            await await_run_decision(self._deps.sessionmaker, parent)
+            parent, policy = await self._parent(
+                caller, origin_context_id=origin_context_id, run_id=run_id
+            )
         from daimon.core.neutral_resources import (
             planned_providers,
             task_worker_spec,
