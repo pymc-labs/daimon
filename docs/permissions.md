@@ -1,5 +1,52 @@
 # Permissions
 
+## Approval gate overrides
+
+Server or workspace admins can change whether attended chat asks before a
+third-party MCP write, at server, channel or thread scope. Values are `on`
+(ask), `off` (allow without a card), and `inherit`. The most specific explicit
+value wins: a thread can turn asking back on beneath a server set to `off`,
+and can turn it off beneath a channel set to `on`. There is no category scope.
+A thread's requester has no special permission to change this setting.
+
+Overrides are inactive by default. The operator must enable both
+`DAIMON_TOOL_SAFETY__ENABLED` and `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`.
+Settings can be saved while inactive; the controls report that they are
+stored but ignored. Every change is audited, and each write allowed by an
+`off` setting logs the applied scope and the administrator who set it.
+
+Only third-party `write_needs_confirmation` decisions can be relaxed. Deny
+rules still deny, explicit agent `ask` rules still ask, and failed rule reads
+still require confirmation. Publishing from sessions that ask before
+publishing, confirmed Daimon tools (watch creation/resumption/key rotation,
+skill addition, lead resolution, backend switches and Microsoft sends/writes),
+and admin-confirmed prompts keep their fixed gates. Routines, wakes and other
+unattended runs still use `unattended_writes` alone.
+
+Use the admin selector on `/here` (Teams: `here`) for the current channel or,
+on Discord and Teams, the current thread. Slack `/here` changes the channel;
+use the CLI or MCP tool for a Slack thread. All controls check native server
+admin authority again when used. Agent keys, agents acting in conversations,
+operator MCP tokens and legacy tokens without registry entries cannot change this setting.
+
+The CLI requires a platform administrator's user id and checks it live:
+
+```bash
+# Server default, then a channel exception and a Slack thread exception.
+daimon channels approvals set discord GUILD_ID off --admin-user-id USER_ID
+daimon channels approvals set discord GUILD_ID on --channel-id CHANNEL_ID --admin-user-id USER_ID
+daimon channels approvals set slack TEAM_ID off --channel-id CHANNEL_ID:THREAD_TS --thread --admin-user-id USER_ID
+daimon channels approvals clear discord GUILD_ID --channel-id CHANNEL_ID --admin-user-id USER_ID
+```
+
+The `set_approval_gate` MCP tool takes `value` (`on`, `off`, `inherit`), optional
+`channel_id` (omitted for the server) and `thread` (default false). Thread ids
+are Discord thread ids, Slack `channel:timestamp`, or Teams full
+`channel;messageid=root` ids. Authorization and inheritance stay within the
+selected tenant. Changes take effect on the next admitted chat turn. The generic
+`tenants access-policy set --clear` refuses while approval overrides remain;
+clear them with the dedicated admin command first.
+
 ## Agent tool rules
 
 A current human workspace admin can set `allow`, `ask` or `deny` for one

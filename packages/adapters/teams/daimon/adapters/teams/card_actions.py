@@ -68,7 +68,9 @@ class Actor:
     conversation_id: str
 
 
-async def card_actor(runtime: TeamsRuntime, activity: InvokeActivity) -> Actor | None:
+async def card_actor(
+    runtime: TeamsRuntime, activity: InvokeActivity, *, remember_name: bool = True
+) -> Actor | None:
     """The clicker, or None when the org, the id or the tenant does not check out.
 
     The conversation must be the configured tenant's. Teams opens no 1:1 chat
@@ -88,13 +90,14 @@ async def card_actor(runtime: TeamsRuntime, activity: InvokeActivity) -> Actor |
     if tenant_id is None:
         return None
     # For the billing card's names; in the background, never failing the click.
-    remember_user_name(
-        runtime.sessionmaker,
-        tenant_id=tenant_id,
-        platform="teams",
-        user_id=user_id,
-        display_name=activity.from_.name,
-    )
+    if remember_name:
+        remember_user_name(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="teams",
+            user_id=user_id,
+            display_name=activity.from_.name,
+        )
     return Actor(
         user_id=user_id,
         tenant_id=tenant_id,

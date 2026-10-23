@@ -2231,3 +2231,68 @@ async def test_a_caller_in_an_isolated_channel_may_be_an_admin(
         "no one is held to a user's grant by where they are from"
     )
     assert await _stored_role(db_session, admission) == Role.ADMIN.value
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.approval_gate import ApprovalGate
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.admission import reauthorize
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    other = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=other.id,
+        policy=TenantAccessPolicy(approvals="off", approvals_set_by="foreign-admin"),
+    )
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=enabled),
+    )
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+    )
+    assert admission.approval_gate == (
+        ApprovalGate("inherit", "server", None, tenant.id) if enabled else None
+    )
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                approvals="off",
+                approvals_set_by="server-admin",
+                channel_rules={
+                    "chan-1": ChannelRule(approvals="on", approvals_set_by="channel-admin")
+                },
+            ),
+        )
+    fresh = await reauthorize(deps, admission)
+    assert fresh.approval_gate == (
+        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id) if enabled else None
+    )
+    assert admission.approval_gate == (
+        ApprovalGate("inherit", "server", None, tenant.id) if enabled else None
+    )

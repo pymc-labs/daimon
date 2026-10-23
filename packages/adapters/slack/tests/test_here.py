@@ -287,3 +287,30 @@ async def test_daemon_error_uses_error_card() -> None:
         await handle_here_command(runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U1"})
     error.assert_awaited_once()
     assert isinstance(error.await_args.args[1], DaimonError)
+
+
+async def test_approval_card_rejects_requester_before_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.slack import here
+    from daimon.core.authz import Subject
+
+    runtime = MagicMock()
+    runtime.sessionmaker = MagicMock()
+    client = MagicMock()
+    client.chat_postEphemeral = AsyncMock()
+    monkeypatch.setattr(here, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(
+        here, "approval_admin", AsyncMock(return_value=Subject(platform_user_id="U1"))
+    )
+    await here.handle_here_approvals(
+        runtime,
+        {
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "user": {"id": "U1"},
+            "actions": [{"selected_option": {"value": "off"}}],
+        },
+    )
+    runtime.sessionmaker.assert_not_called()
+    assert "admin" in client.chat_postEphemeral.await_args.kwargs["text"]

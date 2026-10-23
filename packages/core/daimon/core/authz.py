@@ -87,6 +87,7 @@ class Action(StrEnum):
     SET_CHANNEL_ENVIRONMENT = "set_channel_environment"
     # Set one channel's rule (`Place.channel_id`).
     SET_CHANNEL_RULE = "set_channel_rule"
+    SET_APPROVAL_GATE = "set_approval_gate"
     # Set one agent's rule.
     SET_AGENT_RULE = "set_agent_rule"
     # Archive the copy a channel kept to its own agents was given, as it opens.
@@ -544,6 +545,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action in (
         Action.ARCHIVE_CHANNEL_COPY,
         Action.SET_CHANNEL_RULE,
+        Action.SET_APPROVAL_GATE,
         Action.SET_AGENT_RULE,
     ):
         # none, even on their own channel.

@@ -299,7 +299,12 @@ def resolve_rule(
     if writers is None:
         writers = "none" if current.writers == "none" else "own" if readers == "own" else "any"
     try:
-        return ChannelRule(readers=readers, writers=writers)
+        return ChannelRule(
+            readers=readers,
+            writers=writers,
+            approvals=current.approvals,
+            approvals_set_by=current.approvals_set_by,
+        )
     except ValidationError:
         raise ChannelRuleRefused("own_on_both") from None
 

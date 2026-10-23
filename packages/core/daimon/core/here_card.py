@@ -16,6 +16,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.approval_gate import resolve_approval_gate
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import (
@@ -86,6 +87,8 @@ class HereCard(BaseModel):
     category_channels_bot_can_view: tuple[str, ...] = ()
     credentials: tuple[CredentialStatus, ...] = ()
     text: str
+    approval_gate_note: str | None = None
+    approval_gate_admin: bool = False
 
 
 class HereCardPresentation(BaseModel):
@@ -148,7 +151,13 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
         state, title, colour, subline = "channel", f"{name} answers here", "#2ECC71", None
     if state in {"no_view", "no_replies", "no_agent"}:
         # Nothing answers here, so reading and publishing scope would mislead.
-        return HereCardPresentation(state=state, title=title, colour=colour, subline=subline)
+        return HereCardPresentation(
+            state=state,
+            title=title,
+            colour=colour,
+            subline=subline,
+            extras=(card.approval_gate_note,) if card.approval_gate_note else (),
+        )
     reading = {
         "any": "Any conversation",
         "inside": "Conversations here only",
@@ -162,6 +171,7 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
         else None
     )
     extras = (
+        *((card.approval_gate_note,) if card.approval_gate_note else ()),
         *(("Only own agents answer here",) if card.effective_writers == "own" else ()),
         *(("No access to earlier messages",) if card.bot_can_read_history is False else ()),
     )
@@ -419,6 +429,7 @@ async def load_here_card(
     github: GitHubDeploymentFacts,
     public_mcp_url: str | None,
     is_admin: bool,
+    gate_overrides_active: bool = False,
     caller_account_id: uuid.UUID | None,
     resolve_setter_display: Callable[[str], Awaitable[str | None]] | None = None,
     channel_level_only: bool = False,
@@ -567,7 +578,7 @@ async def load_here_card(
         for cid, label in category_channels_bot_can_view
         if viewer is None or viewer.sees_place(cid)
     )
-    return assemble_here_card(
+    card = assemble_here_card(
         channel_id=channel_id,
         platform=platform,
         thread_id=thread_id,
@@ -597,3 +608,14 @@ async def load_here_card(
         caller_can_read_history=caller_can_read_history,
         category_channels_bot_can_view=category_labels,
     )
+
+    gate = resolve_approval_gate(
+        policy, platform=platform, channel_id=channel_id, thread_id=thread_id
+    )
+    note = (
+        f"Third-party write approvals: {gate.value} ({gate.scope})."
+        if gate_overrides_active
+        else f"Third-party write approvals: {gate.value} stored; overrides disabled by deployment."
+    )
+    card = card.model_copy(update={"approval_gate_note": note, "approval_gate_admin": is_admin})
+    return card.model_copy(update={"text": render_here_card_text(card)})
