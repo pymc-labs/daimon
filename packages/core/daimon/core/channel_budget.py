@@ -983,6 +983,10 @@ BUDGET_LOCK_BUSY_LIMIT_S = 10.0
 #: lock-free snapshot, so this bounds how long the locked refresh cannot persist floors,
 #: not how long usage goes unread.
 BUDGET_LOCK_CONTENDED_LIMIT_S = 60.0
+#: Seconds between a run watch's locked refreshes (which persist floors). Polls between
+#: them decide from the lock-free snapshot, so the watch no longer holds the tenant fleet
+#: lock four times a second per run while every admission in the tenant waits on it.
+BUDGET_LOCKED_REFRESH_S = 2.0
 
 # The granted holder of one advisory key, from the same transaction the watch opened.
 _LOCK_HOLDER = text(
@@ -999,6 +1003,10 @@ _LOCK_HOLDER = text(
     LIMIT 1
     """
 )
+
+
+class _BudgetSnapshotDue(Exception):
+    """This poll decides from the lock-free snapshot; the locked refresh ran recently."""
 
 
 class _BudgetLockBusy(Exception):
@@ -1075,6 +1083,7 @@ async def watch_fleet_budget(
     finished: asyncio.Event,
     poll_interval: float = 0.25,
     read_timeout: float | None = None,
+    locked_refresh_s: float = BUDGET_LOCKED_REFRESH_S,
 ) -> str:
     """One loop per run, fanning out decisions from the same producer graph.
 
@@ -1102,12 +1111,15 @@ async def watch_fleet_budget(
     lock_key = f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"
     # Wait in line for the tenant lock, but leave room inside the read timeout.
     lock_wait_ms = max(1, int(min(1.5, timeout * 0.75) * 1000))
+    last_locked: float | None = None
     try:
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
             watched = tuple(cancelled.items())
             snapshot_read = False
             try:
+                if last_locked is not None and started - last_locked < locked_refresh_s:
+                    raise _BudgetSnapshotDue
                 # The read gets its whole timeout after the lock wait, so a lock granted
                 # late in the wait is not then counted as a slow read.
                 async with asyncio.timeout(timeout + lock_wait_ms / 1000):
@@ -1140,31 +1152,34 @@ async def watch_fleet_budget(
                         )
                         if any(worker_id not in usages for worker_id, _ in watched):
                             raise FleetConflict("watched worker is unavailable")
-            except _BudgetLockBusy as busy:
-                now = asyncio.get_running_loop().time()
-                busy_since = busy_since if busy_since is not None else now
-                holder = busy.holder
-                # One holder transaction is its backend and start; an unseen holder counts
-                # as one that never changes, as before.
-                current = (
-                    (holder["pid"], holder["xact_start"]) if holder is not None else (None, None)
-                )
-                if current != holder_key or holder_since is None:
-                    holder_key, holder_since = current, now
-                    log.info("fleet.budget_lock_busy", holder=holder)
-                stuck = now - holder_since >= BUDGET_LOCK_BUSY_LIMIT_S
-                contended = now - busy_since >= BUDGET_LOCK_CONTENDED_LIMIT_S
-                if stuck or contended:
-                    log.warning(
-                        "fleet.budget_read_unavailable",
-                        reason="lock_busy",
-                        error_class="BudgetLockBusy",
-                        holder=holder,
-                        busy_s=round(now - busy_since, 3),
-                        holder_s=round(now - holder_since, 3),
+            except (_BudgetLockBusy, _BudgetSnapshotDue) as skipped:
+                if isinstance(skipped, _BudgetLockBusy):
+                    now = asyncio.get_running_loop().time()
+                    busy_since = busy_since if busy_since is not None else now
+                    holder = skipped.holder
+                    # One holder transaction is its backend and start; an unseen holder
+                    # counts as one that never changes, as before.
+                    current = (
+                        (holder["pid"], holder["xact_start"])
+                        if holder is not None
+                        else (None, None)
                     )
-                    cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
-                    return "usage_unavailable"
+                    if current != holder_key or holder_since is None:
+                        holder_key, holder_since = current, now
+                        log.info("fleet.budget_lock_busy", holder=holder)
+                    stuck = now - holder_since >= BUDGET_LOCK_BUSY_LIMIT_S
+                    contended = now - busy_since >= BUDGET_LOCK_CONTENDED_LIMIT_S
+                    if stuck or contended:
+                        log.warning(
+                            "fleet.budget_read_unavailable",
+                            reason="lock_busy",
+                            error_class="BudgetLockBusy",
+                            holder=holder,
+                            busy_s=round(now - busy_since, 3),
+                            holder_s=round(now - holder_since, 3),
+                        )
+                        cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
+                        return "usage_unavailable"
                 # Contention must not blind the watch: decide from a lock-free,
                 # read-only snapshot of the same producer. The locked refresh that
                 # persists floors resumes when the lock is free.
@@ -1225,6 +1240,7 @@ async def watch_fleet_budget(
             timeouts = 0
             if not snapshot_read:
                 busy_since, holder_key, holder_since = None, None, None
+                last_locked = started
             for worker_id, event in watched:
                 usage = usages.get(worker_id)
                 if event.is_set() or usage is None:

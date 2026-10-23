@@ -579,10 +579,13 @@ def root_claim_check(
     async def check(db: AsyncSession, scope: Scope, key: str, fence: Lease | None) -> bool:
         if fence is None:
             raise WorkerSpecRefused("origin", "unbound")
+        # The guard reads the current grant on its own sessions: run it before taking the
+        # tenant fleet lock, which every fleet admission and budget read in the tenant
+        # waits on for as long as this send claim holds it (SMOKE J4).
+        await guard()
         root = await require_root_funding(
             db, scope, fence.slot, origin_id=origin_id, controls=controls, markup=deps.markup
         )
-        await guard()
         if datetime.fromisoformat(str(controls["deadline"])) <= await mux_state.database_clock(db):
             raise WorkerSpecRefused("origin", "stale")
         if count:

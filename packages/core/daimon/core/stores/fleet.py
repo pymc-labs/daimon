@@ -45,8 +45,9 @@ from daimon.core.fleet import (
 )
 from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
 from pydantic import JsonValue
-from sqlalchemy import Row, case, func, or_, select, text, update
+from sqlalchemy import ColumnElement, Row, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -312,6 +313,37 @@ async def add_worker(
         return _worker(row)
 
 
+def lock_timed_out(error: DBAPIError) -> bool:
+    """A statement gave up on its lock_timeout (SQLSTATE 55P03), not some other failure."""
+    return (
+        getattr(error.orig, "sqlstate", None) == "55P03"
+        or "lock timeout" in str(error.orig).lower()
+    )
+
+
+def _sweep_due() -> ColumnElement[bool]:
+    """Runs past their deadline, or with a non-terminal worker past its own."""
+    expired_worker = (
+        select(FleetWorkerRow.id)
+        .where(
+            FleetWorkerRow.run_id == FleetRunRow.id,
+            FleetWorkerRow.tenant_id == FleetRunRow.tenant_id,
+            FleetWorkerRow.status.not_in(TERMINAL),
+            or_(FleetWorkerRow.deadline_at <= func.now(), FleetRunRow.deadline_at <= func.now()),
+        )
+        .exists()
+    )
+    return or_(
+        FleetRunRow.status.in_(tuple(RUN_TRANSITIONS)) & (FleetRunRow.deadline_at <= func.now()),
+        expired_worker,
+    )
+
+
+#: How long the scheduler's sweep waits for one tenant's fleet lock before it leaves
+#: that tenant to the next tick.
+SWEEP_LOCK_TIMEOUT = "2s"
+
+
 async def sweep_expired(
     sessionmaker: Source, *, tenant_id: uuid.UUID | None = None
 ) -> tuple[int, int]:
@@ -319,27 +351,44 @@ async def sweep_expired(
 
     Claims share the tenant lock with this sweep. Native termination and money
     remain their respective owners' responsibility; no result or released hold
-    is inferred from a deadline.
+    is inferred from a deadline. Across tenants (the scheduler), each tenant is swept
+    in its own transaction with a short lock wait, so one busy tenant neither waits
+    out the others nor holds their locks until the end.
     """
+    if tenant_id is None and not isinstance(sessionmaker, AsyncSession):
+        async with sessionmaker() as session:
+            tenants = list(
+                (
+                    await session.scalars(
+                        select(FleetRunRow.tenant_id)
+                        .where(_sweep_due())
+                        .distinct()
+                        .order_by(FleetRunRow.tenant_id)
+                    )
+                ).all()
+            )
+        workers_ended = runs_ended = 0
+        for tenant in tenants:
+            try:
+                async with sessionmaker.begin() as session:
+                    await session.execute(text(f"SET LOCAL lock_timeout = '{SWEEP_LOCK_TIMEOUT}'"))
+                    workers, runs = await sweep_expired(session, tenant_id=tenant)
+            except DBAPIError as error:
+                if lock_timed_out(error):
+                    log.info("fleet.sweep_tenant_busy", tenant_id=str(tenant))
+                else:
+                    # One tenant's failure must not stop the sweep for every other tenant.
+                    log.warning(
+                        "fleet.sweep_tenant_failed",
+                        tenant_id=str(tenant),
+                        error_class=type(error.orig).__name__,
+                    )
+                continue
+            workers_ended, runs_ended = workers_ended + workers, runs_ended + runs
+        return workers_ended, runs_ended
     workers_ended = runs_ended = 0
     async with _transaction(sessionmaker) as session:
-        expired_worker = (
-            select(FleetWorkerRow.id)
-            .where(
-                FleetWorkerRow.run_id == FleetRunRow.id,
-                FleetWorkerRow.tenant_id == FleetRunRow.tenant_id,
-                FleetWorkerRow.status.not_in(TERMINAL),
-                or_(
-                    FleetWorkerRow.deadline_at <= func.now(), FleetRunRow.deadline_at <= func.now()
-                ),
-            )
-            .exists()
-        )
-        due = or_(
-            FleetRunRow.status.in_(tuple(RUN_TRANSITIONS))
-            & (FleetRunRow.deadline_at <= func.now()),
-            expired_worker,
-        )
+        due = _sweep_due()
         tenants = (
             [tenant_id]
             if tenant_id is not None
@@ -403,6 +452,18 @@ async def sweep_expired(
                         status="failed",
                     )
                     runs_ended += 1
+                elif workers:
+                    # The worker's own failure record may have been deferred to this sweep
+                    # (a busy fleet lock): publish its batch as that record would, or the
+                    # root never resumes.
+                    from daimon.core.continuity.wakes import enqueue_worker_finished
+
+                    await enqueue_worker_finished(
+                        session,
+                        tenant_id=tenant,
+                        run_id=run.id,
+                        now=await mux_state.database_clock(session),
+                    )
     return workers_ended, runs_ended
 
 

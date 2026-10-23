@@ -26,7 +26,7 @@ from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.receipts import CancelReceipt, Operation, SendReceipt
 from mux.state.store import binding_slot
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 
 from .test_frozen_preparation import revoke
 from .test_frozen_root import root_turn as root_turn
@@ -650,3 +650,27 @@ async def test_crash_resumed_claim_retains_first_observer_outcome_without_double
         "first-observer outcome must survive a resumed claim under a different current observer"
     )
     assert finance_after["exposure_usd"] == finance["exposure_usd"], "no extra debit on resume"
+
+
+async def test_the_claim_guard_runs_without_holding_the_tenant_fleet_lock(root_turn):
+    """SMOKE J4: the send claim held the fleet lock (and the tenant row) while the guard
+    read the grant on other sessions, so every fleet admission in the tenant waited."""
+    deps, _, _, _, _, scope, binding, _ = root_turn
+    free: list[bool] = []
+
+    async def probe() -> None:
+        async with deps.sessionmaker.begin() as db:
+            free.append(
+                (
+                    await db.execute(
+                        text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                        {"key": f"fleet:{scope.tenant_id}"},
+                    )
+                ).scalar_one()
+            )
+
+    request = await select_controls(root_turn, before_native=probe)
+    await deps.state_store.put_binding(binding, expected_generation=0)
+    free.clear()
+    await send(root_turn, request, "guarded")
+    assert free and all(free)

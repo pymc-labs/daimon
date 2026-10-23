@@ -1527,6 +1527,80 @@ async def test_claim_expires_stale_tenant_work_and_preserves_other_tenants_and_h
     assert await fleet.sweep_expired(sm) == (0, 0)
 
 
+async def test_the_scheduler_sweep_skips_a_busy_tenant_and_sweeps_the_rest(
+    pooled: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE J4: the sweep took every due tenant's fleet lock in one transaction with no
+    lock wait bound, so one busy tenant held up (and locked) all the others."""
+    sm = pooled
+    monkeypatch.setattr(fleet, "SWEEP_LOCK_TIMEOUT", "100ms")
+    busy, free = await _run(sm, key="busy"), await _run(sm, key="free")
+    workers = [await _worker(sm, busy, 0), await _worker(sm, free, 0)]
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET deadline_at=now()-interval '1 second' WHERE id = ANY(:ids)"
+            ),
+            {"ids": [w.id for w in workers]},
+        )
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold() -> None:
+        async with sm.begin() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"fleet:{busy.tenant_id}"},
+            )
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold())
+    try:
+        await held.wait()
+        async with asyncio.timeout(5):
+            assert await fleet.sweep_expired(sm) == (1, 0)
+    finally:
+        release.set()
+        await holder
+    assert (await fleet.run_status(sm, tenant_id=free.tenant_id, run_id=free.id))[1][
+        0
+    ].error_code == "deadline_expired"
+    assert await fleet.sweep_expired(sm) == (1, 0)
+
+
+async def test_a_swept_worker_of_a_running_run_wakes_its_root(
+    pooled: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1416 B1: a failure record deferred to the sweep must still publish the worker's
+    batch, as commit_worker_transition would, or the root never resumes."""
+    from daimon.core.continuity import wakes
+
+    sm = pooled
+    published: list[uuid.UUID] = []
+    real = wakes.enqueue_worker_finished
+
+    async def recorded(session, *args, run_id, **kwargs):
+        published.append(run_id)
+        return await real(session, *args, run_id=run_id, **kwargs)
+
+    monkeypatch.setattr(wakes, "enqueue_worker_finished", recorded)
+    run = await _run(sm, key="live")
+    stuck, healthy = await _worker(sm, run, 0), await _worker(sm, run, 1)
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE fleet_worker SET status='starting', deadline_at=now()-interval '1 second' WHERE id=:id"
+            ),
+            {"id": stuck.id},
+        )
+    assert await fleet.sweep_expired(sm) == (1, 0)
+    assert published == [run.id]
+    _, rows = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert next(w for w in rows if w.id == healthy.id).status == "pending"
+    assert await fleet.sweep_expired(sm) == (0, 0)
+    assert published == [run.id]
+
+
 @pytest.mark.parametrize("state", ["pending", "starting", "running"])
 async def test_deadline_sweep_ends_only_expired_workers_without_settling_money(
     db_session_factory: async_sessionmaker[AsyncSession],
