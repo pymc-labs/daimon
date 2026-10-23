@@ -692,9 +692,21 @@ async def commit_worker_transition(
         latest = {row.id: row for _, rows in graph for row in rows}.get(worker.id)
         if latest is None or latest.run_id != worker.run_id:
             raise FleetConflict("worker transition claim missing", reason="claim_missing")
+        run = next((run for run, _ in graph if run.id == worker.run_id), None)
         if action is None:
             if latest.status in TERMINAL:
                 updated = latest  # Preserve a concurrent completion/sweep's terminal result.
+            elif run is not None and run.status == "cancelled":
+                # The whole fleet was stopped (Stop-all, or a typed "stop"): the attempt
+                # it interrupted ends as stopped, never as a refusal of its model.
+                updated = await fleet_store.finish(
+                    db,
+                    tenant_id=worker.tenant_id,
+                    worker_id=worker.id,
+                    expected_version=latest.version,
+                    status="cancelled",
+                    error_code="stop_requested",
+                )
             else:
                 dispatch_changed = (
                     latest.status not in ("starting", "running")
