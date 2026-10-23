@@ -658,7 +658,8 @@ def turn_card_working_with_cancel() -> Any:
 
     state = _card_state(
         "TOOL_RUNNING",
-        tool_lines=("+3 earlier", "✔️ Read a file", "🖋️ Running a command"),
+        plan_lines=("☑️ Load the data", "⏳ Fit the model", "\u2007\u2007\u2007Write it up"),
+        tool_lines=("+3 earlier", "☑️ Read a file", "⏳ Running a command"),
         text_preview="Preview text.",
     )
     return to_blocks(state, now=120.0, cancel_key="turnkey123")
