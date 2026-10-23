@@ -52,7 +52,7 @@ import contextlib
 import functools
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -132,6 +132,8 @@ from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Lease, Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.mutation_retry import MutationRetryPolicy
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -726,6 +728,72 @@ async def commit_worker_transition(
         return updated
 
 
+#: The longest a fleet worker spends on its own setup (policy, source capture, financial
+#: admission, backend resolution) before its native session. A stuck step fails the worker
+#: in plain words instead of holding it at "starting" until the run's deadline (SMOKE J4).
+WORKER_SETUP_TIMEOUT_S = 45.0
+#: How long one worker setup transaction waits for the tenant's fleet lock or funds row.
+WORKER_SETUP_LOCK_TIMEOUT = "10s"
+
+
+@contextlib.asynccontextmanager
+async def _worker_stage(
+    worker: FleetWorker, stage: str, *, setup_at: float | None = None
+) -> AsyncIterator[None]:
+    """Log one worker stage's outcome and time; a setup stage also ends at `setup_at`."""
+    started = time.monotonic()
+    outcome, error_class = "error", None
+    scope: asyncio.Timeout | None = None
+    try:
+        if setup_at is None:
+            yield
+        else:
+            async with asyncio.timeout_at(setup_at) as scope:
+                yield
+        outcome = "ok"
+    except TimeoutError as error:
+        error_class = type(error).__name__
+        if scope is not None and scope.expired():
+            outcome = "setup_timeout"
+            raise FleetConflict(
+                "worker setup did not finish in time", reason="worker_setup_busy"
+            ) from error
+        raise
+    except BaseException as error:
+        error_class = type(error).__name__
+        raise
+    finally:
+        log.info(
+            "fleet.worker_stage",
+            run_id=str(worker.run_id),
+            worker_id=str(worker.id),
+            stage=stage,
+            outcome=outcome,
+            error_class=error_class,
+            ms=round((time.monotonic() - started) * 1000),
+        )
+
+
+@contextlib.asynccontextmanager
+async def _setup_transaction(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    """A worker setup transaction that gives up on a busy fleet lock instead of waiting."""
+    try:
+        async with sessionmaker.begin() as db:
+            await db.execute(text(f"SET LOCAL lock_timeout = '{WORKER_SETUP_LOCK_TIMEOUT}'"))
+            yield db
+    except DBAPIError as error:
+        if (
+            getattr(error.orig, "sqlstate", None) != "55P03"
+            and "lock timeout" not in str(error.orig).lower()
+        ):
+            raise
+        raise FleetConflict(
+            "the tenant's fleet lock stayed busy during worker setup", reason="worker_setup_busy"
+        ) from None
+
+
 async def run_worker(
     request: ProviderPreparationRequest,
     *,
@@ -783,10 +851,15 @@ async def run_worker(
             now=request.now(), deadline=request.deadline, authority_deadline=worker.deadline_at
         )
         async with asyncio.timeout(remaining_s(bound, now=request.now(), refuse_expired=True)):
-            async with deps.sessionmaker() as db:
+            setup_at = asyncio.get_running_loop().time() + WORKER_SETUP_TIMEOUT_S
+            async with (
+                _worker_stage(worker, "policy", setup_at=setup_at),
+                deps.sessionmaker() as db,
+            ):
                 policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
             source_request = replace(request, scope=parent.fleet.scope, source=None, worker=None)
-            source = await capture_preparation_source(source_request)
+            async with _worker_stage(worker, "source", setup_at=setup_at):
+                source = await capture_preparation_source(source_request)
             definition: Agent | AgentSpec = AgentSpec.model_validate(worker.spec)
             overrides = None
             if resolved_worker.source_agent is not None:
@@ -828,7 +901,10 @@ async def run_worker(
                     "worker intent no longer resolves under current root authority",
                     reason="intent_changed",
                 )
-            async with deps.sessionmaker.begin() as db:
+            async with (
+                _worker_stage(worker, "admission", setup_at=setup_at),
+                _setup_transaction(deps.sessionmaker) as db,
+            ):
                 usage = await admit_fleet_worker(
                     db,
                     parent=parent,
@@ -868,7 +944,9 @@ async def run_worker(
             async def recapture(db: AsyncSession | None = None):
                 source = await capture_preparation_source(source_request)
                 async with (
-                    deps.sessionmaker.begin() if db is None else contextlib.nullcontext(db)
+                    _setup_transaction(deps.sessionmaker)
+                    if db is None
+                    else contextlib.nullcontext(db)
                 ) as db:
                     policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
                     if (
@@ -1029,17 +1107,18 @@ async def run_worker(
 
             with store.checking_claims(claim_input):
                 try:
-                    await guard()
-                    async with deps.sessionmaker.begin() as db:
-                        retained, _, origin = await resolve_turn_backend(
-                            db,
-                            revision.channel,
-                            source,
-                            enabled=True,
-                            retained_revision=revision.local,
-                            worker=resolved,
-                            validate_origin=lambda selection, origin, retained: guard(),
-                        )
+                    async with _worker_stage(worker, "resolve", setup_at=setup_at):
+                        await guard()
+                        async with deps.sessionmaker.begin() as db:
+                            retained, _, origin = await resolve_turn_backend(
+                                db,
+                                revision.channel,
+                                source,
+                                enabled=True,
+                                retained_revision=revision.local,
+                                worker=resolved,
+                                validate_origin=lambda selection, origin, retained: guard(),
+                            )
                     if retained != revision or origin != "agent":
                         raise FleetConflict(
                             "worker retained revision no longer authorizes preparation",
@@ -1054,37 +1133,38 @@ async def run_worker(
                         now=request.now,
                     )
                     native_started = True
-                    with allocation.activate():
-                        prepared = await allocation.run(
-                            lambda: bind_session_impl(
-                                deps,
-                                admission,
-                                tenant_id=request.tenant_id,
-                                platform=request.platform,
-                                external_user_id=request.external_user_id,
-                                thread_id=slot.thread.thread_id,
-                                session_account_id=request.session_account_id,
-                                reuse_existing=True,
-                                deadline=bound,
-                                now=request.now,
-                                worker=resolved,
-                                before_native=guard,
-                                initial_input=UserMessage(
-                                    content=(
-                                        TextPart(
-                                            text=_with_prefix(
-                                                context_prompt(
-                                                    "worker", system=admission.agent.system
-                                                ),
-                                                trigger_message,
-                                            )
-                                        ),
-                                    )
-                                ),
-                                _on_prepared=bound_session,
-                                _on_orphan=orphan,
+                    async with _worker_stage(worker, "bind"):
+                        with allocation.activate():
+                            prepared = await allocation.run(
+                                lambda: bind_session_impl(
+                                    deps,
+                                    admission,
+                                    tenant_id=request.tenant_id,
+                                    platform=request.platform,
+                                    external_user_id=request.external_user_id,
+                                    thread_id=slot.thread.thread_id,
+                                    session_account_id=request.session_account_id,
+                                    reuse_existing=True,
+                                    deadline=bound,
+                                    now=request.now,
+                                    worker=resolved,
+                                    before_native=guard,
+                                    initial_input=UserMessage(
+                                        content=(
+                                            TextPart(
+                                                text=_with_prefix(
+                                                    context_prompt(
+                                                        "worker", system=admission.agent.system
+                                                    ),
+                                                    trigger_message,
+                                                )
+                                            ),
+                                        )
+                                    ),
+                                    _on_prepared=bound_session,
+                                    _on_orphan=orphan,
+                                )
                             )
-                        )
                     outcome = await run_prepared_turn(
                         deps,
                         prepared,
@@ -1121,7 +1201,11 @@ async def run_worker(
             from daimon.core.fleet_orchestration import worker_failure_code
 
             # A bug before native start is ours, never "couldn't be set up on that model".
-            failure_code = worker_failure_code(error, "preparation_refused")
+            failure_code = (
+                "preparation_deadline_exceeded"
+                if isinstance(error, FleetConflict) and error.reason == "worker_setup_busy"
+                else worker_failure_code(error, "preparation_refused")
+            )
             with contextlib.suppress(FleetConflict):
                 await asyncio.shield(
                     commit_worker_transition(request, parent, claim, failure_code=failure_code)

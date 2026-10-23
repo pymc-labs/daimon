@@ -127,6 +127,7 @@ WorkerFailureCode = Literal[
     "provider_not_configured",
     "worker_runtime_missing",
     "setup_error",
+    "preparation_deadline_exceeded",
 ]
 
 
