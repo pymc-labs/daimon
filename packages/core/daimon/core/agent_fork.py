@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
 
-import anthropic as anthropic_errors
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -58,7 +57,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.memory_resource import CopiedMemory, copy_shared_memory
+from daimon.core.memory_resource import COPY_MEMORY_LIMIT, CopiedMemory, copy_shared_memory
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, retrieve_agent
 from daimon.core.neutral_resources import HostAgentCopy, NeutralResourceHost
@@ -72,7 +71,6 @@ from daimon.core.stores.domain import BackendAgent, UserSkillRow
 from daimon.core.stores.github_access import AgentRepo
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from mux.contracts.resources import Agent
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _FORK_COPY_FIELDS = frozenset(
@@ -95,8 +93,8 @@ class CopyCarry:
     memory: CopiedMemory | None = None
     memory_failed: bool = False
     owner_recorded: bool = False
-    reconnect: tuple[str, ...] = ()
-    """The source's MCP servers left off because their key stays with the source."""
+    reconnect: tuple[tuple[str, str], ...] = ()
+    """The source's MCP servers (name, URL) left off because their key stays with the source."""
     github_repos: tuple[str, ...] = ()
     """The source's GitHub repos; the copy has no access to them."""
 
@@ -126,27 +124,35 @@ def fork_notes(copy: AgentCopy, new_name: str) -> tuple[str, ...]:
         provider = provider_name(left)
         notes.append(
             f"{source} runs on {provider}, but {new_name} starts on Anthropic: the switch needs "
-            f'confirming for it. To move it, ask "switch {new_name} to {provider}".'
+            f'confirming for it. To move it, ask in chat "switch {new_name} to {provider}".'
         )
     if carry.backend is not None and carry.backend.fleet:
         notes.append(f"It has {source}'s fleet setup, with the same limits.")
-    if carry.memory is not None and carry.memory.copied:
+    memory = carry.memory
+    if memory is not None and memory.copied:
         notes.append(
             f"It has a copy of {source}'s shared memory. Personal memories stay with {source}."
         )
-        if carry.memory.left:
-            notes.append(f"{carry.memory.left} older memory notes were too many to copy.")
-    if carry.memory_failed:
+        if memory.left or memory.failed:
+            total = memory.copied + memory.left + memory.failed
+            limit = f" A copy takes up to {COPY_MEMORY_LIMIT}." if memory.left else ""
+            notes.append(
+                f"Only {memory.copied} of {source}'s {total} memory notes were copied.{limit}"
+            )
+    if carry.memory_failed or (memory is not None and not memory.copied and memory.failed):
         notes.append(f"{source}'s memory couldn't be copied, so {new_name} starts with none.")
     if carry.owner_recorded:
         notes.append(f"You own {new_name}, so you can change it without an admin.")
-    for server in carry.reconnect:
-        notes.append(f'{server} needs connecting again: ask "connect {server} to {new_name}".')
+    for server, url in carry.reconnect:
+        notes.append(
+            f"{server} needs connecting again: ask in chat "
+            f'"connect {server} ({url}) to {new_name}".'
+        )
     if carry.github_repos:
         repos = ", ".join(carry.github_repos)
         notes.append(
-            f"GitHub access isn't copied ({repos}). To give it a repo, ask "
-            f'"give {new_name} access to {carry.github_repos[0]}".'
+            f"GitHub access isn't copied ({repos}). To give it a repo, ask in chat "
+            f'"give {new_name} access to <repo>".'
         )
     return tuple(notes)
 
@@ -429,7 +435,7 @@ class _CarryArgs:
     channel_copy: bool
     owner_account_id: uuid.UUID | None
     capture_source: CaptureSource | None
-    reconnect: tuple[str, ...]
+    reconnect: tuple[tuple[str, str], ...]
 
 
 async def _carry(
@@ -468,7 +474,8 @@ async def _carry(
                 account_id=args.owner_account_id,
                 now=datetime.now(UTC),
             )
-    except (DaimonError, APIError, ValueError) as exc:
+    except Exception as exc:
+        # Best effort from here on: the copy exists, and raising would report it as not made.
         _log.warning("agent_fork.backend_carry_failed", error=type(exc).__name__, **log_fields)
     memory: CopiedMemory | None = None
     memory_failed = False
@@ -482,25 +489,28 @@ async def _carry(
                 copy_agent_id=copy_uuid,
                 copy_name=args.new_name,
             )
-        except anthropic_errors.APIError as exc:
+        except Exception as exc:
             _log.warning("agent_fork.memory_copy_failed", error=type(exc).__name__, **log_fields)
             memory_failed = True
     owner_recorded = False
-    repos: list[AgentRepo] = []
-    try:
-        if args.owner_account_id is not None and not args.channel_copy:
+    if args.owner_account_id is not None and not args.channel_copy:
+        try:
             owner_recorded = await record_agent_creator(
                 sessionmaker,
                 tenant_id=tenant_id,
                 agent_id=copy_uuid,
                 account_id=args.owner_account_id,
             )
+        except Exception as exc:
+            _log.warning("agent_fork.owner_failed", error=type(exc).__name__, **log_fields)
+    repos: list[AgentRepo] = []
+    try:
         async with sessionmaker() as session:
             repos = await github_access.list_agent_repos(
                 session, tenant_id=tenant_id, agent_id=args.source_uuid
             )
-    except SQLAlchemyError as exc:
-        _log.warning("agent_fork.owner_or_repos_failed", error=type(exc).__name__, **log_fields)
+    except Exception as exc:
+        _log.warning("agent_fork.repos_read_failed", error=type(exc).__name__, **log_fields)
     return CopyCarry(
         source_name=args.source_name,
         backend=backend,

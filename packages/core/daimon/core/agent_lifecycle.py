@@ -87,11 +87,14 @@ async def strip_credentialed_mcp_servers(
     source_agent_uuid: uuid.UUID,
     mcp_servers: list[dict[str, object]] | None,
     tools: list[dict[str, object]] | None,
-) -> tuple[list[dict[str, object]] | None, list[dict[str, object]] | None, tuple[str, ...]]:
+) -> tuple[
+    list[dict[str, object]] | None, list[dict[str, object]] | None, tuple[tuple[str, str], ...]
+]:
     """The source's MCP servers and tools minus every server backed by a stored token.
 
-    The third item names the servers left off, for the copy's receipt: each
-    needs connecting to the copy again.
+    The third item names the servers left off with their URLs, for the copy's
+    receipt: each needs connecting to the copy again, and the URL is what that
+    takes (it is no secret: the token is stored apart).
 
     A fork starts with no credentials: no GitHub credential, no repo binding
     or recorded proof of repo access, and no agent-wide MCP token. Copying
@@ -136,7 +139,12 @@ async def strip_credentialed_mcp_servers(
             if not (tool.get("type") == "mcp_toolset" and tool.get("mcp_server_name") in dropped)
         ]
     )
-    return kept_servers, kept_tools, tuple(sorted(dropped))
+    left_off = {
+        str(server.get("name")): str(server.get("url") or "")
+        for server in mcp_servers
+        if server.get("name") in dropped
+    }
+    return kept_servers, kept_tools, tuple(sorted(left_off.items()))
 
 
 async def archive_memory_store_best_effort(

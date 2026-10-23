@@ -79,7 +79,9 @@ async def test_fork_drops_every_server_backed_by_a_stored_token(
 
     assert kept_servers == [servers[1]], "the token-backed server must not reach the fork"
     assert kept_tools == [tools[0], tools[2]], "its toolset goes with it"
-    assert dropped == ("crm",), "the receipt names the server to connect again"
+    assert dropped == (("crm", "https://crm.example.com/mcp/"),), (
+        "the receipt names the server to connect again"
+    )
 
 
 async def test_fork_keeps_everything_when_the_source_holds_no_tokens(

@@ -1513,13 +1513,19 @@ class AgentBackendService:
                     left = left or backend
                     backend, model, settings = None, None, AgentSettings()
                     consent = preview = None
+            policy = await self._policy(session, copy.tenant_id)
+            if backend is not None and not backend_is_enabled(backend, policy.enabled_backends):
+                # Turned off here since the source chose it: every turn would be refused.
+                left = left or backend
+                backend, model, settings = None, None, AgentSettings()
+                consent = preview = None
             if backend is None and settings.is_default() and grant is None:
                 return CarriedBackend(None, left, fleet=False)
             if preview is None:
                 preview = compatibility_preview(
                     copy,
                     backend or DEFAULT_BACKEND,
-                    await self._policy(session, copy.tenant_id),
+                    policy,
                     cost_line="Copied from the agent it was made from.",
                     model=model,
                     settings=settings,

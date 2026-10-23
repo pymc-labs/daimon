@@ -29,6 +29,7 @@ the DB binding is the isolation boundary).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -416,14 +417,18 @@ async def ensure_channel_memory_store_and_mount(
 
 # Ceiling on the memories one copy takes, so a fork stays one tool call.
 COPY_MEMORY_LIMIT = 500
+# Memories read and written at once while copying.
+COPY_MEMORY_CONCURRENCY = 8
 
 
 @dataclass(frozen=True)
 class CopiedMemory:
     copied: int
     """Memories written into the copy's shared store."""
-    left: int
+    left: int = 0
     """Memories past `COPY_MEMORY_LIMIT`, not copied."""
+    failed: int = 0
+    """Memories whose read or write failed, not copied."""
 
 
 async def copy_shared_memory(
@@ -439,8 +444,11 @@ async def copy_shared_memory(
 
     Only the shared store: it is already seen by everyone who talks to the
     source. Personal and channel stores are never copied. None when the source
-    has no shared store yet, which costs one DB read and no API call. Raises
-    `anthropic.APIError` on a failed read or write; whatever was written stays.
+    has no shared store yet, which costs one DB read and no API call. Up to
+    `COPY_MEMORY_LIMIT` memories, `COPY_MEMORY_CONCURRENCY` at a time; one
+    that fails is counted in `failed` and the rest still go. Raises only when
+    the source can't be listed or the copy's store can't be made, before
+    anything is written.
     """
     async with session_factory() as session:
         source_store = await get_memory_store_id(
@@ -455,7 +463,7 @@ async def copy_shared_memory(
         if item.type == "memory"
     ]
     if not entries:
-        return CopiedMemory(0, 0)
+        return CopiedMemory(0)
     mount = await ensure_memory_store_and_mount(
         anthropic,
         session_factory,
@@ -464,11 +472,23 @@ async def copy_shared_memory(
         agent_name=copy_name,
     )
     target = mount["memory_store_id"]
-    copied = 0
-    for item in entries[:COPY_MEMORY_LIMIT]:
-        memory = await read_memory(anthropic, source_store, item.id, scope=scope)
-        await write_memory(anthropic, target, item.path, memory.content or "", scope=scope)
-        copied += 1
+    gate = asyncio.Semaphore(COPY_MEMORY_CONCURRENCY)
+
+    async def copy_one(memory_id: str, path: str) -> bool:
+        async with gate:
+            try:
+                memory = await read_memory(anthropic, source_store, memory_id, scope=scope)
+                await write_memory(anthropic, target, path, memory.content or "", scope=scope)
+            except Exception as error:
+                # Best effort per memory: the receipt counts what didn't come.
+                _log.warning("memory_store.copy_one_failed", error=type(error).__name__)
+                return False
+            return True
+
+    results = await asyncio.gather(
+        *(copy_one(item.id, item.path) for item in entries[:COPY_MEMORY_LIMIT])
+    )
+    copied = sum(results)
     _log.info(
         "memory_store.copied",
         tenant_id=str(tenant_id),
@@ -476,7 +496,11 @@ async def copy_shared_memory(
         copy_agent_id=str(copy_agent_id),
         count=copied,
     )
-    return CopiedMemory(copied, max(0, len(entries) - COPY_MEMORY_LIMIT))
+    return CopiedMemory(
+        copied,
+        left=max(0, len(entries) - COPY_MEMORY_LIMIT),
+        failed=len(results) - copied,
+    )
 
 
 async def archive_memory_store_for_agent(

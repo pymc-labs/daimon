@@ -6,16 +6,22 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from daimon.core import agent_fork
+from daimon.core import agent_fork, memory_resource
 from daimon.core.agent_fork import AgentCopy, CopyCarry, copy_agent, fork_notes
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.authz import Subject
-from daimon.core.channel_backend import AgentBackendService, BackendAgent, CarriedBackend
+from daimon.core.channel_backend import (
+    AgentBackendService,
+    BackendActor,
+    BackendAgent,
+    CarriedBackend,
+)
 from daimon.core.channel_skills import platform_skill_refs
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL_COPY,
@@ -44,8 +50,10 @@ from mux.testing.drivers.anthropic.ma import (
     json_body,
     make_fake_memory_store_handler,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .test_agent_backend import enable
 from .test_agent_backend import owned as owned
 
 NOW = datetime(2026, 10, 13, 21, 0, tzinfo=UTC)
@@ -99,6 +107,7 @@ def _copy(agent: BackendAgent) -> BackendAgent:
 
 async def test_a_copy_takes_the_provider_model_settings_and_fleet_grant(owned) -> None:
     service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
     source = await _source_setting(
         sessions, agent.tenant_id, agent.agent_id, grant=_grant(NOW + timedelta(hours=1), epoch=1)
     )
@@ -125,7 +134,8 @@ async def test_a_copy_takes_the_provider_model_settings_and_fleet_grant(owned) -
 
 
 async def test_a_channel_copy_and_an_expired_grant_take_no_fleet(owned) -> None:
-    service, agent, _actor, sessions = owned
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
     source = await _source_setting(
         sessions, agent.tenant_id, agent.agent_id, grant=_grant(NOW + timedelta(hours=1), epoch=1)
     )
@@ -158,7 +168,8 @@ async def test_a_switch_that_dropped_features_needs_the_copys_own_consent(owned)
 async def test_the_copys_consent_is_kept_only_within_what_the_source_accepted(
     owned, monkeypatch: pytest.MonkeyPatch, drops: list[str], kept: bool
 ) -> None:
-    _service, agent, _actor, sessions = owned
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
     source = await _source_setting(sessions, agent.tenant_id, agent.agent_id, consent=CONSENT)
 
     async def capture(target: BackendAgent) -> BackendAgent:
@@ -239,6 +250,14 @@ async def test_copy_agent_carries_memory_owner_and_provider_and_names_what_to_re
         mcp_server_url="https://crm.example.com/mcp",
         plaintext_token="tok_crm",
     )
+    service = AgentBackendService(factory, enabled=True)
+    await enable(
+        service,
+        BackendAgent(
+            tenant_id=tenant.id, agent_id=source_uuid, name="source", configuration_digest="x"
+        ),
+        BackendActor(tenant.id, account.id, Subject(is_admin=True)),
+    )
     await _source_setting(
         factory,
         tenant.id,
@@ -270,7 +289,7 @@ async def test_copy_agent_carries_memory_owner_and_provider_and_names_what_to_re
 
     assert created[0]["metadata"][MA_METADATA_KEY_COPY_OF] == "source"
     assert not any(server["name"] == "crm" for server in created[0]["mcp_servers"])
-    assert copy.carry.reconnect == ("crm",)
+    assert copy.carry.reconnect == (("crm", "https://crm.example.com/mcp"),)
     async with factory() as session:
         revision = await agent_backends.current(session, tenant.id, copy_uuid)
         owner = await agent_owners.owner_of(session, tenant.id, copy_uuid)
@@ -280,7 +299,10 @@ async def test_copy_agent_carries_memory_owner_and_provider_and_names_what_to_re
         "gemini-4-argon",
     )
     notes = fork_notes(copy, "mine")
-    assert 'crm needs connecting again: ask "connect crm to mine".' in notes
+    assert (
+        'crm needs connecting again: ask in chat "connect crm (https://crm.example.com/mcp) '
+        'to mine".'
+    ) in notes
     if channel_copy:
         assert revision.fleet_grant is None and owner is None and store is None
         assert copy.carry.memory is None and not copy.carry.owner_recorded
@@ -309,11 +331,32 @@ def test_fork_notes_name_a_provider_left_behind_and_lost_memory() -> None:
     )
     assert fork_notes(copy, "mine") == (
         "source runs on OpenAI, but mine starts on Anthropic: the switch needs confirming "
-        'for it. To move it, ask "switch mine to OpenAI".',
+        'for it. To move it, ask in chat "switch mine to OpenAI".',
         "source's memory couldn't be copied, so mine starts with none.",
-        "GitHub access isn't copied (acme/app). To give it a repo, ask \"give mine access "
-        'to acme/app".',
+        "GitHub access isn't copied (acme/app). To give it a repo, ask in chat "
+        '"give mine access to <repo>".',
     )
+
+
+@pytest.mark.parametrize(
+    ("memory", "line"),
+    [
+        (
+            CopiedMemory(3, left=2),
+            "Only 3 of source's 5 memory notes were copied. A copy takes up to 500.",
+        ),
+        (CopiedMemory(3, failed=1), "Only 3 of source's 4 memory notes were copied."),
+        (
+            CopiedMemory(0, failed=2),
+            "source's memory couldn't be copied, so mine starts with none.",
+        ),
+    ],
+)
+def test_fork_notes_say_how_much_memory_came(memory: CopiedMemory, line: str) -> None:
+    copy = AgentCopy(
+        ma_agent(id="ag_new", name="mine"), (), carry=CopyCarry(source_name="source", memory=memory)
+    )
+    assert line in fork_notes(copy, "mine")
 
 
 def test_a_copy_of_a_seeded_agent_keeps_its_platform_skills() -> None:
@@ -324,3 +367,125 @@ def test_a_copy_of_a_seeded_agent_keeps_its_platform_skills() -> None:
     assert platform_skill_refs(copy, "teams", skills) == (ref,)
     assert platform_skill_refs(copy, "slack", skills) == ()
     assert platform_skill_refs(other, "teams", skills) == (), "a name alone never qualifies"
+
+
+async def test_a_provider_turned_off_here_is_left_behind(owned) -> None:
+    service, agent, _actor, sessions = owned
+    source = await _source_setting(sessions, agent.tenant_id, agent.agent_id)
+    copy = _copy(agent)
+    carried = await service.carry_to_copy(source, copy, fleet_grant=True, account_id=None, now=NOW)
+    assert carried == CarriedBackend(None, "gemini", fleet=False)
+    assert await service.current(copy) is None
+
+
+async def _seeded_store(
+    client: Any, factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, count: int
+) -> uuid.UUID:
+    source_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src")
+    mount = await ensure_memory_store_and_mount(
+        client, factory, tenant_id=tenant_id, agent_id=source_uuid, agent_name="source"
+    )
+    scope = resource_scope(tenant_id=str(tenant_id))
+    for n in range(count):
+        await write_memory(client, mount["memory_store_id"], f"/n{n}.md", str(n), scope=scope)
+    return source_uuid
+
+
+async def test_memory_past_the_limit_and_failed_notes_are_counted(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+    source_uuid = await _seeded_store(client, db_session_factory, tenant.id, 4)
+    real_write = memory_resource.write_memory
+
+    async def flaky_write(client: Any, store: str, path: str, content: str, **kw: Any) -> None:
+        if path == "/n1.md":
+            raise RuntimeError("provider hiccup")
+        await real_write(client, store, path, content, **kw)
+
+    monkeypatch.setattr(memory_resource, "COPY_MEMORY_LIMIT", 3)
+    monkeypatch.setattr(memory_resource, "write_memory", flaky_write)
+    copied = await memory_resource.copy_shared_memory(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        source_agent_id=source_uuid,
+        copy_agent_id=uuid.uuid4(),
+        copy_name="mine",
+    )
+    assert copied == CopiedMemory(2, left=1, failed=1)
+
+
+def _plain_client(tenant_id: uuid.UUID, source: Any, created: list[dict[str, Any]]) -> Any:
+    return _client(tenant_id, source, created, FakeMemoryStoreState())
+
+
+@pytest.mark.parametrize(
+    ("metadata", "stamp"),
+    [({MA_METADATA_KEY_COPY_OF: "daimon"}, "daimon"), ({}, None)],
+    ids=["copy-of-a-copy", "plain-source"],
+)
+async def test_the_seeded_name_follows_copies_of_copies_only(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    metadata: dict[str, str],
+    stamp: str | None,
+) -> None:
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    source = ma_agent(id="ag_src", name="source", tenant_id=tenant.id, metadata=metadata)
+    created: list[dict[str, Any]] = []
+    await copy_agent(
+        _plain_client(tenant.id, source, created),
+        db_session_factory,
+        tenant_id=tenant.id,
+        source=source,
+        new_name="mine",
+        public_url=None,
+        subject=Subject(is_admin=True),
+        default_agent_name="daimon",
+    )
+    assert created[0]["metadata"].get(MA_METADATA_KEY_COPY_OF) == stamp
+
+
+async def test_a_failed_carry_still_returns_the_copy_and_lists_only_active_repos(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+
+    async def broken(*_a: Any, **_k: Any) -> Any:
+        raise SQLAlchemyError("database went away")
+
+    async def repos(*_a: Any, **_k: Any) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(full_name="acme/app", status="active"),
+            SimpleNamespace(full_name="acme/old", status="revoked"),
+        ]
+
+    monkeypatch.setattr(agent_fork, "copy_shared_memory", broken)
+    monkeypatch.setattr(agent_fork, "record_agent_creator", broken)
+    monkeypatch.setattr(agent_fork.agent_backends, "current", broken)
+    monkeypatch.setattr(agent_fork.github_access, "list_agent_repos", repos)
+    source = ma_agent(id="ag_src", name="source", tenant_id=tenant.id)
+    copy = await copy_agent(
+        _plain_client(tenant.id, source, []),
+        db_session_factory,
+        tenant_id=tenant.id,
+        source=source,
+        new_name="mine",
+        public_url=None,
+        subject=Subject(is_admin=True),
+        default_agent_name="daimon",
+        owner_account_id=account.id,
+    )
+    assert copy.agent.id == "ag_new"
+    assert copy.carry.memory_failed and not copy.carry.owner_recorded
+    assert copy.carry.backend is None
+    assert copy.carry.github_repos == ("acme/app",)
