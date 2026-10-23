@@ -378,6 +378,53 @@ async def test_credential_gate_reachable_limb_uses_decide_operation(
         )
 
 
+async def test_a_panel_refusal_for_an_owned_agent_points_the_owner_to_chat(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The panel never reads ownership, so its refusal must not claim the owner may edit
+    here: it says an admin is needed here and sends an owner to chat, where they can."""
+    from daimon.core.stores import agent_owners
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id=_TEAM_ID)
+        await make_tenant_config(session, tenant=tenant, agent_name=_AGENT_NAME, mode="agent")
+        owner = await make_account(session, tenant=tenant)
+        await agent_owners.set_owner(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            owner_account_id=owner.id,
+            source="created",
+        )
+        await session.commit()
+
+    with AioResponsesMock() as mock:
+        mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=False), repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        runtime = _build_runtime(
+            db_session_factory, handler=_agent_list_handler(tenant_id=tenant.id)
+        )
+
+        refused = await refuse_unless_allowed_for_agent_name(
+            runtime,
+            AsyncWebClient(token="xoxb-test"),
+            operation="agent_spec_edit",
+            tenant_id=tenant.id,
+            team_id=_TEAM_ID,
+            agent_name=_AGENT_NAME,
+            channel_id=_CHANNEL_ID,
+            user_id=_USER_ID,
+        )
+
+    assert refused is True
+    (text,) = _ephemeral_texts(mock)
+    assert "If it's your agent, ask me in chat" in text
+    assert "owner" not in text, "the panel can't let an owner edit, so it doesn't say so"
+    for copy in (NEEDS_ADMIN_SPEC_MESSAGE, refusal_message("skill_add", "needs_admin")):
+        assert "ask me in chat" in copy and "owner" not in copy
+
+
 def test_refusal_copy_differs_by_operation_family() -> None:
     """The two families refuse for different reasons and say different things.
 

@@ -105,6 +105,10 @@ _AI_KEY_REJECTED = (
     "The AI provider rejected Daimon's request.",
     "The team running Daimon needs to check its key for this provider.",
 )
+_AI_CREDENTIAL_GUARD = (
+    "Daimon stopped this request to keep a credential safe.",
+    "Tell the team running Daimon.",
+)
 _AI_MODEL_GONE = (
     "The model this agent uses isn't offered any more.",
     "Switch the agent's model, or ask its owner or an admin to.",
@@ -168,13 +172,33 @@ def _provider_lines(exc: ProviderError) -> tuple[str, str]:
         return _AI_BUSY
     if exc.category == "transient_network" or (exc.category == "upstream" and exc.retryable):
         return _AI_UNREACHABLE
-    if exc.native_code == "413" or (exc.native_code or "").endswith("_too_large"):
+    codes = {exc.native_code, exc.native_error_code}
+    if codes & _REQUEST_TOO_LARGE:
         return _AI_TOO_LARGE
-    if exc.category in {"auth", "permission"}:
+    if _guards_a_credential(exc.native_code):
+        return _AI_CREDENTIAL_GUARD
+    if exc.category in {"auth", "permission"} and codes & _PROVIDER_REJECTED:
         return _AI_KEY_REJECTED
     if exc.category == "not_found" and _names_the_model(exc):
         return _AI_MODEL_GONE
     return _AI_REFUSED
+
+
+# What a provider says when the request itself was too big: the HTTP status (OpenAI and
+# self-hosted keep it bare, Gemini as `http_413`) or Anthropic's error type. A workspace
+# snapshot or an artifact over its limit is not the person's message, so it is not here.
+_REQUEST_TOO_LARGE = frozenset({"413", "http_413", "request_too_large"})
+# A key or permission the provider itself refused, in the same three spellings.
+_PROVIDER_REJECTED = frozenset(
+    {"401", "403", "http_401", "http_403", "authentication_error", "permission_error"}
+)
+
+
+def _guards_a_credential(code: str | None) -> bool:
+    """Whether Daimon's own driver stopped the call before it reached the provider,
+    because a credential would have been echoed or used outside its binding."""
+    code = code or ""
+    return code.endswith("_echo") or "_secret_" in code or code == "gcs_downscoping_failed"
 
 
 def _names_the_model(exc: ProviderError) -> bool:

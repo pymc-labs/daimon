@@ -353,10 +353,12 @@ async def request_github_access_impl(
         platform_user_id=auth.platform_user_id,
         card=status_card,
     )
+    # Say what the card says: an admin was asked only if one can see the channel and the
+    # admin card went out (now, or recently enough that it wasn't posted again).
+    asked = bool(visible_admins) and (posted or updated.admin_notified_at is not None)
     return GitHubRequestResult(
         status="waiting",
-        # The card says so too: with no admin who can see this channel, nobody was asked.
-        message=status_card.text if not visible_admins else "I've asked an admin.",
+        message="I've asked an admin." if asked else status_card.text,
         request_id=request.id,
     )
 

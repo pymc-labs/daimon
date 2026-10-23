@@ -40,11 +40,12 @@ OPERATOR_TOKENS_LABEL: Final = "🔑 Operator tokens"
 MINT_LABEL: Final = "Mint a token"
 BACK_LABEL: Final = "◀ Back"
 MAX_LISTED: Final = 25
-NOT_CONFIGURED: Final = "-# Operator tokens aren't set up yet. Ask whoever runs Daimon."
+NOT_CONFIGURED: Final = (
+    "-# Operator tokens aren't set up on this Daimon install yet; ask the team running Daimon."
+)
 EXPLAINER: Final = (
     f"-# An operator token lets an integration use Daimon as you for "
-    f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here or with "
-    "`daimon mcp revoke-token`."
+    f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here."
 )
 
 

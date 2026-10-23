@@ -324,7 +324,7 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
     assert "content_hash=" not in summary and "open helper and use Add skill" in summary
     assert "this conversation can't show one" in summary
     assert _NO_CARD_REASONS[where] in summary, "the preview names why no card can show"
-    assert "turned off here" not in summary, "the deployment has cards on"
+    assert "turned off on this Daimon install" not in summary, "the deployment has cards on"
     with pytest.raises(ToolError, match="this conversation can't show one") as refused:
         await add(content_hash=preview.preview.content_hash)
     assert _NO_CARD_REASONS[where] in str(refused.value)
@@ -711,10 +711,10 @@ async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_th
     preview = await add()
     summary = preview.summary
     assert "open helper and use Add skill" in summary and "content_hash=" not in summary
-    assert "approval cards are turned off here" in summary
-    assert "tool_safety.enabled" in summary, "the operator is told which setting"
+    assert "approval cards are turned off on this Daimon install" in summary
+    assert "tool_safety" not in summary, "no setting names in copy a person may read"
     assert "this conversation can't show one" not in summary
-    with pytest.raises(ToolError, match="approval cards are turned off here"):
+    with pytest.raises(ToolError, match="approval cards are turned off on this Daimon install"):
         await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "the confirm staged and uploaded nothing"
 

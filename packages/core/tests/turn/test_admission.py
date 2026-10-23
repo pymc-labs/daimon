@@ -1973,6 +1973,17 @@ def test_a_pinned_refusal_names_only_channels_every_rule_allows_and_none_for_a_c
     assert _runs_in(policy, grant(Subject(), "nobody")) == ()
     assert _runs_in(policy, grant(Subject(client=True), "a")) == (), "never to another org"
 
+    from daimon.core.access_policy import AgentRule, ChannelRule
+
+    kept = TenantAccessPolicy(
+        agent_rules={"a": AgentRule(runs_in=("open", "kept"))},
+        channel_rules={"kept": ChannelRule(readers="own", writers="own")},
+    )
+    assert _runs_in(kept, grant(Subject(), "a")) == ("open",), (
+        "a member elsewhere never learns of a channel kept to its own agents"
+    )
+    assert _runs_in(kept, grant(Subject(is_admin=True), "a")) == ("kept", "open")
+
 
 @pytest.mark.parametrize(
     ("policy", "channel_id", "thread_id"),

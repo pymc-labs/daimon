@@ -67,8 +67,8 @@ _SYSTEM_AGENT_MESSAGE = (
     "Ask me to make you a new agent, or ask an admin to copy this one."
 )
 _REACHABLE_AGENT_MESSAGE = (
-    f"Only this agent's owner or {ADMIN_NOUN} can change it.\n\n"
-    "Ask me and I'll write the request for an admin."
+    f"Changing this agent here needs {ADMIN_NOUN}.\n\n"
+    "If it's your agent, ask me in chat to change it."
 )
 _SHARED_AGENT_MESSAGE = (
     "Changing this agent's repo or keys needs an admin.\n\n"

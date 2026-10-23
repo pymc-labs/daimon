@@ -99,6 +99,9 @@ _KEY_REJECTED = (
     "The AI provider rejected Daimon's request.\n\n"
     "The team running Daimon needs to check its key for this provider."
 )
+_CREDENTIAL_GUARD = (
+    "Daimon stopped this request to keep a credential safe.\n\nTell the team running Daimon."
+)
 _MODEL_GONE = (
     "The model this agent uses isn't offered any more.\n\n"
     "Switch the agent's model, or ask its owner or an admin to."
@@ -313,7 +316,7 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
         ),
         (
             ("permission", False, "gcs_token_echo"),
-            _KEY_REJECTED,
+            _CREDENTIAL_GUARD,
         ),
         (
             ("upstream", False, "malformed_interaction"),
@@ -321,6 +324,11 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
         ),
         (("upstream", False, "413"), _TOO_LARGE),
         (("auth", False, "401"), _KEY_REJECTED),
+        (("auth", False, "authentication_error"), _KEY_REJECTED),
+        (("permission", False, "mcp_secret_outside_binding"), _CREDENTIAL_GUARD),
+        (("permission", False, "gcs_downscoping_failed"), _CREDENTIAL_GUARD),
+        (("permission", False, None), _REFUSED),
+        (("upstream", False, "snapshot_too_large"), _REFUSED),
         (("not_found", False, "404"), _REFUSED),
     ],
 )

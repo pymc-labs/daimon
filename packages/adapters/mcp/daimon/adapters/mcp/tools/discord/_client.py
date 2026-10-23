@@ -64,7 +64,9 @@ def _require_bot_token(runtime: McpRuntime) -> str:  # pyright: ignore[reportUnu
     """Read the bot token from settings (presence validated at boot in Plan 24-04)."""
     discord_settings = runtime.settings.discord
     if discord_settings is None:
-        raise ToolError("discord tools require DAIMON_DISCORD__BOT_TOKEN")
+        raise ToolError(
+            "Discord tools aren't set up on this Daimon install yet; ask the team running Daimon."
+        )
     return discord_settings.bot_token.get_secret_value()
 
 

@@ -80,14 +80,16 @@ MANAGED_AGENT_MESSAGE: Final[str] = (
 )
 
 #: A spec edit by a member against an agent the workspace currently depends on.
+#: The panel never reads ownership, so the owner is told where they can change it.
 NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
-    f"Only this agent's owner or {ADMIN_NOUN} can change it.\n\n"
-    "Ask me and I'll write the request for an admin. Making your own agent is not restricted."
+    f"Changing this agent here needs {ADMIN_NOUN}.\n\n"
+    "If it's your agent, ask me in chat to change it. Making your own agent is not restricted."
 )
 
 #: A skill added or removed by a member on an agent someone else also uses.
 NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
-    f"Only this agent's owner or {ADMIN_NOUN} can change its skills."
+    f"Changing this agent's skills here needs {ADMIN_NOUN}. "
+    "If it's your agent, ask me in chat to change them."
 )
 
 #: An attachment write (repo binding, keys, MCP server) by a member against a
@@ -354,7 +356,7 @@ def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
     if operation in ("skill_add", "skill_remove"):
         if outcome == "managed_agent":
             return MANAGED_AGENT_MESSAGE
-        return f"Only this agent's owner or {ADMIN_NOUN} can change its skills."
+        return NEEDS_ADMIN_SKILL_MESSAGE
     if operation == "skill_repo_connect":
         return SHARED_AGENT_SKILLS_MESSAGE
     return SHARED_AGENT_MESSAGE

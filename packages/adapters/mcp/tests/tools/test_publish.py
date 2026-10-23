@@ -89,7 +89,7 @@ def _make_runtime(settings: Settings) -> McpRuntime:
 
 async def test_publish_report_impl_raises_when_jwt_secret_unset() -> None:
     runtime = _make_runtime(_make_settings(jwt_secret=None))
-    with pytest.raises(ToolError, match="not configured"):
+    with pytest.raises(ToolError, match="isn't set up on this Daimon install"):
         await _publish_report_impl(
             runtime,
             tenant_id=uuid.uuid4(),
@@ -142,7 +142,7 @@ async def test_publish_report_impl_maps_host_not_configured(
 
     monkeypatch.setattr("daimon.adapters.mcp.tools.publish.publish_report", fake)
     runtime = _make_runtime(_make_settings())
-    with pytest.raises(ToolError, match="report host not configured") as exc_info:
+    with pytest.raises(ToolError, match="Publishing reports isn't set up") as exc_info:
         await _publish_report_impl(
             runtime,
             tenant_id=uuid.uuid4(),
@@ -332,7 +332,7 @@ async def test_delete_report_impl_raises_host_not_configured(
 
     monkeypatch.setattr("daimon.adapters.mcp.tools.publish.delete_report", fake)
     runtime = _make_runtime(_make_settings())
-    with pytest.raises(ToolError, match="report host not configured") as exc_info:
+    with pytest.raises(ToolError, match="Publishing reports isn't set up") as exc_info:
         await _delete_report_impl(runtime, tenant_id=uuid.uuid4(), slug="q1-results")
     assert isinstance(exc_info.value.__cause__, HostNotConfiguredError)
 

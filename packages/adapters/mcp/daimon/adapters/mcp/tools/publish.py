@@ -41,6 +41,10 @@ from daimon.core.reports.publish import (
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+_NOT_SET_UP = (
+    "Publishing reports isn't set up on this Daimon install yet; ask the team running Daimon."
+)
+
 
 def _report_host_error_message(err: ReportHostError) -> str:
     """Recover the timeout/unreachable distinction from the wrapped cause.
@@ -102,7 +106,7 @@ async def _publish_report_impl(
     # imprecision from ever reaching the core function as a signed cap.
     cap = Decimal(str(cap_usd))
     if runtime.settings.mcp.jwt_secret is None:
-        raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
+        raise ToolError(_NOT_SET_UP)
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
     if auth is not None:
         await require_publishable(
@@ -132,7 +136,7 @@ async def _publish_report_impl(
                 authorize_source=authorize_source,
             )
     except HostNotConfiguredError as err:
-        raise ToolError("report host not configured") from err
+        raise ToolError(_NOT_SET_UP) from err
     except InvalidSlugError as err:
         raise ToolError(str(err)) from err
     except ReportHostError as err:
@@ -160,7 +164,7 @@ async def _delete_report_impl(
                 now=datetime.now(UTC),
             )
     except HostNotConfiguredError as err:
-        raise ToolError("report host not configured") from err
+        raise ToolError(_NOT_SET_UP) from err
     except ReportHostError as err:
         raise ToolError(_report_host_error_message(err)) from err
     return {"tokens_revoked": result.tokens_revoked, "host_removed": result.host_removed}

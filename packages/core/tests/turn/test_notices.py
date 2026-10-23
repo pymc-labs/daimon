@@ -361,7 +361,7 @@ def test_an_unknown_provider_is_named_generically():
 
 def test_a_gemini_hold_says_it_is_temporary_and_names_no_one_to_ask() -> None:
     text = admission_refusal_text("provider_hold_cap_reached", _NOUNS)
-    assert "temporary" in text and "few minutes" in text
+    assert "temporary" in text and "Try again shortly" in text
     assert "admin" not in text and "release" not in text
 
 

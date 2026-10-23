@@ -65,6 +65,9 @@ KEY_REJECTED = (
     "The AI provider rejected Daimon's request.\n\n"
     "The team running Daimon needs to check its key for this provider."
 )
+CREDENTIAL_GUARD = (
+    "Daimon stopped this request to keep a credential safe.\n\nTell the team running Daimon."
+)
 MODEL_GONE = (
     "The model this agent uses isn't offered any more.\n\n"
     "Switch the agent's model, or ask its owner or an admin to."
@@ -249,7 +252,15 @@ class TestRenderError:
             (ProviderError("upstream", retryable=False, native_code="413"), TOO_LARGE),
             (
                 ProviderError("invalid_request", retryable=False, native_code="artifact_too_large"),
-                TOO_LARGE,
+                REFUSED,
+            ),
+            (
+                ProviderError("auth", retryable=False, native_error_code="http_401"),
+                KEY_REJECTED,
+            ),
+            (
+                ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
+                CREDENTIAL_GUARD,
             ),
             (
                 ProviderError(
