@@ -104,8 +104,12 @@ def build_fleet_view(
     collected: bool = False,
     blocked: bool = False,
     partial: bool = False,
+    cost: str | None = None,
 ) -> discord.ui.LayoutView:
-    """Render only canonical scoped rows; no specs, excerpts or native handles."""
+    """Render only canonical scoped rows; no specs, excerpts or native handles.
+
+    `cost` is an ended run's cost in words (`fleet_cost_words`); it leads the footer.
+    """
     if (
         run.platform != "discord"
         or len({worker.id for worker in workers}) != len(workers)
@@ -163,8 +167,8 @@ def build_fleet_view(
         buttons=buttons,
         footer=(
             # Once the run is over, what it cost leads (J3: "the cost is shown").
-            f"Cost {fleet_cost_words(run.observed_usd)} · Budget cap ${run.total_budget_usd}"
-            if collected or partial or blocked or run.status in ("completed", "cancelled", "failed")
+            f"Cost {cost} · Budget cap ${run.total_budget_usd}"
+            if cost is not None
             else f"Budget cap ${run.total_budget_usd} · "
             f"Deadline <t:{int(run.deadline_at.timestamp())}:f>"
         ),
@@ -764,6 +768,8 @@ class DiscordFleetCard:
     ) -> None:
         self._run_id = run_id
         self._service = service
+        # An ended run's cost in words, read once (`_read`).
+        self._costs: dict[uuid.UUID, str] = {}
         self._load_parent = load_parent
         self._send = send
         self._edit = edit
@@ -814,12 +820,13 @@ class DiscordFleetCard:
     ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
         """The run as the card shows it: once it has ended, with what it actually cost.
 
-        The stored figure trails the budget watch; the card says the same cost the
-        result reply does (`FleetOrchestrator.run_cost`).
+        The stored figure trails the budget watch, so a running run shows no cost;
+        an ended one says the same cost the result reply does
+        (`FleetOrchestrator.run_cost`), read once.
         """
         run, workers = await self._service.read_snapshot(parent, policy, run_id)
-        if run.status not in RUN_TRANSITIONS:
-            run = replace(run, observed_usd=await self._service.run_cost(parent, run))
+        if run.status not in RUN_TRANSITIONS and run.id not in self._costs:
+            self._costs[run.id] = fleet_cost_words(await self._service.run_cost(parent, run))
         return run, workers
 
     def _render(
@@ -838,6 +845,7 @@ class DiscordFleetCard:
             collected=collected,
             blocked=blocked,
             partial=partial,
+            cost=self._costs.get(run.id) if run.status not in RUN_TRANSITIONS else None,
         )
 
     async def refresh(self) -> bool:

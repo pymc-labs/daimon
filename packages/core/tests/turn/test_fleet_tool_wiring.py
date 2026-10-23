@@ -607,6 +607,7 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
         result = dict(await owner.collect(root, policy, run_id=primary.run_id))
         if verdict == "approved":
             assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+            result.pop("cost_usd")
             assert result == {
                 "run_id": str(primary.run_id),
                 "status": "ready",

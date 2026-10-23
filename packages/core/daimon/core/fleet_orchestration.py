@@ -295,15 +295,23 @@ class FleetRefused(ValueError):
         super().__init__(f"fleet: {reason}" + (f". {self.plain}" if self.plain else ""))
 
 
-def fleet_cost_words(usd: Decimal) -> str:
-    """A run's cost as people read it: "$0.42", or "less than $0.01" for a sliver."""
+# A cost read bounds its wait for a connection: results never wait on it.
+RUN_COST_TIMEOUT_S = 2.0
+
+
+def fleet_cost_words(usd: Decimal | None) -> str:
+    """A run's cost as people read it: "$0.42", "less than $0.01", or "not available yet"."""
+    if usd is None:
+        return "not available yet"
     if 0 < usd < Decimal("0.005"):
         return "less than $0.01"
     return f"${usd.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
 
 
-def fleet_cost_sentence(usd: Decimal) -> str:
+def fleet_cost_sentence(usd: Decimal | None) -> str:
     """The plain line a fleet's result reply ends with (J3: "the cost is shown")."""
+    if usd is None:
+        return "This cost isn't available yet."
     return f"This cost {fleet_cost_words(usd)}."
 
 
@@ -1315,25 +1323,31 @@ class FleetOrchestrator:
             "run_id": str(run.id),
             "status": "ready",
             "results": outputs,
-            "cost": fleet_cost_sentence(await self._run_cost(parent, run)),
+            **await self._cost_fields(parent, run),
         }
 
-    async def run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal:
+    async def _cost_fields(self, parent: WorkerPermissions, run: FleetRun) -> dict[str, JsonValue]:
+        """The reply's cost line, and the figure behind it (None while not available)."""
+        cost = await self._run_cost(parent, run)
+        return {
+            "cost": fleet_cost_sentence(cost),
+            "cost_usd": None if cost is None else str(cost),
+        }
+
+    async def run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal | None:
         """What the run's workers cost so far, for the result reply and the card."""
         return await self._run_cost(parent, run)
 
-    async def _run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal:
-        """What the run's workers cost so far, read fresh; the stored figure if that fails."""
+    async def _run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal | None:
+        """The run's cost read fresh, or None: never the stored figure, which trails."""
         reader = getattr(self._owner(), "run_cost", None)
-        if reader is not None:
-            try:
-                fresh = await reader(parent, run.id)
-            except Exception as error:  # a cost read never blocks the results
-                log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
-            else:
-                if fresh is not None:
-                    return fresh
-        return run.observed_usd
+        if reader is None:
+            return None
+        try:
+            return await reader(parent, run.id)
+        except Exception as error:  # a cost read never blocks the results
+            log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
+            return None
 
     async def _partial(
         self,
@@ -1383,7 +1397,7 @@ class FleetOrchestrator:
             "partial": True,
             "results": results,
             "failed": failed,
-            "cost": fleet_cost_sentence(await self._run_cost(parent, run)),
+            **await self._cost_fields(parent, run),
         }
 
     async def settle(
@@ -1519,20 +1533,25 @@ class HostFleetPorts:
         ] = {}
 
     async def run_cost(self, parent: WorkerPermissions, run_id: uuid.UUID) -> Decimal | None:
-        """The run's cost from one read-only budget snapshot, the watch's own math.
+        """This run's cost from its own rows, bounded in time; None if not available.
 
-        Each worker counts at its priced, observed usage or its ledger debit,
-        whichever is larger, so usage already seen counts before it is debited.
+        A pooled connection under load, or a run whose usage can't be priced yet,
+        never stalls or misstates the result: it reads as "not available yet".
         """
-        from daimon.core.channel_budget import read_fleet_budget_snapshot
+        from daimon.core.channel_budget import read_fleet_run_cost
+        from daimon.core.errors import DaimonError
+        from daimon.core.fleet import FleetConflict
 
-        usages = await read_fleet_budget_snapshot(
-            self.sessions, parent=parent, prices=self.prices, markup=self.markup
-        )
-        mine = [usage for usage in usages.values() if usage.run.id == run_id]
-        if not mine:
+        if run_id != parent.fleet.run_id:
             return None
-        return sum((usage.worker_floor_usd for usage in mine), Decimal(0))
+        try:
+            async with asyncio.timeout(RUN_COST_TIMEOUT_S):
+                return await read_fleet_run_cost(
+                    self.sessions, parent=parent, prices=self.prices, markup=self.markup
+                )
+        except (TimeoutError, FleetConflict, DaimonError) as error:
+            log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
+            return None
 
     async def _prepare_original(self, parent: WorkerPermissions) -> ProviderPreparationRequest:
         from daimon.core.turn.runtime_manifest import read_frozen_preparation

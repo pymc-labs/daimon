@@ -837,6 +837,7 @@ async def test_successful_review_returns_only_validated_primary_journal_output()
     result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
     if result.get("status") == "ready" or result.get("partial"):
         assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+        result.pop("cost_usd")
     assert result == {
         "run_id": str(RUN),
         "status": "ready",
@@ -917,6 +918,7 @@ async def test_four_worker_plan_collects_three_primaries_and_one_required_review
     result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
     if result.get("status") == "ready" or result.get("partial"):
         assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+        result.pop("cost_usd")
     assert result == {
         "run_id": str(RUN),
         "status": "ready",
@@ -1242,6 +1244,7 @@ async def test_collect_returns_verified_partial_results_beside_the_failed_worker
     result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
     if result.get("status") == "ready" or result.get("partial"):
         assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+        result.pop("cost_usd")
     assert result == {
         "run_id": str(RUN),
         "status": "blocked",
