@@ -14,12 +14,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
+from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.smoke import SmokeCheckError
 from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.runtime_manifest import ConfigurationGrant
@@ -123,8 +126,25 @@ def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
 
 
 def _skill_bundle(skill_dir: Path) -> SkillUpload:
+    manifest = skill_dir / "SKILL.md"
+    content = manifest.read_bytes()
+    spec, body = parse_skill_markdown(content.decode(), source=str(manifest))
+    name = spec.name.replace("_", "-")
+    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) is None:
+        raise typer.BadParameter(
+            f"{manifest}: skill name {spec.name!r} is invalid for OpenAI after replacing "
+            "underscores with hyphens. Rename the frontmatter name using lowercase letters, "
+            "digits and single hyphens, with no leading or trailing hyphen."
+        )
+    if name != spec.name:
+        # Only the provider's copy changes; local skill identity stays intact.
+        frontmatter = yaml.safe_dump({**spec.model_dump(), "name": name}, sort_keys=False)
+        content = f"---\n{frontmatter}---\n{body}".encode()
     files = tuple(
-        SkillUploadFile(path=file.relative_to(skill_dir).as_posix(), content=file.read_bytes())
+        SkillUploadFile(
+            path=file.relative_to(skill_dir).as_posix(),
+            content=content if file == manifest else file.read_bytes(),
+        )
         for file in sorted(skill_dir.rglob("*"))
         if file.is_file()
     )

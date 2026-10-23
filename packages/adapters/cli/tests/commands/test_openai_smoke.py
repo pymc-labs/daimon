@@ -226,6 +226,11 @@ def test_smoke_completes_one_tool_call_and_reports_ok(
     assert "smoke: OK" in out
     assert "tool_calls=1" in out
     assert "sk-test-not-a-real-key" not in out
+    (upload,) = [call for call in fake.calls if call.url.path == "/v1/skills"]
+    with zipfile.ZipFile(io.BytesIO(upload.content)) as archive:
+        assert {name: archive.read(name) for name in archive.namelist()} == {
+            "bundle/SKILL.md": SKILL_CONTENT
+        }
 
 
 def test_smoke_ignores_the_misleading_idle_status_on_session_create(
