@@ -1770,6 +1770,7 @@ async def _request_agent_backend_switch_impl(
                         "backend_switch.handoff_failed",
                         agent=agent_name,
                         error_type=type(exc).__name__,
+                        exc_info=True,
                     )
                     why = (
                         str(exc).removesuffix(" Nothing was changed.")

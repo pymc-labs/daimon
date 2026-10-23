@@ -88,3 +88,34 @@ async def test_a_copy_made_elsewhere_or_of_another_agent_does_not(providers, sta
 
 async def test_an_unknown_responder_never_matches(providers):
     assert not await _awaits(_copy(), responder=None)
+
+
+async def test_the_cards_capture_names_its_turns_responder(monkeypatch):
+    """The card's check reads the copy as the MCP preview did: its capture names the
+    admitted turn's responder, the one a place's config may not pin yet."""
+    seen: dict[str, object] = {}
+
+    async def capture(_deps, _source, **kwargs):
+        seen.update(kwargs)
+        return _source
+
+    monkeypatch.setattr(admission, "capture_backend_source", capture)
+    account = uuid.uuid4()
+    admitted = SimpleNamespace(
+        account_id=account,
+        agent=SimpleNamespace(id="agent_root"),
+        grant=SimpleNamespace(is_dm=False, subject=object(), run_place=object()),
+        private_dm_id=None,
+        slack_turn_context_id=None,
+        origin_channel_id="channel",
+        origin_thread_id="thread",
+    )
+    await admission.capture_admitted_backend_source(
+        cast(Any, None),
+        _copy(),
+        admission=cast(Any, admitted),
+        tenant_id=TENANT,
+        account_id=account,
+        platform="discord",
+    )
+    assert seen["responder_ma_agent_id"] == "agent_root"
