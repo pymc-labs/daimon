@@ -28,7 +28,10 @@ import pytest
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsSendSessionEvents,
+    BetaManagedAgentsSessionEvent,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
 )
@@ -54,10 +57,12 @@ from daimon.adapters.scheduler.main import (
     _acquire_advisory_lock,  # pyright: ignore[reportPrivateUsage]  # named test seam for advisory-lock contention
 )
 from daimon.adapters.scheduler.main import run as scheduler_run
-from daimon.core.config import Settings
+from daimon.core.config import Settings, load_turn_settings
 from daimon.core.db import build_engine
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.turn import driver as turn_driver
+from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO, TurnIO
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma_models import ma_model_config
@@ -73,6 +78,37 @@ def reset_structlog() -> Iterator[None]:
     yield
     structlog.reset_defaults()
     structlog.contextvars.clear_contextvars()
+
+
+@pytest.fixture
+def turn_io_spy(monkeypatch: pytest.MonkeyPatch) -> list[TurnIO]:
+    """Every turn I/O the driver built during the test, in order.
+
+    The headless runner reaches ``turn_io`` through the driver, so wrapping the
+    driver's binding records which implementation a fire really ran on.
+    """
+    built: list[TurnIO] = []
+    real = turn_driver.turn_io  # pyright: ignore[reportPrivateImportUsage]
+
+    def spy(*args: object, **kwargs: object) -> TurnIO:
+        io = real(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        built.append(io)
+        return io
+
+    monkeypatch.setattr(turn_driver, "turn_io", spy)
+    return built
+
+
+def _assert_ran_on_configured_path(built: list[TurnIO], *, fires: int) -> None:
+    """Each fire built one turn I/O of the configured path's kind, and no other."""
+    path = load_turn_settings().path
+    assert path == os.environ.get("DAIMON_TURN__PATH", "legacy"), "settings must follow the env leg"
+    assert len(built) == fires, f"expected {fires} turn I/O for {fires} fire(s), got {built!r}"
+    for io in built:
+        if path == "mux":
+            assert type(io) is MuxTurnIO, f"mux leg ran {type(io).__name__}"
+        else:
+            assert isinstance(io, LegacyTurnIO), f"legacy leg ran {type(io).__name__}"
 
 
 # Reuse the conftest fake-anthropic builder shape — but inline here to avoid
@@ -230,7 +266,7 @@ def _build_fake_anthropic_factory(
             agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
         )
     )
-    send_mock = AsyncMock(return_value=None)
+    send_mock = AsyncMock(return_value=BetaManagedAgentsSendSessionEvents())
     close_mock = AsyncMock(return_value=None)
     # Post-19-09: any script that does not end in a real terminal event
     # (session.status_idle / session.status_terminated) makes the driver
@@ -304,6 +340,7 @@ def _build_fake_anthropic_factory(
 async def test_end_to_end_tick_populates_last_result_tail(
     schema_engine: tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
+    turn_io_spy: list[TurnIO],
 ) -> None:
     engine, sm, tenant_id = schema_engine
     _set_required_env(monkeypatch)
@@ -343,6 +380,7 @@ async def test_end_to_end_tick_populates_last_result_tail(
         _engine_override=engine,
     )
     assert rc == 0, "scheduler --once should exit 0 on success"
+    _assert_ran_on_configured_path(turn_io_spy, fires=1)
 
     async with sm() as s:
         refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
@@ -357,6 +395,7 @@ async def test_end_to_end_tick_populates_last_result_tail(
 async def test_failure_records_last_error(
     schema_engine: tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
+    turn_io_spy: list[TurnIO],
 ) -> None:
     engine, sm, tenant_id = schema_engine
     _set_required_env(monkeypatch)
@@ -393,6 +432,7 @@ async def test_failure_records_last_error(
         _engine_override=engine,
     )
     assert rc == 0, "scheduler exits 0 even when a fire fails — error is per-routine"
+    _assert_ran_on_configured_path(turn_io_spy, fires=1)
 
     async with sm() as s:
         refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
@@ -412,6 +452,7 @@ async def test_failure_records_last_error(
 async def test_advisory_lock_blocks_second_run(
     schema_engine: tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
+    turn_io_spy: list[TurnIO],
 ) -> None:
     engine, sm, tenant_id = schema_engine
     _set_required_env(monkeypatch)
@@ -445,6 +486,7 @@ async def test_advisory_lock_blocks_second_run(
             _engine_override=engine,
         )
         assert rc == 1, "second scheduler must exit non-zero when lock is held"
+        _assert_ran_on_configured_path(turn_io_spy, fires=0)
 
         async with sm() as s:
             refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
@@ -555,7 +597,7 @@ def _build_archived_agent_factory(
 
     class _FakeEvents:
         stream = AsyncMock(return_value=stream_factory)
-        send = AsyncMock(return_value=None)
+        send = AsyncMock(return_value=BetaManagedAgentsSendSessionEvents())
 
     class _FakeSessions:
         events = _FakeEvents()
@@ -622,6 +664,7 @@ def _build_archived_agent_factory(
 async def test_fire_heals_archived_agent_id(
     schema_engine: tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
+    turn_io_spy: list[TurnIO],
 ) -> None:
     """Acceptance test: routine has an archived ``agent_id``;
     fire resolves a fresh id via tag lookup, persists the heal, and completes
@@ -669,6 +712,7 @@ async def test_fire_heals_archived_agent_id(
         _engine_override=engine,
     )
     assert rc == 0, "scheduler --once should exit 0 on success"
+    _assert_ran_on_configured_path(turn_io_spy, fires=1)
 
     async with sm() as s:
         refreshed = await get_routine(s, row.id, tenant_id=tenant_id)
@@ -798,7 +842,7 @@ def _build_two_tenant_fake_anthropic_factory(
 
     class _FakeEvents:
         stream = stream_mock
-        send = AsyncMock(return_value=None)
+        send = AsyncMock(return_value=BetaManagedAgentsSendSessionEvents())
 
     class _FakeSessions:
         events = _FakeEvents()
@@ -866,6 +910,7 @@ def _build_two_tenant_fake_anthropic_factory(
 async def test_end_to_end_tick_fires_each_routine_under_own_tenant(
     schema_engine: tuple[AsyncEngine, async_sessionmaker[AsyncSession], uuid.UUID],
     monkeypatch: pytest.MonkeyPatch,
+    turn_io_spy: list[TurnIO],
 ) -> None:
     """SCHED-01 end-to-end proof: each routine fires under its own tenant_id.
 
@@ -922,6 +967,7 @@ async def test_end_to_end_tick_fires_each_routine_under_own_tenant(
         _engine_override=engine,
     )
     assert rc == 0, "scheduler --once should exit 0 on success"
+    _assert_ran_on_configured_path(turn_io_spy, fires=2)
 
     async with sm() as s:
         refreshed_a = await get_routine(s, row_a.id, tenant_id=tenant_id_a)

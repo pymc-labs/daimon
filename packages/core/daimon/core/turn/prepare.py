@@ -1678,6 +1678,7 @@ async def bind_session_impl(
             external_user_id=external_user_id,
             markup=deps.markup,
             channel_id=admission.budget_channel_id,
+            turn_path=deps.turn_path,
         )
 
         # `SessionOps` is built here rather than at import time so that

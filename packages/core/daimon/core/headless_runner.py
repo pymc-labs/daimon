@@ -127,6 +127,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
+TurnPath = Literal["legacy", "mux"]
+"""The two turn paths (`TurnSettings.path`), named so a caller can pass one in."""
+
 
 class _NoOpLifecycle(TurnLifecycle):
     """A headless turn has no surface to render to, so every delivery hook
@@ -195,6 +198,7 @@ async def run_turn(
     personal_memory: bool = False,
     platform: str | None = None,
     hold: TurnHold | None = None,
+    turn_path: TurnPath | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -227,6 +231,7 @@ async def run_turn(
             personal_memory=personal_memory,
             platform=platform,
             hold=hold,
+            turn_path=turn_path,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -259,6 +264,7 @@ async def run_turn(
                 personal_memory=personal_memory,
                 platform=platform,
                 hold=hold,
+                turn_path=turn_path,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -268,6 +274,30 @@ async def run_turn(
     return result
 
 
+def _outside_turn_persistence[**P, R](run: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
+    """Run a headless turn without the persistence of whichever turn started it.
+
+    A headless run started from inside another turn (a worker allocation, a
+    tool call) inherits that turn's `current_persistence` through the
+    context. On mux the driver binds it, and `check_session` then refuses the
+    headless run's own session as one the outer turn does not own. A
+    headless run owns nothing the outer turn does, so it starts clean. The
+    fleet worker's own persistence is activated by `run_prepared_turn` and
+    read inside that run (`run_worker`'s `publish`), not here.
+    """
+
+    @functools.wraps(run)
+    async def isolated(*args: P.args, **kwargs: P.kwargs) -> R:
+        token = current_persistence.set(None)
+        try:
+            return await run(*args, **kwargs)
+        finally:
+            current_persistence.reset(token)
+
+    return isolated
+
+
+@_outside_turn_persistence
 async def run_turn_impl(
     *,
     anthropic: AsyncAnthropic,
@@ -295,6 +325,7 @@ async def run_turn_impl(
     personal_memory: bool = False,
     platform: str | None = None,
     hold: TurnHold | None = None,
+    turn_path: TurnPath | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -375,9 +406,15 @@ async def run_turn_impl(
     ``hold`` runs the turn held to a shared channel (`routine_hold.routine_hold`):
     the channel's own store replaces the agent-wide and personal ones, and the
     Daimon credential is the held one.
+
+    ``turn_path`` is the turn path this fire runs on, resolved by the caller at
+    its edge (``load_turn_settings().path``). It is read once here and handed to
+    the driver, so nothing below re-reads settings for the turn. ``None`` falls
+    back to one settings read here.
     """
     turn_scope: Scope | None = None
-    if load_turn_settings().path == "mux":
+    selected_path = turn_path if turn_path is not None else load_turn_settings().path
+    if selected_path == "mux":
         if tenant_id is None or account_id is None:
             raise ScopeViolation(
                 agent_id, "mux headless turns require the authorized tenant/account"
@@ -511,6 +548,7 @@ async def run_turn_impl(
         # bespoke loop) is fully delegated below.
         state: TurnState = await drive_turn(
             anthropic=anthropic,
+            path=selected_path,
             scope=turn_scope,
             session_id=session.id,
             user_message=context_prompt(origin, system=session.agent.system) + trigger_message,

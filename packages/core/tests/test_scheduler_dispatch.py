@@ -6,10 +6,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
-from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
+from daimon.core.stores.domain import CatchUpPolicy, RoutineRow, TenantRow
 from daimon.core.stores.routines import create_routine, get_routine, update_routine
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from .turn_path_support import TurnIOSpy, TurnPath
 
 
 @pytest.fixture
@@ -33,9 +38,13 @@ class NoCaps:
 
 
 async def seed(
-    session: AsyncSession, *, due: datetime, policy: CatchUpPolicy = "skip"
+    session: AsyncSession,
+    *,
+    due: datetime,
+    policy: CatchUpPolicy = "skip",
+    tenant: TenantRow | None = None,
 ) -> RoutineRow:
-    tenant = await make_tenant(session)
+    tenant = tenant or await make_tenant(session)
     row = await create_routine(
         session,
         tenant_id=tenant.id,
@@ -380,10 +389,17 @@ async def test_claimed_queue_stays_bounded_across_ticks(
         await dispatcher.close()
 
 
+@pytest.mark.parametrize("stalls_in", ["session_assembly", "drain"])
 async def test_dispatch_timeout_through_headless_records_ceiling(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
+    stalls_in: str,
 ) -> None:
+    """A fire that outlives the dispatch timeout is recorded as a ceiling breach,
+    whichever leg of the headless turn it stalls in. Only a stall in the drain
+    reaches the turn I/O, so only that case proves which path ran."""
     import httpx
     from anthropic import AsyncAnthropic
     from daimon.core.headless_runner import run_turn
@@ -391,13 +407,46 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
     from daimon.core.turn.outcomes import drain_outcomes
     from daimon.core.turn.termination import TerminationReason
 
-    routine = await seed(db_session, due=NOW - timedelta(minutes=1))
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    routine = await seed(db_session, due=NOW - timedelta(minutes=1), tenant=tenant)
     started = asyncio.Event()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda r, m: httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        r"/v1/environments/([^/]+)",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_environment(id=m.group(1), name="env", created_at=NOW.isoformat()).model_dump(
+                mode="json"
+            ),
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions$",
+        lambda r, m: httpx.Response(200, json=ma_session(id="ses_stalled").model_dump(mode="json")),
+    )
+    router.add(
+        "POST", r"/v1/sessions/[^/]+/events", lambda r, m: httpx.Response(200, json={"data": None})
+    )
 
     async def stall(request: httpx.Request) -> httpx.Response:
-        started.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
+        stalled_leg = (
+            request.url.path.endswith("/events/stream")
+            if stalls_in == "drain"
+            else request.url.path.startswith("/v1/agents/")
+        )
+        if stalled_leg:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        return router.dispatch(request)
 
     async with AsyncAnthropic(
         api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(stall))
@@ -410,7 +459,9 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
                 environment_id="env",
                 trigger_message=row.trigger_message,
                 tenant_id=row.tenant_id,
+                account_id=account.id,
                 session_factory=db_session_factory,
+                turn_path=turn_path,
             )
 
         dispatcher = await run_one_tick(
@@ -433,3 +484,7 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
     assert rows[0].reason == TerminationReason.CEILING
     assert rows[0].error_class == "TimeoutError"
     assert saved is not None and saved.last_error is not None and "timeout" in saved.last_error
+    if stalls_in == "drain":
+        turn_io_used.assert_ran(turn_path)
+    else:
+        assert turn_io_used.classes == [], "a stall in session assembly never reaches the turn I/O"

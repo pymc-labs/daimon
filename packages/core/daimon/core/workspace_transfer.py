@@ -97,6 +97,7 @@ from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import current_outcome
+from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.posture import AutoApprove, Billed, UsageRecorder
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.usage_recording import record_turn_usage
@@ -427,6 +428,7 @@ async def transfer_workspace(
     channel_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     account_id: uuid.UUID | None = None,
+    turn_path: Literal["legacy", "mux"] | None = None,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -443,6 +445,9 @@ async def transfer_workspace(
     bundle, anything else (including an unanswered None) captures them. The
     choice reaches the checkpoint prompt and, when it was `"leave"`, is also
     reported as something the successor did not get.
+
+    `turn_path` is the turn path the checkpoint turn runs on, resolved by the
+    caller; `None` reads settings in the driver.
 
     Never raises for an expected degradation — every rung below the top is a
     returned value. It does raise for an unexpected upstream failure (a 500
@@ -507,33 +512,41 @@ async def transfer_workspace(
     checkpoint_system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = (
         ({"type": "text", "text": prompt},) if privileged else ()
     )
-    state = await run_turn(
-        anthropic=client,
-        session_id=old_session_id,
-        scope=turn_scope,
-        user_message=f"{controls}\n\n{prompt}",
-        system_blocks=checkpoint_system_blocks,
-        lifecycle=_NoOpLifecycle(),
-        cancel=asyncio.Event(),
-        now=now,
-        billing=Billed(
-            record=_bind_checkpoint_recorder(
-                sessionmaker,
-                tenant_id=tenant_id,
-                external_user_id=external_user_id,
-                ma_session_id=old_session_id,
-                model_id=old_snapshot.pricing_id,
-                markup=markup,
-                channel_id=channel_id,
-            )
-        ),
-        # Nobody is watching this turn, so a tool call waiting for approval
-        # would simply hang until the deadline.
-        tool_confirmation=AutoApprove(),
-        deadline=checkpoint_deadline,
-        # The checkpoint executes the old session: decided again right before.
-        before_send=before_send,
-    )
+    # Preparation can run inside another turn's activated persistence (a fleet
+    # worker allocation). That turn owns a different session, so the checkpoint
+    # turn must not bind it: it executes the old session in a context of its own.
+    persistence_token = current_persistence.set(None)
+    try:
+        state = await run_turn(
+            anthropic=client,
+            session_id=old_session_id,
+            scope=turn_scope,
+            user_message=f"{controls}\n\n{prompt}",
+            system_blocks=checkpoint_system_blocks,
+            lifecycle=_NoOpLifecycle(),
+            cancel=asyncio.Event(),
+            now=now,
+            billing=Billed(
+                record=_bind_checkpoint_recorder(
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    external_user_id=external_user_id,
+                    ma_session_id=old_session_id,
+                    model_id=old_snapshot.pricing_id,
+                    markup=markup,
+                    channel_id=channel_id,
+                )
+            ),
+            # Nobody is watching this turn, so a tool call waiting for approval
+            # would simply hang until the deadline.
+            tool_confirmation=AutoApprove(),
+            deadline=checkpoint_deadline,
+            # The checkpoint executes the old session: decided again right before.
+            before_send=before_send,
+            path=turn_path,
+        )
+    finally:
+        current_persistence.reset(persistence_token)
     failure = _checkpoint_gap_reason(state)
     if failure is not None:
         log.warning(
@@ -743,6 +756,8 @@ class WorkspaceTransferRunner:
     """Override for the source agent's display name; defaults to the snapshot's."""
     account_id: uuid.UUID | None = None
     """The account from the caller's existing tenant authorization decision."""
+    turn_path: Literal["legacy", "mux"] | None = None
+    """The turn path the checkpoint turn runs on; `None` reads settings in the driver."""
 
     async def __call__(
         self,
@@ -779,6 +794,7 @@ class WorkspaceTransferRunner:
             unsaved_work=unsaved_work,
             channel_id=self.channel_id,
             before_send=before_send,
+            turn_path=self.turn_path,
         )
         prepared = as_prepared_replacement(
             outcome,
