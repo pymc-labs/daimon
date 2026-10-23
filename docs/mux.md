@@ -2414,6 +2414,12 @@ in place (`POST /vaults/{vault}/credentials/{credential}` with only
 `auth.token`) before it is sent, then the turn's end revokes it as on Gemini.
 Verified live against our OpenAI project on 2026-10-23.
 
+A user's own MCP connectors can't follow an agent to another provider. Each
+becomes a named loss, `mcp_server:<name>` ("its <name> connector" on the
+switch card), with its credentials; the Daimon MCP server is represented
+without them. Before, any extra server failed the whole representation and the
+switch dropped Daimon MCP too.
+
 Selection only offers a row to the turn origin it serves: an agent's turn
 considers template and source-pinned rows; a channel's turn considers fixed
 plans with neither. A tenant-wide channel row and a template row therefore

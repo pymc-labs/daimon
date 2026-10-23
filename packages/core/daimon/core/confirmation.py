@@ -656,6 +656,8 @@ def drop_words(drops: Sequence[str]) -> str:
         if drop.startswith("mcp_tool:"):
             _, server, tool = drop.split(":", 2)
             words.append(f"the {tool} tool of {server}")
+        elif drop.startswith("mcp_server:"):
+            words.append(f"its {drop.removeprefix('mcp_server:')} connector")
         else:
             words.append(_DROP_WORDS.get(drop, drop.replace("_", " ")))
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]

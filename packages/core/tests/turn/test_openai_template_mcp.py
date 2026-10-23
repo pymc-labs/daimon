@@ -344,3 +344,36 @@ async def live_token(request) -> str:
     )
     assert resolve is not None
     return await resolve(request.scope, connection.credential_ref, connection.url)
+
+
+CONNECTOR_PARAMS = {
+    **PARAMS,
+    "mcp_servers": [{"type": "url", "name": "linear", "url": "https://mcp.linear.app/mcp"}],
+    "tools": [
+        *PARAMS["tools"],
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "linear",
+            "configs": [],
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+async def test_a_user_connector_drops_only_itself_never_daimon_mcp(template):
+    """An agent with its own connector keeps Daimon MCP; the card names the connector."""
+    from daimon.core.confirmation import drop_words
+
+    request, quote, wire = template
+    assert "mcp_server:linear" in quote.declared_drops
+    assert "mcp" not in quote.declared_drops
+    assert drop_words(("mcp_server:linear",)) == "its linear connector"
+    await _turn(request, 0)
+    (body,) = wire.posts
+    servers = [tool["server_label"] for tool in body["agent"]["tools"] if tool["type"] == "mcp"]
+    assert servers == ["daimon-mcp"], "Daimon MCP stays; the connector never reaches OpenAI"
+    assert "mcp.linear.app" not in json.dumps([wire.agent, body])
+    # The model is told plainly what this copy can't reach.
+    assert "mcp_server:linear" in wire.agent["instructions"]
