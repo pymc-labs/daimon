@@ -2,8 +2,8 @@
 
 `scripts/ci/deploy_superseded.sh` against real git repositories (a bare origin and
 a shallow, one-commit checkout like actions/checkout's), and the deploy workflow's
-contract: the check runs right after checkout and again before the worker VMs, and
-every later step is skipped on a superseded run.
+contract: the check runs right after checkout, once the job holds its concurrency
+slot, and every later step is skipped on a superseded run.
 """
 
 from __future__ import annotations
@@ -18,10 +18,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "ci" / "deploy_superseded.sh"
 DEPLOY = ROOT / ".github" / "workflows" / "deploy.yml"
-GUARD = (
-    "steps.fresh.outputs.superseded != 'true'",
-    "steps.fresh_again.outputs.superseded != 'true'",
-)
+GUARD = "steps.fresh.outputs.superseded != 'true'"
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -119,30 +116,26 @@ def _steps() -> list[dict[str, Any]]:
     return workflow["jobs"]["deploy"]["steps"]
 
 
-def test_the_check_runs_first_and_again_before_the_worker_vms() -> None:
+def test_the_check_runs_first_and_only_once() -> None:
     steps = _steps()
     ids = [step.get("id") for step in steps]
-    first, again = ids.index("fresh"), ids.index("fresh_again")
+    first = ids.index("fresh")
     assert steps[first - 1].get("uses", "").startswith("actions/checkout@"), (
         "the freshness check is the first step after checkout, before any gcloud"
     )
-    assert steps[again + 1]["name"].startswith("Refresh worker VM containers")
-    for index in (first, again):
-        condition = steps[index]["if"]
-        # Only a main CI push: promote.yml and a manual dispatch deploy what they name.
-        assert "github.event_name == 'push'" in condition
-        assert "github.ref == 'refs/heads/main'" in condition
-        assert "scripts/ci/deploy_superseded.sh" in steps[index]["run"]
+    # Once: after migrations and the MCP deploy, skipping would leave a half-deployed
+    # staging. A queued older run starts only after the newer one finishes.
+    assert sum("deploy_superseded.sh" in step.get("run", "") for step in steps) == 1
+    condition = steps[first]["if"]
+    # Only a main CI push: promote.yml and a manual dispatch deploy what they name.
+    assert "github.event_name == 'push'" in condition
+    assert "github.ref == 'refs/heads/main'" in condition
 
 
 def test_every_step_after_the_check_is_skipped_on_a_superseded_run() -> None:
     steps = _steps()
     ids = [step.get("id") for step in steps]
     for step in steps[ids.index("fresh") + 1 :]:
-        if step.get("id") == "fresh_again":
-            assert GUARD[0] in step["if"]
-            continue
-        condition = step.get("if", "")
-        assert all(term in condition for term in GUARD), (
+        assert GUARD in step.get("if", ""), (
             f"{step.get('name') or step.get('uses')}: a superseded deploy must skip it"
         )

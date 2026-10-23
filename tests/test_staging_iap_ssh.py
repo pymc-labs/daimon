@@ -16,9 +16,7 @@ _WORKFLOW = _ROOT / ".github/workflows/deploy.yml"
 
 #: deploy.yml appends this to every step after its freshness check
 #: (tests/test_deploy_superseded.py proves it); a step's own condition is the rest.
-_FRESHNESS = (
-    " && steps.fresh.outputs.superseded != 'true' && steps.fresh_again.outputs.superseded != 'true'"
-)
+_FRESHNESS = " && steps.fresh.outputs.superseded != 'true'"
 
 
 def without_freshness(condition: str) -> str:
