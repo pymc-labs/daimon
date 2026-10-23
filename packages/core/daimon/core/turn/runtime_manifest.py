@@ -1580,7 +1580,7 @@ async def _capture_source_capabilities(
     from daimon.core.skills.ingest import retained_archive_files
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
-    from daimon.core.turn.runtime_defaults import template_rows
+    from daimon.core.turn.runtime_defaults import default_rows
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
@@ -1615,7 +1615,7 @@ async def _capture_source_capabilities(
         *rows,
         *(
             row
-            for row in template_rows(tenant)
+            for row in default_rows(tenant)
             if row.get("root_materialization") is True
             and str(row.get("profile")) not in operator_profiles
         ),
@@ -3089,7 +3089,7 @@ def manifest_hold_usd(
     channel's own row wins over a tenant-wide "*" row. None when no manifest is
     installed or readable, no single row is selected, or it names no valid hold.
     """
-    from daimon.core.turn.runtime_defaults import template_rows
+    from daimon.core.turn.runtime_defaults import default_rows
 
     try:
         rows = _configured_rows()
@@ -3116,7 +3116,11 @@ def manifest_hold_usd(
             worker_rows(False)
             or _most_specific(worker_rows(True))
             # Selection's code-default fallback; the hold agrees with the row it picks.
-            or _most_specific(worker_rows(True, template_rows(tenant_id)))
+            or (
+                []
+                if _operator_configured(rows, tenant_id, revision)
+                else _most_specific(worker_rows(True, default_rows(tenant_id)))
+            )
         )
         if len(selected) != 1:
             return None
@@ -3143,6 +3147,15 @@ def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue
         if all(exact(other) < exact(candidate) for other in rows if other is not candidate):
             return [candidate]
     return rows
+
+
+def _operator_configured(
+    rows: list[dict[str, JsonValue]], tenant_id: str, revision: ConfigRevision
+) -> bool:
+    """Whether the operator's manifest has any row for this tenant's profile."""
+    return any(
+        row.get("tenant_id") == tenant_id and row.get("profile") == revision.profile for row in rows
+    )
 
 
 def _configured_rows() -> list[dict[str, JsonValue]]:
@@ -3181,7 +3194,7 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     account_id — a wildcard row is a template, never a literal "*" identity.
     """
 
-    from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_configured
+    from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
     from daimon.core.turn.runtime_defaults import default_rows
 
     revision = request.admission.backend_revision
@@ -3192,10 +3205,12 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         selected = _matching_rows(rows, revision, request, allow_wildcard=False)
         if not selected:
             selected = _most_specific(_matching_rows(rows, revision, request, allow_wildcard=True))
-        if not selected:
-            # No operator row serves this turn: the deployment's code defaults do.
+        if not selected and not _operator_configured(rows, request.scope.tenant_id, revision):
+            # The operator configured nothing for this tenant's profile: the
+            # deployment's code defaults serve it. Where the operator configured
+            # the profile, its rows alone decide, so a narrower scope never widens.
             provider = get_profile(revision.profile).provider
-            if provider in DEFAULT_KEY_ENV and not provider_key_configured(provider):
+            if provider in DEFAULT_KEY_ENV and not provider_key_present(provider):
                 # The operator's step, named only in the log: set DEFAULT_KEY_ENV[provider].
                 log.warning(
                     "provider_runtime.not_configured",

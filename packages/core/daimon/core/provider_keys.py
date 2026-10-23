@@ -18,35 +18,33 @@ import os
 from typing import get_args
 
 from mux.contracts.ids import Provider
+from mux.profiles import CONVERSATION_ONLY, INLINE_REUSE, MANAGED_AGENTS
 
 # The deployment-wide key each provider's code runtime defaults use.
 DEFAULT_KEY_ENV: dict[Provider, str] = {
-    "openai": "DAIMON_CHANNEL_OPENAI_KEY",
-    "gemini": "DAIMON_CHANNEL_GEMINI_KEY",
+    CONVERSATION_ONLY.provider: "DAIMON_CHANNEL_OPENAI_KEY",
+    INLINE_REUSE.provider: "DAIMON_CHANNEL_GEMINI_KEY",
 }
 # The order a default allowlist lists its providers in.
 _ORDER: tuple[Provider, ...] = get_args(Provider)
 
 
-def provider_key_configured(provider: Provider) -> bool:
-    """Whether this deployment names a key for `provider`, without reading its value.
+def provider_key_present(provider: Provider) -> bool:
+    """Whether this deployment's own key for `provider` is set and not blank.
 
-    Runtime selection and readback use this: they must never read a credential.
-    A blank key still fails closed where the transport reads it.
+    The allowlist default and runtime selection both use this one check, so a
+    provider allowed by default can also run. It looks the variable up by item,
+    not through `os.environ.get`, and returns only whether it is non-blank: the
+    value is never kept, logged or used to pick a credential.
     """
     env = DEFAULT_KEY_ENV.get(provider)
-    return env is not None and env in os.environ
-
-
-def provider_key_present(provider: Provider) -> bool:
-    """Whether this deployment's own key for `provider` is set and not blank."""
-    env = DEFAULT_KEY_ENV.get(provider)
-    return env is not None and bool((os.environ.get(env) or "").strip())
+    return env is not None and env in os.environ and bool(os.environ[env].strip())
 
 
 def deployment_keyed_providers() -> frozenset[Provider]:
     """Anthropic, plus each provider whose deployment key is set."""
-    return frozenset({"anthropic", *(p for p in DEFAULT_KEY_ENV if provider_key_present(p))})
+    keyed: set[Provider] = {p for p in DEFAULT_KEY_ENV if provider_key_present(p)}
+    return frozenset({MANAGED_AGENTS.provider, *keyed})
 
 
 def default_enabled_backends() -> tuple[Provider, ...]:

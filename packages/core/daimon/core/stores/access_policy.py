@@ -19,6 +19,7 @@ from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
+from mux.profiles import MANAGED_AGENTS
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -177,11 +178,15 @@ async def set_access_policy(
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     payload = policy.model_dump(mode="json")
-    explicit = payload.pop("backends_explicit")
+    # A list that differs from the deployment default is a choice even when the
+    # caller rebuilt the policy from a defaulted one (a model_dump round trip).
+    explicit = payload.pop("backends_explicit") or tuple(policy.enabled_backends) != (
+        default_enabled_backends()
+    )
     # A tenant on the deployment default keeps following it: its loaded default is
     # never written back as a choice, and older builds read Anthropic only.
     chosen = payload.pop("enabled_backends")
-    backends = chosen if explicit else ["anthropic"]
+    backends = chosen if explicit else [MANAGED_AGENTS.provider]
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
     for key in ("channel_rules", "category_rules", "agent_rules"):

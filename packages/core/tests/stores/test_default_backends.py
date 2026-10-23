@@ -134,3 +134,20 @@ async def test_editing_other_rules_never_freezes_the_default_into_the_row(
     later = await load_access_policy(db_session, tenant_id=tenant.id)
     assert later.enabled_backends == ("anthropic", "openai", "gemini"), "it still follows keys"
     assert later.invoker_user_ids == ("u1",)
+
+
+async def test_a_rebuilt_policy_with_a_new_list_is_saved_as_a_choice(
+    db_session: AsyncSession,
+) -> None:
+    """Callers often rebuild from model_dump(); a changed list must not be dropped."""
+    tenant = await make_tenant(db_session)
+    loaded = await load_access_policy(db_session, tenant_id=tenant.id)
+    widened = TenantAccessPolicy.model_validate(
+        {**loaded.model_dump(), "enabled_backends": ("anthropic", "gemini")}
+    )
+
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=widened)
+    db_session.expire_all()
+
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.enabled_backends == ("anthropic", "gemini") and policy.backends_explicit

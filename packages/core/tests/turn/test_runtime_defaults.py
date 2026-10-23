@@ -16,7 +16,7 @@ from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.runtime_defaults import (
     DEFAULT_PROJECT,
-    OPENAI_WORKER_SPEND_LIMIT_CENTS,
+    OPENAI_SPEND_LIMIT_CENTS,
     default_rows,
 )
 from daimon.core.turn.runtime_manifest import manifest_hold_usd, select_runtime_manifest
@@ -45,17 +45,25 @@ def revision(profile: str, model: str) -> Any:
 
 
 def request(
-    profile: str, model: str, *, worker: bool = False, budget: Decimal | None = None
+    profile: str,
+    model: str,
+    *,
+    worker: bool = False,
+    budget: Decimal | None = None,
+    origin: str = "agent",
+    environment: str | None = None,
 ) -> Any:
     limits = SimpleNamespace(native_budget_usd=budget)
     return SimpleNamespace(
         tenant_id=TENANT,
         admission=SimpleNamespace(
             backend_revision=revision(profile, model),
-            backend_revision_origin="agent",
+            backend_revision_origin=origin,
             agent=SimpleNamespace(id="agent_ma_1", version=3),
         ),
         worker=SimpleNamespace(limits=limits) if worker else None,
+        native_budget_usd=None,
+        openai_environment_id=environment,
         scope=SimpleNamespace(tenant_id=str(TENANT), account_id="any-account"),
     )
 
@@ -105,7 +113,7 @@ def test_an_openai_worker_is_capped_and_needs_no_project(
     )
 
     assert plan.worker_materialization
-    assert plan.spend_limit_usd_cents == OPENAI_WORKER_SPEND_LIMIT_CENTS, "Astra is never uncapped"
+    assert plan.spend_limit_usd_cents == OPENAI_SPEND_LIMIT_CENTS, "Astra is never uncapped"
     assert plan.project == DEFAULT_PROJECT and plan.project_header is False
 
 
@@ -122,13 +130,61 @@ def test_a_budgeted_openai_worker_is_capped_by_its_own_budget(
     assert plan.spend_limit_usd_cents is None, "the worker's native budget sets the cap"
 
 
-def test_an_openai_agent_turn_has_no_code_default_yet(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Its own turn needs a hosted environment; a tenant gets one from its own row."""
+def test_an_openai_agent_turn_waits_for_its_tenants_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the tenant's provisioned hosted environment there is no row; with it, one."""
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
     with pytest.raises(AdmissionDenied):
         select_runtime_manifest(
             request("openai.persistent_workspace", "gpt-6-luna"), OpenAIDeployment
         )
+
+    plan = select_runtime_manifest(
+        request("openai.persistent_workspace", "gpt-6-astra", environment="envtmpl_1"),
+        OpenAIDeployment,
+    )
+
+    assert plan.root_materialization and plan.environment_id == "envtmpl_1"
+    assert plan.spend_limit_usd_cents == OPENAI_SPEND_LIMIT_CENTS
+    assert plan.project_header is False
+
+
+def test_a_channel_pinned_to_gemini_runs_from_the_code_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
+
+    plan = select_runtime_manifest(
+        request("gemini.inline_reuse", "gemini-3.8-flash", origin="channel"), GeminiPlan
+    )
+
+    assert not plan.root_materialization and not plan.worker_materialization
+    assert plan.tools == () and plan.template_capabilities is None
+
+
+def test_an_operator_row_narrower_than_the_turn_never_widens_to_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Workers the operator scoped to one channel stay there: other channels refuse."""
+    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
+    worker = default_rows(str(TENANT))[2]
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps([{**worker, "platform": "discord", "channel_id": "only-here"}]))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+
+    with pytest.raises(AdmissionDenied):
+        select_runtime_manifest(
+            request("gemini.inline_reuse", "gemini-3.8-flash", worker=True), GeminiPlan
+        )
+    assert (
+        manifest_hold_usd(
+            revision("gemini.inline_reuse", "gemini-3.8-flash"),
+            tenant_id=str(TENANT),
+            account_id="any-account",
+        )
+        is None
+    ), "the hold agrees: no row"
 
 
 def test_a_pro_model_is_never_in_a_default_grant(monkeypatch: pytest.MonkeyPatch) -> None:
