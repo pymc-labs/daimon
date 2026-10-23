@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import replace
+from decimal import Decimal
 
 import pytest
 from daimon.core._models import Tenant
@@ -319,3 +320,53 @@ async def test_host_settle_defers_to_an_owed_wake_or_retires_a_redundant_one(
         ended = await ports.settle_run(parent, run, "completed", wake_id=None, unless_waking=False)
         assert ended.status == "completed"
         assert (await _read(pooled, row.idempotency_key)).status == "cancelled"
+
+
+async def test_a_stop_racing_the_first_spawn_still_owes_the_end_notice(pooled):
+    """#1373 nit: the first spawn holds the run lock while it inserts the worker.
+
+    The Stop must see that worker once the spawn commits, or the run ends owing
+    its thread no terminal card although a worker ran.
+    """
+    from daimon.core._models import FleetRun as FleetRunRow
+    from sqlalchemy import select
+
+    run = await _run(pooled)
+    async with pooled.begin() as spawn:
+        await fleet.add_worker(
+            spawn,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            ordinal=0,
+            role="research",
+            spec={},
+            spec_digest="spec-0",
+            backend="openai",
+            profile="openai.persistent_workspace",
+            model="gpt-6-luna",
+            budget_usd=Decimal(2),
+            deadline_at=run.deadline_at,
+            max_turns=1,
+        )
+        stop = asyncio.create_task(
+            fleet.set_run_status(
+                pooled,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status="cancelled",
+            )
+        )
+        await asyncio.sleep(0.5)
+        assert not stop.done(), "the Stop waits for the spawn's run lock"
+    ended = await stop
+    assert ended.status == "cancelled"
+    async with pooled() as db:
+        notice = (
+            await db.execute(
+                select(FleetRunRow.end_notice).where(
+                    FleetRunRow.tenant_id == run.tenant_id, FleetRunRow.id == run.id
+                )
+            )
+        ).scalar_one()
+    assert notice == "owed"

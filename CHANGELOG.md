@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fleet: a Stop that races a run's first worker spawn still leaves the run owing its end card. Ending a run now locks the run row first, so its check for a spawned worker sees a spawn that was committing at that moment.
 - Hand-off and switch copy is accurate for a move to another model provider. The hand-off confirmation no longer promises "Your conversation and files carry over" unconditionally: it says they carry over while the agent stays on the same provider, and that switching it to another provider starts it fresh in that conversation. On Discord, the switch card for an agent this thread was handed to ("make a copy of yourself on Argon") now says "This conversation moves to … earlier messages here aren't carried over". Before, that line appeared only when the turn's own agent was the one being switched, while the approved switch moved the handed-to agent's conversation anyway.
 
 - On the mux path, headless turns such as routines and smoke checks retry definitely refused provider writes within the caller's attempt allowance and turn deadline. A write whose response was lost after possible acceptance is no longer blindly resent by the SDK. Retry state stays in memory for that turn; this does not add routine restart recovery or stored transcript copies. Legacy is unchanged.
