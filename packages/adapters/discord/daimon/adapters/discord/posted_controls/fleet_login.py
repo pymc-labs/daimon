@@ -207,7 +207,13 @@ class LoginButton(
         async def live_subject() -> Subject:
             """The clicker as the turn path builds them: the live role, and a client
             (another organisation) never an admin (`admission`: HOST on Discord, so a
-            known foreign home is what makes one)."""
+            known foreign home is what makes one).
+
+            Admission also drops admin for any held turn (a client's, or one in a
+            shared channel). On Discord the client half is `build_subject(client=...)`
+            here, and Discord has no shared (cross-organisation) channels, so nothing
+            else is held.
+            """
             from daimon.core.authz import build_subject
             from daimon.core.stores.identity import find_platform_principal
 

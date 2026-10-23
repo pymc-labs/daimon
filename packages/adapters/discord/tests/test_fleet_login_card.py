@@ -442,17 +442,17 @@ async def test_the_bot_posts_a_login_card_only_in_the_runs_own_thread(case, expe
     assert warned == ([] if expected else [warned[0]])
 
 
-def test_each_login_card_warning_is_logged_once_per_run(monkeypatch):
-    from daimon.adapters.discord import bot as bot_module
+def test_each_login_card_warning_is_logged_once_per_run():
     from daimon.adapters.discord.bot import DaimonBot
+    from structlog.testing import capture_logs
 
-    logged: list[str] = []
-    monkeypatch.setattr(bot_module.log, "warning", lambda event, **_: logged.append(event))
     fake = SimpleNamespace(_login_card_warned=set())
-    for _ in range(3):
-        DaimonBot._warn_login_card(fake, card(), "no_thread")  # type: ignore[arg-type]
-    DaimonBot._warn_login_card(fake, card(run_id=UUID(int=43)), "no_thread")  # type: ignore[arg-type]
-    assert logged == ["fleet.login_card_no_thread"] * 2
+    with capture_logs() as logs:
+        for _ in range(3):
+            DaimonBot._warn_login_card(fake, card(), "no_thread")  # type: ignore[arg-type]
+        DaimonBot._warn_login_card(fake, card(run_id=UUID(int=43)), "no_thread")  # type: ignore[arg-type]
+    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
+    assert events == ["fleet.login_card_no_thread"] * 2
 
 
 async def test_a_claim_write_that_raises_leaves_no_live_copy(monkeypatch):
