@@ -140,6 +140,18 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     return _OUR_SIDE
 
 
+WAKE_REFUSED_LINES = (
+    "The fleet finished, but I couldn't pick this conversation back up to report on it. "
+    "That's a problem on our side.",
+    "Mention me to continue.",
+)
+
+
+def render_wake_refused(*, request_id: str) -> str:
+    """A fleet completion wake that was refused before its turn ran, with its `Ref`."""
+    return "\n\n".join((*WAKE_REFUSED_LINES, f"-# Ref {short_ref(request_id)}"))
+
+
 def error_lines(exc: BaseException) -> tuple[str, ...]:
     """The plain lines for `exc` without the `Ref` line, for surfaces that draw their own."""
     guidance = _guidance(exc)

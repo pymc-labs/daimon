@@ -34,8 +34,10 @@ from daimon.adapters.discord.continuation_dispatch import dispatch_pending_conti
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
+    bound_request_id,
     generate_request_id,
     render_error,
+    render_wake_refused,
 )
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import (
@@ -3911,6 +3913,7 @@ class DaimonBot(commands.Bot):
         tenant_id: uuid.UUID,
         guild_id: str,
     ) -> None:
+        surface = _TurnFailureSurface(thread=thread)
         try:
             with observe_turn(
                 self.runtime.sessionmaker,
@@ -3920,17 +3923,50 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread.id),
                 origin="handoff",
             ):
-                return await self._run_continuation_turn_observed(
-                    row, decision, thread=thread, tenant_id=tenant_id, guild_id=guild_id
+                async with contextlib.AsyncExitStack() as origins:
+                    return await self._run_continuation_turn_observed(
+                        row,
+                        decision,
+                        thread=thread,
+                        tenant_id=tenant_id,
+                        guild_id=guild_id,
+                        surface=surface,
+                        origins=origins,
+                    )
+        except Exception as exc:
+            if isinstance(exc, _anthropic.APIError):
+                log_anthropic_overload(
+                    exc,
+                    tenant_id=tenant_id,
+                    path="continuation",
+                    alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 )
-        except _anthropic.APIError as exc:
-            log_anthropic_overload(
-                exc,
-                tenant_id=tenant_id,
-                path="continuation",
-                alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            )
+            # The dispatcher settles the row; the card this turn posted is ours to end.
+            await self._end_continuation_card(row, exc, surface)
             raise
+
+    async def _end_continuation_card(
+        self, row: TaskContinuationRow, exc: Exception, surface: _TurnFailureSurface
+    ) -> None:
+        """Turn a failed continuation's still-pending card into plain copy; never raises."""
+        from daimon.core.neutral_resources import WorkerSpecRefused
+
+        if surface.end_card is None or (
+            surface.thread is not None and self._thread_stops.get(surface.thread.id) is not None
+        ):
+            return
+        rid = bound_request_id()
+        if row.reason == "worker_finished" and isinstance(
+            exc, (WorkerSpecRefused, WorkerFinishedRootChanged)
+        ):
+            log.warning("fleet.wake_card_refused", error_type=type(exc).__name__, rid=rid)
+            text = render_wake_refused(request_id=rid)
+        else:
+            text = render_error(exc, request_id=rid)
+        try:
+            await surface.end_card(text)
+        except Exception as card_exc:  # best effort: the row is settled either way
+            log.warning("continuation.error_card_failed", error_type=type(card_exc).__name__)
 
     async def _run_continuation_turn_observed(
         self,
@@ -3940,6 +3976,8 @@ class DaimonBot(commands.Bot):
         thread: discord.Thread,
         tenant_id: uuid.UUID,
         guild_id: str,
+        surface: _TurnFailureSurface,
+        origins: contextlib.AsyncExitStack,
     ) -> None:
         """Run the destination agent's first turn for one dispatched continuation.
 
@@ -4136,6 +4174,56 @@ class DaimonBot(commands.Bot):
             owner_key=self.runtime.owner_key,
         )
         self._track_live_turn_card(turn_card_intent.id)
+        lifecycle_holder: list[DiscordTurnLifecycle] = [lifecycle]
+
+        async def _end_card_with_error(text: str) -> None:
+            current = lifecycle_holder[0]
+            if current.ended:
+                return  # the card already became the answer or its own error
+            if current.message_ref is not None:
+                await current.end_card(text)
+            else:
+                await transport.send(text)
+            shown_on = current.message_ref
+            if shown_on is not None and str(shown_on.id) != current.card_message_id:
+                return  # an earlier card still shows its Stop button; recovery retires it
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=current.card_message_id,
+                no_post_confirmed=not current.first_post_attempted,
+            )
+
+        surface.end_card = _end_card_with_error
+
+        origin_context = turn_origin(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform="discord",
+            parent_channel_id=row.parent_channel_id,
+            thread_id=row.thread_id,
+            responder_ma_agent_id=str(agent.id),
+            responder_name=admission.config.agent_name or agent.name,
+            configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
+            configuration_target_name=admission.config.configuration_target_name,
+            role=role,
+            sender_foreign=admission.hold is not None and admission.hold.client,
+            shared_channel=admission.shared_channel,
+            is_setup=admission.config.thread_binding_kind == "setup",
+            keep_fleet_root=self.runtime.turn_deps.fleet_enabled,
+        )
+        prepared_origin = None
+        if self.runtime.turn_deps.fleet_enabled:
+            from daimon.core.turn.runtime_manifest import read_agent_fleet_grant_or_off
+
+            # As on a mention: the origin opens before the session binds, so a
+            # fleet root (a wake included) captures its source while preparing.
+            grant = await read_agent_fleet_grant_or_off(
+                self.runtime.turn_deps, admission, now=datetime.now(UTC)
+            )
+            if grant is not None:
+                prepared_origin = await origins.enter_async_context(origin_context)
 
         session_account_id = admission.account_id
         prepared = await bind_session(
@@ -4211,8 +4299,6 @@ class DaimonBot(commands.Bot):
         )
         seed_message = decision.seed_user_message or ""
 
-        lifecycle_holder: list[DiscordTurnLifecycle] = [lifecycle]
-
         async def _reseed_continuation_message() -> str:
             async with self.runtime.sessionmaker() as session:
                 recovery_origin = await get_active_origin(
@@ -4279,22 +4365,12 @@ class DaimonBot(commands.Bot):
         archive_after = False
         watch.phase = "running"
         try:
-            async with turn_origin(
-                self.runtime.sessionmaker,
-                tenant_id=tenant_id,
-                account_id=admission.account_id,
-                platform="discord",
-                parent_channel_id=row.parent_channel_id,
-                thread_id=row.thread_id,
-                responder_ma_agent_id=str(agent.id),
-                responder_name=admission.config.agent_name or agent.name,
-                configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
-                configuration_target_name=admission.config.configuration_target_name,
-                role=role,
-                sender_foreign=admission.hold is not None and admission.hold.client,
-                shared_channel=admission.shared_channel,
-                is_setup=admission.config.thread_binding_kind == "setup",
-            ) as origin:
+            async with contextlib.AsyncExitStack() as running_origin:
+                if prepared_origin is None:
+                    origin = await running_origin.enter_async_context(origin_context)
+                else:
+                    await running_origin.enter_async_context(origins.pop_all())
+                    origin = prepared_origin
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
                     prepared,
@@ -4339,6 +4415,8 @@ class DaimonBot(commands.Bot):
                         ),
                     ),
                 )
+                # The run ended the card itself (answer, or red error card).
+                surface.end_card = None
                 archive_after = await self._archive_requested(origin.id)
         finally:
             await self._interrupt_stopped_turn(
