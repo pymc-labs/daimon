@@ -16,8 +16,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0131_thread_binding_owner_kind"
-down_revision: str | None = "0128_fleet_run_end_notice"
+revision: str = "0134_thread_binding_owner_kind"
+down_revision: str | None = "0131_usage_obs_tenant_idx"
 branch_labels: str | None = None
 depends_on: str | None = None
 
