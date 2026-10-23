@@ -37,10 +37,18 @@ from daimon.core.neutral_resources import (
 from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.stores import accounts, mux_state, tenant_ledger
 from daimon.core.stores import fleet as fleet_store
-from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
+from daimon.core.stores.channel_budgets import (
+    check_channel_budget_read,
+    get_channel_budget,
+    list_channel_budgets,
+)
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
-from daimon.core.stores.turn_usage import read_accounting_revisions
+from daimon.core.stores.turn_usage import (
+    AccountingPrefetch,
+    prefetch_accounting,
+    read_accounting_revisions,
+)
 from daimon.core.usage_delegation import HostUsageBinding, read_delegated_usage
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ProviderBinding
@@ -360,8 +368,18 @@ async def _fleet_worker_money(
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
     price_floor: bool,
+    prefetch: AccountingPrefetch | None = None,
 ) -> tuple[Decimal, Decimal, bool, bool]:
-    binding = await mux_state.get_binding(session, worker_slot(run, worker))
+    """One worker's (floor, debit, unpriced usage, no native evidence).
+
+    With the graph's `prefetch` it answers from those rows, with the same checks.
+    """
+    slot = worker_slot(run, worker)
+    binding = (
+        await mux_state.get_binding(session, slot)
+        if prefetch is None
+        else await mux_state.cached_binding(session, prefetch.bindings, slot)
+    )
     if binding is None:
         if worker.binding_id is not None:
             raise FleetConflict("accepted worker binding is unavailable")
@@ -372,7 +390,9 @@ async def _fleet_worker_money(
         or worker.binding_id not in (None, binding.id)
     ):
         raise FleetConflict("worker binding differs from its admitted identity")
-    rows = await read_accounting_revisions(session, tenant_id=run.tenant_id, binding=binding)
+    rows = await read_accounting_revisions(
+        session, tenant_id=run.tenant_id, binding=binding, prefetch=prefetch
+    )
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         debit = -sum((row.delta_usd for row in rows.ledger), Decimal(0))
@@ -381,13 +401,28 @@ async def _fleet_worker_money(
         if not rows.revisions or not price_floor:
             return debit, debit, False, False
         native = rows.revisions[0].observation.session
+        # The rows just read are this binding's revisions; prefetched, they are not re-read.
         usage = await read_delegated_usage(
-            session, scope=scope, bindings=(HostUsageBinding(binding, native),), prices=prices
+            session,
+            scope=scope,
+            bindings=(HostUsageBinding(binding, native),),
+            prices=prices,
+            rows=None if prefetch is None else {binding.id: rows},
         )
         floor = (usage.token_floor_usd * markup).quantize(
             Decimal("0.000001"), rounding=ROUND_CEILING
         )
         return max(floor, debit), debit, bool(usage.unpriced_observations), False
+
+
+async def _prefetch_fleet_money(
+    session: AsyncSession, graph: fleet_store.BudgetGraph, *, tenant_id: uuid.UUID
+) -> AccountingPrefetch | None:
+    """Every graph worker's binding and accounting rows in five statements, not per worker."""
+    slots = [worker_slot(run, worker) for run, workers in graph for worker in workers]
+    if not slots:
+        return None
+    return await prefetch_accounting(session, tenant_id=tenant_id, slots=slots)
 
 
 def _root_money(record: OperationRecord) -> tuple[Decimal, Decimal]:
@@ -451,6 +486,28 @@ async def _financial_room(
             - sum((amount for p, c, amount in held if (p, c) == (platform, channel_id)), Decimal(0))
         )
         return available, channel_available
+
+
+def _check_financial_room(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    roots: tuple[OperationRecord, ...],
+) -> None:
+    """`_financial_room`'s refusals without its reads, for a caller that discards its money.
+
+    Incomplete root evidence, then unflushed caller state on the balance or the channel
+    budget, refuse here as they would there, before the caller writes anything. Its
+    channel spend read guards only the ledger, which the balance read already guards.
+    """
+    for root in roots:
+        _root_money(root)
+    tenant_ledger.check_prepaid_balance_read(session, tenant_id=tenant_id)
+    check_channel_budget_read(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    )
 
 
 async def require_root_funding(
@@ -565,6 +622,12 @@ async def _produce_fleet_budget(
     reserve: bool,
     financial: bool,
     snapshot: bool = False,
+    locked: tuple[
+        fleet_store.BudgetGraph,
+        Mapping[uuid.UUID, datetime | None],
+        tuple[OperationRecord, ...],
+    ]
+    | None = None,
 ) -> dict[uuid.UUID, FleetBudgetUsage]:
     """The sole product producer of held exposure and admission decisions.
 
@@ -576,34 +639,44 @@ async def _produce_fleet_budget(
     Terminal/crashed unknowns retain their bound. Only proof of cancellation
     before any claim or native evidence releases the unused reservation.
     Caller owns commit, including refusals that retain new overrun evidence.
+
+    `locked` is the (graph, allocation stamps, roots) the caller has just read with
+    `lock_budget(financial=True)` and `list_fleet_root_finances` in this transaction,
+    writing nothing since. The locks it holds fence every writer of those rows, so
+    reading them again here would return the same rows.
     """
     if not markup.is_finite() or markup <= 0:
         raise FleetConflict("fleet billing markup must be positive and finite")
     if snapshot and reserve:
         raise FleetConflict("a snapshot read cannot reserve")
+    if locked is not None and (snapshot or not financial):
+        raise FleetConflict("only the financial producer reuses a locked graph")
     facts = parent.fleet
     if facts.scope.is_platform or facts.scope.is_legacy_host_authorized:
         raise FleetConflict("fleet budget requires tenant authority")
     tenant_id = uuid.UUID(facts.scope.tenant_id)
     with session.no_autoflush:
-        graph, started_at = await fleet_store.lock_budget(
-            session,
-            tenant_id=tenant_id,
-            actor_id=facts.account_id,
-            run_id=facts.run_id,
-            financial=financial,
-            persisted=True,
-            locking=not snapshot,
-        )
-        roots = await mux_state.list_fleet_root_finances(
-            session, tenant_id=tenant_id, locking=not snapshot
-        )
-        await _financial_room(
+        if locked is None:
+            graph, started_at = await fleet_store.lock_budget(
+                session,
+                tenant_id=tenant_id,
+                actor_id=facts.account_id,
+                run_id=facts.run_id,
+                financial=financial,
+                persisted=True,
+                locking=not snapshot,
+            )
+            roots = await mux_state.list_fleet_root_finances(
+                session, tenant_id=tenant_id, locking=not snapshot
+            )
+        else:
+            graph, started_at, roots = locked
+        # Refuse before any write; the money itself is read after save_budget below.
+        _check_financial_room(
             session,
             tenant_id=tenant_id,
             platform=facts.root.channel.platform,
             channel_id=facts.root.channel.channel_id,
-            graph=graph,
             roots=roots,
         )
         pair = next((pair for pair in graph if pair[0].id == facts.run_id), None)
@@ -679,6 +752,7 @@ async def _produce_fleet_budget(
         debits: dict[uuid.UUID, Decimal] = {}
         zero_spend: set[uuid.UUID] = set()
         unpriced_usage = False
+        prefetch = await _prefetch_fleet_money(session, graph, tenant_id=tenant_id)
         with localcontext() as arithmetic:
             arithmetic.prec = 80
             for other_run, members in graph:
@@ -692,6 +766,7 @@ async def _produce_fleet_budget(
                         prices=prices,
                         markup=markup,
                         price_floor=other_run.id == run.id,
+                        prefetch=prefetch,
                     )
                     unpriced_usage = unpriced_usage or unpriced
                     floors[member.id] = floor
@@ -904,6 +979,7 @@ async def _reserve_fleet_worker(
     expected_version: int,
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
+    roots: tuple[OperationRecord, ...],
 ) -> FleetBudgetUsage:
     """Financial admission in the SAME caller transaction as canonical spawn.
 
@@ -924,15 +1000,15 @@ async def _reserve_fleet_worker(
     if not decision:
         raise FleetConflict("reservation requires current root authorization")
     with session.no_autoflush:
-        graph, _ = await fleet_store.lock_budget(
+        # Read again after the caller's add_worker, which this graph must include. The
+        # roots are the caller's: they were read and locked under this same lock, and
+        # add_worker does not write them.
+        graph, started_at = await fleet_store.lock_budget(
             session,
             tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
             actor_id=parent.fleet.account_id,
             run_id=parent.fleet.run_id,
             persisted=True,
-        )
-        await mux_state.list_fleet_root_finances(
-            session, tenant_id=uuid.UUID(parent.fleet.scope.tenant_id)
         )
         pair = next((p for p in graph if p[0].id == parent.fleet.run_id), None)
         if pair is None:
@@ -957,6 +1033,7 @@ async def _reserve_fleet_worker(
                 markup=markup,
                 reserve=True,
                 financial=True,
+                locked=(graph, started_at, roots),
             )
         )[worker_id]
         if snapshot.admitted and worker.reserved_usd == 0:
@@ -1395,7 +1472,7 @@ async def admit_fleet_worker(
         raise FleetConflict("resolved worker belongs to another root")
     tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
     with session.no_autoflush:
-        graph, _ = await fleet_store.lock_budget(
+        await fleet_store.lock_budget(
             session,
             tenant_id=tenant_id,
             actor_id=parent.fleet.account_id,
@@ -1403,12 +1480,12 @@ async def admit_fleet_worker(
             persisted=True,
         )
         roots = await mux_state.list_fleet_root_finances(session, tenant_id=tenant_id)
-        await _financial_room(
+        # Refuse before add_worker writes; the reservation reads the money.
+        _check_financial_room(
             session,
             tenant_id=tenant_id,
             platform=parent.fleet.root.channel.platform,
             channel_id=parent.fleet.root.channel.channel_id,
-            graph=graph,
             roots=roots,
         )
         worker = await fleet_store.add_worker(
@@ -1436,6 +1513,7 @@ async def admit_fleet_worker(
             expected_version=worker.version,
             prices=prices,
             markup=markup,
+            roots=roots,
         )
         if not usage.admitted and usage.worker.status == "pending":
             ended = await fleet_store.finish(
