@@ -319,6 +319,32 @@ class OpenAISessions:
             session = session.model_copy(update={"binding": binding})
         return session
 
+    async def refresh_mcp(self, scope: Scope, ref: ResourceRef, *, key: str) -> None:
+        """Before a new turn: give the session's owned MCP vault this turn's bearer.
+
+        Only for a session whose own vault this driver created; a session without
+        one (no MCP, or independently supplied vaults) is left as it is. A session
+        created this turn already holds this turn's bearer; writing it again is
+        idempotent.
+        """
+        self._c.check(scope, ref, "session")
+        binding = self._binding_lookup(scope, ref.id) if self._binding_lookup is not None else None
+        binding = binding or self._mcp_bindings.get((scope.tenant_id, scope.account_id, ref.id))
+        managed = session_mcp.from_binding(self._c, scope, binding)
+        if managed is None:
+            return
+        if self._mcp_secrets is None:
+            raise self._c.unsupported("host_mcp_secret_resolver")
+        raw = await self._c.call("GET", "/agents/sessions/" + segment(ref.id))
+        if raw.get("id") != ref.id:
+            raise ValueError("wrong session identity")
+        await self._decode(scope, raw)
+        agent_id = text(object_json(raw["agent"])["id"])
+        agent = await self._c.call("GET", "/agents/" + segment(agent_id))
+        if agent.get("id") != agent_id:
+            raise ValueError("wrong session agent identity")
+        await session_mcp.rotate(self._c, scope, managed, agent, self._mcp_secrets, key=key)
+
     @owned
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         self._c.check(scope, ref, "session")

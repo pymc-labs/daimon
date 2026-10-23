@@ -614,6 +614,8 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         backend=backend,
         session_ref=ref,
         native_footer_cost=footer_cost,
+        # Revokes a template turn's per-turn MCP credential however the turn ends.
+        _finalize=runtime.end_of_turn,
     )
 
 

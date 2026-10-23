@@ -1624,7 +1624,7 @@ async def _capture_source_capabilities(
     from daimon.core.skills.ingest import retained_archive_files
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
-    from daimon.core.turn.runtime_defaults import default_rows
+    from daimon.core.turn.runtime_defaults import capture_template_rows
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
@@ -1659,9 +1659,8 @@ async def _capture_source_capabilities(
         *rows,
         *(
             row
-            for row in default_rows(tenant)
-            if row.get("root_materialization") is True
-            and str(row.get("profile")) not in operator_profiles
+            for row in capture_template_rows(tenant)
+            if str(row.get("profile")) not in operator_profiles
         ),
     ]
     revision = request.admission.backend_revision
