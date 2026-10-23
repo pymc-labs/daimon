@@ -60,6 +60,17 @@ def pending_candidates(parent: WorkerPermissions) -> tuple[LoginCandidate, ...]:
     return tuple(c for c in parent.login_candidates if not c.preapproved)
 
 
+def spawn_waits_for_logins(parent: WorkerPermissions) -> bool:
+    """Whether a spawn must ask and wait (≤ `LOGIN_WAIT_S`) before dispatching.
+
+    Never while sharing isn't live: there is no card to answer, so a wait would only
+    delay every worker; the fleet card already says the workers run without them.
+    """
+    from daimon.core.turn.runtime_manifest import LOGIN_SHARING_LIVE
+
+    return LOGIN_SHARING_LIVE and bool(pending_candidates(parent))
+
+
 def apply_run_decision(
     parent: WorkerPermissions, decision: Mapping[str, str] | None
 ) -> WorkerPermissions:

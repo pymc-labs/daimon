@@ -17,6 +17,7 @@ from daimon.core.fleet_login_decision import (
     await_run_decision,
     choose_login,
     expire_question,
+    spawn_waits_for_logins,
 )
 from daimon.core.neutral_resources import WorkerPermissions
 from daimon.core.stores import fleet
@@ -81,6 +82,18 @@ def test_decision_is_intersected_with_the_frozen_candidates():
 def test_no_candidates_leaves_the_root_unchanged():
     parent = permissions()
     assert apply_run_decision(parent, {"env:A": "share"}) is parent
+
+
+def test_no_spawn_waits_while_sharing_is_not_live(monkeypatch):
+    from daimon.core.turn import runtime_manifest
+
+    parent = with_candidates(permissions(), candidate("env:B"))
+    monkeypatch.setattr(runtime_manifest, "LOGIN_SHARING_LIVE", False)
+    assert not spawn_waits_for_logins(parent)  # no card to answer: no dead 60 s
+    monkeypatch.setattr(runtime_manifest, "LOGIN_SHARING_LIVE", True)
+    assert spawn_waits_for_logins(parent)
+    saved_only = with_candidates(permissions(), candidate("env:A", preapproved=True))
+    assert not spawn_waits_for_logins(saved_only)  # nothing to ask
 
 
 # Database: the question, the wait, the clicks
