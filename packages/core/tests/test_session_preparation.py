@@ -3679,8 +3679,11 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
             release.set()
         results = await asyncio.wait_for(asyncio.gather(*tasks), 5)
         assert all(isinstance(result, PreparedTurn) for result in results)
+        # On mux the retired senders queue on the old binding's lease and learn
+        # they are retired one at a time, each after a lease poll of up to
+        # `LeaseWait.poll_max_s` (1 s): five of them can take about 5 s.
         retired = await asyncio.wait_for(
-            asyncio.gather(*predecessor_waiters, return_exceptions=True), 2
+            asyncio.gather(*predecessor_waiters, return_exceptions=True), 10
         )
         from daimon.core.session_mutation import SessionRetired
 

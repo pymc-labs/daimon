@@ -1981,6 +1981,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
 
     dead_session_cause = _api_status_error(404, "not found")
     call_count = 0
+    recovery_started = asyncio.Event()
 
     async def _fake_run_turn(
         *,
@@ -2012,6 +2013,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         # run_prepared_turn built for the recovery turn) -- block until it
         # fires, proving the mirror is what unblocks it, since the ORIGINAL
         # event is never passed to this call directly.
+        recovery_started.set()
         await cancel.wait()
         return TurnState(error=TurnError(kind="interrupted", message="interrupted during recovery"))
 
@@ -2020,7 +2022,9 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
     original_cancel = asyncio.Event()
 
     async def _cancel_soon() -> None:
-        await asyncio.sleep(0.02)
+        # Cancel while the recovery turn is in flight, not after a fixed delay:
+        # a slow runner may not have reached the recovery attempt in 20 ms.
+        await asyncio.wait_for(recovery_started.wait(), 10)
         original_cancel.set()
 
     caller_lifecycle = RecordingLifecycle()
