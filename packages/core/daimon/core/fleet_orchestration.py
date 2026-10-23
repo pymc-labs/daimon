@@ -128,6 +128,8 @@ WorkerFailureCode = Literal[
     "provider_not_allowed",
     "channel_backend_pinned",
     "worker_runtime_missing",
+    "provider_daily_cap_reached",
+    "provider_price_unavailable",
     "setup_error",
     "balance_depleted",
     "cap_exceeded",
@@ -200,6 +202,9 @@ _ADMISSION_REASON_CODES: dict[str, WorkerFailureCode] = {
     "channel_budget_exceeded": "channel_budget_exceeded",
     "provider_hold_cap_reached": "provider_hold_cap_reached",
     "provider_setup_pending": "provider_setup_pending",
+    # The daily per-model cap (#1398/#1419), before any provider request.
+    "provider_daily_cap_reached": "provider_daily_cap_reached",
+    "provider_price_unavailable": "provider_price_unavailable",
 }
 _BACKEND_CAUSE_CODES: dict[str, WorkerFailureCode] = {
     "provider_not_configured": "provider_not_configured",

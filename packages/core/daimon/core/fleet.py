@@ -167,6 +167,13 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
         "this server doesn't allow that model provider; an admin can allow it, "
         "or ask for another model"
     ),
+    "provider_daily_cap_reached": (
+        "today's budget for that model on this server is used up; it resets at midnight UTC, "
+        "or ask for another model"
+    ),
+    "provider_price_unavailable": (
+        "Daimon can't price that model right now, so it won't run it; ask for another model"
+    ),
     "channel_backend_pinned": (
         "this channel is set to run on one model provider only; ask for a model from it, "
         "or an admin can change the channel's setting"
