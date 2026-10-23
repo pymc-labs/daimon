@@ -7500,3 +7500,36 @@ async def test_queue_notice_delayed_by_reaction_is_fenced_to_held_turn(transitio
         )
     client.chat_postMessage.assert_not_awaited()
     client.reactions_add.assert_awaited_once()
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_approval_thread_modal_acks_before_dispatch_and_rejects_external(external):
+    app = _make_app()
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, payload):
+        socket.call_log.append("approval-thread")
+
+    with (
+        patch("daimon.adapters.slack.app.handle_here_approval_submission", new=handle),
+        patch("daimon.adapters.slack.app.is_external_interactive", return_value=external),
+    ):
+        await app.on_request(
+            socket,
+            SocketModeRequest(
+                type="interactive",
+                envelope_id="approval-thread-envelope",
+                payload={
+                    "type": "view_submission",
+                    "team": {"id": "T_TEST"},
+                    "user": {"id": "U_TEST"},
+                    "view": {"callback_id": "here_approvals_thread"},
+                },
+            ),
+        )
+        await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log == (
+        ["send_socket_mode_response"]
+        if external
+        else ["send_socket_mode_response", "approval-thread"]
+    )

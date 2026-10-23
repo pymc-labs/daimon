@@ -9,7 +9,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import daimon.core.here_card as here_card_module
 import pytest
-from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, KeyEntry, McpServerEntry
 from daimon.core.here_card import (
     CredentialStatus,
@@ -586,14 +586,39 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
     assert "<@123>" not in unknown.text
 
 
+@pytest.mark.parametrize(
+    ("gate", "active", "is_dm", "expected"),
+    [
+        ("inherit", True, False, "Third-party write approvals: on (deployment default)."),
+        ("off", True, False, "Third-party write approvals: off (server)."),
+        (
+            "off",
+            False,
+            False,
+            "Stored write approvals: off (server); overrides disabled by deployment.",
+        ),
+        (
+            "off",
+            True,
+            True,
+            "Direct-message write approvals are unchanged; scope overrides do not apply.",
+        ),
+    ],
+)
 async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
     monkeypatch: pytest.MonkeyPatch,
+    gate: Approvals,
+    active: bool,
+    is_dm: bool,
+    expected: str,
 ) -> None:
     """Teams has no `<@id>` mention: the setter is named from their stored name."""
     entra_id = str(uuid.UUID(int=7))
     channel = "19:ops@thread.tacv2"
     monkeypatch.setattr(
-        here_card_module, "load_access_policy", AsyncMock(return_value=TenantAccessPolicy())
+        here_card_module,
+        "load_access_policy",
+        AsyncMock(return_value=TenantAccessPolicy(approvals=gate)),
     )
     monkeypatch.setattr(here_card_module, "load_rule_viewer", AsyncMock(return_value=None))
     responder = RosterAgent(
@@ -645,9 +670,13 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
             default=DeploymentDefault(agent_name="other"),
             github=GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False),
             public_mcp_url=None,
-            is_admin=False,
+            is_admin=True,
+            gate_overrides_active=active,
+            is_dm=is_dm,
             caller_account_id=None,
         )
+        assert card.approval_gate_note == expected
+        assert card.approval_gate_admin is (not is_dm)
         # The compact card text omits provenance; the structured facts keep it.
         return card.set_by_label or ""
 

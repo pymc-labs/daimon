@@ -457,7 +457,7 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
-    if call.tool_name == "request_agent_backend_switch" and own_server:
+    if call.tool_name == "request_agent_backend_switch":
         reference = BackendSwitchReference.model_validate(
             {
                 "agent": data.get("agent_name"),

@@ -14,12 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget; unresolved sources are refused.
 
 - Add opt-in server-admin overrides for third-party MCP write approvals at
-  server, channel and thread scope, with audited CLI/MCP and `/here` controls.
-  CLI changes require a personal MCP credential; the server verifies the actor's
-  current native admin authority. Changes apply to the next write in prepared
-  and running turns, with failed setting reads requiring confirmation. Fixed
-  confirmations (including own-endpoint aliases), deny rules and unattended
-  writes retain their gates.
+  server, channel and thread scope, through audited native `/here` controls on
+  Discord, Slack and Teams. Every click/submission rechecks native admin authority.
+  Changes apply to the next write in prepared and running turns; failed setting
+  reads require confirmation. Fixed confirmation and permission-setter names
+  retain their gates on every host, including unrelated name collisions. Direct
+  messages, deny rules and unattended writes retain their existing behavior.
+  Rollback caveat: older builds reject the stored approval fields as unknown and
+  refuse that tenant's policy. Remove those fields or restore a compatible policy
+  backup before rollback; disabling the deployment flag does not remove them.
 
 ### Fixed
 

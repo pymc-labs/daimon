@@ -51,6 +51,7 @@ from daimon.core.tool_safety import (
     ToolVerdict,
     classify_tool,
     decide_tool_call,
+    gate_protected_tool,
     is_publish_call,
     needs_annotations,
     proxy_refusal,
@@ -607,9 +608,11 @@ def interactive_decider(
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=True)
+        protected_name = gate_protected_tool(call.tool_name)
         if (
             policy.enabled
             and policy.allow_gate_overrides
+            and not protected_name
             and approval_gate_for is not None
             and call.server_name in (server_urls or {})
             and not read_error

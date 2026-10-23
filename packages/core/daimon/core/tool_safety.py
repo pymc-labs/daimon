@@ -66,6 +66,7 @@ __all__ = [
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
     "PUBLISH_TOOLS",
+    "PERMISSION_SETTER_TOOLS",
     "SERVER_SEPARATOR",
     "PermissionPolicyType",
     "ToolAnnotations",
@@ -81,6 +82,7 @@ __all__ = [
     "daimon_endpoint",
     "decide_tool_call",
     "has_confirmation_gate",
+    "gate_protected_tool",
     "heal_reserved_server",
     "needs_annotations",
     "proxy_refusal",
@@ -102,6 +104,7 @@ WILDCARD_TOOL = "*"
 ToolEffect = Literal["read", "write"]
 PermissionPolicyType = Literal["always_allow", "always_ask"]
 VerdictReason = Literal[
+    "protected_tool_name",
     #: Enforcement is off for this deployment.
     "disabled",
     #: Not a third-party MCP tool (sandbox tools, daimon's own server).
@@ -252,6 +255,59 @@ PUBLISH_TOOLS: Final[frozenset[str]] = frozenset(
 APPROVAL_TOOLS: Final[frozenset[str]] = frozenset(
     {*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS, "set_routine_sandbox_tools"}
 )
+
+# Permission changes cannot be delegated by switching off write confirmation.
+# These names are protected even on unrecognised hosts or unrelated servers.
+PERMISSION_SETTER_TOOLS: Final[frozenset[str]] = frozenset(
+    {
+        "set_approval_gate",
+        "set_channel_rule",
+        "set_agent_rule",
+        "set_agent_tool_rule",
+        "clear_agent_tool_rule",
+        "set_channel_agent_tool_rule",
+        "clear_channel_agent_tool_rule",
+        "set_routine_sandbox_tools",
+        "set_channel_environment",
+        "clear_channel_environment",
+        "set_channel_skills",
+        "add_channel_skill",
+        "remove_channel_skill",
+        "set_channel_budget",
+        "clear_channel_budget",
+        "set_agent_backend",
+        "set_agent_default",
+        "clear_agent_default",
+        "set_thread_participation",
+        "set_plain_text_mentions",
+        "grant_admin",
+        "revoke_admin",
+        "set_access_policy",
+        "clear_access_policy",
+    }
+)
+
+
+def gate_protected_tool(tool_name: str) -> bool:
+    """Names that never receive automatic authority from a gate override.
+
+    Endpoint identity is additional protection, not proof that another host
+    serves a third party. The proxy is protected so it cannot wrap a setter.
+    """
+    return (
+        tool_name in CONFIRMED_DAIMON_TOOLS
+        or tool_name in PUBLISH_TOOLS
+        or tool_name in PERMISSION_SETTER_TOOLS
+        or tool_name == PROXY_TOOL_NAME
+        or (
+            tool_name.startswith(("set_", "clear_", "grant_", "revoke_", "configure_"))
+            and any(
+                part in tool_name
+                for part in ("permission", "approval", "policy", "rule", "admin", "gate")
+            )
+        )
+    )
+
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
@@ -428,10 +484,11 @@ class ToolSafetyPolicy(BaseModel):
         default=False,
         exclude_if=lambda value: not value,
         description=(
-            "Let server admins override asking before third-party MCP writes at server, "
-            "channel or thread scope. The most specific explicit on/off setting wins. "
-            "Stored settings are ignored while off. Fixed Daimon confirmations, admin "
-            "prompts, deny rules and unattended_writes are unaffected."
+            "Let native server admins change third-party MCP write approvals from /here "
+            "at server, channel or thread scope. The most specific explicit on/off setting wins. "
+            "Stored settings are ignored while off. Fixed confirmation and permission-setter "
+            "names never receive an override, regardless of server host. Deny rules, direct "
+            "messages and unattended_writes retain their existing behavior."
         ),
     )
     effects: dict[str, ToolEffect] = Field(
@@ -849,6 +906,15 @@ def _decide_tool_call(
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
+    if attended and call.server_name not in trusted_servers and gate_protected_tool(call.tool_name):
+        # Endpoint comparison cannot prove another hostname is third-party.
+        # Protected names cannot be widened by annotations, operator read hints,
+        # an agent allow rule, or a scoped approval switch. Denials still win.
+        if _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name):
+            return ToolVerdict(outcome="deny", effect="write", reason="denied_by_operator")
+        if policy.agent_rules and agent_rule is not None and agent_rule.rule == "deny":
+            return ToolVerdict(outcome="deny", effect="write", reason="agent_rule_deny")
+        return ToolVerdict(outcome="ask", effect="write", reason="protected_tool_name")
     if SERVER_SEPARATOR in call.server_name and _gated(call.server_name, trusted_servers):
         # Its keys alias another server's tools, so neither an operator
         # override nor a rule can be trusted to mean it: always a write.

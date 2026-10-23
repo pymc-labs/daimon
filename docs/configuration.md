@@ -1610,10 +1610,11 @@ remain editable but inactive until enabled.
 
 `bool` · optional · default `False`
 
-Let server admins override asking before third-party MCP writes at server, channel or
-thread scope. The most specific explicit on/off setting wins. Stored settings are
-ignored while off. Fixed Daimon confirmations, admin prompts, deny rules and
-unattended_writes are unaffected.
+Let native server admins change third-party MCP write approvals from /here at server,
+channel or thread scope. The most specific explicit on/off setting wins. Stored settings
+are ignored while off. Fixed confirmation and permission-setter names never receive an
+override, regardless of server host. Deny rules, direct messages and unattended_writes
+retain their existing behavior.
 
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 

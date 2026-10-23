@@ -17,46 +17,51 @@ stored but ignored. Every change is audited, and each write allowed by an
 
 Only third-party `write_needs_confirmation` decisions can be relaxed. Deny
 rules still deny, explicit agent `ask` rules still ask, and failed rule reads
-still require confirmation. Publishing from sessions that ask before
-publishing, confirmed Daimon tools (watch creation/resumption/key rotation,
-skill addition, lead resolution, backend switches and Microsoft sends/writes),
-and admin-confirmed prompts keep their fixed gates. Connections to Daimon's own
-MCP endpoint remain subject to those gates under any name, including legacy
-URL aliases; new aliases are refused when attached. Routines, wakes and other
-unattended runs still use `unattended_writes` alone.
+still require confirmation. Names in the confirmed Daimon and publishing sets,
+admin-confirmed actions, and gate or permission setters never receive an
+approval override, whatever server exposes them. This includes watch actions,
+skill addition, lead resolution, backend switches, Microsoft sends/writes,
+publishing and channel/agent permission changes. An unrelated third-party tool
+with a protected name conservatively asks too. A second hostname, HTTP URL,
+IP address or proxy cannot turn those names into ordinary third-party writes.
+Endpoint-binding checks also retain fixed gates for recognized own-endpoint
+aliases; attaching such aliases is refused.
 
-Use the admin selector on `/here` (Teams: `here`) for the current channel or,
-on Discord and Teams, the current thread. Slack `/here` changes the channel;
-use the CLI or MCP tool for a Slack thread. All controls check native server
-admin authority again when used. Agent keys, agents acting in conversations,
-operator MCP tokens and legacy tokens without registry entries cannot change this setting.
+Settings can only be changed by humans through the native admin controls on
+`/here` (Teams: `here`). There is no CLI command or MCP tool for changing them.
+Each click and modal submission checks current native server/workspace admin
+authority; channel ownership, thread ownership, agent credentials and cached
+admin claims confer no authority.
 
-The CLI calls the authenticated MCP setter with your registered personal
-credential. The server derives the tenant and actor from that credential and
-checks the actor's current native admin authority. A claimed user id cannot
-authorize a change. Set `DAIMON_APPROVALS_URL` to your tenant's MCP endpoint
-and `DAIMON_APPROVALS_TOKEN` to your personal MCP credential (or pass `--url`
-and `--token`):
+- **Discord:** use `/here` in a server channel or thread. Select **Server**,
+  **Channel**, or **Thread** and choose ask, allow writes, or inherit. A thread
+  card offers all three scopes, with Channel referring to its parent.
+- **Slack:** use `/here` in the channel. Server and Channel choices apply
+  directly. A Thread choice opens a native modal; paste the root message link
+  from that channel or its timestamp. Daimon checks admin authority again and
+  verifies the root in that workspace and channel before saving.
+- **Teams:** type `here` in a channel post. The card offers Server, Channel
+  and Thread controls, each with ask, allow writes and inherit.
 
-```bash
-# Server default, then a channel exception and a Slack thread exception.
-daimon channels approvals set off
-daimon channels approvals set on --channel-id CHANNEL_ID
-daimon channels approvals set off --channel-id CHANNEL_ID:THREAD_TS --thread
-daimon channels approvals clear --channel-id CHANNEL_ID
-```
+The card displays the effective choice and its source. An inherited server
+default asks; disabled deployment overrides are displayed as stored but ignored.
+Direct messages do not consume any server, channel or thread override, including
+a server set to `off`; their third-party writes keep their existing confirmation
+behavior. Routines, wakes and other unattended runs still use `unattended_writes`.
 
-The `set_approval_gate` MCP tool takes `value` (`on`, `off`, `inherit`), optional
-`channel_id` (omitted for the server) and `thread` (default false). Thread ids
-are Discord thread ids, Slack `channel:timestamp`, or Teams full
-`channel;messageid=root` ids. Authorization and inheritance stay within the
-credential's tenant. The effective setting is read again before each automatic
-allowance, including in prepared and running turns. Switching `off` to `on` or
-clearing it to an asking parent takes effect on the next write. An unreadable
-setting requires confirmation. A prepared turn with a stale looser gate is
-refused before sending and must be prepared again. The generic
-`tenants access-policy set --clear` refuses while approval overrides remain;
-clear them with the dedicated admin command first.
+The effective setting is read again before every prospective automatic allowance,
+including in prepared and running turns. Switching `off` to `on`, or clearing it
+to an asking parent, applies to the next write. An unreadable setting requires
+confirmation. A send prepared with a stale looser gate is refused; retrying
+requires a fresh admission, rather than repeatedly sending the stale grant.
+The generic `tenants access-policy set --clear` refuses while approval overrides
+remain; clear them using the native admin controls first.
+
+Before rolling back to an older build, remove stored approval settings or restore
+an older policy backup. Older policy readers reject unknown fields, so stored
+`approvals` and `approvals_set_by` fields make the policy unreadable and refuse
+that tenant's turns. Disabling deployment overrides alone does not remove those
+stored fields.
 
 ## Agent tool rules
 

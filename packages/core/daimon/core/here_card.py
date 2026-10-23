@@ -474,6 +474,7 @@ async def load_here_card(
     public_mcp_url: str | None,
     is_admin: bool,
     gate_overrides_active: bool = False,
+    is_dm: bool = False,
     caller_account_id: uuid.UUID | None,
     resolve_setter_display: Callable[[str], Awaitable[str | None]] | None = None,
     channel_level_only: bool = False,
@@ -664,10 +665,19 @@ async def load_here_card(
     gate = resolve_approval_gate(
         policy, platform=platform, channel_id=channel_id, thread_id=thread_id
     )
+    effective = "on" if gate.value == "inherit" else gate.value
+    source = "deployment default" if gate.value == "inherit" else gate.scope
     note = (
-        f"Third-party write approvals: {gate.value} ({gate.scope})."
+        f"Third-party write approvals: {effective} ({source})."
         if gate_overrides_active
-        else f"Third-party write approvals: {gate.value} stored; overrides disabled by deployment."
+        else (
+            f"Stored write approvals: {gate.value} ({gate.scope}); "
+            "overrides disabled by deployment."
+        )
     )
-    card = card.model_copy(update={"approval_gate_note": note, "approval_gate_admin": is_admin})
+    if is_dm:
+        note = "Direct-message write approvals are unchanged; scope overrides do not apply."
+    card = card.model_copy(
+        update={"approval_gate_note": note, "approval_gate_admin": is_admin and not is_dm}
+    )
     return card.model_copy(update={"text": render_here_card_text(card)})

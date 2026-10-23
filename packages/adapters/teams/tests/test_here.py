@@ -103,9 +103,12 @@ def test_the_here_card_shows_names_as_literal_text() -> None:
     assert "<at>" not in rendered, "a name cannot become a mention"
 
 
-@pytest.mark.parametrize("target", [CHANNEL_ID, f"{CHANNEL_ID};messageid=root"])
+@pytest.mark.parametrize(
+    "scope,target",
+    [("server", ""), ("channel", CHANNEL_ID), ("thread", f"{CHANNEL_ID};messageid=root")],
+)
 async def test_approval_card_rechecks_admin_and_writes_nothing(
-    monkeypatch: pytest.MonkeyPatch, target: str
+    monkeypatch: pytest.MonkeyPatch, scope: str, target: str
 ) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
@@ -121,7 +124,78 @@ async def test_approval_card_rechecks_admin_and_writes_nothing(
         here, "approval_admin", AsyncMock(return_value=Subject(platform_user_id="user"))
     )
     context = MagicMock()
-    context.activity.value.action.data = {"op": "off", "target": target}
+    context.activity.value.action.data = {"op": "off", "scope": scope, "target": target}
     response = await here.HereApprovals(runtime).on_action(context)
     runtime.sessionmaker.assert_not_called()
     assert "admin" in str(response)
+
+
+@pytest.mark.parametrize("scope", ["server", "channel", "thread"])
+@pytest.mark.parametrize("value", ["on", "off", "inherit"])
+async def test_native_admin_can_change_every_approval_scope(
+    db_session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    value: str,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from daimon.adapters.teams import here
+    from daimon.adapters.teams.card_actions import Actor
+    from daimon.core.authz import Subject
+    from daimon.core.stores.access_policy import load_access_policy
+    from daimon.core.stores.security_audit import list_events
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=True, allow_gate_overrides=True)
+    monkeypatch.setattr(
+        here,
+        "card_actor",
+        AsyncMock(
+            return_value=Actor(
+                user_id="native-admin", tenant_id=TENANT, is_admin=True, conversation_id=CHANNEL_ID
+            )
+        ),
+    )
+    fresh = AsyncMock(return_value=Subject(is_admin=True, platform_user_id="native-admin"))
+    monkeypatch.setattr(here, "approval_admin", fresh)
+    target = {"server": "", "channel": CHANNEL_ID, "thread": f"{CHANNEL_ID};messageid=root"}[scope]
+    ctx = MagicMock()
+    ctx.activity.value.action.data = {"op": value, "scope": scope, "target": target}
+    await here.HereApprovals(runtime).on_action(ctx)
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=TENANT)
+        events = await list_events(session, tenant_id=TENANT)
+    assert (
+        policy.approvals
+        if scope == "server"
+        else policy.channel_rules.get(target, ChannelRule()).approvals
+    ) == value
+    assert len(events) == 1 and events[0].platform_user_id == "native-admin"
+    fresh.assert_awaited_once()
+
+
+def test_here_offers_explicit_server_channel_and_thread_controls() -> None:
+    card = assemble_here_card(
+        channel_id=CHANNEL_ID,
+        platform="teams",
+        agent_name="agent",
+        tier="thread",
+        channel=None,
+        tenant=None,
+        configuration_target_name=None,
+        policy=TenantAccessPolicy(),
+        details=None,
+    ).model_copy(update={"approval_gate_admin": True})
+    rendered = here_card(card, channel_id=CHANNEL_ID, thread_id=f"{CHANNEL_ID};messageid=root")
+    data = rendered.model_dump(by_alias=True, exclude_none=True)
+    actions = [
+        action
+        for block in data["body"]
+        if block["type"] == "ActionSet"
+        for action in block["actions"]
+    ]
+    assert {action["data"]["scope"] for action in actions} == {"server", "channel", "thread"}
+    assert len(actions) == 9

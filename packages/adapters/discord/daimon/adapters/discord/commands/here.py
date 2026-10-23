@@ -52,21 +52,37 @@ def build_here_embed(card: HereCard) -> discord.Embed:
 class ApprovalGateView(discord.ui.View):
     """An ephemeral, server-bound control; authority is re-read on every click."""
 
-    def __init__(self, runtime: DiscordRuntime, tenant_id: uuid.UUID, target: str) -> None:
+    def __init__(
+        self,
+        runtime: DiscordRuntime,
+        tenant_id: uuid.UUID,
+        channel_id: str,
+        thread_id: str | None = None,
+    ) -> None:
         super().__init__(timeout=300)
         self.runtime = runtime
         self.tenant_id = tenant_id
-        self.target = target
+        scopes: list[tuple[str, str, str | None]] = [
+            ("server", "Server", None),
+            ("channel", "Channel", channel_id),
+        ]
+        if thread_id is not None:
+            scopes.append(("thread", "Thread", thread_id))
+        self.choices: dict[str, tuple[str | None, Approvals]] = {}
+        options: list[discord.SelectOption] = []
+        settings: tuple[tuple[str, Approvals], ...] = (
+            ("Ask before writes", "on"),
+            ("Allow writes", "off"),
+            ("Inherit", "inherit"),
+        )
+        for scope, label, target in scopes:
+            for title, value in settings:
+                key = f"{scope}:{value}"
+                self.choices[key] = (target, value)
+                options.append(discord.SelectOption(label=f"{label}: {title}", value=key))
         select: discord.ui.Select[ApprovalGateView] = discord.ui.Select(
-            placeholder="Third-party write approvals here",
-            options=[
-                discord.SelectOption(label=label, value=value)
-                for label, value in (
-                    ("Ask before writes", "on"),
-                    ("Allow writes without asking", "off"),
-                    ("Inherit parent setting", "inherit"),
-                )
-            ],
+            placeholder="Change write approvals: server / channel / thread",
+            options=options,
         )
         select.callback = self.change
         self.add_item(select)
@@ -90,21 +106,16 @@ class ApprovalGateView(discord.ui.View):
         raw: object = (
             cast("list[object]", values)[0] if isinstance(values, list) and values else None
         )
-        value: Approvals
-        if raw == "on":
-            value = "on"
-        elif raw == "off":
-            value = "off"
-        elif raw == "inherit":
-            value = "inherit"
-        else:
+        choice = self.choices.get(raw) if isinstance(raw, str) else None
+        if choice is None:
             return
+        target, value = choice
         try:
             await set_approval_gate(
                 self.runtime.sessionmaker,
                 tenant_id=self.tenant_id,
                 platform="discord",
-                target=self.target,
+                target=target,
                 value=value,
                 subject=subject,
             )
@@ -112,7 +123,7 @@ class ApprovalGateView(discord.ui.View):
                 self.runtime.settings.tool_safety.enabled
                 and self.runtime.settings.tool_safety.allow_gate_overrides
             )
-            message = f"Third-party write approvals: {value}."
+            message = f"Third-party write approvals: {value} ({target or 'server'})."
             if not active:
                 message += " Saved but ignored: deployment overrides are disabled."
         except DaimonError as exc:
@@ -243,7 +254,7 @@ class HereCog(commands.Cog):
                 else None
             )
             if is_guild_admin(interaction):
-                approval_view = ApprovalGateView(runtime, tenant_id, thread_id or str(channel.id))
+                approval_view = ApprovalGateView(runtime, tenant_id, str(channel.id), thread_id)
                 if view is not None:
                     for item in tuple(view.children):
                         view.remove_item(item)

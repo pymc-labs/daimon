@@ -1291,13 +1291,17 @@ then refreshed from storage immediately before each automatic allowance in
 pre-send authorization rejects a stale looser gate for attended turns.
 Session endpoint bindings identify Daimon's own server, including legacy URL
 aliases, for toolset configuration and fixed-gate decisions.
-Only `interactive_decider` can relax a
-third-party write verdict, and only with the deployment opt-in enabled. Fixed
-Daimon gates and unattended decisions keep their existing paths. The shared
+Only `interactive_decider` can relax a third-party write verdict, and only with
+the deployment opt-in enabled. Protected confirmation and permission-setter
+names never receive an override on any server, even an unrecognized alternate
+host or an unrelated server with a colliding name. Direct messages never consume
+scope overrides. Unattended decisions keep their existing paths. The shared
 `approval_gate` setter authorizes the `SET_APPROVAL_GATE` action and atomically
-writes the policy and audit event. CLI changes use a personal authenticated
-FastMCP client to call the MCP setter; MCP and `/here` adapters obtain fresh
-native admin evidence before invoking the core setter.
+writes the policy and audit event. Only native `/here` controls invoke this
+setter, obtaining fresh platform-admin evidence for each click or submission.
+Discord and Teams offer server/channel/thread choices. Slack server/channel
+choices apply directly; its thread modal verifies a root message in the invoking
+channel. CLI and MCP mutation surfaces are absent.
 
 Tool rules come from the session's
 conversation channel (`session_rules_channel`), never its budget channel. The decider comes
