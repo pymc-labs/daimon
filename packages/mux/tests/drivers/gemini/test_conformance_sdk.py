@@ -9,6 +9,7 @@ from mux.contracts.config import CapabilityRequirement, ConfigRevision, Resolved
 from mux.contracts.events import TurnEndedPayload
 from mux.contracts.ids import PageRequest
 from mux.contracts.resources import EnvironmentSpec, ToolSpec, WorkspaceSource
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.testing.conformance.runner import PendingKind, run_fixture
 from mux.testing.drivers.gemini.conformance_sdk import GeminiSDKScript, offline_sdk_adapter
@@ -25,7 +26,7 @@ async def test_cancellation_and_usage_shared_oracles_cross_actual_sdk(case: str)
         posts = [r for r in script.http_requests if r.method == "POST"]
         assert len(posts) == (2 if case == "C06" else 1)
         body = json.loads(posts[0].content)
-        assert body["tools"] == []
+        assert body["tools"] == [NO_TOOLS_TOOL]
         assert body["agent_config"]["model"] == "gemini-3.8-flash"
         assert body["input"] == [{"type": "text", "text": "seed"}]
         assert posts[0].headers["Api-Revision"] == "2026-05-20"

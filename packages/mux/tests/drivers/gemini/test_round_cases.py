@@ -18,7 +18,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import SendReceipt
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import GeminiEvents
-from mux.drivers.gemini.transport import Object, SDKTransport
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, SDKTransport
 from mux.testing.conformance.budget import BudgetConfig, BudgetGuard, BudgetRefused
 from mux.testing.conformance.runner import ConformanceFailure
 from mux.testing.drivers.gemini.round_cases import INTERACTION_CEILING_USD, run_c04, run_c06
@@ -57,7 +57,7 @@ class NativeWire:
             if self.sdk is not None:
                 assert self.session is not None
             body = json.loads(request.content)
-            assert body["tools"] == []
+            assert body["tools"] == [NO_TOOLS_TOOL]
             assert body["agent_config"]["model"] == "gemini-3.8-flash"
             self.identities.append(
                 "native-owned" if len(self.posts) == 1 else f"native-owned-{len(self.posts)}"
@@ -294,7 +294,10 @@ async def test_complete_round_sdk_single_case_hold_get_before_delete_and_exact_s
     for request in native.requests:
         if request.method == "POST" and request.url.path.endswith("/interactions"):
             body = json.loads(request.content)
-            assert body["tools"] == [] and body["agent_config"]["max_total_tokens"] == 4096
+            assert (
+                body["tools"] == [NO_TOOLS_TOOL]
+                and body["agent_config"]["max_total_tokens"] == 4096
+            )
     with pytest.raises(FileExistsError):
         await execute(selected, mock=httpx.MockTransport(native.handle))
     assert len(native.posts) == selected.envelope.interactions

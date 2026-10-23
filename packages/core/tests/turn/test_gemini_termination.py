@@ -115,6 +115,11 @@ class NativeWire:
         self.saved: dict[str, Object] = {}
         # Accepted but never started: the stream stays silent, as under Gemini load.
         self.silent_stream = False
+        # The function a requires_action interaction calls, and how many calls
+        # to it follow each function_result before the run completes.
+        self.function_name = "weather"
+        self.repeat_calls = 0
+        self.results: list[list[dict[str, object]]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -129,8 +134,30 @@ class NativeWire:
                     "parameters": {"type": "object", "properties": {}},
                 }
             ]
-            assert body["input"] == [{"type": "text", "text": "offline question"}]
             identity = f"offline-interaction-{len(self.saved) + 1}"
+            if body["input"] and body["input"][0].get("type") == "function_result":
+                # The host answered the call: the run continues as a new interaction
+                # chained to the one that asked.
+                assert (
+                    body.get("previous_interaction_id") == f"offline-interaction-{len(self.saved)}"
+                )
+                self.results.append(body["input"])
+                again = len(self.results) <= self.repeat_calls
+                raw = interaction(
+                    identity, status="requires_action" if again else "completed", text="direct"
+                )
+                if again:
+                    raw["steps"] = [
+                        {
+                            "type": "function_call",
+                            "id": f"call-{len(self.results) + 1}",
+                            "name": self.function_name,
+                            "arguments": {},
+                        }
+                    ]
+                self.saved[identity] = raw
+                return httpx.Response(200, json=raw)
+            assert body["input"] == [{"type": "text", "text": "offline question"}]
             raw = interaction(identity, status=self.status)
             if self.usage is not None:
                 raw["usage"] = self.usage
@@ -140,7 +167,12 @@ class NativeWire:
                 del raw["usage"]
             if self.status == "requires_action":
                 raw["steps"] = [
-                    {"type": "function_call", "id": "call-1", "name": "weather", "arguments": {}}
+                    {
+                        "type": "function_call",
+                        "id": "call-1",
+                        "name": self.function_name,
+                        "arguments": {},
+                    }
                 ]
             self.saved[identity] = raw
             return httpx.Response(200, json=raw)
@@ -171,7 +203,11 @@ class NativeWire:
                 return httpx.Response(
                     200,
                     headers={"content-type": "text/event-stream"},
-                    content=_silence() if self.silent_stream else b"",
+                    # Only a run still waiting is silent: its continuation answers.
+                    content=_silence()
+                    if self.silent_stream
+                    and self.saved[identity]["status"] in ("in_progress", "requires_action")
+                    else b"",
                 )
             if self.final_get_status is not None:
                 self.saved[identity]["status"] = self.final_get_status
@@ -410,6 +446,42 @@ async def test_a_turn_gemini_never_starts_frees_its_hold_at_the_deadline(
     # cancel's read-back and any later read both ask; the ledger release is idempotent).
     usage = native_host.deps.turn_runtimes[PROFILE].usage_store
     assert set(cast(Accounting, usage.accounting).released) == {identity}
+
+
+async def test_a_stop_cancels_the_running_gemini_interaction(native_host: NativeHost) -> None:
+    from daimon.core.turn.run import run_prepared_turn
+
+    native_host.wire.status = "in_progress"
+    native_host.wire.silent_stream = True
+    prepared = await prepare(native_host)
+    cancel = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.5, cancel.set)
+
+    async def reseed() -> str:
+        raise AssertionError("Gemini native replay must not invoke Anthropic replacement")
+
+    outcome = await asyncio.wait_for(
+        run_prepared_turn(
+            native_host.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform=CHANNEL.platform,
+            thread_id="thread",
+            external_user_id="user",
+            user_message="offline question",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+            render_interval_s=3600,
+            operation_key="offline-stop",
+        ),
+        timeout=30,
+    )
+    assert outcome.state.termination == TerminationReason.INTERRUPTED
+    # Gemini stops working (and spending) on the reply nobody will see.
+    cancels = [r for r in native_host.wire.requests if r.url.path.endswith("/cancel")]
+    assert len(cancels) == 1
 
 
 async def test_public_binding_refusal_is_pre_native_and_committed(native_host: NativeHost) -> None:

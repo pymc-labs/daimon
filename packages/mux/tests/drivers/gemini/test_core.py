@@ -20,7 +20,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import compile_agent
-from mux.drivers.gemini.transport import Object, close_iterator
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, close_iterator
 from mux.errors import (
     ContinuityLost,
     ExtensionVersionError,
@@ -101,7 +101,7 @@ async def test_two_turns_reuse_history_environment_and_immutable_default(setup: 
     first = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
     second = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="two")
     assert first.turn_id != second.turn_id
-    assert [request["tools"] for request in t.requests] == [[], []]
+    assert [request["tools"] for request in t.requests] == [[NO_TOOLS_TOOL], [NO_TOOLS_TOOL]]
     assert t.requests[1]["previous_interaction_id"] == "i1"
     assert t.requests[1]["environment"] == "e1"
     assert t.requests[1]["agent_config"] == {"type": "antigravity", "model": "gemini-3.8-flash"}
@@ -231,7 +231,7 @@ async def test_required_action_continuation_keeps_root_until_real_completion(set
         key="result",
     )
     assert second.turn_id == first.turn_id
-    assert [request["tools"] for request in t.requests] == [[], []]
+    assert [request["tools"] for request in t.requests] == [[NO_TOOLS_TOOL], [NO_TOOLS_TOOL]]
     assert t.requests[1]["input"] == [
         {"type": "function_result", "name": "weather", "call_id": "call", "result": "cold"}
     ]
@@ -648,7 +648,7 @@ def test_unconfigured_agent_compiles_an_explicit_empty_tools_list(
     spec = AgentSpec(
         name="bounded", model=ModelRef(provider="gemini", id="gemini-3.8-flash"), tools=tools
     )
-    assert compile_agent(spec)["tools"] == []
+    assert compile_agent(spec)["tools"] == [NO_TOOLS_TOOL]
 
 
 def test_configured_agent_compiles_only_declared_builtin_custom_and_mcp_tools() -> None:
@@ -719,7 +719,7 @@ async def test_agent_worker_budget_is_in_the_owned_template_and_blocks_another_i
         "max_total_tokens": 65_536,
     }
     assert transport.requests[0]["system_instruction"] == "Kept"
-    assert transport.requests[0]["tools"] == []
+    assert transport.requests[0]["tools"] == [NO_TOOLS_TOOL]
     assert await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
     restarted = GeminiManagedAgents(
         transport,

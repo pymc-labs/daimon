@@ -15,7 +15,7 @@ from mux.drivers.gemini.core import GeminiAgents, compile_agent, now, page_value
 from mux.drivers.gemini.mcp_auth import MCPSecretResolver
 from mux.drivers.gemini.skill_deployment import GCSBundleDeployment
 from mux.drivers.gemini.storage import Records, Storage, owner
-from mux.drivers.gemini.transport import Object, Transport, object_value
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, Transport, object_value
 from mux.errors import ProviderError, ScopeViolation
 from mux.profiles.gemini import INLINE_REUSE
 from mux.state.operations import request_digest
@@ -78,7 +78,11 @@ def native_definition(
         "id": id_,
         "base_agent": request["agent"],
         "agent_config": request["agent_config"],
-        "tools": request["tools"],
+        # A definition cannot hold a function tool (the Agents API allows only the
+        # built-ins and MCP servers), and its tools are not what restricts a turn:
+        # every interaction sends its own list, the no-tools sentinel included
+        # (measured 2026-10-23). So a tool-free agent is defined with none.
+        "tools": [] if request["tools"] == [NO_TOOLS_TOOL] else request["tools"],
         "base_environment": {"type": "remote", "sources": sources},
     }
     if spec.description is not None:

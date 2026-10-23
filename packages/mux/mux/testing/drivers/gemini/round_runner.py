@@ -32,7 +32,13 @@ from mux.drivers.gemini.core import BASE_AGENT
 from mux.drivers.gemini.deployment import (
     _require_clean_environment,  # pyright: ignore[reportPrivateUsage]
 )
-from mux.drivers.gemini.transport import API_REVISION, Object, SDKTransport, provider_call
+from mux.drivers.gemini.transport import (
+    API_REVISION,
+    NO_TOOLS_TOOL,
+    Object,
+    SDKTransport,
+    provider_call,
+)
 from mux.testing.conformance.budget import (
     BudgetConfig,
     BudgetGuard,
@@ -368,7 +374,9 @@ class RoundWire:
                 or self.posts >= self.maximum
                 or self.book.exceeds_interaction_limit()
                 or self.book.model_drift
-                or parsed.get("tools") != []
+                # The reviewed set: the inert no-tools sentinel alone (an empty list
+                # would enable Gemini's billable built-ins).
+                or parsed.get("tools") != [NO_TOOLS_TOOL]
                 or parsed.get("agent") != BASE_AGENT
                 or parsed.get("background") is not True
                 or parsed.get("store") is not True
@@ -835,7 +843,7 @@ async def execute(
             "N": envelope.interactions,
             "maximum_usd": str(envelope.maximum_usd),
             "runtime_max_usd": "0",
-            "tools": [],
+            "tools": [NO_TOOLS_TOOL],
             "native_creates": wire.posts if wire else 0,
             "actual_usd": str(receipt.actual_usd) if receipt.actual_usd is not None else None,
             "held_usd": str(receipt.held_usd),

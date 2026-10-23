@@ -53,6 +53,7 @@ from daimon.testing.outcome_oracle import LogObservation, VisibleText
 from daimon.testing.turn_router import build_turn_router
 from mux.contracts.ids import ChannelRef, ModelRef, Provider, ResourceRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+from mux.drivers.gemini import NO_TOOLS_TOOL
 from mux.drivers.gemini.flash import FlashAttempt
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDK
 from mux.drivers.openai.session_controls import SessionControls
@@ -261,7 +262,8 @@ class GeminiWire:
         assert request.method in {"POST", "GET"}
         if request.method == "POST":
             body = json_body(request)
-            assert body["tools"] == []
+            # An agent request: the inert no-tools sentinel, never [] (built-ins).
+            assert body["tools"] == [NO_TOOLS_TOOL]
             assert body["agent_config"]["model"] == "gemini-3.8-flash"
         # Gemini workspaces expire seven days after creation: stamp it now.
         stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -492,3 +492,15 @@ async def test_a_503_storm_across_the_flash_chain_strands_no_hold(postgres_state
     summary = outstanding_holds(json.dumps({str(i): row for i, row in enumerate(rows)}))
     # Only an accepted interaction keeps its hold (for settlement).
     assert summary["open_holds"] == (0 if last == "503" else 1)
+
+
+async def test_a_refusal_naming_an_interaction_keeps_its_hold(postgres_state):
+    sessions, scope, _, _ = postgres_state
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    owner = holds(sessions, scope)
+    await owner.before_attempt(model=model, attempt=1)
+    await owner.after_attempt(
+        receipt=FlashAttempt(model, 1, "refused", http_status=503, interaction_id="named")
+    )
+    (row,) = (await ledger(sessions)).values()
+    assert row["held_usd"] == "0.10", "an interaction exists: settle or the TTL frees it"

@@ -22,6 +22,7 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import bind_session_impl
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
 from mux.drivers.openai.transport import SDKTransport
 from mux.testing.isolated_sdk import build_async_openai, build_gemini_client
@@ -721,7 +722,7 @@ async def test_complete_declared_worker_proof_consumes_actual_native_counterpart
     assert len(transport.requests) == 1
     sent = transport.requests[0]
     assert sent["agent"] == selected.counterpart.agent.ref.id
-    assert sent["tools"] == []
+    assert sent["tools"] == [NO_TOOLS_TOOL]
     assert sent["environment"] == {"type": "remote", "sources": []}
 
 

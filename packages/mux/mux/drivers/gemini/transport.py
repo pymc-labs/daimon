@@ -48,6 +48,18 @@ class Transport(Protocol):
     ) -> AsyncIterator[Object]: ...
 
 
+#: The one tool an agent request with no tools of its own allows: listing it keeps
+#: Gemini's built-ins (billable search among them) off. Never meant to be called;
+#: the host answers a call to it once (`daimon.core.turn.gemini`).
+NO_TOOLS_FUNCTION = "daimon_no_tools"
+NO_TOOLS_TOOL: JsonValue = {
+    "type": "function",
+    "name": NO_TOOLS_FUNCTION,
+    "description": "No tools are available. Never call this; answer directly.",
+    "parameters": {"type": "object", "properties": {}},
+}
+
+
 def object_value(value: JsonValue) -> Object:
     if not isinstance(value, dict):
         raise ValueError("expected a provider object")
@@ -431,14 +443,18 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
 
 
 def connect_failure(error: BaseException) -> bool:
-    """The request never left: the connection itself failed (in `error` or its causes)."""
+    """The request never left: the connection itself failed (`error` or its explicit causes).
+
+    Only `__cause__` (`raise ... from`) is followed: an implicit `__context__` is
+    whatever was being handled when this error arose, not why it arose.
+    """
     seen: BaseException | None = error
     for _ in range(8):
         if seen is None:
             return False
         if isinstance(seen, httpx.ConnectError | httpx.ConnectTimeout):
             return True
-        seen = seen.__cause__ or seen.__context__
+        seen = seen.__cause__
     return False
 
 
@@ -661,14 +677,18 @@ class SDKTransport:
         return await provider_call(self._files.download(file=f"files/environment-{environment_id}"))
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
-        # Omission enables provider defaults, including billable web tools.
-        # Keep older saved requests explicit as well as freshly compiled agents.
+        # An omitted list is made explicit here, but for an AGENT request an empty
+        # list still means Gemini's built-ins (billable search among them). That is
+        # closed upstream: `compile_agent` never emits it (it allows the inert
+        # NO_TOOLS_TOOL), and a session saved with [] is upgraded before its send
+        # (`validate_intent`), which sends the fresh compilation.
         bounded = dict(request)
         bounded.setdefault("tools", [])
         if not isinstance(bounded["tools"], list):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="explicit_tools_required"
             )
+
         bounded = await refresh_bound_request(bounded)
         token = storage_request_token(bounded)
         if token is not None:

@@ -505,3 +505,59 @@ def test_only_a_failed_connection_is_classified_as_never_sent() -> None:
     # The request may have been sent: a read timeout or a dropped reply is unknown.
     assert normalize_error(httpx.ReadTimeout("slow", request=url)).native_code is None
     assert normalize_error(httpx.RemoteProtocolError("dropped", request=url)).native_code is None
+
+
+def test_write_and_pool_timeouts_after_the_send_may_have_reached_google() -> None:
+    import httpx
+    from mux.drivers.gemini.transport import normalize_error
+
+    url = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/interactions")
+    for error in (httpx.WriteTimeout("slow", request=url), httpx.PoolTimeout("busy", request=url)):
+        assert normalize_error(error).native_code is None
+    # An implicit context is not a cause: a connect error being handled elsewhere
+    # never makes an unrelated later failure "never sent".
+    later = httpx.ReadTimeout("slow", request=url)
+    later.__context__ = httpx.ConnectError("old", request=url)
+    assert normalize_error(later).native_code is None
+
+
+async def test_a_really_cancelled_create_task_still_publishes_its_receipt() -> None:
+    import asyncio
+
+    started = asyncio.Event()
+
+    class Hanging(FakeTransport):
+        async def create(self, request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    accounting = Accounting()
+    task = asyncio.create_task(FlashTransport(Hanging(), accounting).create(request()))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [(r.outcome, r.sent) for r in accounting.receipts] == [("unknown", True)]
+
+
+async def test_a_failed_receipt_never_replaces_the_cancel_in_flight() -> None:
+    import asyncio
+
+    started = asyncio.Event()
+
+    class Hanging(FakeTransport):
+        async def create(self, request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    class Broken(Accounting):
+        async def after_attempt(self, *, receipt):  # type: ignore[no-untyped-def]
+            raise RuntimeError("ledger write failed")
+
+    task = asyncio.create_task(FlashTransport(Hanging(), Broken()).create(request()))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

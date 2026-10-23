@@ -43,7 +43,7 @@ from mux.drivers.gemini.skill_deployment import (
     verify_retained_deployments,
 )
 from mux.drivers.gemini.storage import Records, Storage
-from mux.drivers.gemini.transport import SDKTransport, Transport
+from mux.drivers.gemini.transport import NO_TOOLS_FUNCTION, NO_TOOLS_TOOL, SDKTransport, Transport
 from mux.errors import UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.store import StateStore
@@ -166,6 +166,8 @@ class GeminiManagedAgents:
 
 
 __all__ = [
+    "NO_TOOLS_FUNCTION",
+    "NO_TOOLS_TOOL",
     "ATTEMPT_MODELS",
     "AgentCatalogTransport",
     "FLASH_MODELS",
