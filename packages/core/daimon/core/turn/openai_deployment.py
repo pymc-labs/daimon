@@ -8,11 +8,14 @@ recheck. No SDK client or provider configuration is loaded during app startup.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
 
+import structlog
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
@@ -23,6 +26,7 @@ from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_codec import CONVERSATION_PROFILE, PROFILE, PROFILES
+from daimon.core.turn.openai_environment import EnvironmentPort
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.persistence import TurnPersistence
@@ -61,6 +65,7 @@ from pydantic import (
     model_validator,
 )
 
+log = structlog.get_logger(__name__)
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 _MANIFEST = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_MANIFEST_BYTES = 1_048_576
@@ -663,6 +668,74 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     return runtime
 
 
+def _environments(key: str) -> EnvironmentPort:
+    """The environment port on the install's OpenAI key (no I/O yet).
+
+    Like the code-default rows (`runtime_defaults`): no `OpenAI-Project` header, so
+    the key's own default project applies, and `DEFAULT_PROJECT` is only the label
+    the environment's refs carry, matching the row that will use it.
+    """
+    from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
+    from mux.drivers.openai import Context, OpenAIEnvironments, configured_transport
+
+    transport = configured_transport(api_key=key, project=None)
+    return OpenAIEnvironments(Context(transport, DEFAULT_PROJECT, PROFILE, None))
+
+
+async def _deployment_id() -> str | None:
+    from daimon.core.turn.openai_environment import deployment_id
+
+    return await deployment_id()
+
+
+async def prepare_tenant_environment(
+    request: ProviderPreparationRequest,
+) -> ProviderPreparationRequest:
+    """Before a GPT root turn's runtime is built: the tenant's hosted environment.
+
+    Only for an agent's own `openai.persistent_workspace` turn on a tenant whose
+    runtime file has no row for it (its own row, e.g. the template `daimon openai
+    init` writes, always wins), on an install with a deployment OpenAI key. The
+    code-default root row (`runtime_defaults`) then uses it. Everything else passes
+    through unchanged and is refused, or served, exactly as before.
+    """
+    from daimon.core.provider_keys import DEFAULT_KEY_ENV
+    from daimon.core.turn.openai_environment import tenant_environment
+    from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT, OPENAI
+    from daimon.core.turn.runtime_manifest import manifest_has_row
+
+    revision = request.admission.backend_revision
+    store = request.deps.state_store
+    key = (os.environ.get(DEFAULT_KEY_ENV[OPENAI]) or "").strip()
+    if (
+        revision is None
+        or revision.profile != PROFILE
+        or request.worker is not None
+        or request.openai_environment_id is not None
+        or store is None
+        or not key
+        or manifest_has_row(request)
+    ):
+        return request
+    deployment = await _deployment_id()
+    if deployment is None:
+        # Fail closed: without a name only this deployment uses, a reconcile could
+        # adopt another deployment's environment. The turn stays as it was before.
+        log.warning("openai_environment.deployment_unknown", tenant_id=request.scope.tenant_id)
+        return request
+    environment_id = await tenant_environment(
+        store,
+        _environments(key),
+        tenant_id=request.scope.tenant_id,
+        project=DEFAULT_PROJECT,
+        deployment=deployment,
+        # Wall-clock time: a turn's `now` can be frozen at admission, and waiting
+        # for another replica's create must actually time out.
+        now=lambda: datetime.now(UTC),
+    )
+    return replace(request, openai_environment_id=environment_id)
+
+
 def register_runtime() -> None:
     """Install the provider's host callbacks without transports or credential access."""
     from daimon.core.turn.runtimes import register_channel_runtime
@@ -675,4 +748,5 @@ def register_runtime() -> None:
             authorizations=partial(authorized_deployments, profile=profile),
             tariffs=partial(provider_prices, PROFILE) if profile == PROFILE else None,
             fallback=True,
+            prepare=prepare_tenant_environment if profile == PROFILE else None,
         )

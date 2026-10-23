@@ -1098,3 +1098,27 @@ async def test_a_confirmed_switch_of_the_copy_this_thread_was_handed_to_moves_it
     else:
         assert "isn't the one answering here" in changed.summary
         assert rows == []
+
+
+async def test_a_switch_preview_to_gpt_never_creates_the_tenants_environment(
+    active_chat, monkeypatch
+):
+    from daimon.core.turn import openai_environment
+
+    async def created(*_args, **_kwargs):
+        raise AssertionError("a preview created the tenant's OpenAI environment")
+
+    monkeypatch.setattr(openai_environment, "tenant_environment", created)
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "offline-key")
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    _without_own_tools(payload)
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="openai",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview"

@@ -227,6 +227,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "This model's prepaid spending hold is used up.",
         "Ask {who} to release or raise it.",
     ),
+    "provider_setup_pending": _Copy(
+        "Couldn't set up GPT for this {scope} yet.",
+        "Try again shortly.",
+    ),
 }
 # A provider refusal names its real cause and the chat words that fix it.
 _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {

@@ -2856,8 +2856,12 @@ async def read_preparation_counterpart(
         if source is None or revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
         target = selected.target_spec
-        from daimon.core.turn.runtimes import ScopedTurnRuntimes
+        from daimon.core.turn.runtimes import ScopedTurnRuntimes, prepare_channel_runtime
 
+        # Provider setup this turn's runtime needs first (e.g. the tenant's GPT
+        # environment, created once). Only a real turn's preparation reaches here.
+        timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+        selected = await asyncio.wait_for(prepare_channel_runtime(selected), timeout=timeout)
         if isinstance(selected.deps.turn_runtimes, ScopedTurnRuntimes):
             selected.deps.turn_runtimes.bind_preparation(selected)
         runtime = selected.deps.turn_runtimes.get(revision.profile)
@@ -2910,6 +2914,12 @@ async def read_preparation_counterpart(
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)
+    except AdmissionDenied as error:
+        # A refusal that names its own cause (e.g. GPT still being set up for this
+        # tenant) reaches the person as itself; anything else stays "unsupported".
+        if error.reason != "backend_unsupported":
+            raise
+        raise AdmissionDenied(reason="backend_unsupported") from error
     except (UnsupportedCapability, TimeoutError, TurnError, AgentBackendRefused) as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:
@@ -3271,6 +3281,24 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         return plan_type.model_validate(resolved)
     except (OSError, ValidationError):
         raise AdmissionDenied(reason="backend_unsupported") from None
+
+
+def manifest_has_row(request: ProviderPreparationRequest) -> bool:
+    """Whether the operator's runtime file has any row for this turn (exact or wildcard).
+
+    A tenant's own row always wins over anything provisioned on its behalf, so
+    this reads only the file, never the code defaults. A configured file that
+    can't be read counts as having a row: never provision around a
+    configuration the operator meant to install.
+    """
+    revision = request.admission.backend_revision
+    if revision is None:
+        return False
+    try:
+        rows = _configured_rows()
+    except AdmissionDenied:
+        return True
+    return bool(_matching_rows(rows, revision, request, allow_wildcard=True))
 
 
 def _worker_template(plan: CounterpartPlan) -> bool:
