@@ -1,16 +1,20 @@
 """Rules the chat `routines` panels share: status glyph, label, order and who may act.
 
-Pure, apart from `channel_agent`, which reads the agent a channel answers with.
+Pure, apart from `channel_agent`, which reads the agent a channel answers with,
+and `panel_save_refusal`, which reads the access policy.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Literal
+from typing import Literal, cast
 
+from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_subject
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.turn.errors import AdmissionDenialReason
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PANEL_CAP = 25
@@ -81,3 +85,43 @@ async def channel_agent(
         session, context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id), default=default
     )
     return config.agent_name
+
+
+async def panel_save_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    is_admin: bool,
+    agent: AgentRef,
+    channel_id: str | None,
+) -> AdmissionDenialReason | None:
+    """Why a panel may not save a routine with no destination, or None.
+
+    The checks chat's `create_routine` runs inside an admitted turn: the
+    creator must be someone the access policy lets start turns (a fire acts
+    for them, `ACT_FOR_CREATOR`), and the agent must be one that may run with
+    nowhere to post, saved from `channel_id` (`SAVE_ROUTINE`: a pinned agent
+    needs one of its channels, and a channel kept to its own agents keeps its
+    routines). Without them the panel would say a routine was created that
+    every fire then refuses. Raises `AccessPolicyUnreadable` when the policy
+    can't be read.
+    """
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    subject = build_subject(is_admin=is_admin, platform_user_id=user_id)
+    for action, origin in (
+        (Action.ACT_FOR_CREATOR, None),
+        (Action.SAVE_ROUTINE, Place(channel_id=channel_id) if channel_id else None),
+    ):
+        decision = authorize(
+            policy,
+            subject=subject,
+            action=action,
+            surface=Surface.ROUTINE,
+            agent=agent if action is Action.SAVE_ROUTINE else None,
+            place=Place(),
+            origin=origin,
+        )
+        if not decision:
+            return cast(AdmissionDenialReason, decision.reason)
+    return None

@@ -51,6 +51,7 @@ from daimon.core.routines import (
 )
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
+from daimon.core.turn.notices import RefusalNouns
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -357,6 +358,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     if may_schedule_agent(name, is_admin=False, answers_here=here)
                 ]
             if not agent_names:
+                nouns = RefusalNouns.for_platform("slack")
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
@@ -364,6 +366,9 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                         "No agent answers here, so there's none you can schedule from this "
                         "channel.\n\nOpen this in a channel with an agent, or ask a workspace "
                         "admin."
+                        if not is_admin
+                        else "There are no agents to schedule yet.\n\n"
+                        f"To add one, {nouns.verb} {nouns.setup}."
                     ),
                 )
                 return

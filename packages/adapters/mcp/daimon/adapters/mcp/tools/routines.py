@@ -560,9 +560,10 @@ async def _create_routine_impl(
     except ToolError as err:
         if not defaulted:
             raise
+        why = str(err).removesuffix("Nothing was saved.").strip().rstrip(".") + "."
         raise ToolError(
-            f"With no destination named, this routine would post here, but it can't ({err}). "
-            "Name a channel or thread for its results. Nothing was saved."
+            f"With no destination named, this routine would post in this conversation, "
+            f"but it can't: {why} Name a channel or thread for its results. Nothing was saved."
         ) from err
     if runtime.settings.mcp.require_routine_destination and destination_kind is None:
         raise ToolError(
@@ -833,7 +834,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``update_routine(clear_destination=true)``. A run's spend counts
         toward the destination channel's budget, or without a destination
         the budget of the channel named by ``origin_context_id``, and a run
-        is skipped while that budget is used up.
+        is skipped while that budget is used up. When the routine's job is
+        to post somewhere other than this conversation, name that place as
+        the destination; otherwise its result posts here as well.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,

@@ -220,3 +220,35 @@ async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
     assert row.next_fire_at is not None
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel refreshes in place"
+
+
+async def test_create_from_a_channel_thread_offers_the_agent_that_channel_answers_with(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Opened privately in a channel thread, the panel uses that channel's agent,
+    not the workspace default, as a turn there would."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    channel = "19:research@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+            tenant_id=TENANT,
+            agent_name="acme-project",
+            mode="agent",
+        )
+    fetch = {"data": {"dialog_id": "routine_create", "msteams": {"type": "task/fetch"}}}
+    runtime = build_teams_runtime(db_session_factory, anthropic=build_fake_anthropic(_agents_two))
+    async with running_service(runtime, teams_api_fake) as service:
+        member = await post_activity(
+            service,
+            make_invoke(
+                "task/fetch", fetch, user=OTHER_AAD_OBJECT_ID, chat=f"{channel};messageid=17"
+            ),
+        )
+
+    assert member["task"]["type"] == "continue", member
+    assert '"acme-project"' in json.dumps(member), "the channel's own agent"
+    assert '"daimon"' not in json.dumps(member), "not the workspace default"

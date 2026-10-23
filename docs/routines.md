@@ -142,17 +142,23 @@ The platform surfaces differ, and the difference is deliberate:
   ("every weekday at 9am, post the sales numbers"), and labels the schedule
   field "Schedule (advanced: cron, like 0 9 * * 1-5)". The panel rows and the
   confirmation show the schedule in words (`daimon.core.cron_words`).
-- **Teams** `routines` (1:1 chat) matches Slack: it creates through a
+- **Teams** `routines` (1:1 chat, or privately in a channel thread) matches Slack: it creates through a
   dialog, and the panel writes the row the same way
   (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). Its form
   and schedule words read the same as Slack's. The shared rules (glyph, label,
   ordering, admin-or-creator, and `may_schedule_agent`, who may schedule which
   agent) live in `daimon.core.routines`. Both panels apply the same rule as
   `create_routine` in chat: a member may create a routine for the agent the
-  panel's channel answers with (on Teams, the 1:1 chat's, which is the
-  workspace default agent), and its agent picker lists only that agent; an
-  admin may pick any agent. The submission is checked again before the row
-  is written.
+  channel or chat the panel was opened in answers with (on Teams a channel
+  thread's channel, or the chat's own setting, which is usually the workspace
+  default agent), and its agent picker lists only that agent; an admin may
+  pick any agent. The submission is checked again before the row is written,
+  together with what an admitted chat turn would have checked
+  (`panel_save_refusal`): the creator must be someone the access policy lets
+  start turns (`ACT_FOR_CREATOR`), and `authorize(SAVE_ROUTINE)` must allow
+  the agent with no destination, saved from that channel (a pinned agent, or
+  another channel's own agent, is refused). A refusal uses the turn refusal
+  copy, so the panel never confirms a routine every fire would refuse.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
@@ -479,7 +485,13 @@ depleted balance, a channel that isn't set up or whose setup is out of date
 run (`AdmissionDenied`, worded by its own reason and cause, so a provider
 that isn't turned on names the provider and the chat words that switch it),
 and the protected, pinned, isolated or otherwise denied admission reasons. A
-used-up channel budget ends `It won't run until the budget has room again.` The notice is queued only
+provider refusal that names no cause reads "This agent's model provider can't
+run here." A used-up channel budget ends `It won't run until the budget has
+room again.` A used-up prepaid provider hold (`provider_hold_cap_reached`)
+frees up on its own as attempts settle or age out, so it keeps the turn
+refusal's words but ends with the try-again line.
+
+The notice is queued only
 while `last_error` is still null, so a routine that keeps failing posts once
 and stays quiet until a run succeeds; the panels still show every failure.
 It never replaces a post that is pending or claimed, so an undelivered result

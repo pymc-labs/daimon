@@ -330,6 +330,12 @@ _REFUSAL_FAILURES: Final[dict[TerminationReason, str]] = {
     TerminationReason.MISSING_CONFIG: _UNTIL_FIXED,
     TerminationReason.RESOLVER_MISS: _UNTIL_FIXED,
 }
+#: Admission refusals that clear without anyone acting: a provider's prepaid
+#: hold frees up as its attempts settle or age out, so a later run may pass.
+_PASSING_DENIALS: Final[frozenset[str]] = frozenset({"provider_hold_cap_reached"})
+#: `backend_unsupported` with no named cause: the turn copy's "right now"
+#: would contradict "until that's fixed".
+_PROVIDER_CANT_RUN = "This agent's model provider can't run here.\n\nAsk {who} to check it."
 
 
 def failure_notice_text(
@@ -348,9 +354,14 @@ def failure_notice_text(
     if (then := _REFUSAL_FAILURES.get(reason)) is not None or refused:
         then = then or _UNTIL_FIXED
         if isinstance(error, AdmissionDenied):
-            refusal = admission_refusal_text(
-                error.reason, nouns, cause=error.cause, provider=error.provider
-            )
+            if error.reason in _PASSING_DENIALS:
+                then = _NEXT_RUN
+            if error.reason == "backend_unsupported" and error.cause is None:
+                refusal = _PROVIDER_CANT_RUN.format(who=nouns.who)
+            else:
+                refusal = admission_refusal_text(
+                    error.reason, nouns, cause=error.cause, provider=error.provider
+                )
             return f"{refusal}\n\n{then}"
         if notice := render_termination_notice(
             reason,

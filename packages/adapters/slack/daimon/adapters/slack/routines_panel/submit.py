@@ -30,14 +30,21 @@ from daimon.adapters.slack.routines_panel.read import load_routines, routines_vi
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.authz import build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.cron_words import schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.routines import can_manage_routine, channel_agent, may_schedule_agent
+from daimon.core.routines import (
+    can_manage_routine,
+    channel_agent,
+    may_schedule_agent,
+    panel_save_refusal,
+)
 from daimon.core.stores.routines import create_routine, delete_routine, get_routine
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -167,18 +174,17 @@ async def _refuse_agent(
     web_client: AsyncWebClient,
     *,
     tenant_id: uuid.UUID,
-    team_id: str,
+    is_admin: bool,
     channel_id: str,
     user_id: str,
     agent_name: str,
 ) -> bool:
-    """Re-check, server-side, that the submitter may schedule `agent_name`.
+    """Check, server-side, that the submitter may schedule `agent_name`.
 
     The rule asking in chat applies (`may_schedule_agent`): a member may
     schedule the agent this channel answers with, an admin any agent.
     Sends an ephemeral and returns True when refused.
     """
-    is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
     if is_admin:
         return False
     async with runtime.sessionmaker() as session:
@@ -231,11 +237,12 @@ async def run_routines_create_submission(
         timezone_ = str(extra.get("timezone") or "")
         trigger_message = str(extra.get("trigger_message") or "")
 
+        is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
         if await _refuse_agent(
             runtime,
             web_client,
             tenant_id=tenant_id,
-            team_id=team_id,
+            is_admin=is_admin,
             channel_id=channel_id,
             user_id=user_id,
             agent_name=agent_name,
@@ -260,6 +267,25 @@ async def run_routines_create_submission(
                 channel=channel_id,
                 user=user_id,
                 text=f":x: No agent named `{agent_name}` found for this workspace.",
+            )
+            return
+
+        async with runtime.sessionmaker() as session:
+            refusal = await panel_save_refusal(
+                session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                is_admin=is_admin,
+                agent=build_agent_ref(match.name, match.metadata, agent_name),
+                channel_id=channel_id or None,
+            )
+        if refusal is not None:
+            await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id,
+                user=user_id,
+                text=admission_refusal_text(
+                    refusal, RefusalNouns.for_platform("slack"), agent_name=agent_name
+                ),
             )
             return
 

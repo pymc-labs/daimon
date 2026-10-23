@@ -1467,8 +1467,10 @@ async def test_a_conversation_a_routine_cannot_post_in_is_refused_with_the_fix(
     tenant_id, account_id, origin_id = await _origin(
         db_session, platform="discord", channel="444", thread="999"
     )
-    with pytest.raises(ToolError, match="would post here.*Name a channel or thread"):
+    with pytest.raises(ToolError, match="would post in this conversation") as refused:
         await _create_here(committing_sessionmaker, tenant_id, account_id, origin_id)
+    assert str(refused.value).count("Nothing was saved.") == 1, str(refused.value)
+    assert "Name a channel or thread for its results." in str(refused.value)
 
 
 async def test_the_agent_scope_check_applies_to_a_defaulted_destination(

@@ -193,15 +193,14 @@ def test_notice_says_what_failed_in_plain_words(
     ("error", "expected"),
     [
         (
-            AdmissionDenied(reason="provider_hold_cap_reached"),
-            "This model's prepaid spending hold is used up.\n\nAsk an admin to release or "
-            "raise it.\n\nIt will fail the same way at every scheduled time until that's fixed.",
-        ),
-        (
             AdmissionDenied(
                 reason="backend_unsupported", cause="provider_not_allowed", provider="gemini"
             ),
             "Gemini isn't turned on for this server.",
+        ),
+        (
+            AdmissionDenied(reason="backend_unsupported"),
+            "This agent's model provider can't run here.\n\nAsk an admin to check it.",
         ),
     ],
 )
@@ -213,6 +212,15 @@ def test_a_refusal_no_later_run_gets_past_names_its_cause_and_says_so(
     assert text.startswith(expected), "the turn refusal's own words"
     assert "next scheduled time" not in text, "it does not promise a retry that fails again"
     assert text.endswith("until that's fixed.")
+
+
+def test_a_provider_hold_that_frees_up_by_itself_says_it_will_try_again() -> None:
+    """Holds settle as attempts finish and age out, so a later run can pass."""
+    error = AdmissionDenied(reason="provider_hold_cap_reached")
+    assert failure_notice_text(termination_reason(error), platform="discord", error=error) == (
+        "This model's prepaid spending hold is used up.\n\nAsk an admin to release or "
+        "raise it.\n\nIt will try again at its next scheduled time."
+    )
 
 
 @pytest.mark.parametrize(

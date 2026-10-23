@@ -3,7 +3,8 @@
 Mirrors Slack's `/routines` panel and its rules: a member sees only the
 routines they created, an admin sees all; only an admin or the creator may
 pause, resume, read the last output or delete one; a member may create one
-for the agent this chat answers with, an admin for any agent, as in chat.
+for the agent the chat or channel it is opened in answers with, an admin for
+any agent, as in chat.
 Every click re-verifies the clicker and re-reads the row, so a stale card
 grants nothing.
 """
@@ -38,6 +39,7 @@ from daimon.adapters.teams.routines_card import (
     panel_card,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.authz import build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -47,9 +49,11 @@ from daimon.core.routines import (
     channel_agent,
     may_schedule_agent,
     panel_rows,
+    panel_save_refusal,
 )
 from daimon.core.stores import routines as store
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -66,8 +70,18 @@ GONE = "This routine no longer exists."
 NOT_OWNER = "Only the routine's creator or an admin can do that."
 NOT_HERE = "{agent} doesn't answer here, so only an admin can schedule it."
 NO_AGENT = "No agent answers here, so there's none you can schedule.\n\nAsk an admin."
+NO_AGENTS_YET = "There are no agents to schedule yet.\n\nTo add one, {verb} {setup}."
 NEW_ROUTINE = "New routine"
 _EVENT = "teams.routines.failed"
+
+
+def _place(actor: Actor) -> str:
+    """The channel (or chat) the panel was opened in, as a turn there resolves it.
+
+    A channel thread's conversation carries its root (`;messageid=`); the
+    channel is what its agent is configured on.
+    """
+    return actor.conversation_id.split(";", 1)[0]
 
 
 class RoutinesPanel:
@@ -178,7 +192,7 @@ class RoutinesPanel:
             return await channel_agent(
                 session,
                 tenant_id=actor.tenant_id,
-                channel_id=None,
+                channel_id=_place(actor),
                 default=self._runtime.deployment_default,
             )
 
@@ -193,7 +207,12 @@ class RoutinesPanel:
         if actor is None:
             return dialog_notice(NEW_ROUTINE, DENIED)
         if not await self._schedulable(actor):
-            return dialog_notice(NEW_ROUTINE, NO_AGENT)
+            if not actor.is_admin:
+                return dialog_notice(NEW_ROUTINE, NO_AGENT)
+            nouns = RefusalNouns.for_platform("teams")
+            return dialog_notice(
+                NEW_ROUTINE, NO_AGENTS_YET.format(verb=nouns.verb, setup=nouns.setup)
+            )
         return await self._form(actor, {})
 
     async def _submit(
@@ -238,6 +257,19 @@ class RoutinesPanel:
         )
         if agent is None:
             return f"No agent named {values['agent']!r} found."
+        async with self._runtime.sessionmaker() as session:
+            refusal = await panel_save_refusal(
+                session,
+                tenant_id=actor.tenant_id,
+                user_id=actor.user_id,
+                is_admin=actor.is_admin,
+                agent=build_agent_ref(agent.name, agent.metadata, values["agent"]),
+                channel_id=_place(actor),
+            )
+        if refusal is not None:
+            return admission_refusal_text(
+                refusal, RefusalNouns.for_platform("teams"), agent_name=values["agent"]
+            )
         async with self._runtime.sessionmaker.begin() as session:
             await store.create_routine(
                 session,
