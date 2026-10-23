@@ -15,6 +15,7 @@ import aiohttp
 import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.core.agent_identity import AgentIdentity
+from daimon.core.posted_controls.confirmation import EXPIRED_MESSAGE
 from daimon.core.posted_controls.lifecycle import edit_card_within
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.core.turn.provider_actions import (
@@ -209,7 +210,7 @@ class SlackProviderActions:
             refusal = "This request is no longer pending."
         elif datetime.now(UTC) >= posted.prompt.context.expires_at:
             posted.answer.set_result(None)
-            refusal = "This request expired."
+            refusal = EXPIRED_MESSAGE
         if refusal is not None:
             try:
                 await posted.client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs are Unknown

@@ -10,6 +10,7 @@ from typing import TypedDict
 
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREYPLE
+from daimon.core.posted_controls.confirmation import EXPIRED_MESSAGE
 from daimon.core.posted_controls.lifecycle import edit_card_within
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.core.turn.provider_actions import (
@@ -111,7 +112,7 @@ class ProviderActionView(discord.ui.LayoutView):
             refusal = "This request is no longer pending."
         elif datetime.now(UTC) >= self.prompt.context.expires_at:
             self.answer.set_result(None)
-            refusal = "This request expired."
+            refusal = EXPIRED_MESSAGE
         if refusal is not None:
             await interaction.response.send_message(
                 refusal, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()

@@ -30,10 +30,12 @@ from daimon.core.confirmation import (
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
-    NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
+    RULE_REFUSED_FOOTER,
+    STOPPED_MESSAGE,
     ConfirmationCardState,
     build_confirmation_card,
+    refused_after_approval,
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
@@ -440,6 +442,7 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
     assert answer == "expired"
     assert sender.activities[-1].id == "m-1", "the posted card is edited in place"
     assert "Expired" in _json(sender, -1) and "Action.Execute" not in _json(sender, -1)
+    assert "Nothing ran. Ask again to run it." in _json(sender, -1)
     token = re.search(r'"token":"([^"]+)"', _json(sender, 0))
     assert token is not None
     assert cards._controls.missing_message(token.group(1)) == EXPIRED_MESSAGE
@@ -457,6 +460,25 @@ async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
 
     assert sender.activities[-1].id == "m-1"
     assert "Stopped" in _json(sender, -1)
+    late = await cards.on_action(_click(token, "approve", AAD_OBJECT_ID))
+    assert late.value == STOPPED_MESSAGE, "the card says Stopped, so the click does too"
+
+
+async def test_a_rule_refused_approved_card_retires_with_the_rules_footer() -> None:
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting, token = await _post(cards, sender)
+    await cards.on_action(_click(token, "approve", AAD_OBJECT_ID))
+
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation)
+    with refused_after_approval():
+        await result.retire_unsent()
+    assert await drain_card_edits(1) == 0
+
+    assert "Stopped" in _json(sender, -1)
+    assert RULE_REFUSED_FOOTER in _json(sender, -1)
+    assert "Ask again" not in _json(sender, -1)
 
 
 async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> None:
@@ -469,8 +491,9 @@ async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> No
         await waiting
 
     assert sender.activities[-1].id == "m-1" and "Stopped" in _json(sender, -1)
+    assert "Nothing ran. Ask again to run it." in _json(sender, -1)
     late = await cards.on_action(_click(token, "approve", AAD_OBJECT_ID))
-    assert late.value == NO_LONGER_PENDING_MESSAGE
+    assert late.value == STOPPED_MESSAGE, "a stopped card was never answered"
     assert len(sender.sent) == 2, "a late click changes nothing"
 
 

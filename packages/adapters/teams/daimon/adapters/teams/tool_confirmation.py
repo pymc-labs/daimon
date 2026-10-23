@@ -132,7 +132,7 @@ def _footer(
         if prompt.tool_rules_enabled and card.footer is not None:
             return (card.footer.format(actor=answered_by or card.answered_by_platform_user_id),)
         return (f"by {answered_by or name}",)
-    return ()
+    return (card.footer,) if card.footer is not None else ()
 
 
 def _detail_blocks(lines: tuple[str, ...]) -> list[CardElement]:
@@ -322,12 +322,14 @@ class TeamsConfirmationCards:
             if prompt.tool_rule is not None and rule_factory is not None:
                 prompt = await snapshot_tool_rule(prompt, rule_factory)
             posted_cards: list[_PostedCard] = []
+            posted_tokens: list[str] = []
             if requester_display_name:
                 prompt = prompt.model_copy(
                     update={"requester_display_name": requester_display_name}
                 )
 
             async def post(token: str) -> _PostedCard:
+                posted_tokens.append(token)
                 card = build_confirmation_card(
                     prompt, state="pending", token=token, allow_always=prompt.tool_rule is not None
                 )
@@ -369,6 +371,8 @@ class TeamsConfirmationCards:
                     # (`edit_card_within` keeps per-card call order).
                     await answered_posted.answered_edit_done.wait()
                     answered_posted.retired.set()
+                    # Approved but never sent: a late click says it was stopped.
+                    self._controls.stopped_tokens.extend(posted_tokens)
                     await self._edit(answered_posted, "stopped")
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)

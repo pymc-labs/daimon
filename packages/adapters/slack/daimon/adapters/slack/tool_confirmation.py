@@ -228,8 +228,10 @@ class SlackConfirmationCards:
             if prompt.tool_rule is not None and rule_factory is not None:
                 prompt = await snapshot_tool_rule(prompt, rule_factory)
             posted_cards: list[_PostedCard] = []
+            posted_tokens: list[str] = []
 
             async def post(token: str) -> _PostedCard:
+                posted_tokens.append(token)
                 card = build_confirmation_card(
                     prompt, state="pending", token=token, allow_always=prompt.tool_rule is not None
                 )
@@ -279,6 +281,8 @@ class SlackConfirmationCards:
                     # (`edit_card_within` keeps per-card call order).
                     await answered_posted.answered_edit_done.wait()
                     answered_posted.retired.set()
+                    # Approved but never sent: a late click says it was stopped.
+                    self._controls.stopped_tokens.extend(posted_tokens)
                     await _edit(answered_posted, "stopped", answered_by=None)
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)

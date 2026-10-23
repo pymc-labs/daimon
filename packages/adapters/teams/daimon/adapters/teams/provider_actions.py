@@ -18,6 +18,7 @@ from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.card_actions import button, submitted_fields, toast
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
+from daimon.core.posted_controls.confirmation import EXPIRED_MESSAGE
 from daimon.core.posted_controls.lifecycle import edit_card_within
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.core.turn.provider_actions import (
@@ -197,7 +198,7 @@ class TeamsProviderActions:
             return toast("This request is no longer pending.")
         if datetime.now(UTC) >= posted.prompt.context.expires_at:
             posted.answer.set_result(None)
-            return toast("This request expired.")
+            return toast(EXPIRED_MESSAGE)
         posted.choice, response = choices[int(index)]
         posted.answer.set_result(response)
         return toast("Response recorded.")

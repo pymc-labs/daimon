@@ -141,7 +141,9 @@ async def test_save_if_lost_admin_check_returns_after_settlement(loser: str) -> 
         )()
     release.set()
     assert await task == (
-        "This request was already answered." if loser == "deny" else "This request expired."
+        "This request was already answered."
+        if loser == "deny"
+        else "This request expired, so nothing ran. Ask again to run it."
     )
     assert not saved
 
@@ -161,7 +163,9 @@ async def test_approved_click_without_save_has_no_rule_to_replay(
     assert controls.claim_admin(token) is None
     assert future.result() == "approved"
     restarted: PostedConfirmations[object] = PostedConfirmations()  # type: ignore[type-var]
-    assert restarted.claim_admin(token) == "This request was already answered."
+    assert restarted.claim_admin(token) == (
+        "This request is no longer active. Ask again if it still needs doing."
+    ), "a restarted process never saw this token: it claims neither an answer nor a non-run"
     async with db_session_factory() as session:
         assert (
             await store.get_rule(
