@@ -319,6 +319,19 @@ class HostFleetToolService:
                 obstacle = root_refusal(origin.id)
                 if obstacle is not None:
                     raise ToolError(fleet_root_obstacle_text(obstacle)) from None
+                from daimon.core.fleet_configuration import FLEET_UNAVAILABLE_HERE
+                from daimon.core.turn.runtime_manifest import default_fleet_unavailable_here
+
+                # No default fleet where results can't be delivered yet; a custom
+                # grant's root that went stale is still just unavailable.
+                if caller.chat_agent_id is not None and await default_fleet_unavailable_here(
+                    self._deps,
+                    tenant_id=caller.tenant_id,
+                    agent_id=caller.chat_agent_id,
+                    platform=caller.platform,
+                    now=datetime.now(UTC),
+                ):
+                    raise ToolError(FLEET_UNAVAILABLE_HERE) from None
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
             parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_admin))
         else:

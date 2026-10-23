@@ -227,6 +227,7 @@ async def root_turn(
             thread.channel.channel_id,
             thread.thread_id,
             False,
+            platform="discord",
         )
         admission = Admission(
             account.id,

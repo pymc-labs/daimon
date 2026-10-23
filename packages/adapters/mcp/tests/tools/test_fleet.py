@@ -1561,3 +1561,60 @@ async def test_the_local_opus_fast_preset_is_never_a_fleet_worker_model() -> Non
         )
     (call,) = orchestrator.spawn.await_args_list
     assert call.kwargs["agent"].model == ModelRef(provider="anthropic", id="claude-opus-5-5")
+
+
+@pytest.mark.parametrize("custom", [False, True])
+async def test_a_slack_root_with_no_fleet_is_told_fleets_arent_available_here(root_turn, custom):
+    """No default fleet where no adapter settles and delivers workers (Slack, Teams).
+
+    It never names another chat app. A custom grant's root that went stale is still
+    just unavailable, not "not available here".
+    """
+    from daimon.core.turn_origin import turn_origin
+    from sqlalchemy import text
+
+    deps, prepared, _, _, seed, _, _, _ = root_turn
+    if not custom:
+        # No stored fleet setting at all: the agent has only the computed default.
+        async with deps.sessionmaker.begin() as db:
+            await db.execute(text("DELETE FROM agent_backend_revision"))
+    bridge = HostFleetToolService(
+        FleetOrchestrator(
+            HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal(1), deps=deps)
+        ),
+        runtime=replace(runtime(), session_factory=deps.sessionmaker, client=deps.anthropic),
+        deps=deps,
+    )
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="slack",
+        parent_channel_id="C-slack",
+        thread_id="T-slack",
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
+        keep_fleet_root=True,
+    ) as slack_origin:
+        from daimon.core.ma_identity import derive_agent_uuid
+
+        caller = replace(
+            AUTH,
+            tenant_id=slack_origin.tenant_id,
+            account_id=slack_origin.account_id,
+            platform="slack",
+            chat_agent_id=derive_agent_uuid(
+                tenant_id=slack_origin.tenant_id, ma_agent_id=prepared.admission.agent.id
+            ),
+        )
+        with pytest.raises(ToolError) as refused:
+            await bridge.status(caller, run_id=None, origin_context_id=slack_origin.id)
+        message = str(refused.value)
+        assert "Discord" not in message
+        if custom:
+            assert "root_unavailable" in message
+        else:
+            assert message == "Fleets aren't available here yet."
