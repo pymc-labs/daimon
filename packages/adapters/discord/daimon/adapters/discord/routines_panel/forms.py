@@ -92,7 +92,7 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
                 return
             source_thread_id = str(channel.id) if isinstance(channel, discord.Thread) else None
             parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
-            if parent_id is None:
+            if not parent_id:
                 await interaction.response.send_message(embeds.SOURCE_UNVERIFIED, ephemeral=True)
                 return
             source_channel_id = str(parent_id)
