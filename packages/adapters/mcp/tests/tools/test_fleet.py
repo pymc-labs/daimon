@@ -95,7 +95,12 @@ def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(Settings.model_config, "env_prefix", "N11_FLEET_TEST_UNUSED_")
 
 
-def runtime(*, path: Literal["legacy", "mux"] = "mux", channel_backends: bool = True) -> McpRuntime:
+def runtime(
+    *,
+    path: Literal["legacy", "mux"] = "mux",
+    channel_backends: bool = True,
+    agent_backends: bool = True,
+) -> McpRuntime:
     # No SDK constructor or DB engine is needed at this thin adapter boundary.
     return McpRuntime(
         session_factory=cast(Any, None),
@@ -104,7 +109,9 @@ def runtime(*, path: Literal["legacy", "mux"] = "mux", channel_backends: bool = 
         settings=Settings(
             anthropic=AnthropicSettings(api_key=SecretStr("offline")),
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://unused/unused")),
-            turn=TurnSettings(path=path, channel_backends=channel_backends),
+            turn=TurnSettings(
+                path=path, channel_backends=channel_backends, agent_backends=agent_backends
+            ),
             mcp=McpSettings(public_url=HttpUrl("https://offline.invalid/mcp")),
         ),
     )
@@ -173,12 +180,16 @@ async def test_disabled_fleet_never_inspects_runtime_or_registers_tools() -> Non
     assert await mcp.list_tools() == []
 
 
-@pytest.mark.parametrize("path,channels", [("legacy", True), ("mux", False)])
+@pytest.mark.parametrize(
+    "path,channels,agents", [("legacy", True, True), ("mux", False, True), ("mux", True, False)]
+)
 async def test_existing_neutral_flags_gate_fleet_registration(
-    path: Literal["legacy", "mux"], channels: bool
+    path: Literal["legacy", "mux"], channels: bool, agents: bool
 ) -> None:
     mcp = FastMCP("off")
-    register_fleet_tools(mcp, runtime(path=path, channel_backends=channels), enabled=True)
+    register_fleet_tools(
+        mcp, runtime(path=path, channel_backends=channels, agent_backends=agents), enabled=True
+    )
     assert await mcp.list_tools() == []
 
 
