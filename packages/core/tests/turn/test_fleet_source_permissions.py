@@ -318,7 +318,6 @@ async def test_finite_grant_durations_remain_under_the_existing_turn_ceiling(cap
         "repository",
         "unknown_extension",
         "native_tools",
-        "missing_memory",
         "foreign_scope",
         "foreign_environment",
         "archived_environment",
@@ -395,8 +394,6 @@ async def test_unsupported_missing_or_foreign_capture_refuses_before_native_io(c
                 )
             }
         )
-    elif fault == "missing_memory":
-        source = source.model_copy(update={"memory_store_id": None})
     elif fault == "foreign_scope":
         source = source.model_copy(
             update={"resource_scope": fleet.scope.model_copy(update={"account_id": str(uuid4())})}
@@ -436,6 +433,20 @@ async def test_unsupported_missing_or_foreign_capture_refuses_before_native_io(c
             policy=policy,
             now=NOW.replace(tzinfo=None) if fault == "naive_clock" else NOW,
         )
+    assert len(trace.requests) == 1
+
+
+async def test_a_root_before_its_memory_store_exists_runs_workers_without_memory(captured):
+    """The store is created by the agent's first session: its workers declare the loss."""
+    source, admission, grant, fleet, policy, trace = captured
+    source = source.model_copy(update={"memory_store_id": None})
+    permissions = fleet_root_permissions(
+        source, admission, grant, fleet=fleet, policy=policy, now=NOW
+    )
+    assert "memory" in permissions.spec.declared_drops
+    assert not any(
+        r.resource is not None and r.resource.kind == "memory_store" for r in permissions.resources
+    )
     assert len(trace.requests) == 1
 
 

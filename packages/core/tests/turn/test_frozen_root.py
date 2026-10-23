@@ -64,6 +64,7 @@ async def root_turn(
     live_root=False,
     null_environment_description=False,
     resolved_model=False,
+    memory=True,
 ):
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
@@ -179,13 +180,14 @@ async def root_turn(
         captured = await load_backend_agent(
             client, sm, tenant_id=tenant.id, agent_name="root", actual_agent=actual
         )
-        async with sm.begin() as db:
-            await agent_memory_stores.insert_memory_store(
-                db,
-                tenant_id=tenant.id,
-                agent_id=captured.agent_id,
-                memory_store_id="warm-root-memory",
-            )
+        if memory:
+            async with sm.begin() as db:
+                await agent_memory_stores.insert_memory_store(
+                    db,
+                    tenant_id=tenant.id,
+                    agent_id=captured.agent_id,
+                    memory_store_id="warm-root-memory",
+                )
         captured = await project_session_resources(
             captured,
             agent=actual,
