@@ -224,8 +224,8 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "Ask {who} to check which provider {agent_mid} uses.",
     ),
     "provider_hold_cap_reached": _Copy(
-        "This model's prepaid spending hold is used up.",
-        "Ask {who} to release or raise it.",
+        "Too many replies are already running on this model for this account.",
+        "Try again when one finishes.",
     ),
     "provider_setup_pending": _Copy(
         "Couldn't set up GPT for this {scope} yet.",
