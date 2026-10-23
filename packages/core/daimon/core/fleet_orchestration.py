@@ -827,6 +827,7 @@ class FleetOrchestrator:
                 ),
                 limits=limits,
                 captured_source=captured_source,
+                digest_phase="spawn",
             )
 
         from mux.profiles import backend_selection

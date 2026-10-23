@@ -815,7 +815,9 @@ async def run_worker(
                 environment=resolved_worker.environment,
                 limits=resolved_worker.limits,
             )
-            resolved = normalize(policy=policy, now=request.now(), captured_source=source)
+            resolved = normalize(
+                policy=policy, now=request.now(), captured_source=source, digest_phase="run_worker"
+            )
             if (
                 resolved.digest != worker.spec_digest
                 or resolved.limits.budget_usd != worker.budget_usd
