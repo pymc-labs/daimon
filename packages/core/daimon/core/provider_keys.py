@@ -33,12 +33,12 @@ def provider_key_present(provider: Provider) -> bool:
     """Whether this deployment's own key for `provider` is set and not blank.
 
     The allowlist default and runtime selection both use this one check, so a
-    provider allowed by default can also run. It looks the variable up by item,
-    not through `os.environ.get`, and returns only whether it is non-blank: the
-    value is never kept, logged or used to pick a credential.
+    provider allowed by default can also run. It returns only a bool: the value
+    is never kept, logged or used to pick a credential. Tests that forbid
+    credential reads allow exactly this helper (`daimon.testing.key_presence`).
     """
     env = DEFAULT_KEY_ENV.get(provider)
-    return env is not None and env in os.environ and bool(os.environ[env].strip())
+    return env is not None and bool((os.environ.get(env) or "").strip())
 
 
 def deployment_keyed_providers() -> frozenset[Provider]:

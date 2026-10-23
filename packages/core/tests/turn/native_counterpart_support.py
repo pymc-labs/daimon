@@ -21,6 +21,7 @@ from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.testing import pytest_plugin as database_plugin
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.key_presence import called_by_key_presence
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec, SkillUpload, SkillUploadFile
@@ -324,7 +325,7 @@ async def owned(
         original = os.environ.get
 
         def refuse_key(name: str, default: str | None = None) -> str | None:
-            if name == plan.api_key_env:
+            if name == plan.api_key_env and not called_by_key_presence():
                 raise AssertionError("native readback component discovered a credential")
             return original(name, default)
 
