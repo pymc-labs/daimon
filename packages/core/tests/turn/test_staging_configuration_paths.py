@@ -216,17 +216,25 @@ def _ma_sends(host) -> int:
 @pytest.mark.parametrize("selector_host", ["postgres"], indirect=True)
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 async def test_ci_selected_channel_backend_execution_path(selector_host, turn_io_used: TurnIOSpy):
-    """A saved channel choice runs on its provider only when the leg turns it on."""
+    """The default turn runs on the leg's path; a saved channel choice runs on its
+    provider only when the leg turns it on."""
     host = selector_host
     turn = selected_turn()
-    saved = await host.change(BackendConfig(backend="openai", profile=PROFILE, model="gpt-6-luna"))
-    assert saved.backend == "openai"
     deps = replace(
         host.deps,
         turn_path=turn.path,
         channel_backends=turn.channel_backends,
         agent_backends=turn.agent_backends,
     )
+    admission, _, outcome = await _run_channel_turn(host, deps, "default-thread")
+    assert outcome.state.error is None, "the default Anthropic turn should complete"
+    turn_io_used.assert_ran(turn.path)
+    assert _ma_sends(host) == 1, "Managed Agents must run the default turn"
+    assert host.wire.requests == [], "OpenAI must receive no request before a choice is saved"
+    turn_io_used.classes.clear()
+
+    saved = await host.change(BackendConfig(backend="openai", profile=PROFILE, model="gpt-6-luna"))
+    assert saved.backend == "openai"
     admission, prepared, outcome = await _run_channel_turn(host, deps, "selected-thread")
     if turn.channel_backends:
         assert admission.backend_revision == saved, "the saved channel choice must be admitted"
@@ -234,12 +242,12 @@ async def test_ci_selected_channel_backend_execution_path(selector_host, turn_io
         assert outcome.state.error is None, "the native turn should complete"
         assert turn_io_used.classes == [OpenAITurnIO], "the turn must run on OpenAI's turn I/O"
         assert any(r.method == "POST" for r in host.wire.requests), "OpenAI must run the turn"
-        assert _ma_sends(host) == 0, "Managed Agents must not receive the turn"
+        assert _ma_sends(host) == 1, "Managed Agents must not receive the chosen turn"
         return
     assert admission.backend_revision is None, "the off leg must ignore the saved choice"
     assert outcome.state.error is None, "the legacy turn should complete"
     turn_io_used.assert_ran("legacy")
-    assert _ma_sends(host) == 1, "Managed Agents must run the turn"
+    assert _ma_sends(host) == 2, "Managed Agents must run the turn"
     assert host.wire.requests == [], "OpenAI must receive no request"
     # Control: the same saved choice is admitted once mux and channel backends are on.
     enabled = replace(deps, turn_path="mux", channel_backends=True)
