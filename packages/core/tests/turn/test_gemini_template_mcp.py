@@ -40,13 +40,16 @@ from .test_gemini_runtime_transport import clients_for
 
 
 @pytest.fixture
-async def template(consent_request, source_mcp, monkeypatch, tmp_path):
+async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     from daimon.core.authz import Place
     from daimon.core.channel_backend import AgentBackendService
     from daimon.core.scope import DeploymentDefault, ScopeContext
     from daimon.core.turn.admission import capture_backend_source
     from daimon.testing.asgi import mcp_session
 
+    # "unreadable_mcp": the source's MCP catalogue can't be read at consent, so the
+    # confirmed switch declares the MCP drop (the J2/J3 copy's path).
+    unreadable_mcp = getattr(request, "param", None) == "unreadable_mcp"
     request, service, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
@@ -96,6 +99,8 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path):
             "serverInfo": {"name": "offline", "version": "1"},
         }
         if body["method"] == "tools/list":
+            if unreadable_mcp:
+                return httpx.Response(503, json={"error": "offline"})
             token = call.headers["Authorization"].removeprefix("Bearer ")
             result = (await mcp_session(source_mcp, token=token, method="tools/list"))["result"]
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
@@ -205,6 +210,25 @@ async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(templ
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops and "tools" in quote.declared_drops
     assert {"memory", "skills"} <= set(quote.declared_drops)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("template", ["unreadable_mcp"], indirect=True)
+async def test_a_switch_that_dropped_mcp_is_served_with_no_mcp_and_no_credential(template):
+    """J2/J3: a copy's confirmed switch to Gemini dropped its MCP. Its first turn on
+    the MCP template is served with none, rather than refused as backend_unsupported,
+    and never gets an MCP credential."""
+    request, quote, native, _, _ = template
+    assert "mcp" in quote.declared_drops
+    selected, runtime = await _prepared(request)
+    assert selected.target_spec.mcp_servers == ()
+    assert not [tool for tool in native["tools"] if tool.get("type") == "mcp_server"]
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    with pytest.raises(ScopeViolation):
+        await transport.mcp_secrets(request.scope, "caller-mcp:anything", "https://mcp.invalid/mcp")
+    async with request.deps.sessionmaker() as db:
+        live = [row for row in await _tokens(db, request) if row.revoked_at is None]
+    assert live == [], "no live MCP credential is left for this turn"
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
