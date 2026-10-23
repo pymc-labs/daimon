@@ -1976,11 +1976,17 @@
         its final reply there. A thread is its id exactly as turn_controls
         or a read tool gives it, and a malformed id is refused with the form to
         use; the channel must be one you are in. A protected channel is refused.
-        Without a destination the
-        result is only recorded (``last_result_tail``), as before. A run's
-        spend counts toward the destination channel's budget, or without a
-        destination the budget of the channel named by ``origin_context_id``
-        (this turn's), and a run is skipped while that budget is used up.
+        Without a destination, a routine made in a conversation (pass this
+        turn's ``origin_context_id``) posts back to it, in the thread it was
+        asked in. Only one made in a private DM, or with no conversation, is
+        only recorded (``last_result_tail``); to keep any other routine
+        record-only, create it and then call
+        ``update_routine(clear_destination=true)``. A run's spend counts
+        toward the destination channel's budget, or without a destination
+        the budget of the channel named by ``origin_context_id``, and a run
+        is skipped while that budget is used up. When the routine's job is
+        to post somewhere other than this conversation, name that place as
+        the destination; otherwise its result posts here as well.
         <blank line>
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -2004,7 +2010,9 @@
         Example: a user says "daimon, create a routine that pings me every
         5 minutes with the message 'ping'". The correct call is
         ``create_routine(agent_name="daimon", cron_expr="*/5 * * * *",
-        timezone="UTC", trigger_message="ping")``.
+        timezone="UTC", trigger_message="ping",
+        origin_context_id="<this turn's origin_context_id>")``, and each
+        run's result posts back in this thread.
       ''',
       'parameters': dict({
         'additionalProperties': False,
