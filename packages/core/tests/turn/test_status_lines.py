@@ -8,6 +8,7 @@ import pytest
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock
 from daimon.core.turn.status_lines import (
+    CARD_SECTIONS,
     DRAFT_LOG_LINES,
     MAX_PLAN_LINES,
     draft_log,
@@ -18,12 +19,13 @@ from daimon.core.turn.status_lines import (
     format_summary,
     format_tool_lines,
     has_running_tool,
+    in_card_order,
     roll_draft,
 )
 
 ToolType = Literal["agent.tool_use", "agent.custom_tool_use", "agent.mcp_tool_use"]
 # A pending plan step has no icon: an em and an en space keep it in line.
-_PENDING = "  "
+_PENDING = "\u2007\u2007\u2007"
 
 
 def _call(
@@ -114,7 +116,7 @@ def test_built_in_tools_read_present_tense_while_running_and_past_when_done() ->
     lines = format_tool_lines(
         [_call("bash", "complete"), _call("web_fetch", "failed"), _call("read")]
     )
-    assert lines == ("✔️ Ran a command", "🚫 Fetched a web page", "🔍 Reading a file"), (
+    assert lines == ("☑️ Ran a command", "🚫 Fetched a web page", "🔍 Reading a file"), (
         "finished calls take a result icon and the past tense; running ones the present"
     )
 
@@ -129,8 +131,8 @@ def test_mcp_and_custom_tools_get_humanized_names_and_verb_icons() -> None:
         ]
     )
     assert lines == (
-        "✔️ Search issues (tracker)",
-        "🖋️ Create page",
+        "☑️ Search issues (tracker)",
+        "⏳ Create page",
         "📜 List SQL tables (warehouse)",
         "🔍 Read",
     ), "a custom tool named like a built-in is still humanized, not narrated"
@@ -176,7 +178,7 @@ def test_only_allowlisted_built_in_fields_reach_the_card() -> None:
 def test_finished_tool_lines_follow_the_order_calls_finished() -> None:
     content: list[ContentBlock] = [_call("bash", "complete"), _call("grep", "failed")]
     lines = format_tool_lines(content, finished_ids=("tu_grep_failed", "tu_bash_complete"))
-    assert lines == ("🚫 Searched files", "✔️ Ran a command"), "the call that finished first leads"
+    assert lines == ("🚫 Searched files", "☑️ Ran a command"), "the call that finished first leads"
 
 
 def test_tool_lines_keep_running_calls_and_fold_older_ones() -> None:
@@ -184,8 +186,8 @@ def test_tool_lines_keep_running_calls_and_fold_older_ones() -> None:
     content += [_call("slow_import"), _call("bash"), _call("read")]
     lines = format_tool_lines(content)
     assert lines[0] == "+2 earlier", "calls beyond the six shown fold into one line on top"
-    assert lines[1:4] == ("✔️ Step 2", "✔️ Step 3", "✔️ Step 4"), "latest finished calls kept"
-    assert lines[4:] == ("🖋️ Slow import", "🖋️ Running a command", "🔍 Reading a file"), (
+    assert lines[1:4] == ("☑️ Step 2", "☑️ Step 3", "☑️ Step 4"), "latest finished calls kept"
+    assert lines[4:] == ("⏳ Slow import", "⏳ Running a command", "🔍 Reading a file"), (
         "running calls always show, below the finished ones"
     )
 
@@ -402,10 +404,10 @@ def test_built_in_tools_show_one_allowlisted_detail() -> None:
         ]
     )
     assert lines == (
-        "✔️ Searched the web: pymc marketing mix",
-        "✔️ Fetched a web page: docs.example.com",
-        "✔️ Read a file: model.py",
-        "🖋️ Editing a file: notes.txt",
+        "☑️ Searched the web: pymc marketing mix",
+        "☑️ Fetched a web page: docs.example.com",
+        "☑️ Read a file: model.py",
+        "⏳ Editing a file: notes.txt",
     ), "each built-in shows its one field, on one line"
 
 
@@ -419,7 +421,7 @@ def test_a_long_detail_is_clipped_and_a_bad_one_dropped() -> None:
         ]
     )
     assert lines[0] == f"🔍 Searching the web: {'q' * 40}…", "a long query is clipped"
-    assert lines[1:] == ("🔍 Fetching a web page", "🖋️ Writing a file", "🔍 Reading a file"), (
+    assert lines[1:] == ("🔍 Fetching a web page", "⏳ Writing a file", "🔍 Reading a file"), (
         "an input that is not a usable value leaves the plain label"
     )
 
@@ -440,7 +442,7 @@ def test_plan_lines_draw_the_latest_plan_as_a_checklist() -> None:
             via_search=True,
         ),
     ]
-    assert format_plan_lines(content) == ("✔️ Load data", "🖋️ Fit model", f"{_PENDING}Report"), (
+    assert format_plan_lines(content) == ("☑️ Load data", "⏳ Fit model", f"{_PENDING}Report"), (
         "the newest update wins, also when called through the MCP search interface"
     )
 
@@ -450,8 +452,8 @@ def test_a_long_plan_folds_finished_steps_then_cuts_the_tail() -> None:
     steps += [("now", "in_progress")] + [(f"later {i}", "pending") for i in range(5)]
     lines = format_plan_lines([_plan(steps)])
     assert len(lines) == MAX_PLAN_LINES, "the plan stays within its line budget"
-    assert lines[0] == "✔️ 4 done", "finished steps at the top fold into one line"
-    assert lines[1] == "🖋️ now", "the step in progress stays in view"
+    assert lines[0] == "☑️ 4 done", "finished steps at the top fold into one line"
+    assert lines[1] == "⏳ now", "the step in progress stays in view"
     assert lines[-1] == f"{_PENDING}+2 more", "what does not fit is counted"
 
 
@@ -467,9 +469,15 @@ def test_plan_lines_skip_failed_calls_and_malformed_steps() -> None:
 
 def test_a_plan_update_leaves_the_tool_lines_only_when_the_plan_is_shown() -> None:
     content: list[ContentBlock] = [_plan([("Load", "in_progress")]), _call("bash")]
-    assert format_tool_lines(content, plan_shown=True) == ("🖋️ Running a command",), (
+    assert format_tool_lines(content, plan_shown=True) == ("⏳ Running a command",), (
         "the plan is drawn as the checklist, not as a tool line"
     )
-    assert format_tool_lines(content) == ("🖋️ Update plan (daimon-mcp)", "🖋️ Running a command"), (
+    assert format_tool_lines(content) == ("⏳ Update plan (daimon-mcp)", "⏳ Running a command"), (
         "with progress plans off the call is an ordinary tool line"
     )
+
+
+def test_the_card_reads_updates_then_plan_then_tool_lines() -> None:
+    assert CARD_SECTIONS == ("updates", "plan", "tools"), "the latest updates lead the card"
+    drawn = in_card_order({"tools": "T", "plan": None, "updates": "U"})
+    assert drawn == ["U", "T"], "sections follow CARD_SECTIONS and an empty one drops out"

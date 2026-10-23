@@ -1,9 +1,9 @@
 """Words for the in-progress turn card, shared by the chat adapters.
 
-Discord, Slack and Teams all draw a headline, the progress plan, a block of
-tool lines and the last few draft lines from the same `TurnState`; this module
-owns the words so the cards cannot drift, and each adapter adds only its own
-markup.
+Discord, Slack and Teams all draw a headline, the last few draft lines, the
+progress plan and a block of tool lines from the same `TurnState`, in the
+order `CARD_SECTIONS` gives; this module owns the words and that order so the
+cards cannot drift, and each adapter adds only its own markup.
 
 A tool line names the tool. Its arguments stay off the card, because they can
 hold anything a model or a person typed, keys included. The one exception is
@@ -37,22 +37,41 @@ _PLAN_STEP_MAX_CHARS = 60
 # Em spaces: chat clients collapse runs of plain spaces but keep these.
 SUMMARY_GAP = "\u2003\u2003"
 
-_DONE_ICON = "✔️"
+# ☑️ and ⏳ rather than ✔️ and 🖋️: those two are dark glyphs that all but
+# vanish on a dark theme.
+_DONE_ICON = "☑️"
 _FAILED_ICON = "🚫"
-_WRITE_ICON = "🖋️"
+_WRITE_ICON = "⏳"
 _LIST_ICON = "📜"
 _LOOKUP_ICON = "🔍"
 
 PlanStatus = Literal["pending", "in_progress", "completed"]
 # The card's own words: done as a finished tool, in progress as a running one.
-# A pending step has no icon; an em and an en space hold its text in line with
-# the steps that have one, and keep a leading "-" or "1." from becoming a list.
-_PLAN_PENDING = "\u2003\u2002"
+# Plan lines are drawn in code like the tool lines, since a chat client draws
+# an emoji differently in code and in text. A pending step has no icon; three
+# figure spaces hold its text in line with the steps that have one (in a
+# monospace font an emoji takes two cells and its space one), no client
+# collapses them, and they keep a leading "-" or "1." from becoming a list.
+_PLAN_PENDING = "\u2007\u2007\u2007"
 _PLAN_ICONS: Mapping[PlanStatus, str] = {
     "completed": f"{_DONE_ICON} ",
     "in_progress": f"{_WRITE_ICON} ",
     "pending": _PLAN_PENDING,
 }
+
+
+CardSection = Literal["updates", "plan", "tools"]
+# Under the headline, top down: the agent's latest updates (the draft lines)
+# first, as what a person reads for, then the plan, then the tool lines.
+CARD_SECTIONS: tuple[CardSection, ...] = ("updates", "plan", "tools")
+# The plan and the tool lines are drawn alike: a small header, then each line in code.
+LabelledSection = Literal["plan", "tools"]
+SECTION_LABELS: Mapping[LabelledSection, str] = {"plan": "Plan", "tools": "Details"}
+
+
+def in_card_order[T](sections: Mapping[CardSection, T | None]) -> list[T]:
+    """An adapter's drawn sections in `CARD_SECTIONS` order; a missing or None one drops out."""
+    return [part for name in CARD_SECTIONS if (part := sections.get(name)) is not None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +207,7 @@ def roll_draft(earlier: Sequence[str], latest: str | None, new: str) -> tuple[tu
 
 
 def draft_log(earlier: Sequence[str], latest: str | None) -> tuple[str, ...]:
-    """The lines a card shows under its tool lines, oldest first."""
+    """The lines a card shows first under its headline, oldest first."""
     return (*earlier, latest) if latest else tuple(earlier)
 
 
@@ -318,7 +337,7 @@ def format_plan_lines(content: Sequence[ContentBlock]) -> tuple[str, ...]:
 
     Finished steps at the top fold into one ``N done`` line first, so the step
     in progress stays in view; a plan still too long ends in ``+N more``. Lines
-    carry no backtick, like the tool lines.
+    carry no backtick, so an adapter fences each in code, like the tool lines.
     """
     steps = list(plan_steps(content))
     folded = 0

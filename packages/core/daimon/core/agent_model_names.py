@@ -19,12 +19,27 @@ from mux.profiles import (
 
 
 def model_name(model: ModelRef) -> str:
-    return (
-        model.id.replace("claude-", "Claude ")
-        .replace("gemini-", "Gemini ")
-        .replace("gpt-", "GPT ")
-        .replace("-", " ")
+    """The name people say: "Claude Opus 5.5", "GPT-6 Astra", "Gemini 4 Argon"."""
+    from daimon.core.constants import MODEL_DISPLAY_NAMES
+
+    if model.id in MODEL_DISPLAY_NAMES:
+        return "Claude " + MODEL_DISPLAY_NAMES[model.id]
+    words: list[str] = []
+    for word in model.id.split("-"):
+        if word.isdigit() and words and words[-1][-1:].isdigit():
+            words[-1] += "." + word  # claude-opus-4-7 -> Opus 4.7
+        else:
+            words.append(word)
+    if words[0] == "gpt" and len(words) > 1:
+        words = [f"GPT-{words[1]}", *words[2:]]
+    return " ".join(
+        word if word.startswith("GPT") or word[:1].isdigit() else word.capitalize()
+        for word in words
     )
+
+
+class AmbiguousModel(ValueError):
+    """A name that could mean more than one available model."""
 
 
 @dataclass(frozen=True)
@@ -41,6 +56,8 @@ def agent_catalog() -> tuple[AgentModel, ...]:
             f"~${rates.input:g} input / ${rates.output:g} output per million tokens",
         )
         for name, rates in AGENT_MODEL_PRICING.items()
+        # A "-fast" id is a local preset (model_presets), not a provider model id:
+        # only the legacy path expands it, so it is never a catalog/fleet choice.
         if not name.endswith("-fast")
     ]
     for provider in PROVIDERS:
@@ -104,6 +121,9 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
     ):
         if "lite" not in family:
             matches = [model for model in matches if "lite" not in _key(model.id).split()]
+        # Defensive: agent_catalog() excludes the fast preset, but a caller-supplied
+        # `available` may carry it; "opus" must never mean that pricier variant.
+        matches = [model for model in matches if "fast" not in _key(model.id).split()]
         if matches:
             return max(matches, key=lambda model: tuple(map(int, re.findall(r"\d+", model.id))))
     if not matches:
@@ -125,7 +145,7 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
     if len(matches) == 1:
         return matches[0]
     if matches:
-        raise ValueError(
+        raise AmbiguousModel(
             f'"{value}" could mean '
             + ", ".join(model_name(model) for model in matches)
             + ". Choose a model by name."

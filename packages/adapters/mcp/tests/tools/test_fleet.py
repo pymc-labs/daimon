@@ -972,7 +972,9 @@ async def test_public_token_caps_keep_existing_resolver_refusals(fault) -> None:
     )
     owner = host_owner()
     async with Client(registered(HostFleetToolService(FleetOrchestrator(owner), load))) as client:
-        with pytest.raises(ToolError, match="not_subset|budget: unsupported"):
+        with pytest.raises(
+            ToolError, match="outside what this fleet allows|isn.t supported for this worker"
+        ):
             await client.call_tool("fleet_spawn", request)
     owner.admit.assert_not_awaited()
 
@@ -1092,7 +1094,7 @@ async def test_plain_spawn_refuses_ungranted_models_and_mixed_specs() -> None:
     bridge, orchestrator = plain_bridge(plain_root())
     request = {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
     async with Client(registered(bridge)) as client:
-        with pytest.raises(ToolError, match="backend: not_subset"):
+        with pytest.raises(ToolError, match="isn.t allowed in this fleet"):
             await client.call_tool("fleet_spawn", {**request, "model": "gemini-3.8-pro"})
         with pytest.raises(ToolError, match="exactly one"):
             await client.call_tool("fleet_spawn", {**request, **arguments("fleet_spawn")})
@@ -1129,7 +1131,7 @@ async def test_plain_spawn_with_no_budget_left_refuses_before_admission() -> Non
     run, _ = orchestrator.read_snapshot.return_value
     orchestrator.read_snapshot.return_value = (replace(run, total_budget_usd=Decimal("0.02")), ())
     async with Client(registered(bridge)) as client:
-        with pytest.raises(ToolError, match="budget: exhausted"):
+        with pytest.raises(ToolError, match="budget is used up"):
             await client.call_tool(
                 "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
             )
@@ -1239,7 +1241,7 @@ async def test_planned_models_give_each_provider_its_own_share() -> None:
                 "planned_models": plan,
             },
         )
-        with pytest.raises(ToolError, match="does not allow: gemini-3.8-pro"):
+        with pytest.raises(ToolError, match='"gemini-3.8-pro" isn.t allowed in this fleet'):
             await client.call_tool(
                 "fleet_spawn",
                 {
@@ -1323,7 +1325,7 @@ async def test_a_fleet_plan_may_name_agent_workers_models_the_grant_does_not_lis
                 "planned_models": ["gpt-6-luna", "gemini-3.8-flash"],
             },
         )
-        with pytest.raises(ToolError, match="can't use: gpt-6-nova"):
+        with pytest.raises(ToolError, match='"gpt-6-nova" isn.t allowed in this fleet'):
             await client.call_tool(
                 "fleet_spawn",
                 {
@@ -1384,3 +1386,178 @@ async def test_a_worker_running_as_another_agent_cannot_start_a_fleet() -> None:
                 {"operation_key": "N1", "role": "nested", "agent": "researcher", "task": "Go."},
             )
     owner.agent_worker_parent.assert_not_awaited()
+
+
+def fork_root() -> WorkerPermissions:
+    """daimon-fleet on staging: a Sonnet root whose grant allows Opus, Astra and Argon."""
+    root = host_parent()
+    sonnet = ModelRef(provider="anthropic", id="claude-sonnet-5-5")
+    granted = (
+        sonnet,
+        ModelRef(provider="anthropic", id="claude-opus-5-5"),
+        ModelRef(provider="openai", id="gpt-6-astra"),
+        ModelRef(provider="gemini", id="gemini-4-argon"),
+    )
+    return replace(
+        root,
+        spec=root.spec.model_copy(update={"model": sonnet}),
+        backend_grants=(
+            *root.backend_grants,
+            backend_selection("openai").model_copy(update={"model": "gpt-6-astra"}),
+            backend_selection("gemini").model_copy(update={"model": "gemini-4-argon"}),
+        ),
+        models=granted,
+    )
+
+
+async def test_fork_yourself_on_opus_astra_and_argon_resolves_each_plain_name() -> None:
+    """J3: 'fork yourself into 3 workers on Opus 5.5, Astra and Argon' spawned nothing."""
+    bridge, orchestrator = plain_bridge(fork_root())
+    # The names the root passed in the failed run, then the user's own phrasing.
+    for plan, names in (
+        (["claude-opus-5-5", "astra", "argon"], ["claude-opus-5-5", "astra", "argon"]),
+        (["Opus 5.5", "Astra", "Argon"], ["Opus 5.5", "Astra", "Argon"]),
+    ):
+        orchestrator.spawn.reset_mock()
+        async with Client(registered(bridge)) as client:
+            for index, name in enumerate(names, start=1):
+                await client.call_tool(
+                    "fleet_spawn",
+                    {
+                        "operation_key": f"W{index}",
+                        "role": f"W{index}",
+                        "task": "Postgres vs SQLite for a small team's internal tool?",
+                        "model": name,
+                        "planned_models": plan,
+                    },
+                )
+        spawned = [call.kwargs["agent"].model for call in orchestrator.spawn.await_args_list]
+        assert spawned == [
+            ModelRef(provider="anthropic", id="claude-opus-5-5"),
+            ModelRef(provider="openai", id="gpt-6-astra"),
+            ModelRef(provider="gemini", id="gemini-4-argon"),
+        ]
+        # The plan splits the budget by provider: one worker each.
+        limits = orchestrator.spawn_limits.await_args_list[-3:]
+        assert [call.kwargs["planned_on_provider"] for call in limits] == [1, 1, 1]
+        assert all(call.kwargs["planned_workers"] == 3 for call in limits)
+
+
+async def test_a_fork_to_another_granted_model_of_the_roots_provider_is_not_a_backend_refusal() -> (
+    None
+):
+    """J3 (b): Opus from a Sonnet root failed only because the plan named ungranted names."""
+    bridge, orchestrator = plain_bridge(fork_root())
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {
+                "operation_key": "W1",
+                "role": "W1",
+                "task": "Go.",
+                "model": "claude-opus-5-5",
+                "planned_models": ["claude-opus-5-5", "gpt-6-astra", "gemini-4-argon"],
+            },
+        )
+    (call,) = orchestrator.spawn.await_args_list
+    assert call.kwargs["agent"].model == ModelRef(provider="anthropic", id="claude-opus-5-5")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("model", "sol", '"sol" isn\'t allowed in this fleet; allowed: '),
+        ("planned_models", ["astra", "nova"], '"nova" isn\'t allowed in this fleet; allowed: '),
+        ("model", "claude", '"claude" could mean '),
+    ],
+)
+async def test_unknown_or_ambiguous_worker_model_names_get_a_plain_refusal_with_the_allowed_list(
+    field: str, value: object, message: str
+) -> None:
+    from structlog.testing import capture_logs
+
+    bridge, orchestrator = plain_bridge(fork_root())
+    request: dict[str, object] = {"operation_key": "W1", "role": "W1", "task": "Go.", field: value}
+    async with Client(registered(bridge)) as client:
+        with capture_logs() as logs, pytest.raises(ToolError) as refused:
+            await client.call_tool("fleet_spawn", request)
+    text = str(refused.value)
+    assert message in text and "not_subset" not in text
+    assert "GPT-6 Astra (gpt-6-astra)" in text and "Gemini 4 Argon (gemini-4-argon)" in text
+    orchestrator.spawn.assert_not_awaited()
+    (entry,) = [e for e in logs if e["event"] == "fleet.spawn_refused"]
+    assert entry["category"] == "request" and entry["operation_key"] == "W1"
+
+
+async def test_core_refusals_reach_the_root_as_plain_text_and_are_logged_by_category() -> None:
+    from daimon.core.fleet_orchestration import FleetRefused
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from structlog.testing import capture_logs
+
+    bridge, orchestrator = plain_bridge(fork_root())
+    request = {"operation_key": "W1", "role": "W1", "task": "Go.", "model": "astra"}
+    cases = [
+        (
+            WorkerSpecRefused("backend", "not_subset"),
+            "The worker's model or model provider is outside",
+            "worker_spec",
+        ),
+        (
+            WorkerSpecRefused("budget", "exhausted"),
+            "The worker's budget is used up.",
+            "worker_spec",
+        ),
+        (
+            FleetRefused("run_limit_reached"),
+            "Fleet refused this worker: run limit reached.",
+            "fleet",
+        ),
+    ]
+    async with Client(registered(bridge)) as client:
+        for error, text, category in cases:
+            orchestrator.spawn.side_effect = error
+            with capture_logs() as logs, pytest.raises(ToolError) as refused:
+                await client.call_tool("fleet_spawn", request)
+            assert text in str(refused.value) and "_" not in str(refused.value).split(":")[-1]
+            (entry,) = [e for e in logs if e["event"] == "fleet.spawn_refused"]
+            assert entry["category"] == category
+
+
+async def test_fleet_agents_lists_the_models_a_task_worker_may_run_on_by_plain_name() -> None:
+    bridge, orchestrator = plain_bridge(fork_root())
+    orchestrator.worker_agents.return_value = [{"name": "researcher", "model": "gpt-6-luna"}]
+    async with Client(registered(bridge)) as client:
+        listed = await client.call_tool("fleet_agents", {})
+    content = listed.structured_content
+    assert content["agents"] == [{"name": "researcher", "model": "gpt-6-luna"}]
+    assert content["models"] == [
+        {"name": "Claude Sonnet 5.5", "id": "claude-sonnet-5-5", "provider": "anthropic"},
+        {"name": "Claude Opus 5.5", "id": "claude-opus-5-5", "provider": "anthropic"},
+        {"name": "GPT-6 Astra", "id": "gpt-6-astra", "provider": "openai"},
+        {"name": "Gemini 4 Argon", "id": "gemini-4-argon", "provider": "gemini"},
+    ]
+
+
+async def test_the_local_opus_fast_preset_is_never_a_fleet_worker_model() -> None:
+    """Review: claude-opus-5-5-fast is a local preset only the legacy path expands."""
+    root = fork_root()
+    fast = ModelRef(provider="anthropic", id="claude-opus-5-5-fast")
+    bridge, orchestrator = plain_bridge(replace(root, models=(*root.models, fast)))
+    async with Client(registered(bridge)) as client:
+        # Every spelling of the preset, including the long forms close-matching would
+        # otherwise turn into standard Opus, is refused before resolution.
+        for name in ("opus fast", "claude-opus-5-5-fast", "Claude Opus 5.5 fast"):
+            with pytest.raises(ToolError) as refused:
+                await client.call_tool(
+                    "fleet_spawn",
+                    {"operation_key": "W1", "role": "W1", "task": "Go.", "model": name},
+                )
+            assert "can't run as a fleet worker" in str(refused.value)
+            assert "(claude-opus-5-5-fast)" not in str(refused.value)
+        listed = await client.call_tool("fleet_agents", {})
+        assert "claude-opus-5-5-fast" not in {m["id"] for m in listed.structured_content["models"]}
+        await client.call_tool(
+            "fleet_spawn", {"operation_key": "W2", "role": "W2", "task": "Go.", "model": "opus"}
+        )
+    (call,) = orchestrator.spawn.await_args_list
+    assert call.kwargs["agent"].model == ModelRef(provider="anthropic", id="claude-opus-5-5")

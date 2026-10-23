@@ -90,7 +90,7 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 def update(state: CardState, event: CardEvent) -> CardState:
     """Return a new CardState with event applied.
 
-    A message joins the draft log shown under the tool lines (the last few
+    A message joins the draft log shown under the headline (the last few
     lines, oldest first); an empty one changes nothing. A draft revises the
     latest line. done and error move to the terminal phases.
     """

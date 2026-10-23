@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from daimon.adapters.discord.runtime import DiscordRuntime
     from daimon.core.turn.admission import Admission
 
-__all__ = ["build_confirmation_view", "discord_confirmation_hook"]
+__all__ = ["build_confirmation_view", "confirmation_requester", "discord_confirmation_hook"]
 
 log = structlog.get_logger(__name__)
 
@@ -164,6 +164,12 @@ class _ConfirmationView(discord.ui.LayoutView):
             for line in footer.splitlines():
                 container.add_item(discord.ui.TextDisplay(f"-# {line}"))
         self.add_item(container)
+
+    def pending_requester(self) -> str | None:
+        """The requester while this card still waits for an answer, else None."""
+        if self._answer is None or self.is_finished():
+            return None
+        return self._prompt.requester_platform_user_id
 
     async def _on_approve(self, interaction: discord.Interaction) -> None:
         await self._settle(interaction, "approved")
@@ -300,6 +306,15 @@ def build_confirmation_view(
 ) -> discord.ui.LayoutView:
     """The components-v2 view for `card`; buttons only while pending."""
     return _ConfirmationView(card, prompt, answer)
+
+
+def confirmation_requester(view: object) -> str | None:
+    """Who may answer `view`, when it is a live, unanswered confirmation card.
+
+    None for any other view, so the staging confirm click (`confirm_click`) can only
+    press Confirm cards that are still waiting.
+    """
+    return view.pending_requester() if isinstance(view, _ConfirmationView) else None
 
 
 def discord_confirmation_hook(

@@ -32,6 +32,7 @@ from daimon.adapters.discord.embed import (
     EmbedData,
     EmbedEvent,
     TurnPhase,
+    embed_fields,
     format_termination_notice,
     to_embed_data,
     update,
@@ -323,8 +324,8 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
         embed.set_footer(text=data.footer)
     if data.notice is not None:
         embed.add_field(name="Notice", value=data.notice[:1024], inline=False)
-    if data.details is not None:
-        embed.add_field(name="Details", value=data.details, inline=False)
+    for name, value in embed_fields(data):
+        embed.add_field(name=name, value=value, inline=False)
     return embed
 
 
@@ -938,7 +939,7 @@ class DiscordTurnLifecycle:
         return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the one status embed: headline, tool lines and the last few draft lines."""
+        """Render the one status embed: headline, the last few draft lines, plan and tool lines."""
         embed = build_discord_embed(to_embed_data(self._state, now=now))
         if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
             embed.title = "Queued — waiting for a free slot…"

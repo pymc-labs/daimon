@@ -76,6 +76,7 @@ from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
+from daimon.adapters.mcp.tools.models import register_model_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
 from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
@@ -554,6 +555,7 @@ def create_mcp_app(
     sessions.register_sessions_tools(mcp, runtime)
     agent_chat.register_agent_chat_tools(mcp, runtime, billing_config=effective_billing_config)
     time.register_time_tools(mcp, runtime)
+    register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
     register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)

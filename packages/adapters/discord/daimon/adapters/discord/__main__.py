@@ -11,6 +11,7 @@ from typing import cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.confirm_click import start_confirm_click_server
 from daimon.adapters.discord.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
@@ -139,6 +140,8 @@ async def main() -> None:
         # OB-3 liveness responder on the loop asyncio.run() created (co-location is
         # the property that a hung loop fails the probe and Fly restarts us).
         health_server = await start_liveness_responder(settings.discord.health_port)
+        # Staging test infrastructure; None unless switched on on a staging host.
+        confirm_click_server = await start_confirm_click_server(bot, settings)
         log.info("starting_discord_bot")
         owner_drain = asyncio.create_task(drain_on_owner_loss(bot), name="discord.owner_loss_drain")
         try:
@@ -160,6 +163,9 @@ async def main() -> None:
                 await owner_drain
             health_server.close()
             await health_server.wait_closed()
+            if confirm_click_server is not None:
+                confirm_click_server.close()
+                await confirm_click_server.wait_closed()
 
 
 if __name__ == "__main__":

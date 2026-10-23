@@ -347,11 +347,11 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     clock.now += 65
     await lifecycle.on_render(TurnState(content=[read, bash], finished_tool_ids=("t1",)))
 
-    headline, details, tools, draft, elapsed, _actions = _card_body(sender, -1)
+    headline, draft, details, tools, elapsed, _actions = _card_body(sender, -1)
     assert headline["text"] == "**Working on it…**"
     assert (elapsed["text"], elapsed["isSubtle"]) == ("1m 5s", True), "elapsed time, quiet"
     assert details["text"] == "Details"
-    assert tools["text"] == "✔️ Read a file\n\n🖋️ Running a command", "one paragraph per line"
+    assert tools["text"] == "☑️ Read a file\n\n⏳ Running a command", "one paragraph per line"
     assert tools["fontType"] == "Monospace", "a TextBlock draws no code fence"
     assert (draft["text"], draft["isSubtle"]) == ("Checking the files.", True), "draft on one line"
 

@@ -47,19 +47,22 @@ _TURN = TurnState(
         )
     ]
 )
-_PLAN = ["✔️ Load the data", "🖋️ Fit the model", "\u2003\u2002Write it up"]
+_PLAN = ["☑️ Load the data", "⏳ Fit the model", "\u2007\u2007\u2007Write it up"]
 
 
 def _discord() -> list[str]:
     state = discord_embed.update_activity(discord_embed.EmbedState(started_at=100.0), _TURN)
-    description = discord_embed.to_embed_data(state, now=165.0).description
-    return description.splitlines() if description else []
+    plan = discord_embed.to_embed_data(state, now=165.0).plan
+    return [line.strip("`") for line in plan.splitlines()] if plan else []
 
 
 def _slack() -> list[str]:
     state = blockkit.update_activity(blockkit.State(started_at=100.0), _TURN)
-    sections = [b for b in blockkit.to_blocks(state, now=165.0) if b["type"] == "section"]
-    return sections[1]["text"]["text"].splitlines() if len(sections) > 1 else []
+    for block in blockkit.to_blocks(state, now=165.0):
+        text = block["elements"][0]["text"] if block["type"] == "context" else ""
+        if text.startswith("*Plan*"):
+            return [line.strip("`") for line in text.splitlines()[1:]]
+    return []
 
 
 def _teams() -> list[str]:
@@ -69,7 +72,7 @@ def _teams() -> list[str]:
         "body"
     ]
     texts = [block["text"] for block in body if block["type"] == "TextBlock"]
-    return texts[1].split("\n\n") if texts[1].startswith("✔️") else []
+    return texts[2].split("\n\n") if texts[1] == "Plan" else []
 
 
 @pytest.mark.parametrize("on", [True, False])

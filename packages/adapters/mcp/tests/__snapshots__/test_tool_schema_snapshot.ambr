@@ -3463,6 +3463,24 @@
         'type': 'object',
       }),
     }),
+    'list_models': dict({
+      'description': '''
+        List the models an agent here can run on: plain name, id, provider and list price.
+        <blank line>
+        Use it to answer "what models can I use?" or "what does luna cost?", and
+        to pick a name for an agent's model. Only providers this server has turned
+        on are listed, and every listed name (e.g. "Opus 5.5", "Astra", "Argon")
+        is accepted wherever a model is named. Prices are list prices per million
+        tokens, before this server's markup. A fleet's own allowed models are in
+        fleet_agents.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_my_sessions': dict({
       'description': '''
         List the sessions you started with this agent (id, status, title, timestamps).

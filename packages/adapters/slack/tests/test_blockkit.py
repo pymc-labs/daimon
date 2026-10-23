@@ -183,7 +183,7 @@ class TestToBlocks:
     def test_running_state_with_tool_lines_has_escaped_code_block(self) -> None:
         state = _make_state(
             phase=TurnPhase.TOOL_RUNNING,
-            tool_lines=("✔️ Read a file", "🖋️ Q&A sync"),
+            tool_lines=("☑️ Read a file", "⏳ Q&A sync"),
             started_at=1.0,
         )
         blocks = to_blocks(state, now=66.0)
@@ -191,7 +191,7 @@ class TestToBlocks:
         assert sections[0]["text"]["text"] == "*Working on it…*"
         contexts = _find_blocks_by_type(blocks, "context")
         assert contexts[0]["elements"][0]["text"] == (
-            "*Details*\n`✔️ Read a file`\n`🖋️ Q&amp;A sync`"
+            "*Details*\n`☑️ Read a file`\n`⏳ Q&amp;A sync`"
         )
 
     def test_tool_line_markdown_stays_in_inline_code(self) -> None:
@@ -233,17 +233,18 @@ class TestToBlocks:
         draft = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]
         assert len(draft["text"]["text"]) <= 3000
 
-    def test_the_plan_is_its_own_section_between_the_headline_and_details(self) -> None:
+    def test_the_plan_is_drawn_like_the_details_and_before_them(self) -> None:
         state = replace(
             _make_state(phase=TurnPhase.TOOL_RUNNING),
-            plan_lines=("✔️ Load *data*", "🖋️ Fit <model>"),
+            plan_lines=("☑️ Load *data*", "⏳ Fit <model>"),
             tool_lines=("🔍 Reading a file",),
         )
         blocks = to_blocks(state, now=None)
-        assert blocks[1]["text"]["text"] == "✔️ Load *data*\n🖋️ Fit &lt;model&gt;", (
-            "the plan follows the headline, one escaped line per step"
-        )
-        assert blocks[2]["type"] == "context", "the details come after the plan"
+        assert blocks[1]["type"] == "context", "the plan is a context block like the details"
+        assert blocks[1]["elements"][0]["text"] == (
+            "*Plan*\n`☑️ Load *data*`\n`⏳ Fit &lt;model&gt;`"
+        ), "a Plan header, then one escaped line of code per step"
+        assert blocks[2]["elements"][0]["text"].startswith("*Details*"), "details follow"
 
     def test_a_draft_log_over_the_section_limit_loses_its_oldest_lines_first(self) -> None:
         state = replace(
@@ -348,7 +349,7 @@ class TestToBlocks:
         """No block dict anywhere must contain a 'color' key."""
         state = _make_state(
             phase=TurnPhase.THINKING,
-            tool_lines=("🖋️ Tool",),
+            tool_lines=("⏳ Tool",),
             text_preview="preview",
         )
         blocks = to_blocks(state, now=5.0)

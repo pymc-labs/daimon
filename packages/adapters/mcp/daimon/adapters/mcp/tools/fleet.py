@@ -9,12 +9,13 @@ entry points retain their independent outside-chat restriction.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
@@ -37,9 +38,106 @@ if TYPE_CHECKING:
     from daimon.core.neutral_resources import WorkerPermissions
     from daimon.core.turn.deps import TurnDeps
 
+log = structlog.get_logger(__name__)
+
 PositiveMoney = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
 PositiveCount = Annotated[int, Field(gt=0, strict=True)]
 OperationKey = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^\S+$")]
+
+
+def _allowed_models(models: Sequence[ModelRef]) -> tuple[ModelRef, ...]:
+    return tuple({(model.provider, model.id): model for model in models}.values())
+
+
+def _allowed_line(models: Sequence[ModelRef]) -> str:
+    from daimon.core.agent_model_names import model_name
+
+    return ", ".join(f"{model_name(model)} ({model.id})" for model in models) or "none"
+
+
+def _without_fast(models: Sequence[ModelRef]) -> tuple[ModelRef, ...]:
+    from daimon.core.model_presets import OPUS_FAST
+
+    return tuple(model for model in _allowed_models(models) if model.id != OPUS_FAST)
+
+
+def fleet_model(value: str, models: Sequence[ModelRef]) -> str:
+    """The granted model id a worker model name means ("astra" -> gpt-6-astra), or a plain refusal.
+
+    Only this run's allowed models are candidates, so a name never resolves to a
+    model the fleet can't use; an ambiguous name lists what it could mean. The
+    local Opus fast preset is never a worker model: only the legacy path expands it.
+    """
+    import re
+
+    from daimon.core.agent_model_names import AmbiguousModel, resolve_model
+
+    allowed = _without_fast(models)
+    if "fast" in re.findall(r"[a-z]+", value.casefold()):
+        # Refuse before resolving: close-match spelling would turn it into standard Opus.
+        raise ToolError(
+            f'"{value}" can\'t run as a fleet worker (the fast setting only applies to an '
+            f"agent's own model); allowed: {_allowed_line(allowed)}."
+        )
+    try:
+        return resolve_model(value, available=allowed).id
+    except AmbiguousModel as error:
+        raise ToolError(f"{error} Allowed in this fleet: {_allowed_line(allowed)}.") from None
+    except ValueError:
+        raise ToolError(
+            f'"{value}" isn\'t allowed in this fleet; allowed: {_allowed_line(allowed)}.'
+        ) from None
+
+
+_REASONS = {
+    "not_subset": "is outside what this fleet allows",
+    "unsupported": "isn't supported for this worker",
+    "unbound": "is missing",
+    "ambiguous": "is ambiguous",
+    "stale": "is out of date; check the fleet again",
+    "exhausted": "is used up",
+}
+
+
+async def _refusals_logged(
+    operation_key: str, spawn: Callable[[], Awaitable[dict[str, JsonValue]]]
+) -> dict[str, JsonValue]:
+    """Log every refused spawn with a category; the root only ever gets plain text."""
+    from daimon.core.fleet_orchestration import FleetRefused
+    from daimon.core.neutral_resources import WorkerSpecRefused
+
+    try:
+        return await spawn()
+    except ToolError as error:
+        log.info(
+            "fleet.spawn_refused",
+            category="request",
+            operation_key=operation_key,
+            detail=str(error)[:300],
+        )
+        raise
+    except WorkerSpecRefused as error:
+        log.info(
+            "fleet.spawn_refused",
+            category="worker_spec",
+            operation_key=operation_key,
+            field=error.field,
+            reason=error.reason,
+        )
+        what = (
+            "model or model provider" if error.field == "backend" else error.field.replace("_", " ")
+        )
+        raise ToolError(
+            f"The worker's {what} {_REASONS.get(error.reason, error.reason.replace('_', ' '))}."
+        ) from None
+    except FleetRefused as error:
+        log.info(
+            "fleet.spawn_refused",
+            category="fleet",
+            operation_key=operation_key,
+            reason=error.reason,
+        )
+        raise ToolError(f"Fleet refused this worker: {error.reason.replace('_', ' ')}.") from None
 
 
 class AgentWorker(BaseModel):
@@ -300,6 +398,9 @@ class HostFleetToolService:
                 parent, policy, agent_name=as_agent
             )
         elif spec is None and clone is None and task is not None:
+            if model is not None:
+                # A natural name ("astra", "opus 5.5") means the granted id it names.
+                model = fleet_model(model, (*parent.models, parent.spec.model))
             spec = task_worker_spec(parent, role=role, task=task, model=model)
         providers: list[Provider] | None = None
         if planned_models is not None:
@@ -312,7 +413,14 @@ class HostFleetToolService:
                     if isinstance(backend_id, str) and isinstance(model_id, str):
                         models.append(ModelRef(provider=cast(Provider, backend_id), id=model_id))
                 plan_parent = replace(parent, models=tuple(models))
+            # Names resolve to granted ids first, so "astra" no longer refuses the plan;
+            # a name that resolves to nothing still refuses it, in plain words.
+            planned_models = [
+                fleet_model(name, (*plan_parent.models, plan_parent.spec.model))
+                for name in planned_models
+            ]
             granted = {model.id for model in (*plan_parent.models, plan_parent.spec.model)}
+            # Safety net: fleet_model only returns allowed ids, so this should never fire.
             unknown = sorted(set(planned_models) - granted)
             if unknown:
                 raise ToolError(
@@ -454,8 +562,18 @@ class HostFleetToolService:
     async def agents(
         self, caller: AuthIdentity, *, origin_context_id: uuid.UUID | None = None
     ) -> Mapping[str, JsonValue]:
+        from daimon.core.agent_model_names import model_name
+
         parent, policy = await self._parent(caller, origin_context_id=origin_context_id)
-        return {"agents": list(await self._orchestrator.worker_agents(parent, policy))}
+        models = _without_fast((*parent.models, parent.spec.model))
+        return {
+            "agents": list(await self._orchestrator.worker_agents(parent, policy)),
+            # The models a task worker (a copy of you) may run on, by plain name.
+            "models": [
+                {"name": model_name(model), "id": model.id, "provider": model.provider}
+                for model in models
+            ],
+        }
 
 
 def register_fleet_tools(
@@ -506,6 +624,59 @@ def register_fleet_tools(
         model: str | None = None,
         planned_workers: int | None = None,
         planned_models: list[str] | None = None,
+    ) -> dict[str, JsonValue]:
+        async def checked() -> dict[str, JsonValue]:
+            return await _spawn_checked(
+                ctx,
+                run_id=run_id,
+                operation_key=operation_key,
+                role=role,
+                backend=backend,
+                agent=agent,
+                clone=clone,
+                clone_revision=clone_revision,
+                overrides=overrides,
+                session=session,
+                budget_usd=budget_usd,
+                deadline=deadline,
+                max_turns=max_turns,
+                max_input_tokens=max_input_tokens,
+                max_output_tokens=max_output_tokens,
+                result_contract=result_contract,
+                reviewer_of=reviewer_of,
+                origin_context_id=origin_context_id,
+                task=task,
+                model=model,
+                planned_workers=planned_workers,
+                planned_models=planned_models,
+            )
+
+        return await _refusals_logged(operation_key, checked)
+
+    async def _spawn_checked(
+        ctx: Context,
+        *,
+        run_id: uuid.UUID | None,
+        operation_key: str,
+        role: str,
+        backend: BackendConfig | None,
+        agent: AgentSpec | AgentWorker | str | None,
+        clone: ResourceRef | None,
+        clone_revision: Revision | None,
+        overrides: AgentPatch | None,
+        session: SessionSpec | None,
+        budget_usd: Decimal | None,
+        deadline: datetime | None,
+        max_turns: int | None,
+        max_input_tokens: int | None,
+        max_output_tokens: int | None,
+        result_contract: Mapping[str, JsonValue] | None,
+        reviewer_of: uuid.UUID | None,
+        origin_context_id: uuid.UUID | None,
+        task: str | None,
+        model: str | None,
+        planned_workers: int | None,
+        planned_models: list[str] | None,
     ) -> dict[str, JsonValue]:
         if isinstance(agent, (str, AgentWorker)):
             name = agent if isinstance(agent, str) else agent.name
@@ -578,11 +749,13 @@ def register_fleet_tools(
         """Start one worker in this turn's fleet run. Call once per worker, in parallel.
 
         Usually pass only operation_key (unique per worker, e.g. "W1"), role,
-        task (the worker's full instructions), model (a model id from the
-        fleet grant, e.g. "gpt-6-luna"; omit it for your own model) and
-        planned_models (the model id of every worker you are starting, e.g.
-        ["gpt-6-luna", "gemini-3.8-flash", "claude-sonnet-5-5"], the same list
-        on every call), plus origin_context_id from your turn controls.
+        task (the worker's full instructions), model (a model the fleet
+        allows, by id or plain name, e.g. "gpt-6-astra" or "astra"; omit it
+        for your own model) and planned_models (the model of every worker you
+        are starting, e.g. ["opus 5.5", "astra", "argon"], the same list on
+        every call), plus origin_context_id from your turn controls.
+        fleet_agents lists the allowed models by name. A name that matches
+        none, or several, is refused with the allowed list.
         Leave everything else out: the host binds this turn's run (never
         invent a run_id), picks the granted backend, splits the budget left
         evenly across your planned workers (and each provider's cap across
@@ -736,11 +909,15 @@ def register_fleet_tools(
         ctx: Context,
         origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
-        """List the on-server agents your workers can run as in this fleet run.
+        """List what this fleet run's workers can be: on-server agents, and models.
 
-        Each has a name, a short description, the backend and model its own
-        config runs it on, and a rough list price per million tokens. Pass the
-        name as fleet_spawn's agent. Every spawn checks again, so the list is advice.
+        "agents": on-server agents a worker can run as. Each has a name, a short
+        description, the backend and model its own config runs it on, and a
+        rough list price per million tokens. Pass the name as fleet_spawn's agent.
+        "models": the models a task worker (a copy of you, e.g. "fork yourself
+        across models") may run on, each with a plain name and its id. Pass
+        either as fleet_spawn's model. The agents' models are not this list.
+        Every spawn checks again, so both lists are advice.
         """
         return dict(await owner().agents(await _auth(ctx), origin_context_id=origin_context_id))
 

@@ -2,8 +2,9 @@
 
 The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
-elapsed time, the agent's plan when progress plans are on, the turn's tool lines,
-the last few draft lines, and a Stop button.
+elapsed time, then in `CARD_SECTIONS` order the last few draft lines, the
+agent's plan when progress plans are on and the turn's tool lines, and a Stop
+button.
 The answer replaces the card as Extended Markdown messages: a card TextBlock
 renders no code blocks or math, a message does. A card follows it with the
 summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
@@ -29,6 +30,9 @@ from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
+    SECTION_LABELS,
+    CardSection,
+    LabelledSection,
     draft_log,
     format_draft,
     format_duration,
@@ -36,6 +40,7 @@ from daimon.core.turn.status_lines import (
     format_plan_lines,
     format_tool_lines,
     has_running_tool,
+    in_card_order,
     roll_draft,
 )
 from microsoft_teams.api import Account, Attachment, MentionEntity, MessageActivityInput
@@ -141,7 +146,7 @@ def live_card(state: CardState, *, now: float, cancel_key: str) -> AdaptiveCard:
     Once Stop is clicked it reads "Stopping…" and has no Stop button; the
     answer to the click is this card too (`handle_cancel`).
     A TextBlock renders no code fence and drops single line breaks, so the
-    tool lines are a monospace block with one paragraph each.
+    plan and the tool lines are monospace blocks with one paragraph each.
     """
     elapsed = now - state.started_at
     if state.stopping:
@@ -155,16 +160,22 @@ def live_card(state: CardState, *, now: float, cancel_key: str) -> AdaptiveCard:
             is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: word
         )
     body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
-    if state.plan_lines:
-        # One paragraph per step, as for the draft lines below.
-        body.append(TextBlock(text="\n\n".join(state.plan_lines), wrap=True))
-    if state.tool_lines:
-        lines = "\n\n".join(state.tool_lines)
-        body.append(TextBlock(text="Details", size="Small", wrap=True))
-        body.append(TextBlock(text=lines, font_type="Monospace", size="Small", wrap=True))
+    # A TextBlock drops single line breaks: one paragraph per line in each section.
+    # The plan and the tool lines are drawn alike, monospace so their emoji look alike.
+    sections: dict[CardSection, list[CardElement]] = {}
     if draft_lines := draft_log(state.earlier_drafts, state.draft):
-        # A TextBlock drops single line breaks: one paragraph per draft line.
-        body.append(TextBlock(text="\n\n".join(draft_lines), is_subtle=True, wrap=True))
+        sections["updates"] = [TextBlock(text="\n\n".join(draft_lines), is_subtle=True, wrap=True)]
+    labelled: dict[LabelledSection, tuple[str, ...]] = {
+        "plan": state.plan_lines,
+        "tools": state.tool_lines,
+    }
+    for name, lines in labelled.items():
+        if lines:
+            sections[name] = [
+                TextBlock(text=SECTION_LABELS[name], size="Small", wrap=True),
+                TextBlock(text="\n\n".join(lines), font_type="Monospace", size="Small", wrap=True),
+            ]
+    body.extend(element for section in in_card_order(sections) for element in section)
     body.append(TextBlock(text=format_duration(elapsed), is_subtle=True, size="Small", wrap=True))
     if not state.stopping:
         body.append(

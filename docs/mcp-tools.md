@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 124 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 125 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -254,6 +254,14 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 | `microsoft_search` | Teams callers | Search the person's Microsoft 365 as them: files, SharePoint, mail or calendar. |
 | `microsoft_send` | Teams callers | Send an email or a calendar invite from the person's Microsoft account. |
 | `microsoft_write` | Teams callers | Change the person's files or notes through Microsoft Graph, as them. |
+
+## `models`
+
+``list_models``: the models an agent here can be set to, by name, with list prices.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
 
 ## `notebook`
 
