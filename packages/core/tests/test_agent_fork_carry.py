@@ -13,7 +13,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from daimon.core import agent_fork, memory_resource
-from daimon.core.agent_fork import AgentCopy, CopyCarry, copy_agent, fork_notes
+from daimon.core.agent_fork import AgentCopy, CopyCarry, CopyCarryScope, copy_agent, fork_notes
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import (
@@ -222,12 +222,25 @@ def _client(
     )
 
 
-@pytest.mark.parametrize("channel_copy", [False, True], ids=["fork", "channel-copy"])
-async def test_copy_agent_carries_memory_and_provider_and_names_what_to_reconnect(
+@pytest.mark.parametrize(
+    ("kind", "carry"),
+    [
+        ("fork", "all"),
+        ("fork", "settings"),
+        ("fork", None),
+        ("channel-copy", "all"),
+    ],
+    ids=["admin-or-owner", "member", "unsaid", "channel-copy"],
+)
+async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    channel_copy: bool,
+    kind: str,
+    carry: CopyCarryScope | None,
 ) -> None:
+    """An admin's or owner's copy takes memory and fleet; anyone else's, or one
+    whose maker is unknown, takes the settings only; a channel's copy never more."""
+    channel_copy = kind == "channel-copy"
     monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
     factory = db_session_factory
     async with factory.begin() as session:
@@ -284,6 +297,7 @@ async def test_copy_agent_carries_memory_and_provider_and_names_what_to_reconnec
         subject=Subject(is_admin=True),
         default_agent_name="daimon",
         extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: "chan"} if channel_copy else None,
+        **({"carry": carry} if carry is not None else {}),
     )
 
     assert created[0]["metadata"][MA_METADATA_KEY_COPY_OF] == "source"
@@ -301,10 +315,14 @@ async def test_copy_agent_carries_memory_and_provider_and_names_what_to_reconnec
         'crm needs connecting again: ask in chat "connect crm (https://crm.example.com/mcp) '
         'to mine".'
     ) in notes
-    if channel_copy:
+    kept_back = "source's memory and fleet setup stay with source."
+    if channel_copy or carry != "all":
         assert revision.fleet_grant is None and store is None
         assert copy.carry.memory is None
+        assert (kept_back in notes) is not channel_copy
+        assert not any("fleet setup, with" in note for note in notes)
         return
+    assert kept_back not in notes
     assert revision.fleet_grant is not None
     assert store is not None and store != mount["memory_store_id"]
     copied = {(m["path"], m["content"]) for m in memory.memories[store]}
@@ -477,6 +495,7 @@ async def test_a_failed_carry_still_returns_the_copy_and_lists_only_active_repos
         public_url=None,
         subject=Subject(is_admin=True),
         default_agent_name="daimon",
+        carry="all",
     )
     assert copy.agent.id == "ag_new"
     assert copy.carry.memory_failed

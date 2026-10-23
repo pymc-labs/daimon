@@ -1197,6 +1197,8 @@ async def agents_fork(
         default_agent_name=rt.deployment_default.agent_name,
         # A provider switch that dropped features is carried only from the copy's own capture.
         capture_source=_fork_capture(rt, tenant_id, principal.account_id, principal.os_user, dst),
+        # The operator's copy takes everything an admin's does.
+        carry="all",
     )
     await ensure_agent_face(
         rt.sessionmaker,

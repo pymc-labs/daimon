@@ -266,8 +266,11 @@ three ways (`packages/core/daimon/core/agent_fork.py:115-133`):
   them;
 - another agent's skills, and any that fail to copy, are left off and named.
 
-A fork also takes the source's provider setting, fleet grant and shared memory
-(`AgentBackendService.carry_to_copy`, `memory_resource.copy_shared_memory`).
+A fork also takes the source's provider setting
+(`AgentBackendService.carry_to_copy`). Only a fork made by an admin or the
+source's owner (`copy_agent(carry="all")`) also takes the fleet grant and the
+shared memory (`memory_resource.copy_shared_memory`); anyone else's fork, and
+one whose maker the caller doesn't state, takes the settings only.
 Personal and channel memory stores are never copied. A provider switch whose
 consent dropped features is carried only with a fresh consent pinned to the
 fork, and only when the fork drops nothing more; a provider turned off for
