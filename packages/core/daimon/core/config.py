@@ -199,6 +199,14 @@ class McpSettings(BaseModel):
             "Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter."
         ),
     )
+    member_copy_limit: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "How many live copies one member may own of agents they copied while talking to "
+            "them (fork_agent without admin). Admins are not limited. 0 turns member copies off."
+        ),
+    )
     legacy_token_cutoff: AwareDatetime | None = Field(
         default=None,
         description=(
