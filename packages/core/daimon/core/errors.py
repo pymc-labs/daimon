@@ -20,6 +20,7 @@ TurnKind = Literal[
     "interrupt_timeout",
     "connection_lost",
     "upstream",
+    "refused",
     "reducer_bug",
     "requires_action",
     "ceiling",

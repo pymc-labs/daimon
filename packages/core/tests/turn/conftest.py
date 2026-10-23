@@ -199,15 +199,20 @@ def make_status_idle(
     *,
     event_id: str,
     stop_reason: StopReason | None = None,
+    stop_details: dict[str, str] | None = None,
 ) -> BetaManagedAgentsSessionStatusIdleEvent:
+    """`stop_details` is not modelled by the pinned SDK; it validates as an extra field."""
     if stop_reason is None:
         stop_reason = BetaManagedAgentsSessionEndTurn(type="end_turn")
-    return BetaManagedAgentsSessionStatusIdleEvent(
-        id=event_id,
-        type="session.status_idle",
-        stop_reason=stop_reason,
-        processed_at=_T,
-    )
+    raw: dict[str, object] = {
+        "id": event_id,
+        "type": "session.status_idle",
+        "stop_reason": stop_reason.model_dump(mode="json"),
+        "processed_at": _T,
+    }
+    if stop_details is not None:
+        raw["stop_details"] = stop_details
+    return BetaManagedAgentsSessionStatusIdleEvent.model_validate(raw)
 
 
 def make_tool_confirmation(

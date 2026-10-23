@@ -51,6 +51,11 @@ def _tool(name: str, status: str) -> ToolUseBlock:
             "Daimon's AI service failed on this reply.",
             "@mention Daimon to try again.",
         ),
+        (
+            TerminationReason.REFUSED,
+            "Daimon's AI declined this request.",
+            "Rephrase it and @mention Daimon again.",
+        ),
         (TerminationReason.RATE_LIMITED, "Daimon's AI service is busy.", "Try again in a minute."),
         (
             TerminationReason.SESSION_TERMINATED,
@@ -175,6 +180,7 @@ def test_completed_has_no_notice() -> None:
     [
         (TerminationReason.INTERRUPTED, "Send a message to carry on."),
         (TerminationReason.UPSTREAM, "Send your message again."),
+        (TerminationReason.REFUSED, "Rephrase it and send it again."),
         (TerminationReason.CONNECTION_LOST, "Send a message to ask what it finished."),
         (TerminationReason.SESSION_BUSY, "Wait for it to finish, then send a message."),
     ],

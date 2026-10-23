@@ -35,12 +35,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Source audit: common admission/queue/preparation gates plus driver finalizers
 # and the public prepared-turn deadline remain reachable. Gemini has neither
-# legacy retry/MCP-degraded records nor the Anthropic-only session replacement
-# branch. History replay retains the session and never sets recovered=True.
+# legacy retry/MCP-degraded records, the Anthropic refusal idle, nor the
+# Anthropic-only session replacement branch. History replay retains the session
+# and never sets recovered=True.
 # See GEMINI-TERMINATION.md for the independent source inventory and proof gaps.
 UNREACHABLE_REASONS = frozenset(
     {
         TerminationReason.REDUCER_BUG,
+        TerminationReason.REFUSED,
         TerminationReason.MCP_DEGRADED_EMPTY,
         TerminationReason.RETRYING_UNSETTLED,
         TerminationReason.RECOVERY_CANCELLED,

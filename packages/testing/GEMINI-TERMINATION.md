@@ -26,8 +26,9 @@ cases retain their session. Interrupted may occur before native preparation.
 | admission_concurrency_shed, pre-native interrupted | `core/turn/slots.py` / `core/turn_queue.py` before preparation |
 | missing_config, resolver_miss, session_busy, unknown | Common admission/preparation exceptions and total `termination_reason` mapper |
 
-The seven exclusions are explicit, independent of which tests ran:
-`reducer_bug` has no production raiser; `mcp_degraded_empty` and
+The eight exclusions are explicit, independent of which tests ran:
+`reducer_bug` has no production raiser; `refused` needs the Anthropic refusal
+idle (`stop_details`), which the Gemini codec does not produce; `mcp_degraded_empty` and
 `retrying_unsettled` need legacy record kinds that the Gemini codec does not
 produce; `recovery_cancelled` and `recovery_failed` require the Anthropic-only
 replacement branch in `run_prepared_turn`; `session_preparation_failed` and

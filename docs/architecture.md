@@ -1282,7 +1282,10 @@ set outside the mapper: `admission_concurrency_shed` by callers when the
 turn queue is full or a queued turn passes its max wait, and `recovery_failed` by `run_prepared_turn` on
 the terminal hook when replacing a lost session raises (the exception it
 re-raises maps to `unknown`). A session MA reports terminated without any terminal
-event for this turn is `session_terminated`, never `completed`.
+event for this turn is `session_terminated`, never `completed`. A turn the model
+refuses ends with an ordinary `end_turn` idle whose `stop_details` says
+`refusal`; the reducer reads it and the turn is `refused`, never an empty
+`completed`.
 `TurnError.kind` is unchanged, and
 every `TurnKind` value is also a `TerminationReason` value with the same
 string.

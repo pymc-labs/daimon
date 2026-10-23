@@ -42,7 +42,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.termination import denial_termination_reason
+from daimon.core.turn.termination import denial_termination_reason, normalized_termination_reason
 from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
@@ -53,6 +53,8 @@ from daimon.testing.turn_fakes import (
     YieldEvent,
     run_turn_on_leg,
 )
+from mux.contracts.ids import ResourceRef
+from mux.drivers.anthropic.normalize import EventNormalizer
 
 from .conftest import (
     make_agent_message,
@@ -354,6 +356,32 @@ def test_a_denial_string_maps_like_the_exception_carrying_it(
     ), f"{denial} must record one member whichever way the refusal is reported"
 
 
+def test_a_neutral_refusal_end_maps_to_refused() -> None:
+    """The mux leg sees a refusal as an errored `turn_ended`; it must not read as upstream."""
+    session = ResourceRef(
+        id="sess_1",
+        kind="session",
+        provider="anthropic",
+        account_scope_id="workspace",
+        tenant_id="tenant",
+        account_id="account",
+    )
+    normalizer = EventNormalizer(session)
+    native = {"id": "e", "processed_at": "2026-10-09T00:00:00+00:00"}
+    normalizer.normalize({**native, "type": "session.status_running"}, observed_at=_FROZEN_NOW)
+    ended = normalizer.normalize(
+        {
+            **native,
+            "id": "ended",
+            "type": "session.status_idle",
+            "stop_reason": {"type": "end_turn"},
+            "stop_details": {"type": "refusal", "category": "cyber"},
+        },
+        observed_at=_FROZEN_NOW,
+    )
+    assert normalized_termination_reason(ended) is TerminationReason.REFUSED, ended.payload
+
+
 def test_only_completed_and_interrupted_are_not_failures() -> None:
     assert {r for r in TerminationReason if not r.is_failure} == {
         TerminationReason.COMPLETED,
@@ -408,6 +436,7 @@ def test_the_value_set_is_pinned() -> None:
         "interrupt_timeout",
         "connection_lost",
         "upstream",
+        "refused",
         "rate_limited",
         "session_terminated",
         "mcp_degraded_empty",

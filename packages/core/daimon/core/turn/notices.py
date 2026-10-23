@@ -78,6 +78,11 @@ _COPY: dict[TerminationReason, _Copy] = {
     TerminationReason.UPSTREAM: _Copy(
         "Daimon's AI service failed on this reply.", _RETRY, "Send your message again."
     ),
+    TerminationReason.REFUSED: _Copy(
+        "Daimon's AI declined this request.",
+        "Rephrase it and @mention Daimon again.",
+        "Rephrase it and send it again.",
+    ),
     TerminationReason.RATE_LIMITED: _Copy("Daimon's AI service is busy.", "Try again in a minute."),
     TerminationReason.SESSION_TERMINATED: _Copy(
         "Daimon stopped mid-reply. Its working files may be gone.",

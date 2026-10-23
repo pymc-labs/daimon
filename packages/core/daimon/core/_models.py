@@ -2749,7 +2749,7 @@ class TurnOutcome(Base):
         ),
         CheckConstraint(
             "reason IN ('completed', 'interrupted', 'interrupt_timeout', "
-            "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
+            "'connection_lost', 'upstream', 'refused', 'rate_limited', 'session_terminated', "
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
             "'admission_balance_depleted', 'admission_cap_exceeded', "

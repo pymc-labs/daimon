@@ -9,6 +9,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.errors import TurnError
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock, TurnState
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import (
     BlockForever,
     DelayThenYield,
@@ -153,6 +154,44 @@ async def test_run_turn_finalizes_session_status_terminated_as_terminal_failure(
     assert final.error.kind == "upstream"
     assert len(lc.terminal_failures) == 1
     assert lc.terminal_success == []
+
+
+async def test_run_turn_finalizes_refusal_idle_as_refused_failure() -> None:
+    """A refused turn idles as `end_turn` with no answer. Without reading
+    `stop_details` it finalized as an empty success, which the chat card
+    showed as "Stopped." instead of saying the request was declined."""
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [
+            YieldEvent(
+                make_status_idle(
+                    event_id="sevt_1",
+                    stop_details={"type": "refusal", "category": "reasoning_extraction"},
+                )
+            ),
+        ]
+    ]
+    lc = RecordingLifecycle()
+
+    final = await asyncio.wait_for(
+        run_turn_on_leg(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        timeout=2.0,
+    )
+
+    assert final.termination is TerminationReason.REFUSED, f"got {final.termination}"
+    assert len(lc.terminal_failures) == 1, "a refusal must finalize as a failure"
+    err = lc.terminal_failures[0][1]
+    assert isinstance(err, TurnError) and err.kind == "refused", f"got {err!r}"
+    assert lc.terminal_success == [], "a refusal is not an empty success"
 
 
 async def test_run_turn_finalizes_requires_action_idle_as_actionable_failure() -> None:
