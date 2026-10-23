@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fleet card: a worker the budget watch stopped reads why, whenever the watch stopped it, before or after it started: "its spending couldn't be measured, so it was stopped; try again" (it used to read "Daimon refused to start it"), "it used up its budget; ask for a bigger budget …" for the worker's own or the run's budget, "Daimon restarted before it finished" for a restart. A limit with no specific reason still reads "a spending limit was reached".
 - Claude workers: the native tool schema now models `url_sources`, which Managed Agents echoes on a `web_fetch`/`web_search` config. A named agent's clone worker (J4 `fleet-claude`) passes its readback and runs; it used to fail as "a setup error on our side". The value is kept and sent back exactly as echoed, never set by Daimon, and only URL tools may carry it.
 - Fleet: a Claude worker whose allocation readback echoes a tool field Daimon's strict native schema doesn't model is refused like any other readback mismatch (its allocated agent is archived), instead of failing as "a setup error on our side" with a raw validation error. The host logs `fleet.worker_readback_unrepresented` with the unknown field paths (names only).
 - Fleet: a Stop that races a run's first worker spawn still leaves the run owing its end card. Ending a run now locks the run row first, so its check for a spawned worker sees a spawn that was committing at that moment.
