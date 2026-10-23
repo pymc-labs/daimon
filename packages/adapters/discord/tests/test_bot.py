@@ -2459,6 +2459,7 @@ class TestCredentialButtonRegistration:
             "run_request_expiry_poller",
             "run_connect_notice_poller",
             "run_delivery_poller",
+            "run_run_end_poller",
         ):
             monkeypatch.setattr(bot_module, name, fake_poller(name))
         edits: list[tuple[object, object, str]] = []

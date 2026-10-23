@@ -20,11 +20,12 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any, Literal, cast
 
+import structlog
 from daimon.core._models import Account, Tenant
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
@@ -44,10 +45,11 @@ from daimon.core.fleet import (
 )
 from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
 from pydantic import JsonValue
-from sqlalchemy import Row, func, or_, select, text, update
+from sqlalchemy import Row, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+log = structlog.get_logger(__name__)
 _ACTIVE: tuple[WorkerStatus, ...] = ("starting", "running")
 _MICRO_EXPONENT = -6  # whole micro-dollars: Numeric(12, 6)
 _MAX_AMOUNT = Decimal("999999.999999")
@@ -399,8 +401,6 @@ async def sweep_expired(
                         run_id=run.id,
                         expected_version=run.version,
                         status="failed",
-                        # No wake delivered a result: the thread is owed a notice.
-                        end_reason="run_expired",
                     )
                     runs_ended += 1
     return workers_ended, runs_ended
@@ -736,7 +736,6 @@ async def set_run_status(
     status: RunStatus,
     wake_id: uuid.UUID | None = None,
     unless_waking: bool = False,
-    end_reason: task_continuations.RunEndReason = "run_ended",
 ) -> FleetRun:
     """Compare-and-set the run's status; an ended run withdraws its wakes.
 
@@ -745,7 +744,16 @@ async def set_run_status(
     wake of this run refuses the move in the same transaction (FleetConflict),
     so a turn already owed to the root is never cancelled under it.
     """
-    finished = {"finished_at": func.now()} if status not in RUN_TRANSITIONS else {}
+    # An ended run owes its thread a terminal card until one is rendered.
+    finished = (
+        {
+            "finished_at": func.now(),
+            "end_notice": "owed",
+            "end_notice_due_at": func.now() + END_NOTICE_GRACE,
+        }
+        if status not in RUN_TRANSITIONS
+        else {}
+    )
     async with _transaction(sessionmaker) as session:
         row = (
             await session.execute(
@@ -775,10 +783,136 @@ async def set_run_status(
         ):
             raise FleetConflict(f"run {run_id} has a pending wake", reason="wake_pending")
         if finished:
-            await task_continuations.retire_worker_finished_rows(
-                session, run=run, keep_id=wake_id, reason=end_reason
-            )
+            await task_continuations.retire_worker_finished_rows(session, run=run, keep_id=wake_id)
     return run
+
+
+#: Time for the turn that ended a run to render its own terminal card.
+END_NOTICE_GRACE = timedelta(seconds=60)
+#: How long a wake turn that was running when its run ended may still answer.
+WAKE_TURN_GRACE = timedelta(minutes=15)
+END_NOTICE_MAX_ATTEMPTS = 6
+_END_NOTICE_BACKOFF = timedelta(seconds=30)
+_END_NOTICE_BACKOFF_CAP = timedelta(minutes=15)
+
+
+@dataclass(frozen=True)
+class EndNotice:
+    """An ended run whose thread has not seen its terminal card."""
+
+    run: FleetRun
+    workers: tuple[FleetWorker, ...]
+    card_message_id: str | None
+    #: A wake delivered the root's answer: settle the card, post no notice.
+    delivered: bool
+    attempts: int
+
+
+async def claim_end_notices(
+    sessionmaker: async_sessionmaker[AsyncSession], *, platform: str, limit: int = 10
+) -> tuple[EndNotice, ...]:
+    """Lease this platform's due run-end notices: each attempt pushes `due` back.
+
+    The caller posts outside this transaction and then calls `settle_end_notice`.
+    A crash between the post and the settle posts again after the backoff, so
+    delivery is at least once. A run whose wake turn may still be running waits
+    for it; one out of attempts is given up.
+    """
+    claimed: list[EndNotice] = []
+    async with sessionmaker.begin() as session:
+        now = await session.scalar(select(func.now()))
+        assert now is not None
+        rows = (
+            await session.scalars(
+                select(FleetRunRow)
+                .where(
+                    FleetRunRow.platform == platform,
+                    FleetRunRow.end_notice == "owed",
+                    FleetRunRow.end_notice_due_at <= now,
+                )
+                .order_by(FleetRunRow.end_notice_due_at, FleetRunRow.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+        for row in rows:
+            run = _run(row)
+            started, delivered = await task_continuations.run_end_wakes(session, run=run)
+            if started is not None and started + WAKE_TURN_GRACE > now:
+                row.end_notice_due_at = started + WAKE_TURN_GRACE
+                continue
+            if row.end_notice_attempts >= END_NOTICE_MAX_ATTEMPTS:
+                row.end_notice = "given_up"
+                log.error("fleet.end_notice_given_up", run_id=str(run.id), reason="attempts")
+                continue
+            row.end_notice_attempts += 1
+            row.end_notice_due_at = now + min(
+                _END_NOTICE_BACKOFF * 2 ** (row.end_notice_attempts - 1), _END_NOTICE_BACKOFF_CAP
+            )
+            workers = (
+                await session.scalars(
+                    select(FleetWorkerRow)
+                    .where(
+                        FleetWorkerRow.tenant_id == run.tenant_id, FleetWorkerRow.run_id == run.id
+                    )
+                    .order_by(FleetWorkerRow.ordinal)
+                )
+            ).all()
+            claimed.append(
+                EndNotice(
+                    run=run,
+                    workers=tuple(_worker(worker) for worker in workers),
+                    card_message_id=row.card_message_id,
+                    delivered=delivered,
+                    attempts=row.end_notice_attempts,
+                )
+            )
+        await session.flush()
+    return tuple(claimed)
+
+
+async def settle_end_notice(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    outcome: Literal["shown", "given_up"],
+) -> bool:
+    """Close an owed notice; False when something else already closed it."""
+    async with sessionmaker.begin() as session:
+        settled = await session.scalar(
+            update(FleetRunRow)
+            .where(
+                FleetRunRow.tenant_id == tenant_id,
+                FleetRunRow.id == run_id,
+                FleetRunRow.end_notice == "owed",
+            )
+            .values(end_notice=outcome)
+            .returning(FleetRunRow.id)
+        )
+    return settled is not None
+
+
+async def record_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    message_id: str,
+    terminal: bool,
+) -> None:
+    """Remember the run's card; a rendered terminal card settles an owed notice."""
+    values: dict[str, Any] = {"card_message_id": message_id}
+    if terminal:
+        values["end_notice"] = case(
+            (FleetRunRow.end_notice == "owed", "shown"), else_=FleetRunRow.end_notice
+        )
+    async with sessionmaker.begin() as session:
+        await session.execute(
+            update(FleetRunRow)
+            .where(FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id)
+            .values(**values)
+        )
 
 
 async def run_status(

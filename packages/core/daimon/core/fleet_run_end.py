@@ -1,24 +1,31 @@
-"""Tell a thread its fleet ended when no wake delivered the result.
+"""Tell a thread its fleet ended when no turn rendered the run's end there.
 
-The deadline sweep ends a run in whichever process runs it, and withdraws the
-run's wakes as "run_expired". Nothing is then owed to the root, so without this
-the run's card stays at "running" and nobody hears the fleet ended. The adapter
-polls those withdrawn wakes, settles the card and posts one plain notice per run.
+A run that ends owes its thread a terminal card (`fleet_run.end_notice`).
+The root turn, a wake turn or a Stop press usually renders it and settles that
+at once. A run the deadline sweep ended, whose wake was refused, or that never
+parked a wake has nobody to do so: without this its card stays at "running".
+The adapter polls those runs, settles the card and posts one plain line.
+
+Delivery is at least once: a crash between the post and its settle posts again
+after the backoff. One run's failure never holds up the others.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 import structlog
-from daimon.core.fleet import RUN_TRANSITIONS, FleetConflict, FleetRun, FleetWorker
-from daimon.core.stores import fleet, task_continuations
+from daimon.core.stores import fleet
+from daimon.core.stores.fleet import EndNotice
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-#: The adapter hook: settle the run's card and post the notice. True when done
-#: (or the thread can never be reached), False to retry on a later poll.
-PostRunEnd = Callable[[FleetRun, tuple[FleetWorker, ...]], Awaitable[bool]]
+#: What the adapter did: "shown" (the card and notice are out), "retry" (a
+#: transient failure; the claim's backoff applies) or "give_up" (it can never be
+#: shown there: the thread is gone, locked or forbidden).
+type EndOutcome = Literal["shown", "retry", "give_up"]
+PostRunEnd = Callable[[EndNotice], Awaitable[EndOutcome]]
 _log = structlog.get_logger(__name__)
 
 
@@ -27,33 +34,29 @@ async def poll_run_end_notices_once(
     *,
     platform: str,
     post: PostRunEnd,
-    limit: int = 20,
 ) -> int:
-    """Claim, post and settle expired runs while row locks keep the post single."""
-    posted = 0
-    for _ in range(limit):
-        async with sessionmaker.begin() as session:
-            claim = await task_continuations.claim_run_end_notice(session, platform=platform)
-            if claim is None:
-                break
-            tenant_id, run_id, thread_id, ids = claim
-            try:
-                run, workers = await fleet.run_status(session, tenant_id=tenant_id, run_id=run_id)
-            except FleetConflict:
-                run, workers = None, ()
-            if (
-                run is not None
-                and run.platform == platform
-                and run.thread_id == thread_id
-                and run.status not in RUN_TRANSITIONS
-            ):
-                if not await post(run, workers):
-                    break
-                posted += 1
-            else:
-                _log.info("fleet.run_end_notice_skipped", run_id=str(run_id))
-            await task_continuations.mark_run_end_notice_shown(session, ids=ids)
-    return posted
+    """Post every due notice, outside the claim's row locks; returns how many showed."""
+    shown = 0
+    for notice in await fleet.claim_end_notices(sessionmaker, platform=platform):
+        run_id = str(notice.run.id)
+        try:
+            outcome = await post(notice)
+        except Exception:
+            _log.exception("fleet.end_notice_failed", run_id=run_id, attempts=notice.attempts)
+            continue
+        if outcome == "retry":
+            _log.warning("fleet.end_notice_retry", run_id=run_id, attempts=notice.attempts)
+            continue
+        if outcome == "give_up":
+            _log.error("fleet.end_notice_given_up", run_id=run_id, reason="unpostable")
+        await fleet.settle_end_notice(
+            sessionmaker,
+            tenant_id=notice.run.tenant_id,
+            run_id=notice.run.id,
+            outcome="shown" if outcome == "shown" else "given_up",
+        )
+        shown += outcome == "shown"
+    return shown
 
 
 async def run_run_end_poller(
