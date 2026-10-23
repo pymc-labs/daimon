@@ -387,6 +387,35 @@ async def freeze(value):
     await persistence.run(write)
 
 
+async def test_a_root_frozen_before_worker_times_still_reads(root_turn):
+    """A root recorded before #1436 has no max_worker_seconds: it decodes as None and
+    its workers keep the old rule (the root's own, shorter deadline)."""
+    from daimon.core.neutral_resources import worker_runtime_ceiling
+
+    await freeze(root_turn)
+    deps, _, _, intent, _, scope, _, _ = root_turn
+    current, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    assert current.max_worker_seconds is not None
+    async with deps.sessionmaker() as db:
+        row = await db.scalar(
+            select(MuxOperation).where(
+                MuxOperation.tenant_id == intent.tenant_id,
+                MuxOperation.key.startswith("fleet_root:"),
+            )
+        )
+        assert row is not None
+        record = dict(row.record)
+        result = dict(record["result"])
+        permissions = dict(result["permissions"])
+        del permissions["max_worker_seconds"]
+        row.record = {**record, "result": {**result, "permissions": permissions}}
+        await db.commit()
+    old, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    assert old.max_worker_seconds is None
+    assert old == replace(current, max_worker_seconds=None)
+    assert worker_runtime_ceiling(old, "anthropic") is None
+
+
 async def test_real_native_ack_root_join_is_shared_by_intent_and_origin(root_turn):
     await freeze(root_turn)
     deps, prepared, grants, intent, origin, scope, binding, transport = root_turn

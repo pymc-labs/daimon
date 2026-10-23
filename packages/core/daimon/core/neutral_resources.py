@@ -1131,6 +1131,9 @@ def worker_runtime_ceiling(
     ceilings = (
         parent.max_worker_seconds,
         WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None,
+        # Every worker keeps the root's native budget, whose dispatch is time-bounded:
+        # shorten its deadline rather than refuse it under a longer custom grant.
+        NATIVE_DISPATCH_MAX_SECONDS if parent.limits.native_budget_usd is not None else None,
     )
     return min((ceiling for ceiling in ceilings if ceiling is not None), default=None)
 

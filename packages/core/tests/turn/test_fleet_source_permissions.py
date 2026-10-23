@@ -1364,6 +1364,14 @@ async def test_the_grants_worker_time_caps_every_worker_and_the_run_keeps_its_ow
     # A grant worker time above Gemini's profile cap leaves Gemini at its cap.
     assert worker_runtime_ceiling(replace(root, max_worker_seconds=900), "gemini") == 600
     assert worker_runtime_ceiling(replace(root, max_worker_seconds=900), "openai") == 900
+    # A root with a native budget (Astra) shortens every worker to the native bound
+    # instead of letting require_native_dispatch refuse it under a longer grant.
+    native = replace(
+        root,
+        max_worker_seconds=900,
+        limits=root.limits.model_copy(update={"native_budget_usd": Decimal("0.02")}),
+    )
+    assert worker_runtime_ceiling(native, "openai") == 600
 
 
 def test_bounded_gemini_tokens_fit_the_prompt_and_the_budget():
