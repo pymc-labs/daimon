@@ -58,7 +58,7 @@ _FORMAT_TEAMS = """\
 """
 _FORMAT_TABLES = (
     "Final-reply Markdown tables render as images on Discord unless the tenant\n"
-    "opts out, and as native tables on Slack when the tenant enables them. "
+    "opts out, and as native tables on Slack unless the tenant opts out. "
     "Otherwise prefer bullets or code blocks. "
     "Use blank lines for separation rather than horizontal rules (`---`)."
 )
@@ -86,7 +86,7 @@ _FORMATTING = {
         "write `<#CHANNEL_ID>` taking CHANNEL_ID from the `id` attribute on the\n"
         "`<channel>` element. Both render as clickable names — do NOT print raw\n"
         "IDs. Never write `<!channel>`, `<!here>`, or `<!everyone>`.\n"
-        "Final-reply Markdown tables render as native tables when the tenant enables them. "
+        "Final-reply Markdown tables render as native tables unless the tenant opts out. "
         "Otherwise prefer bullets or code blocks. " + _SEPARATION
     ),
     "teams": (
