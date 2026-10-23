@@ -1066,10 +1066,18 @@ async def _fork_agent_impl(
     new_name: str,
     expected_ma_agent_id: str | None = None,
     new_copy_if_taken: bool = False,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
+    from daimon.adapters.mcp.tools.task_continuity import forked_in_value
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_FORKED_FROM,
+        MA_METADATA_KEY_FORKED_IN,
+    )
+
     # Forking is an admin's call: a fork routes nowhere and has no channel
     # pin of its own, so it is free to run anywhere the source can't.
     _require_admin(auth)
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     public_url = runtime.settings.mcp.public_url
     async with contextlib.AsyncExitStack() as stack:
         # Pick, check and create under the name's lock, so two copies at once
@@ -1102,6 +1110,14 @@ async def _fork_agent_impl(
                 default_agent_name=runtime.deployment_default.agent_name,
                 # Whoever made the copy owns it.
                 owner=auth.account_id if may_own(auth) else None,
+                # Made from a conversation: switching it from there hands it that
+                # conversation in the same step (J1, `copy_awaiting_its_switch`).
+                extra_metadata={
+                    MA_METADATA_KEY_FORKED_FROM: source.id,
+                    MA_METADATA_KEY_FORKED_IN: forked_in_value(origin),
+                }
+                if origin is not None
+                else None,
             )
         except DaimonError as exc:
             raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
@@ -1548,6 +1564,7 @@ async def _request_agent_backend_switch_impl(
     thread_mode: ThreadMode | None = None,
     required_capabilities: tuple[Capability, ...] | None = None,
     for_everyone: bool = False,
+    unsaved_work: Literal["copy", "leave"] | None = None,
 ) -> AgentBackendSwitchInfo:
     model = _resolve_agent_model(target_backend, model)
     _require_selectable_model(target_backend, model)
@@ -1558,6 +1575,10 @@ async def _request_agent_backend_switch_impl(
         raise ToolError("Request this change from your active chat conversation.")
 
     from daimon.adapters.mcp.tools._session_gate import session_card_gap
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+        copy_awaiting_its_switch,
+    )
     from daimon.core.channel_backend import (
         BackendActor,
         load_backend_agent,
@@ -1572,6 +1593,9 @@ async def _request_agent_backend_switch_impl(
     from pydantic import ValidationError
 
     on_now: Provider | None = None
+    # A new copy of this conversation's responder, made here: the confirmed switch
+    # hands it this conversation too.
+    awaiting: str | None = None
     try:
         service = make_backend_service(
             runtime.session_factory,
@@ -1620,6 +1644,24 @@ async def _request_agent_backend_switch_impl(
             auth,
         )
         on_now = await _provider_now(service, agent)
+        if agent.source is not None and await copy_awaiting_its_switch(
+            runtime,
+            auth,
+            origin,
+            ma_agent_id=agent.source.ref.id,
+            metadata=agent.source.spec.metadata,
+        ):
+            awaiting = agent.source.ref.id
+            # Every hand-off check, before a card is posted: its uncommitted-work
+            # question is one the person answers here, never on the card.
+            await _hand_off_task_impl(
+                runtime,
+                auth,
+                origin_context_id=str(origin.id),
+                agent_id=awaiting,
+                unsaved_work=unsaved_work,
+                switch="check",
+            )
         if thread_mode == "shared" and not (auth.is_admin and auth.agent_id is None):
             # The service refuses it too; say so before a card is posted.
             raise ToolError(
@@ -1665,6 +1707,16 @@ async def _request_agent_backend_switch_impl(
 
             before = await service.current(agent)
             old_provider = provider_name((before.backend if before else None) or DEFAULT_BACKEND)
+            if awaiting is not None:
+                # Checked again at the write edge, so a refusal changes nothing.
+                await _hand_off_task_impl(
+                    runtime,
+                    auth,
+                    origin_context_id=str(origin.id),
+                    agent_id=awaiting,
+                    unsaved_work=unsaved_work,
+                    switch="check",
+                )
             try:
                 await service.set_backend(
                     agent,
@@ -1685,6 +1737,26 @@ async def _request_agent_backend_switch_impl(
                     # Another switch landed first: name where the agent is now.
                     on_now = await _provider_now(service, agent)
                 raise
+            if awaiting is not None:
+                # J1: the switch and the hand-off it promises, in one step. The model's
+                # own order was a coin toss: a copy handed this conversation before
+                # its switch posted the card again instead of answering.
+                try:
+                    await _hand_off_task_impl(
+                        runtime,
+                        auth,
+                        origin_context_id=str(origin.id),
+                        agent_id=awaiting,
+                        unsaved_work=unsaved_work,
+                        switch="commit",
+                    )
+                except ToolError as exc:
+                    raise ToolError(
+                        f"{agent_name} now uses {provider_name(target_backend)}, but this "
+                        "conversation couldn't be handed to it: "
+                        f"{str(exc).removesuffix(' Nothing was changed.')} Ask {agent_name} "
+                        "in a new conversation."
+                    ) from exc
             status = "changed"
             summary = (
                 f"Model provider changed. New conversations with {agent_name} use "
@@ -1933,6 +2005,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         new_name: str,
         expected_ma_agent_id: str | None = None,
         new_copy_if_taken: bool = False,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
         Admin-only. Only for a saved, named copy someone asked to keep. Running
@@ -1954,7 +2027,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
         is the copy's: name the copy by it, not ``new_name``. Pass true for "make a
         copy of yourself" asks, where the person named no copy; when the person
-        names the copy, leave this false."""
+        names the copy, leave this false. Pass this active turn's
+        ``origin_context_id``."""
         return await _fork_agent_impl(
             runtime,
             await _auth(ctx),
@@ -1962,6 +2036,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             new_name,
             expected_ma_agent_id=expected_ma_agent_id,
             new_copy_if_taken=new_copy_if_taken,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool(tags={"admin"})
@@ -2000,6 +2075,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             thread_mode: ThreadMode | None = None,
             required_capabilities: tuple[Capability, ...] | None = None,
             for_everyone: bool = False,
+            unsaved_work: Literal["copy", "leave"] | None = None,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
@@ -2020,10 +2096,11 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             when the person says it's for everyone (for_everyone=true, on both calls);
             otherwise offer the copy below. For "make a copy of yourself on Gemini":
             copy the agent with fork_agent and new_copy_if_taken=true (always a NEW
-            copy, never an earlier one; use the name and id it returns from here on),
-            hand this conversation to the copy with hand_off_task while it is still on
-            this provider, then switch the copy here; the confirmed switch moves this
-            conversation to Gemini from the next message.
+            copy, never an earlier one; use the name it returns from here on), then
+            switch the copy here. Don't hand_off_task first: the confirmed switch hands
+            this conversation to the copy and moves it to Gemini from the next message.
+            If that preview asks the uncommitted-work question, pass the person's
+            answer as ``unsaved_work`` on both calls.
             First call without preview_digest and show the returned compatibility,
             shared-thread limits, what won't be available, and the cost line. Call again
             with the same model and that preview's expected_revision, preview_digest and
@@ -2049,4 +2126,5 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 thread_mode=thread_mode,
                 required_capabilities=required_capabilities,
                 for_everyone=for_everyone,
+                unsaved_work=unsaved_work,
             )

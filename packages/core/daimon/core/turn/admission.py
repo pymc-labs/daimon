@@ -1503,6 +1503,24 @@ def _memory_read_only(policy: TenantAccessPolicy, grant: AdmissionGrant, sealed:
     )
 
 
+def _forked_here(source: BackendAgent, config: ResolvedConfig, context: ScopeContext) -> bool:
+    """`source` is a copy fork_agent made of this place's responder, in this place."""
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_FORKED_FROM,
+        MA_METADATA_KEY_FORKED_IN,
+        forked_in,
+    )
+
+    stamp = (source.source.spec.metadata if source.source is not None else None) or {}
+    made_from = stamp.get(MA_METADATA_KEY_FORKED_FROM)
+    return (
+        made_from is not None
+        and config.responder_ma_agent_id in (None, made_from)
+        and stamp.get(MA_METADATA_KEY_FORKED_IN)
+        == forked_in(context.platform, context.channel_id, context.thread_id)
+    )
+
+
 async def capture_backend_source(
     deps: TurnDeps,
     source: BackendAgent,
@@ -1573,6 +1591,22 @@ async def capture_backend_source(
                         source.source.ref.id,
                     )
                 )
+            if (
+                not target_matches
+                and explicit_target_name is None
+                and config.configuration_target_name is None
+                and _forked_here(source, config, context)
+            ):
+                # J1/J2: a new copy of this place's responder, made here. Its confirmed
+                # switch hands it this place too, so it reads as it will answer here:
+                # this place's template and MCP, not a bare agent read.
+                config = config.model_copy(
+                    update={
+                        "agent_name": source.name,
+                        "responder_ma_agent_id": source.source.ref.id,
+                    }
+                )
+                target_matches = True
             if not target_matches and explicit_target_name is None:
                 # An agent-level setting (provider, model) names any agent the requester
                 # may edit, e.g. a copy that isn't this place's responder: read that

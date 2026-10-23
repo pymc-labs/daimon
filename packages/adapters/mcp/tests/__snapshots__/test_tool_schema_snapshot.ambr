@@ -2594,7 +2594,8 @@
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
         is the copy's: name the copy by it, not ``new_name``. Pass true for "make a
         copy of yourself" asks, where the person named no copy; when the person
-        names the copy, leave this false.
+        names the copy, leave this false. Pass this active turn's
+        ``origin_context_id``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2616,6 +2617,17 @@
           }),
           'new_name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'source_name': dict({
             'type': 'string',
@@ -3160,6 +3172,11 @@
             ]),
             'default': None,
             'description': "Null unless the person explicitly asked the destination to continue or finish NAMED work, in their own words. 'Take over' alone, with no named work, is null. Never restate work that already finished.",
+          }),
+          'keep_provider': dict({
+            'default': False,
+            'description': 'True only for a new copy of you that should stay on your model provider. A copy being switched to another provider is handed the thread after its switch card is approved, never before.',
+            'type': 'boolean',
           }),
           'origin_context_id': dict({
             'type': 'string',
