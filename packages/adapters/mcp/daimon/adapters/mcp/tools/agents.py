@@ -58,7 +58,7 @@ from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
+from daimon.core.agent_ownership import agent_name_lock, member_copies_lock, record_agent_creator
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -1130,6 +1130,12 @@ async def _fork_agent_impl(
         if not auth.is_admin and not answering:
             _require_admin(auth)
         if not auth.is_admin:
+            # Held through the create: two copies at once never both fit the cap.
+            await stack.enter_async_context(
+                member_copies_lock(
+                    runtime.session_factory, tenant_id=auth.tenant_id, account_id=auth.account_id
+                )
+            )
             await _require_member_copy_room(runtime, auth)
         try:
             copy = await copy_agent(
@@ -1952,7 +1958,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Make a copy of Daimon or another agent that you can edit under a new name.
         Anyone may copy you (the agent answering them), and owns that copy; copying
         any other agent is admin-only. Only for a saved, named copy someone asked
-        to keep. The copy keeps its source's tool rules, and starts on the server's
+        to keep. The copy keeps its source's tool rules (copied once, at the fork:
+        later changes to the source's rules don't follow), and starts on the server's
         default fleet (the source's own fleet settings don't carry over). Running
         copies of yourself on several models at once is not this: that is a fleet
         of task workers (fleet_spawn), which needs no admin.
