@@ -176,6 +176,8 @@ __all__ = [
     "native_agent_tools",
     "neutral_catalog_profile_for",
     "accounting_mode_for",
+    "as_worker",
+    "worker_selection",
 ]
 
 
@@ -191,6 +193,9 @@ class BackendSelection:
     tariff_gated_models: tuple[str, ...] = ()
     # Allowed models only a bounded fleet worker runs; an agent or channel never picks them.
     worker_only_models: tuple[str, ...] = ()
+    # The profile a fleet worker runs on, when it differs from an agent's own:
+    # a worker answers one task, so it needs no persistent workspace.
+    worker_profile: str | None = None
 
 
 #: Everyday names for a provider beyond its id, display name and model family.
@@ -203,6 +208,7 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
         ("per_caller",),
         allowed_models=(ASTRA_MODEL,),
         profiles=(CONVERSATION_ONLY.profile_id,),
+        worker_profile=CONVERSATION_ONLY.profile_id,
     ),
     "selfhosted": BackendSelection(
         BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6.1-sol"),
@@ -250,6 +256,19 @@ def selectable_models(backend: Provider) -> tuple[str, ...]:
             if model is not None and model not in declared.worker_only_models
         )
     )
+
+
+def worker_selection(backend: Provider) -> ResolvedBackend:
+    """The backend a fleet worker on `backend` runs on: OpenAI workers are conversation-only."""
+    return as_worker(backend_selection(backend))
+
+
+def as_worker(selection: ResolvedBackend) -> ResolvedBackend:
+    """`selection` with its provider's worker profile, so stored grants read the same way."""
+    declared = _BACKEND_SELECTIONS.get(selection.backend)
+    if declared is None or declared.worker_profile in (None, selection.profile):
+        return selection
+    return selection.model_copy(update={"profile": declared.worker_profile})
 
 
 def worker_models(backend: Provider) -> tuple[str, ...]:

@@ -1472,7 +1472,7 @@ def _with_root_model(
     already enables it. Provider budget lines, worker counts and deadlines are unchanged.
     """
     from daimon.core.channel_backend import check_backend
-    from mux.profiles import backend_selection
+    from mux.profiles import worker_selection
 
     backends, models = grant.backends, grant.models
     model = ModelRef(provider=root.provider, id=root.id)
@@ -1484,7 +1484,7 @@ def _with_root_model(
     ):
         return backends, (*models, model)
     try:
-        selection = backend_selection(model.provider)
+        selection = worker_selection(model.provider)
         if selection.thread_mode != "per_caller" or selection.model not in (None, model.id):
             return backends, models
         check_backend(
@@ -1722,13 +1722,13 @@ def agent_worker_backend(
     `backend`/`model` are the agent's current backend setting (#1309). No setting,
     or Managed Agents, means the agent's own native model.
     """
-    from mux.profiles import MANAGED_AGENTS, backend_selection
+    from mux.profiles import MANAGED_AGENTS, backend_selection, worker_selection
 
     if backend is None or backend == MANAGED_AGENTS.provider:
         selection = backend_selection(MANAGED_AGENTS.provider)
         return selection, ModelRef(provider=spec.model.provider, id=spec.model.id)
     try:
-        selection = backend_selection(backend)
+        selection = worker_selection(backend)
     except InvalidConfig:
         raise WorkerSpecRefused("backend", "unsupported") from None
     chosen = model or selection.model
