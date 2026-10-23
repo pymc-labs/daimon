@@ -13,20 +13,19 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import long_jobs as tools
-from daimon.core._models import LongJobRecord, Tenant
 from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.long_job_models import LongJobPolicy
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import long_jobs as store
 from daimon.core.stores.domain import Role
+from daimon.core.stores.tenants import set_funding_mode
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
-from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
@@ -43,9 +42,7 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
     async with sm.begin() as db:
         tenant = await make_tenant(db)
         owner = await make_account(db, tenant=tenant)
-        await db.execute(
-            update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")
-        )
+        await set_funding_mode(db, tenant_id=tenant.id, funding_mode="operator_funded")
         await store.set_policy(
             db,
             tenant_id=tenant.id,
@@ -149,9 +146,7 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
                     == json.loads(second.content[0].text)["id"]
                 )
         async with sm.begin() as db:
-            rows = (
-                await db.scalars(select(LongJobRecord).where(LongJobRecord.tenant_id == tenant.id))
-            ).all()
+            rows = await store.list_jobs(db, tenant_id=tenant.id, owner_account_id=owner.id)
             assert len(rows) == (1 if mode == "approved" else 0)
             if rows:
                 [row] = rows
