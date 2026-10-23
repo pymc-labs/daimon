@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
 from typing import Any, Literal, cast
 
-from daimon.core._models import Account, Tenant
+from daimon.core._models import Account, PlatformPrincipal, Tenant
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core.fleet import (
@@ -1191,25 +1191,76 @@ async def write_login_state(
         )
 
 
-async def open_login_questions(
+async def login_questions(
     sessionmaker: Source, *, platform: str
-) -> tuple[tuple[uuid.UUID, uuid.UUID, dict[str, Any]], ...]:
-    """Every undecided login question of a running run on this platform:
-    (tenant id, run id, question)."""
+) -> tuple[tuple[uuid.UUID, uuid.UUID, str, dict[str, Any], dict[str, str] | None], ...]:
+    """(tenant, run, status, question, decision) for every question on this platform
+    that is undecided on a running run, or posted and not yet settled."""
     async with _transaction(sessionmaker) as session:
         rows = (
             await session.execute(
-                select(FleetRunRow.tenant_id, FleetRunRow.id, FleetRunRow.login_question).where(
-                    FleetRunRow.platform == platform,
-                    FleetRunRow.status.in_(_OPEN),
-                    FleetRunRow.login_question.is_not(None),
-                    FleetRunRow.login_decision.is_(None),
-                )
+                select(
+                    FleetRunRow.tenant_id,
+                    FleetRunRow.id,
+                    FleetRunRow.status,
+                    FleetRunRow.login_question,
+                    FleetRunRow.login_decision,
+                ).where(FleetRunRow.platform == platform, FleetRunRow.login_question.is_not(None))
             )
         ).all()
-    found: list[tuple[uuid.UUID, uuid.UUID, dict[str, Any]]] = []
+    found: list[tuple[uuid.UUID, uuid.UUID, str, dict[str, Any], dict[str, str] | None]] = []
     for row in rows:
         question: object = row.login_question
-        if isinstance(question, dict):
-            found.append((row.tenant_id, row.id, dict(cast(dict[str, Any], question))))
+        if not isinstance(question, dict):
+            continue
+        typed = dict(cast(dict[str, Any], question))
+        open_ = row.status in _OPEN and row.login_decision is None
+        unsettled = typed.get("card_message_id") is not None and not typed.get("card_settled")
+        if open_ or unsettled:
+            found.append((row.tenant_id, row.id, row.status, typed, _decision(row.login_decision)))
     return tuple(found)
+
+
+async def settle_login_card(
+    sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> bool:
+    """Mark the posted card as showing its final state (False if there is none)."""
+    async with _transaction(sessionmaker) as session:
+        state = await lock_login_state(session, tenant_id=tenant_id, run_id=run_id)
+        if state is None or state[2] is None:
+            return False
+        question = state[2]
+        question["card_settled"] = True
+        await write_login_state(session, tenant_id=tenant_id, run_id=run_id, question=question)
+        return True
+
+
+async def record_login_card(
+    sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID, message_id: str
+) -> bool:
+    """Claim the open question's card (from null): False when it already has one,
+    is decided, or there is none, so two posters never both post it."""
+    async with _transaction(sessionmaker) as session:
+        state = await lock_login_state(session, tenant_id=tenant_id, run_id=run_id)
+        if state is None or state[2] is None or state[3] is not None:
+            return False
+        question = state[2]
+        if question.get("card_message_id") is not None:
+            return False
+        question["card_message_id"] = message_id
+        await write_login_state(session, tenant_id=tenant_id, run_id=run_id, question=question)
+        return True
+
+
+async def account_for_platform_user(
+    sessionmaker: Source, *, tenant_id: uuid.UUID, platform: str, external_id: str
+) -> uuid.UUID | None:
+    """The account a chat user already has in this tenant; never creates one."""
+    async with _transaction(sessionmaker) as session:
+        return await session.scalar(
+            select(PlatformPrincipal.account_id).where(
+                PlatformPrincipal.tenant_id == tenant_id,
+                PlatformPrincipal.platform == platform,
+                PlatformPrincipal.external_id == external_id,
+            )
+        )

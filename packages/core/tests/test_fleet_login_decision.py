@@ -13,10 +13,16 @@ import pytest
 from daimon.core.fleet_credentials import LoginCandidate
 from daimon.core.fleet_login_decision import (
     LOGIN_WAIT_S,
+    LoginCard,
+    LoginClickLimiter,
+    answer_login_click,
     apply_run_decision,
     await_run_decision,
     choose_login,
     expire_question,
+    final_state_text,
+    login_cards,
+    settle_login_card,
     spawn_waits_for_logins,
 )
 from daimon.core.neutral_resources import WorkerPermissions
@@ -152,10 +158,10 @@ async def run_parent(
     return sm, parent, other.id
 
 
-async def _question(sm, parent: WorkerPermissions) -> dict:
-    found = await fleet.open_login_questions(sm, platform="discord")
-    assert len(found) == 1 and found[0][1] == parent.fleet.run_id
-    return found[0][2]
+async def _question(sm, parent: WorkerPermissions) -> LoginCard:
+    found = [card for card in await login_cards(sm, platform="discord") if not card.final]
+    assert len(found) == 1 and found[0].run_id == parent.fleet.run_id
+    return found[0]
 
 
 async def _click(
@@ -165,7 +171,7 @@ async def _click(
         sm,
         tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
         run_id=parent.fleet.run_id,
-        digest=question["digest"],
+        digest=question.digest,
         actor_account_id=actor or parent.fleet.account_id,
         actor_platform_user_id="clicker" if actor else "person",
         is_admin=admin,
@@ -207,14 +213,14 @@ async def test_no_answer_records_no_answer_for_every_row_after_the_wait(run_pare
     sm, parent, _ = run_parent
     clock = Clock()
     task, question = await _waiting(sm, parent, clock)
-    assert question["state"] == "open" and question["requester_platform_user_id"] == "person"
-    assert [row["label"] for row in question["rows"]] == ["ADMIN_KEY", "MINE"]
+    assert question.state == "open" and question.requester_platform_user_id == "person"
+    assert [row.label for row in question.rows] == ["ADMIN_KEY", "MINE"]
     assert not task.done()  # no worker before the decision or the timeout
     clock.now += timedelta(seconds=LOGIN_WAIT_S + 1)
     decision = await asyncio.wait_for(task, 5)
     assert decision == {"env:ADMIN_KEY": "no_answer", "env:MINE": "no_answer"}
     assert apply_run_decision(parent, decision).shared_logins == frozenset()
-    assert await fleet.open_login_questions(sm, platform="discord") == ()
+    assert await login_cards(sm, platform="discord") == ()
 
 
 async def test_the_requesters_answers_decide_the_run_and_end_the_wait(run_parent):
@@ -252,13 +258,13 @@ async def test_clicks_are_rechecked_per_row_at_click_time(run_parent):
     task, question = await _waiting(sm, parent, Clock())
     # A member can't share an admin-installed key, even for this run only.
     assert (await _click(sm, parent, question, row=0)).refused == "share_not_allowed"
-    # Nor can "share all" slip it past the per-row check.
-    assert (await _click(sm, parent, question, row="all")).refused == "share_not_allowed"
+    # "All" is only ever "Skip all".
+    assert (await _click(sm, parent, question, row="all")).refused == "bad_choice"
     # Only the run's requester answers; only on the card for these exact rows.
     assert (await _click(sm, parent, question, actor=other)).refused == "not_requester"
-    stale = {**question, "digest": "0" * 64}
+    stale = replace(question, digest="0" * 64)
     assert (await _click(sm, parent, stale)).refused == "stale_card"
-    assert (await _click(sm, parent, question, row=7)).refused == "unknown_row"
+    assert (await _click(sm, parent, question, row=7)).refused == "stale_card"
     # Every refusal is audited with its reason, as the CLICKER (not the requester).
     denied = [row for row in await _audited(sm) if row.outcome == "denied"]
     assert len(denied) == 5
@@ -275,7 +281,7 @@ async def test_skip_all_decides_at_once_and_saves_only_for_an_admin(run_parent):
     task, question = await _waiting(sm, parent, Clock())
     saved: list[dict] = []
 
-    async def save(choices):
+    async def save(choices, question):
         saved.append(dict(choices))
 
     member = await _click(sm, parent, question, row=1, choice="share_once", save=save)
@@ -290,7 +296,7 @@ async def test_a_failed_save_never_changes_the_runs_decision(run_parent):
     sm, parent, _ = run_parent
     task, question = await _waiting(sm, parent, Clock())
 
-    async def save(choices):
+    async def save(choices, question):
         raise RuntimeError("config write failed")
 
     answer = await _click(sm, parent, question, row="all", choice="skip", admin=True, save=save)
@@ -317,7 +323,7 @@ async def test_a_cancelled_spawn_stops_waiting_and_decides_nothing(run_parent):
         sm,
         tenant_id=tenant_id,
         run_id=parent.fleet.run_id,
-        digest=question["digest"],
+        digest=question.digest,
         actor_account_id=parent.fleet.account_id,
         actor_platform_user_id="person",
         is_admin=True,
@@ -333,7 +339,7 @@ async def test_parallel_spawns_share_one_question(run_parent):
     clock = Clock()
     first, question = await _waiting(sm, parent, clock)
     second, again = await _waiting(sm, parent, clock)
-    assert again["digest"] == question["digest"]
+    assert again.digest == question.digest
     clock.now += timedelta(seconds=LOGIN_WAIT_S + 1)
     assert await asyncio.wait_for(first, 5) == await asyncio.wait_for(second, 5)
 
@@ -342,7 +348,7 @@ async def test_nothing_to_ask_returns_without_opening_a_question(run_parent):
     sm, parent, _ = run_parent
     saved_only = with_candidates(parent, candidate("env:A", preapproved=True))
     assert await await_run_decision(sm, saved_only) is None
-    assert await fleet.open_login_questions(sm, platform="discord") == ()
+    assert await login_cards(sm, platform="discord") == ()
 
 
 async def test_the_question_never_outlives_the_run_deadline(run_parent):
@@ -350,7 +356,7 @@ async def test_the_question_never_outlives_the_run_deadline(run_parent):
     soon = datetime.now(UTC) + timedelta(seconds=10)
     short = replace(parent, limits=parent.limits.model_copy(update={"deadline": soon}))
     task, question = await _waiting(sm, short, Clock())
-    assert datetime.fromisoformat(question["expires_at"]) == soon
+    assert question.expires_at == soon
     task.cancel()
 
 
@@ -403,3 +409,153 @@ def test_login_candidates_survive_the_frozen_root_json_round_trip():
     restored = field.validate_json(json.dumps(stored))
     assert restored.login_candidates == parent.login_candidates
     assert restored == parent
+
+
+# The adapter's one call: identity, live admin, rate limit
+
+
+async def _principal(sm, tenant_id: uuid.UUID, account_id: uuid.UUID, external_id: str) -> None:
+    from daimon.core._models import PlatformPrincipal
+
+    async with sm.begin() as session:
+        session.add(
+            PlatformPrincipal(
+                tenant_id=tenant_id,
+                platform="discord",
+                external_id=external_id,
+                account_id=account_id,
+            )
+        )
+
+
+def _deps(sm):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(sessionmaker=sm, anthropic=None)
+
+
+async def _press(
+    sm,
+    parent,
+    card,
+    *,
+    clicker="person",
+    admin=False,
+    row=0,
+    choice="share",
+    limiter=None,
+    digest=None,
+):
+    asked: list[str] = []
+
+    async def live_admin() -> bool:
+        asked.append(clicker)
+        return admin
+
+    answer = await answer_login_click(
+        _deps(sm),
+        tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
+        platform="discord",
+        run_id=parent.fleet.run_id,
+        digest=digest or card.digest[:12],
+        row=row,
+        choice=choice,
+        clicker_platform_user_id=clicker,
+        live_admin=live_admin,
+        limiter=limiter or LoginClickLimiter(),
+    )
+    return answer, asked
+
+
+async def test_a_click_resolves_the_clicker_and_asks_admin_live(run_parent):
+    sm, parent, other = run_parent
+    tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+    await _principal(sm, tenant_id, parent.fleet.account_id, "person")
+    await _principal(sm, tenant_id, other, "clicker")
+    task, card = await _waiting(sm, parent, Clock())
+    # Someone with no account here: refused, audited, never created, admin never asked.
+    stranger, asked = await _press(sm, parent, card, clicker="nobody", admin=True)
+    assert stranger.refused == "not_requester" and asked == []
+    async with sm() as session:
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM platform_principals WHERE external_id = 'nobody'")
+            )
+            == 0
+        )
+    # Another member of the server: not the requester.
+    assert (await _press(sm, parent, card, clicker="clicker"))[0].refused == "not_requester"
+    # The requester, not an admin right now: can't share the admin's key.
+    member, asked = await _press(sm, parent, card, row=0, admin=False)
+    assert member.refused == "share_not_allowed" and asked == ["person"]
+    # The same person, an admin at click time: may. The 12-hex prefix routes the card.
+    shared, _ = await _press(sm, parent, card, row=0, admin=True)
+    assert shared.refused is None
+    # The admin's save is attempted as the clicker; it fails here (no agent to load),
+    # and the run's answer stands regardless.
+    assert not shared.saved
+    assert shared.card is not None and [r.choice for r in shared.card.rows] == ["share", None]
+    done, _ = await _press(sm, parent, card, row="all", choice="skip")
+    assert done.decided and done.card is not None and done.card.state == "decided"
+    assert await asyncio.wait_for(task, 5) == {"env:ADMIN_KEY": "share", "env:MINE": "skip"}
+    assert final_state_text(done.card) == (
+        "Shared with workers: ADMIN_KEY\nWorkers run without: MINE"
+    )
+
+
+async def test_a_short_digest_prefix_is_a_stale_card(run_parent):
+    sm, parent, _ = run_parent
+    await _principal(sm, uuid.UUID(parent.fleet.scope.tenant_id), parent.fleet.account_id, "person")
+    task, card = await _waiting(sm, parent, Clock())
+    short, _ = await _press(sm, parent, card, digest=card.digest[:11], choice="skip")
+    assert short.refused == "stale_card"
+    task.cancel()
+
+
+async def test_stale_card_clicks_are_capped_without_touching_the_database(run_parent):
+    sm, parent, _ = run_parent
+    await _principal(sm, uuid.UUID(parent.fleet.scope.tenant_id), parent.fleet.account_id, "person")
+    task, card = await _waiting(sm, parent, Clock())
+    limiter = LoginClickLimiter(max_refusals=3, window_s=60)
+    for _ in range(3):
+        refused, _ = await _press(sm, parent, card, digest="0" * 12, choice="skip", limiter=limiter)
+        assert refused.refused == "stale_card"
+    before = len(await _audited(sm))
+    limited, asked = await _press(sm, parent, card, choice="skip", limiter=limiter)
+    assert limited.refused == "rate_limited" and asked == []
+    assert len(await _audited(sm)) == before  # nothing written past the cap
+    # Another clicker (or another run) has its own budget.
+    other, _ = await _press(sm, parent, card, clicker="someone", choice="skip", limiter=limiter)
+    assert other.refused == "not_requester"
+    task.cancel()
+
+
+def test_the_limiter_window_slides():
+    limiter = LoginClickLimiter(max_refusals=2, window_s=60)
+    limiter.refused("k", 0)
+    limiter.refused("k", 10)
+    assert limiter.limited("k", 30)
+    assert not limiter.limited("k", 61)  # the first refusal left the window
+
+
+async def test_cards_list_open_then_unsettled_then_nothing(run_parent):
+    sm, parent, _ = run_parent
+    tenant_id, run_id = uuid.UUID(parent.fleet.scope.tenant_id), parent.fleet.run_id
+    clock = Clock()
+    task, card = await _waiting(sm, parent, clock)
+    assert card.card_message_id is None and card.state == "open"
+    # Only one poster wins the card.
+    assert await fleet.record_login_card(sm, tenant_id=tenant_id, run_id=run_id, message_id="m1")
+    assert not await fleet.record_login_card(
+        sm, tenant_id=tenant_id, run_id=run_id, message_id="m2"
+    )
+    clock.now += timedelta(seconds=LOGIN_WAIT_S + 1)
+    await asyncio.wait_for(task, 5)
+    # Expired but posted: still listed, so a restarted adapter settles it.
+    (final,) = await login_cards(sm, platform="discord")
+    assert final.state == "expired" and final.card_message_id == "m1" and not final.card_settled
+    assert final_state_text(final) == "No answer, so workers ran without: ADMIN_KEY, MINE"
+    assert await settle_login_card(sm, tenant_id=tenant_id, run_id=run_id)
+    assert await login_cards(sm, platform="discord") == ()
+    # The card never carries a login's key or who set it.
+    assert "env:" not in repr(final) and str(parent.fleet.account_id) not in repr(final.rows)
