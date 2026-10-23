@@ -604,8 +604,9 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
         with pytest.raises(FleetRefused, match="review_digest_mismatch"):
             await owner.collect(root, policy, run_id=primary.run_id)
     else:
-        result = await owner.collect(root, policy, run_id=primary.run_id)
+        result = dict(await owner.collect(root, policy, run_id=primary.run_id))
         if verdict == "approved":
+            assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
             assert result == {
                 "run_id": str(primary.run_id),
                 "status": "ready",

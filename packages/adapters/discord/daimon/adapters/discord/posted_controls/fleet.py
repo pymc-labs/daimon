@@ -22,7 +22,12 @@ from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.fleet import RUN_TRANSITIONS, TERMINAL, FleetRun, FleetWorker, holds_slot
-from daimon.core.fleet_orchestration import Control, FleetOrchestrator, FleetRefused
+from daimon.core.fleet_orchestration import (
+    Control,
+    FleetOrchestrator,
+    FleetRefused,
+    fleet_cost_words,
+)
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerPermissions, WorkerSpecRefused
 from daimon.core.posted_controls import CardButton, CardState, PostedCard
@@ -157,7 +162,10 @@ def build_fleet_view(
         facts=facts,
         buttons=buttons,
         footer=(
-            f"Budget cap ${run.total_budget_usd} · "
+            # Once the run is over, what it cost leads (J3: "the cost is shown").
+            f"Cost {fleet_cost_words(run.observed_usd)} · Budget cap ${run.total_budget_usd}"
+            if collected or partial or blocked or run.status in ("completed", "cancelled", "failed")
+            else f"Budget cap ${run.total_budget_usd} · "
             f"Deadline <t:{int(run.deadline_at.timestamp())}:f>"
         ),
     )
@@ -797,9 +805,22 @@ class DiscordFleetCard:
         ):
             raise FleetRefused("foreign_run")
         run_id = self._run_id or parent.fleet.run_id
-        run, workers = await self._service.read_snapshot(parent, policy, run_id)
+        run, workers = await self._read(parent, policy, run_id)
         self._run_id = run.id
         return parent, policy, run, workers
+
+    async def _read(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, run_id: uuid.UUID
+    ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
+        """The run as the card shows it: once it has ended, with what it actually cost.
+
+        The stored figure trails the budget watch; the card says the same cost the
+        result reply does (`FleetOrchestrator.run_cost`).
+        """
+        run, workers = await self._service.read_snapshot(parent, policy, run_id)
+        if run.status not in RUN_TRANSITIONS:
+            run = replace(run, observed_usd=await self._service.run_cost(parent, run))
+        return run, workers
 
     def _render(
         self,
@@ -926,7 +947,7 @@ class DiscordFleetCard:
                     pressed_by=str(interaction.user.id),
                     presser_is_admin=parent.subject.is_admin,
                 )
-                run, workers = await self._service.read_snapshot(parent, policy, run.id)
+                run, workers = await self._read(parent, policy, run.id)
                 view = self._render(run, workers)
 
                 async def edit_current(
@@ -987,7 +1008,7 @@ class DiscordFleetCard:
                 return _refusal_text(refused, "kill")
             # The kill stands whether or not the card can be redrawn now.
             try:
-                run, workers = await self._service.read_snapshot(parent, policy, run.id)
+                run, workers = await self._read(parent, policy, run.id)
                 if message is not None:
                     self._message = message
                 await self._display(self._render(run, workers))
@@ -1061,7 +1082,7 @@ class DiscordFleetCard:
             if render:
                 # Collect can observe rows newer than the initial snapshot.
                 try:
-                    run, workers = await self._service.read_snapshot(parent, policy, run_id)
+                    run, workers = await self._read(parent, policy, run_id)
                     view = self._render(
                         run,
                         workers,
@@ -1117,7 +1138,7 @@ class DiscordFleetCard:
                 reply = await self._service.collect(parent, policy, run_id=run.id)
                 if reply.get("status") in ("ready", "blocked") and self._wake_id is None:
                     await self._service.defer(parent, policy, run_id=run.id)
-                run, workers = await self._service.read_snapshot(parent, policy, run.id)
+                run, workers = await self._read(parent, policy, run.id)
                 await self._display(self._render(run, workers))
             except (FleetRefused, WorkerSpecRefused) as error:
                 log.info("fleet.card_error_end_skipped", reason=str(error))

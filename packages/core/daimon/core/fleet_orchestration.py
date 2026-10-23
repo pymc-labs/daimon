@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mappin
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Literal, Protocol, cast, get_args
 
 import structlog
@@ -293,6 +293,18 @@ class FleetRefused(ValueError):
         # The real limits and what the user can do, for whoever relays the refusal.
         self.plain = " ".join(part for part in (detail, _PLAIN_REFUSALS.get(reason)) if part)
         super().__init__(f"fleet: {reason}" + (f". {self.plain}" if self.plain else ""))
+
+
+def fleet_cost_words(usd: Decimal) -> str:
+    """A run's cost as people read it: "$0.42", or "less than $0.01" for a sliver."""
+    if 0 < usd < Decimal("0.005"):
+        return "less than $0.01"
+    return f"${usd.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+
+
+def fleet_cost_sentence(usd: Decimal) -> str:
+    """The plain line a fleet's result reply ends with (J3: "the cost is shown")."""
+    return f"This cost {fleet_cost_words(usd)}."
 
 
 def fleet_limits_sentence(max_workers: int, budget_usd: Decimal) -> str:
@@ -1299,7 +1311,29 @@ class FleetOrchestrator:
             for worker in workers
             if worker.reviewer_of is None
         ]
-        return {"run_id": str(run.id), "status": "ready", "results": outputs}
+        return {
+            "run_id": str(run.id),
+            "status": "ready",
+            "results": outputs,
+            "cost": fleet_cost_sentence(await self._run_cost(parent, run)),
+        }
+
+    async def run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal:
+        """What the run's workers cost so far, for the result reply and the card."""
+        return await self._run_cost(parent, run)
+
+    async def _run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal:
+        """What the run's workers cost so far, read fresh; the stored figure if that fails."""
+        reader = getattr(self._owner(), "run_cost", None)
+        if reader is not None:
+            try:
+                fresh = await reader(parent, run.id)
+            except Exception as error:  # a cost read never blocks the results
+                log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
+            else:
+                if fresh is not None:
+                    return fresh
+        return run.observed_usd
 
     async def _partial(
         self,
@@ -1345,7 +1379,12 @@ class FleetOrchestrator:
             for worker in workers
             if worker.status != "succeeded"
         ]
-        return {"partial": True, "results": results, "failed": failed}
+        return {
+            "partial": True,
+            "results": results,
+            "failed": failed,
+            "cost": fleet_cost_sentence(await self._run_cost(parent, run)),
+        }
 
     async def settle(
         self,
@@ -1478,6 +1517,22 @@ class HostFleetPorts:
         self._watches: dict[
             uuid.UUID, tuple[dict[uuid.UUID, asyncio.Event], asyncio.Event, asyncio.Task[None]]
         ] = {}
+
+    async def run_cost(self, parent: WorkerPermissions, run_id: uuid.UUID) -> Decimal | None:
+        """The run's cost from one read-only budget snapshot, the watch's own math.
+
+        Each worker counts at its priced, observed usage or its ledger debit,
+        whichever is larger, so usage already seen counts before it is debited.
+        """
+        from daimon.core.channel_budget import read_fleet_budget_snapshot
+
+        usages = await read_fleet_budget_snapshot(
+            self.sessions, parent=parent, prices=self.prices, markup=self.markup
+        )
+        mine = [usage for usage in usages.values() if usage.run.id == run_id]
+        if not mine:
+            return None
+        return sum((usage.worker_floor_usd for usage in mine), Decimal(0))
 
     async def _prepare_original(self, parent: WorkerPermissions) -> ProviderPreparationRequest:
         from daimon.core.turn.runtime_manifest import read_frozen_preparation

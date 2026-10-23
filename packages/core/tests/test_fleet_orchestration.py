@@ -834,7 +834,9 @@ async def test_review_refusal_blocks_verified_result_from_being_reported():
 
 async def test_successful_review_returns_only_validated_primary_journal_output():
     owner, _, _ = reviewed_ports()
-    result = await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN)
+    result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
+    if result.get("status") == "ready" or result.get("partial"):
+        assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
     assert result == {
         "run_id": str(RUN),
         "status": "ready",
@@ -912,7 +914,9 @@ async def test_four_worker_plan_collects_three_primaries_and_one_required_review
 
     owner.read_result.side_effect = read_result
     owner.validate_contract.side_effect = lambda contract, actual: actual.payload["content"]
-    result = await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN)
+    result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
+    if result.get("status") == "ready" or result.get("partial"):
+        assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
     assert result == {
         "run_id": str(RUN),
         "status": "ready",
@@ -1235,7 +1239,9 @@ def failed_worker(**changes: Any) -> FleetWorker:
 async def test_collect_returns_verified_partial_results_beside_the_failed_worker():
     # r5: W1/W2 succeeded and W3 failed; collect used to hide both answers.
     owner = ports(worker(role="W1"), failed_worker())
-    result = await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN)
+    result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
+    if result.get("status") == "ready" or result.get("partial"):
+        assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
     assert result == {
         "run_id": str(RUN),
         "status": "blocked",

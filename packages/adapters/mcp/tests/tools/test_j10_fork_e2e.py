@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -752,6 +753,8 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
         assert seen.gemini_counted  # Argon's bounded envelope was sized before the send
     # fleet_collect: three results, one per worker.
     assert seen.collected["status"] == "ready"
+    # J3/J10: the results come back WITH what the run cost, for the reply to say.
+    assert re.fullmatch(r"This cost (\$\d+\.\d{2}|less than \$0\.01)\.", seen.collected["cost"])
     assert sorted(item["result"] for item in seen.collected["results"]) == [
         "answer turn-1",
         "gemini says X",
@@ -762,6 +765,7 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
     # The root may give its answer, and the card ends collected, the run completed.
     assert seen.gate == (True, None)
     assert seen.card[0] == "**Fleet — collected**" and seen.run_status == "completed"
+    assert any("Cost $" in line or "Cost less than $0.01" in line for line in seen.card), seen.card
     for model in ("claude-opus-5-5", "gpt-6-astra", GEMINI[gemini]):
         assert f"{model} — succeeded" in text
     # Nothing a worker lacks goes unsaid: each loss of the root's own setup is named
