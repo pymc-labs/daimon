@@ -392,6 +392,28 @@ class AgentSettings:
         return AgentSettings(None, self.requires, self.thread_mode)
 
 
+type LeftReason = Literal["needs_consent", "not_runnable", "turned_off"]
+"""Why a copy does not run on its source's provider."""
+
+
+@dataclass(frozen=True)
+class CarriedBackend:
+    """What `AgentBackendService.carry_to_copy` gave a copy.
+
+    `revision` is the copy's first setting, None when nothing was written;
+    `left_backend` names a source provider the copy does not run on, and
+    `left_reason` why; `fleet` says whether the source's fleet grant came
+    along, and `fleet_left` that it was left behind because it no longer
+    passes the checks a grant setting must.
+    """
+
+    revision: AgentBackendRevision | None
+    left_backend: Provider | None
+    fleet: bool
+    left_reason: LeftReason | None = None
+    fleet_left: bool = False
+
+
 @dataclass(frozen=True)
 class BackendSelectionState:
     agent: BackendAgent
@@ -729,6 +751,52 @@ def resolve_agent_backend(
 
 def backend_selection_enabled(settings: TurnSettings) -> bool:
     return settings.path == "mux" and settings.channel_backends
+
+
+def checked_fleet_grant(
+    value: AgentFleetGrant,
+    agent: BackendAgent,
+    *,
+    enabled_backends: tuple[Provider, ...],
+    now: datetime,
+) -> AgentFleetGrant:
+    """`value` re-read and checked as a grant setting is; raise `AgentBackendRefused` if not.
+
+    Unexpired, every choice runnable as a worker on an enabled provider, its
+    profile within the limits, and the provider caps within the budget.
+    """
+    try:
+        value = AgentFleetGrant.model_validate_json(value.model_dump_json())
+        if now.utcoffset() is None or value.expires_at <= now:
+            raise ValueError("expired grant")
+        for choice in value.backends:
+            check_backend(
+                ConfigRevision.create(
+                    ChannelRef(
+                        tenant_id=str(agent.tenant_id), platform="cli", channel_id=agent.name
+                    ),
+                    1,
+                    choice,
+                ),
+                enabled_backends=enabled_backends,
+                worker=True,
+            )
+            # Agent workers choose their own profile at dispatch. Legacy
+            # choices on an agent grant don't require funding a denied
+            # provider; its zero cap still refuses every worker there.
+            if not (
+                value.worker_agents is not None
+                and value.limits.provider_limits_usd is not None
+                and value.limits.provider_limits_usd.get(choice.backend, 0) <= 0
+            ):
+                value.limits.require_profile(get_profile(choice.profile))
+    except (ValueError, DaimonError, UnsupportedCapability):
+        raise AgentBackendRefused("invalid_fleet_grant") from None
+    lines = value.limits.provider_limits_usd
+    if lines is not None and sum(lines.values(), Decimal(0)) > value.limits.budget_usd:
+        # Financial admission refuses every spawn of such a run; say so now.
+        raise AgentBackendRefused("fleet_provider_limits_exceed_budget")
+    return value
 
 
 class AgentBackendService:
@@ -1221,39 +1289,9 @@ class AgentBackendService:
         policy = await self._policy(session, agent.tenant_id)
         normalized: JsonValue | None = None
         if value is not None:
-            try:
-                value = AgentFleetGrant.model_validate_json(value.model_dump_json())
-                if now.utcoffset() is None or value.expires_at <= now:
-                    raise ValueError("expired grant")
-                for choice in value.backends:
-                    check_backend(
-                        ConfigRevision.create(
-                            ChannelRef(
-                                tenant_id=str(agent.tenant_id),
-                                platform="cli",
-                                channel_id=agent.name,
-                            ),
-                            1,
-                            choice,
-                        ),
-                        enabled_backends=policy.enabled_backends,
-                        worker=True,
-                    )
-                    # Agent workers choose their own profile at dispatch. Legacy
-                    # choices on an agent grant don't require funding a denied
-                    # provider; its zero cap still refuses every worker there.
-                    if not (
-                        value.worker_agents is not None
-                        and value.limits.provider_limits_usd is not None
-                        and value.limits.provider_limits_usd.get(choice.backend, 0) <= 0
-                    ):
-                        value.limits.require_profile(get_profile(choice.profile))
-            except (ValueError, DaimonError, UnsupportedCapability):
-                raise AgentBackendRefused("invalid_fleet_grant") from None
-            lines = value.limits.provider_limits_usd
-            if lines is not None and sum(lines.values(), Decimal(0)) > value.limits.budget_usd:
-                # Financial admission refuses every spawn of such a run; say so now.
-                raise AgentBackendRefused("fleet_provider_limits_exceed_budget")
+            value = checked_fleet_grant(
+                value, agent, enabled_backends=policy.enabled_backends, now=now
+            )
             normalized = value.model_copy(update={"epoch": local + 1}).model_dump(mode="json")
         else:
             # Off is stored, so a revoked agent never falls back to the default fleet.
@@ -1431,6 +1469,225 @@ class AgentBackendService:
         return await self._change(
             agent, None, expected_revision, actor, "revert", expected_preview_digest
         )
+
+    async def carry_to_copy(
+        self,
+        source: AgentBackendRevision,
+        copy: BackendAgent,
+        *,
+        fleet_grant: bool,
+        shared_threads: bool = False,
+        account_id: uuid.UUID | None,
+        now: datetime,
+    ) -> CarriedBackend:
+        """Give a new copy of an agent its source's provider, model, settings and fleet grant.
+
+        The copy is the forker's own call (`authorize(FORK)`), so no card is
+        asked again, except where the source's switch carries consent to drop
+        features: that consent is pinned to the source, so the copy's is taken
+        afresh from its own capture and kept only when it drops nothing the
+        source's admin did not already accept. Without a capture, or when the
+        copy would drop more, the provider is left at the default and named in
+        `left_backend`, as is one that can't run here any more or that the
+        tenant turned off. The grant must pass `checked_fleet_grant` again, or
+        it is left behind (`fleet_left`). Shared threads are an admin's call
+        (`_change`), so they come only with `shared_threads`. A copy that already
+        has a setting is never overwritten.
+        """
+        backend: Provider | None = source.backend
+        model: str | None = source.model
+        settings = AgentSettings.of(source)
+        if settings.thread_mode == "shared" and not shared_threads:
+            settings = AgentSettings(settings.profile, settings.requires, None)
+        left: Provider | None = None
+        reason: LeftReason | None = None
+        offered: AgentFleetGrant | None = None
+        fleet_left = False
+        if fleet_grant and (source.fleet_grant is not None or source.fleet_grant_invalid):
+            try:
+                if source.fleet_grant is None:
+                    raise ValueError("invalid grant")
+                offered = AgentFleetGrant.model_validate_json(json.dumps(source.fleet_grant))
+            except ValueError:
+                fleet_left = True
+            # An expired grant is no setup at all: nothing to carry or to name.
+            if offered is not None and offered.expires_at <= now:
+                offered = None
+
+        def leave(why: LeftReason) -> None:
+            nonlocal left, reason, backend, model, settings
+            if left is None:
+                left, reason = backend, why
+            backend, model, settings = None, None, AgentSettings()
+
+        async with policy_store.policy_write_transaction(
+            self._sessions, tenant_id=copy.tenant_id
+        ) as session:
+            if await agent_backends.current(session, copy.tenant_id, copy.agent_id) is not None:
+                return CarriedBackend(None, None, fleet=False)
+            policy = await self._policy(session, copy.tenant_id)
+            grant: JsonValue | None = None
+            if offered is not None:
+                try:
+                    checked = checked_fleet_grant(
+                        offered, copy, enabled_backends=policy.enabled_backends, now=now
+                    )
+                    # The copy's first setting is revision 1, so its grant's epoch is too.
+                    grant = checked.model_copy(update={"epoch": 1}).model_dump(mode="json")
+                except AgentBackendRefused:
+                    fleet_left = True
+            consent: JsonValue | None = None
+            preview: CompatibilityPreview | None = None
+            if source.drop_consent is not None:
+                if self._capture_source is not None and backend is not None:
+                    try:
+                        preview = await self._preview(session, copy, backend, model, settings)
+                    except (DaimonError, UnsupportedCapability):
+                        preview = None
+                    if (
+                        preview is not None
+                        and preview.drop_consent is not None
+                        and set(preview.declared_drops) <= set(source.declared_drops)
+                    ):
+                        consent = preview.drop_consent.model_dump(mode="json")
+                    else:
+                        preview = None
+                if preview is None:
+                    leave("needs_consent")
+            if backend is not None and not backend_is_enabled(backend, policy.enabled_backends):
+                # Turned off here since the source chose it: every turn would be refused.
+                leave("turned_off")
+                consent = preview = None
+            if backend is not None or not settings.is_default():
+                try:
+                    check_backend(
+                        ConfigRevision.create(
+                            ChannelRef(
+                                tenant_id=str(copy.tenant_id), platform="cli", channel_id=copy.name
+                            ),
+                            1,
+                            agent_selection(backend or DEFAULT_BACKEND, model, settings),
+                        )
+                    )
+                except DaimonError:
+                    # Not runnable here any more: the copy starts on the default instead.
+                    leave("not_runnable")
+                    consent = preview = None
+            if backend is None and settings.is_default() and grant is None:
+                return CarriedBackend(
+                    None, left, fleet=False, left_reason=reason, fleet_left=fleet_left
+                )
+            if preview is None:
+                preview = compatibility_preview(
+                    copy,
+                    backend or DEFAULT_BACKEND,
+                    policy,
+                    cost_line="Copied from the agent it was made from.",
+                    model=model,
+                    settings=settings,
+                )
+            try:
+                async with session.begin_nested():
+                    revision = await agent_backends.put_revision(
+                        session,
+                        tenant_id=copy.tenant_id,
+                        agent_id=copy.agent_id,
+                        agent_name=copy.name,
+                        local=1,
+                        backend=backend,
+                        previous_local=None,
+                        digest=_revision_digest(copy, backend, grant, consent, model, settings),
+                        preview_digest=preview.digest,
+                        fleet_grant=grant,
+                        drop_consent=consent,
+                        model=model,
+                        profile=settings.profile,
+                        requires=cast(JsonValue, settings.facts().get("requires")),
+                        thread_mode=settings.thread_mode,
+                    )
+            except IntegrityError:
+                return CarriedBackend(None, left, fleet=False, left_reason=reason)
+            await security_audit.append_event(
+                session,
+                tenant_id=copy.tenant_id,
+                account_id=account_id,
+                agent_id=copy.agent_id,
+                platform=None,
+                platform_user_id=None,
+                tool_name="agent_backend",
+                operation="copy",
+                outcome="allowed",
+                reason=f"copied from {source.agent_id}:{source.local}",
+                scope=f"agent_backend:{copy.agent_id}:{revision.local}",
+            )
+            return CarriedBackend(
+                revision,
+                left,
+                fleet=grant is not None,
+                left_reason=reason,
+                fleet_left=fleet_left,
+            )
+
+    async def recheck_copy_consent(
+        self,
+        copy: BackendAgent,
+        revision: AgentBackendRevision,
+        *,
+        account_id: uuid.UUID | None = None,
+    ) -> bool:
+        """Whether a copy's carried consent still matches its capture; withdraw it if not.
+
+        Its pin covers everything the capture reads, so anything the copy
+        gained after `carry_to_copy` (its memory store, say) would refuse every
+        turn. A stale one is replaced by a default setting (keeping the fleet
+        grant), so the copy runs on the default provider until switched. A
+        capture that fails is treated the same: an unchecked pin is never kept.
+        """
+        if revision.drop_consent is None or self._capture_source is None:
+            return True
+        from daimon.core.turn.runtime_manifest import source_preservation_pin
+
+        try:
+            captured = await self._capture_source(copy)
+            if source_preservation_pin(captured) == revision.drop_consent.source_pin:
+                return True
+        except Exception as error:
+            log.warning(
+                "agent_backend.copy_recheck_failed", error=type(error).__name__, exc_info=True
+            )
+        async with policy_store.policy_write_transaction(
+            self._sessions, tenant_id=copy.tenant_id
+        ) as session:
+            current = await agent_backends.current(session, copy.tenant_id, copy.agent_id)
+            if current is None or current.local != revision.local:
+                return False
+            withdrawn = await agent_backends.put_revision(
+                session,
+                tenant_id=copy.tenant_id,
+                agent_id=copy.agent_id,
+                agent_name=copy.name,
+                local=revision.local + 1,
+                backend=None,
+                previous_local=revision.local,
+                digest=_revision_digest(copy, None, revision.fleet_grant),
+                preview_digest=revision.preview_digest,
+                fleet_grant=revision.fleet_grant,
+            )
+            await security_audit.append_event(
+                session,
+                tenant_id=copy.tenant_id,
+                account_id=account_id,
+                agent_id=copy.agent_id,
+                platform=None,
+                platform_user_id=None,
+                tool_name="agent_backend",
+                operation="copy_withdrawn",
+                outcome="allowed",
+                reason="carried consent no longer matches the copy",
+                scope=f"agent_backend:{copy.agent_id}:{withdrawn.local}",
+            )
+        log.warning("agent_backend.copy_consent_withdrawn", agent_id=str(copy.agent_id))
+        return False
 
     async def audit(
         self,

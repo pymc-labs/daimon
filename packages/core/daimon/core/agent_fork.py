@@ -3,21 +3,27 @@
 The copy takes the source's prompt, model, tools, MCP definitions and skills
 from its live MA state, with the default daimon MCP server and base toolset
 guaranteed and the credential guidance applied. It starts with no credentials
-(`agent_lifecycle.strip_credentialed_mcp_servers`). Skills scoped to the
-source are uploaded again under the copy's own name, so the two never share a
-skill id; skills scoped to another agent, and any copy that fails, are left
-off and named. Its face starts rendering as soon as it exists, so its first
-post has it. Whether it may be copied is `authorize(FORK)`'s: an admin's
-call, and never a pinned agent. The chat `fork_agent` tool, the CLI and
+(`agent_lifecycle.strip_credentialed_mcp_servers`): the servers and GitHub
+repos that need connecting again are named in its receipt (`fork_notes`).
+Skills scoped to the source are uploaded again under the copy's own name, so
+the two never share a skill id; skills scoped to another agent, and any copy
+that fails, are left off and named. Given a `capture_source`, it also takes
+the source's provider, model and settings; with `carry="all"` its shared
+memory, and, for an admin, its fleet grant (`_carry`); a channel's own copy
+takes none of these.
+Its face starts rendering as soon as it exists, so its first post has it.
+Whether it may be copied is `authorize(FORK)`'s: an admin's call, and never
+a pinned agent. The chat `fork_agent` tool, the CLI and
 channel isolation use it.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import cast
+from datetime import UTC, datetime
+from typing import Literal, cast
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
@@ -30,6 +36,7 @@ from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
+from daimon.core.channel_backend import AgentBackendService, CarriedBackend, load_backend_agent
 from daimon.core.defaults.ma_index import (
     download_skill_version,
     find_agent_by_daimon_tag,
@@ -39,7 +46,10 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_CHANNEL_COPY,
+    MA_METADATA_KEY_COPY_OF,
     MA_METADATA_KEY_ISOLATED,
+    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     build_metadata,
     strip_tenant_prefix,
@@ -47,6 +57,12 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.memory_resource import (
+    COPY_MEMORY_LIMIT,
+    CopiedMemory,
+    copy_shared_memory,
+    ensure_memory_store_and_mount,
+)
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, retrieve_agent
 from daimon.core.neutral_resources import HostAgentCopy, NeutralResourceHost
@@ -54,8 +70,11 @@ from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
 from daimon.core.specs import merge_default_agent_toolset
+from daimon.core.stores import agent_backends, github_access
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.domain import UserSkillRow
+from daimon.core.stores.agent_memory_stores import get_memory_store_id
+from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, UserSkillRow
+from daimon.core.stores.github_access import AgentRepo
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from mux.contracts.resources import Agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -68,6 +87,36 @@ _FORK_COPY_FIELDS = frozenset(
 _log = structlog.get_logger(__name__)
 
 
+type CaptureSource = Callable[[BackendAgent], Awaitable[BackendAgent]]
+type CopyCarryScope = Literal["all", "settings"]
+"""What a copy takes past its definition, by who makes it.
+
+`"all"` (an admin's copy, or an owner's copy of their own agent) also takes
+the shared memory, and, only when the forker is an admin, the fleet grant
+and shared threads: a copied grant is a second budget under the same limits,
+so the source and the copy can together spend twice. `"settings"` (anyone
+else, and any caller that doesn't say) takes the provider, model and
+settings only. Either way the provider is carried only by a caller that
+passes a `capture_source`.
+"""
+
+
+@dataclass(frozen=True)
+class CopyCarry:
+    """What a copy took over from its source besides its definition, and what it lacks."""
+
+    source_name: str = ""
+    backend: CarriedBackend | None = None
+    memory: CopiedMemory | None = None
+    memory_failed: bool = False
+    reconnect: tuple[tuple[str, str], ...] = ()
+    """The source's MCP servers (name, scheme://host) left off: their key stays with the source."""
+    github_repos: tuple[str, ...] = ()
+    """The source's GitHub repos; the copy has no access to them."""
+    kept_back: bool = False
+    """A settings-only copy: the source's memory and fleet setup stayed with it."""
+
+
 @dataclass(frozen=True)
 class AgentCopy:
     agent: BetaManagedAgentsAgent
@@ -75,6 +124,74 @@ class AgentCopy:
     """Skills left off the copy: another agent's, or the source's own that failed to copy."""
     copied_skills: tuple[str, ...] = ()
     """The source's own skills, uploaded again under the copy's name."""
+    carry: CopyCarry = CopyCarry()
+
+
+def fork_notes(copy: AgentCopy, new_name: str) -> tuple[str, ...]:
+    """The copy's receipt: what came with it and what this person must connect again. Pure."""
+    from daimon.core.turn.notices import provider_name
+
+    carry, source = copy.carry, copy.carry.source_name or "the original"
+    notes: list[str] = []
+    carried = carry.backend.revision if carry.backend is not None else None
+    if carried is not None and carried.backend is not None:
+        model = f" ({carried.model})" if carried.model else ""
+        notes.append(f"It runs on {provider_name(carried.backend)}{model}, like {source}.")
+    left = carry.backend.left_backend if carry.backend is not None else None
+    if left is not None and carry.backend is not None:
+        provider = provider_name(left)
+        reason = carry.backend.left_reason
+        if reason == "turned_off":
+            notes.append(
+                f"{source} runs on {provider}, which is turned off here, "
+                f"so {new_name} runs on Anthropic."
+            )
+        elif reason == "not_runnable":
+            notes.append(
+                f"{source}'s {provider} setting can't run here any more, "
+                f"so {new_name} runs on Anthropic."
+            )
+        else:
+            notes.append(
+                f"{source} runs on {provider}, but {new_name} starts on Anthropic: the switch "
+                f'needs confirming for it. To move it, ask in chat "switch {new_name} to '
+                f'{provider}".'
+            )
+    if carry.backend is not None and carry.backend.fleet_left:
+        notes.append(f"{source}'s fleet setup can't be used here any more, so {new_name} has none.")
+    if carry.kept_back:
+        notes.append(f"{source}'s memory and fleet setup stay with {source}.")
+    if carry.backend is not None and carry.backend.fleet:
+        notes.append(
+            f"It has {source}'s fleet setup, with the same limits; each agent spends up to "
+            "them on its own."
+        )
+    memory = carry.memory
+    if memory is not None and memory.copied:
+        notes.append(
+            f"It has a copy of {source}'s shared memory. Personal memories stay with {source}."
+        )
+        if memory.left or memory.failed:
+            total = memory.copied + memory.left + memory.failed
+            limit = f" A copy takes up to {COPY_MEMORY_LIMIT}." if memory.left else ""
+            notes.append(
+                f"Only {memory.copied} of {source}'s {total} memory notes were copied.{limit}"
+            )
+    if carry.memory_failed or (memory is not None and not memory.copied and memory.failed):
+        notes.append(f"{source}'s memory couldn't be copied, so {new_name} starts with none.")
+    for server, origin in carry.reconnect:
+        at = f" ({origin})" if origin else ""
+        notes.append(
+            f"{server}{at} needs connecting again with its full address (it's on {source}): "
+            f'ask in chat "connect {server} to {new_name}".'
+        )
+    if carry.github_repos:
+        repos = ", ".join(carry.github_repos)
+        notes.append(
+            f"GitHub access isn't copied ({repos}). To give it a repo, ask in chat "
+            f'"give {new_name} access to <repo>".'
+        )
+    return tuple(notes)
 
 
 @dataclass(frozen=True)
@@ -217,11 +334,19 @@ async def copy_agent(
     subject: Subject,
     default_agent_name: str | None,
     extra_metadata: Mapping[str, str] | None = None,
+    capture_source: CaptureSource | None = None,
+    carry: CopyCarryScope = "settings",
+    actor_account_id: uuid.UUID | None = None,
 ) -> AgentCopy:
     """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
 
     `extra_metadata` is stamped on the copy too (an isolation copy's channel).
     `default_agent_name` is the deployment default, which gets no face.
+    `capture_source` captures the copy the way
+    its turns will, which a provider switch that dropped features needs to be
+    carried (`AgentBackendService.carry_to_copy`). `carry` is chosen by who
+    makes the copy (`CopyCarryScope`); unsaid, it is `"settings"`.
+    `actor_account_id` is who made it, for the audit rows of what it carries.
     """
     async with sessionmaker() as session:
         try:
@@ -253,6 +378,13 @@ async def copy_agent(
     fork_params["metadata"] = build_metadata(
         tenant_id=tenant_id, name=new_name, account_id=derive_guild_account_uuid(tenant_id)
     ) | dict(extra_metadata or {})
+    seeded = (
+        source_name
+        if source_ma.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+        else source_ma.metadata.get(MA_METADATA_KEY_COPY_OF)
+    )
+    if seeded:
+        fork_params["metadata"][MA_METADATA_KEY_COPY_OF] = seeded
     fork_params["mcp_servers"] = merge_default_mcp_server(
         cast("list[BetaManagedAgentsURLMCPServerParams] | None", fork_params.get("mcp_servers")),
         public_url,
@@ -265,10 +397,11 @@ async def copy_agent(
     # An isolated reader mounts no secrets; the guidance would send it looking for them.
     if source_ma.metadata.get(MA_METADATA_KEY_ISOLATED) != "true":
         fork_params["system"] = apply_credential_guidance(str(fork_params.get("system") or ""))
-    servers, tools = await agent_lifecycle.strip_credentialed_mcp_servers(
+    source_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id))
+    servers, tools, reconnect = await agent_lifecycle.strip_credentialed_mcp_servers(
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
-        source_agent_uuid=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(source.id)),
+        source_agent_uuid=source_uuid,
         mcp_servers=cast("list[dict[str, object]] | None", fork_params.get("mcp_servers")),
         tools=cast("list[dict[str, object]] | None", fork_params.get("tools")),
     )
@@ -292,8 +425,21 @@ async def copy_agent(
         metadata=created.metadata,
         default_agent_name=default_agent_name,
     )
+    carry_args = _CarryArgs(
+        tenant_id=tenant_id,
+        source_name=source_name,
+        source_uuid=source_uuid,
+        new_name=new_name,
+        channel_copy=MA_METADATA_KEY_CHANNEL_COPY in (extra_metadata or {}),
+        carry_all=carry == "all",
+        actor_account_id=actor_account_id,
+        admin=subject.is_admin and not subject.via_agent_key and not subject.client,
+        capture_source=capture_source,
+        reconnect=reconnect,
+    )
     if not split.own:
-        return AgentCopy(created, tuple(split.dropped))
+        carried = await _carry(anthropic, sessionmaker, created, carry_args)
+        return AgentCopy(created, tuple(split.dropped), carry=carried)
     copied, failed = await _copy_own_skills(
         anthropic,
         sessionmaker,
@@ -317,7 +463,166 @@ async def copy_agent(
             error=type(exc).__name__,
         )
         agent = created
-    return AgentCopy(agent, (*split.dropped, *failed), tuple(copied))
+    carried = await _carry(anthropic, sessionmaker, agent, carry_args)
+    return AgentCopy(agent, (*split.dropped, *failed), tuple(copied), carried)
+
+
+@dataclass(frozen=True)
+class _CarryArgs:
+    tenant_id: uuid.UUID
+    source_name: str
+    source_uuid: uuid.UUID
+    new_name: str
+    channel_copy: bool
+    carry_all: bool
+    admin: bool
+    actor_account_id: uuid.UUID | None
+    capture_source: CaptureSource | None
+    reconnect: tuple[tuple[str, str], ...]
+
+
+async def _carry(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    copy: BetaManagedAgentsAgent,
+    args: _CarryArgs,
+) -> CopyCarry:
+    """Give the new copy what lives outside its definition. Never raises: the copy exists.
+
+    Only a copy made with `carry="all"` takes the shared memory (what the
+    source's people told it), and only an admin's such copy the fleet grant
+    (a second budget under the same limits). The provider setting comes only
+    with a `capture_source`, so a chat fork stays as it was until chat passes
+    one. A channel's own copy takes none of it: it exists to keep a channel
+    apart, and it has no capture to re-take a switch's consent with. Who owns
+    the copy is recorded apart, by the owner rule.
+
+    The provider comes last. A carried consent is pinned to everything the
+    copy's capture reads, its shared memory store among them, so the store is
+    made first and the pin is checked again once written
+    (`AgentBackendService.recheck_copy_consent`).
+    """
+    full = args.carry_all and not args.channel_copy
+    tenant_id = args.tenant_id
+    copy_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(copy.id))
+    log_fields = {"tenant_id": str(tenant_id), "agent_id": copy.id}
+    source_revision: AgentBackendRevision | None = None
+    source_store: str | None = None
+    try:
+        async with sessionmaker() as session:
+            source_revision = await agent_backends.current(session, tenant_id, args.source_uuid)
+            source_store = await get_memory_store_id(
+                session, tenant_id=tenant_id, agent_id=args.source_uuid
+            )
+    except Exception as exc:
+        # Best effort from here on: the copy exists, and raising would report it as not made.
+        _log.warning(
+            "agent_fork.source_read_failed", error=type(exc).__name__, **log_fields, exc_info=True
+        )
+    memory: CopiedMemory | None = None
+    memory_failed = False
+    if full:
+        try:
+            memory = await copy_shared_memory(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                source_agent_id=args.source_uuid,
+                copy_agent_id=copy_uuid,
+                copy_name=args.new_name,
+            )
+        except Exception as exc:
+            _log.warning(
+                "agent_fork.memory_copy_failed",
+                error=type(exc).__name__,
+                **log_fields,
+                exc_info=True,
+            )
+            memory_failed = True
+    backend: CarriedBackend | None = None
+    # Only a caller that can capture the copy carries its provider (the CLI today):
+    # without one a chat fork stays as it was, on the default provider, until chat
+    # can capture it and show the receipt.
+    if source_revision is not None and not args.channel_copy and args.capture_source is not None:
+        capture: CaptureSource | None = args.capture_source
+        if source_revision.drop_consent is not None:
+            try:
+                # The pin reads the copy's shared store: it must exist before the capture.
+                await ensure_memory_store_and_mount(
+                    anthropic,
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_id=copy_uuid,
+                    agent_name=args.new_name,
+                )
+            except Exception as exc:
+                # No stable pin without it: the switch waits to be confirmed again.
+                _log.warning(
+                    "agent_fork.memory_store_failed",
+                    error=type(exc).__name__,
+                    **log_fields,
+                    exc_info=True,
+                )
+                capture = None
+        try:
+            # `copy` is the definition as created: mounting a memory store binds it
+            # in the database and leaves the agent itself unchanged, and the capture
+            # retrieves the agent afresh anyway.
+            backend_agent = await load_backend_agent(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                agent_name=args.new_name,
+                actual_agent=copy,
+            )
+            service = AgentBackendService(sessionmaker, enabled=True, capture_source=capture)
+            backend = await service.carry_to_copy(
+                source_revision,
+                backend_agent,
+                # A copied grant is a second budget under the same limits: an admin's call.
+                fleet_grant=full and args.admin,
+                shared_threads=full and args.admin,
+                account_id=args.actor_account_id,
+                now=datetime.now(UTC),
+            )
+            if backend.revision is not None and not await service.recheck_copy_consent(
+                backend_agent, backend.revision, account_id=args.actor_account_id
+            ):
+                backend = CarriedBackend(
+                    None,
+                    backend.revision.backend,
+                    fleet=backend.fleet,
+                    left_reason="needs_consent",
+                    fleet_left=backend.fleet_left,
+                )
+        except Exception as exc:
+            _log.warning(
+                "agent_fork.backend_carry_failed",
+                error=type(exc).__name__,
+                **log_fields,
+                exc_info=True,
+            )
+    repos: list[AgentRepo] = []
+    try:
+        async with sessionmaker() as session:
+            repos = await github_access.list_agent_repos(
+                session, tenant_id=tenant_id, agent_id=args.source_uuid
+            )
+    except Exception as exc:
+        _log.warning(
+            "agent_fork.repos_read_failed", error=type(exc).__name__, **log_fields, exc_info=True
+        )
+    has_fleet = source_revision is not None and source_revision.fleet_grant is not None
+    return CopyCarry(
+        source_name=args.source_name,
+        backend=backend,
+        memory=memory,
+        memory_failed=memory_failed,
+        reconnect=args.reconnect,
+        github_repos=tuple(repo.full_name for repo in repos if repo.status == "active"),
+        # Said only when the source has a memory or a fleet setup to keep back.
+        kept_back=not full and not args.channel_copy and (has_fleet or source_store is not None),
+    )
 
 
 async def fork_agent(
@@ -331,6 +636,7 @@ async def fork_agent(
     subject: Subject,
     default_agent_name: str | None,
     extra_metadata: Mapping[str, str] | None = None,
+    carry: CopyCarryScope = "settings",
 ) -> AgentCopy:
     """Copy the agent named `source_name` to `new_name`; raise `DaimonError` if either is wrong."""
     if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=new_name):
@@ -348,6 +654,7 @@ async def fork_agent(
         subject=subject,
         default_agent_name=default_agent_name,
         extra_metadata=extra_metadata,
+        carry=carry,
     )
 
 
@@ -407,4 +714,13 @@ async def fork_host_agent(
     return made
 
 
-__all__ = ["AgentCopy", "copy_agent", "fork_agent", "fork_host_agent"]
+__all__ = [
+    "AgentCopy",
+    "CaptureSource",
+    "CopyCarry",
+    "CopyCarryScope",
+    "copy_agent",
+    "fork_agent",
+    "fork_host_agent",
+    "fork_notes",
+]

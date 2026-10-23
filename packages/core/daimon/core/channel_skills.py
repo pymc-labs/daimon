@@ -47,6 +47,7 @@ from daimon.core.defaults.ma_index import (
     match_skills_by_display_title,
 )
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_COPY_OF,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     skill_owner_candidates,
@@ -439,12 +440,15 @@ def platform_skill_refs(
 
     `platform_skills` maps each default agent's name to its platform-limited
     refs (`load_platform_skills`). Only the agent the defaults pipeline manages
-    gets them, never a fork or another agent that took its name.
+    gets them, and a copy of it (`MA_METADATA_KEY_COPY_OF`), never another
+    agent that took its name.
     """
     metadata = agent.metadata or {}
-    if metadata.get(MA_METADATA_KEY_MANAGED) != "true":
-        return ()
-    refs = platform_skills.get(metadata.get(MA_METADATA_KEY_NAME, ""), ())
+    if metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+        seeded = metadata.get(MA_METADATA_KEY_NAME, "")
+    else:
+        seeded = metadata.get(MA_METADATA_KEY_COPY_OF, "")
+    refs = platform_skills.get(seeded, ()) if seeded else ()
     return tuple(ref for ref in refs if ref.platforms is not None and platform in ref.platforms)
 
 

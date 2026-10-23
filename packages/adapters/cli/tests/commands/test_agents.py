@@ -43,13 +43,14 @@ from daimon.adapters.cli.runtime import FACE_WAIT_S, CliRuntime
 from daimon.core import agent_identity
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.authz import Subject
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError, SpecError, StoreError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.agent_google_binding import get_agent_google_binding
 from daimon.core.stores.agent_tool_rules import get_rule
@@ -57,7 +58,13 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
-from mux.testing.drivers.anthropic.ma import MARouter, build_stub_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import (
+    FakeMemoryStoreState,
+    MARouter,
+    build_stub_anthropic,
+    list_response,
+    make_fake_memory_store_handler,
+)
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
@@ -656,6 +663,90 @@ async def test_agents_fork_strips_server_fields_and_creates(
     assert md.get("daimon_account") == str(derive_guild_account_uuid(tenant_id)), (
         "CLI-forked agents must carry the derived guild account so the panel can edit them"
     )
+
+
+async def test_agents_fork_captures_the_copy_for_a_switch_that_dropped_features(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source switched with dropped features: the CLI captures the copy as the
+    switch command would, and the receipt says the switch needs confirming."""
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.stores import agent_backends
+    from daimon.core.turn import admission, deps
+
+    async with db_session_factory() as s, s.begin():
+        tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        principal = await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+        tenant_id = tenant.id
+        policy = await load_access_policy(s, tenant_id=tenant_id)
+        await set_access_policy(
+            s,
+            tenant_id=tenant_id,
+            policy=policy.model_copy(update={"enabled_backends": ("anthropic", "openai")}),
+        )
+        await agent_backends.put_revision(
+            s,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_source"),
+            agent_name="base-agent",
+            local=1,
+            backend="openai",
+            previous_local=None,
+            preview_digest="preview",
+            digest="digest",
+            drop_consent={
+                "declared_drops": ["memory"],
+                "source_pin": "a" * 64,
+                "target_digest": "b" * 64,
+            },
+        )
+    source_data = _agent_json(agent_id="ag_source", name="base-agent", tenant_id=tenant_id)
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([source_data]))
+    router.add("GET", r"/v1/agents/ag_source", lambda req, m: httpx.Response(200, json=source_data))
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda req, m: httpx.Response(
+            200,
+            json=_agent_json(
+                agent_id="ag_fork",
+                name="forked-agent",
+                tenant_id=tenant_id,
+                metadata=json.loads(req.content)["metadata"],
+            ),
+        ),
+    )
+    memory = make_fake_memory_store_handler(FakeMemoryStoreState())
+    for method in ("GET", "POST"):
+        router.add(method, r"/v1/memory_stores(/.*)?", lambda req, m: memory(req))
+    captured: list[dict[str, object]] = []
+
+    async def capture(_deps: object, agent: object, **kwargs: object) -> object:
+        captured.append({"agent": agent, **kwargs})
+        raise AgentBackendRefused("source_unavailable")
+
+    monkeypatch.setattr(deps, "build_turn_deps", lambda *_a, **_k: object())
+    monkeypatch.setattr(admission, "capture_backend_source", capture)
+    out = StringIO()
+    console = Console(file=out, force_terminal=False, highlight=False, width=200)
+    rt = build_cli_runtime(db_session_factory, router=router, settings=_FakeSettings())
+
+    await agents_fork(rt=rt, console=console, src="base-agent", dst="forked-agent")
+
+    assert len(captured) == 1, "the copy, not the source, is captured"
+    call = captured[0]
+    assert call["explicit_target_name"] == "forked-agent"
+    assert call["external_user_id"] == principal.os_user and call["is_dm"] is False
+    context = cast(ScopeContext, call["context"])
+    assert (context.platform, context.account_id) == ("cli", principal.account_id)
+    assert cast(Subject, call["subject"]).is_admin
+    assert 'ask in chat "switch forked-agent to OpenAI"' in out.getvalue()
+    async with db_session_factory() as s:
+        copy_setting = await agent_backends.current(
+            s, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork")
+        )
+    assert copy_setting is None, "no consent of the copy's own: it starts on the default"
 
 
 async def test_agents_fork_adds_base_toolset_when_source_lacks_it(

@@ -927,6 +927,23 @@ async def read_memory(
     return BetaManagedAgentsMemory.model_construct(_fields_set=None, **record.native)
 
 
+async def write_memory(
+    client: AsyncAnthropic, store_id: str, path: str, content: str, *, scope: Scope
+) -> None:
+    """Create one memory at `path`; the store must not already hold that path."""
+    backend, port = _memory_port(client, store_id, scope=scope)
+    await legacy_call(
+        port.write(
+            scope,
+            resource_ref(backend, "memory_store", store_id, scope=scope),
+            path,
+            content,
+            expected=None,
+            key=str(uuid4()),
+        )
+    )
+
+
 async def delete_memory(
     client: AsyncAnthropic,
     store_id: str,

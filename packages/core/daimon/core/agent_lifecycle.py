@@ -14,6 +14,7 @@ MCP) use different field names for the same collaborators.
 from __future__ import annotations
 
 import uuid
+from urllib.parse import urlsplit
 
 import anthropic as anthropic_errors
 import structlog
@@ -87,8 +88,16 @@ async def strip_credentialed_mcp_servers(
     source_agent_uuid: uuid.UUID,
     mcp_servers: list[dict[str, object]] | None,
     tools: list[dict[str, object]] | None,
-) -> tuple[list[dict[str, object]] | None, list[dict[str, object]] | None]:
+) -> tuple[
+    list[dict[str, object]] | None, list[dict[str, object]] | None, tuple[tuple[str, str], ...]
+]:
     """The source's MCP servers and tools minus every server backed by a stored token.
+
+    The third item names the servers left off with their address, scheme and
+    host only, for the copy's receipt: each needs connecting to the copy
+    again. Never the full URL: some servers carry a secret in the path or
+    query, and the receipt is posted where people who never saw the source's
+    definition can read it.
 
     A fork starts with no credentials: no GitHub credential, no repo binding
     or recorded proof of repo access, and no agent-wide MCP token. Copying
@@ -110,14 +119,14 @@ async def strip_credentialed_mcp_servers(
         )
     credentialed_urls = {canonical_mcp_url(row.mcp_server_url) for row in credentials}
     if not credentialed_urls or mcp_servers is None:
-        return mcp_servers, tools
+        return mcp_servers, tools, ()
     dropped = {
         str(server.get("name"))
         for server in mcp_servers
         if canonical_mcp_url(str(server.get("url") or "")) in credentialed_urls
     }
     if not dropped:
-        return mcp_servers, tools
+        return mcp_servers, tools, ()
     _log.info(
         "agent_lifecycle.fork_dropped_credentialed_mcp_servers",
         source_agent_id=str(source_agent_uuid),
@@ -133,7 +142,18 @@ async def strip_credentialed_mcp_servers(
             if not (tool.get("type") == "mcp_toolset" and tool.get("mcp_server_name") in dropped)
         ]
     )
-    return kept_servers, kept_tools
+    left_off = {
+        str(server.get("name")): _server_origin(str(server.get("url") or ""))
+        for server in mcp_servers
+        if server.get("name") in dropped
+    }
+    return kept_servers, kept_tools, tuple(sorted(left_off.items()))
+
+
+def _server_origin(url: str) -> str:
+    """`scheme://host` of `url`, without credentials, port, path or query."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.hostname}" if parts.scheme and parts.hostname else ""
 
 
 async def archive_memory_store_best_effort(
