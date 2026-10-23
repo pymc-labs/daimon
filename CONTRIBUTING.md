@@ -133,6 +133,13 @@ passing must be removed from the list. It is not a prerequisite of the staging
 deploy, because legacy is the production default. A test that only holds on mux builds its deps with
 `deps_for_pinned_mux`; the rest must hold on both legs.
 
+The blocking `pytest-staging-config` job also runs focused turn checks in two
+configurations. Its enabled leg sets `DAIMON_TURN__PATH=mux`,
+`DAIMON_TURN__CHANNEL_BACKENDS=true`, `DAIMON_TURN__AGENT_BACKENDS=true`, and
+`DAIMON_FLEET__ENABLED=true`; its legacy leg sets the path and all three switches
+off. The tests verify the selected platform turn path, native agent counterpart
+proof, and fleet grant admission. Both legs must pass before staging deploys.
+
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
 

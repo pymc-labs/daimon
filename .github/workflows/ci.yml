@@ -236,6 +236,61 @@ jobs:
           path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
 
+  # Exercise the staging switches together, and the default/off path, through
+  # real turn, native agent, and fleet entry points. This blocks staging even
+  # while the broader mux ratchet above still has known failures.
+  pytest-staging-config:
+    name: pytest-staging-config (${{ matrix.configuration }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { configuration: enabled, path: mux, channel_backends: "true", agent_backends: "true", fleet_enabled: "true" }
+          - { configuration: legacy-off, path: legacy, channel_backends: "false", agent_backends: "false", fleet_enabled: "false" }
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      DAIMON_ANTHROPIC__API_KEY: offline-ci-key
+      DAIMON_TURN__PATH: ${{ matrix.path }}
+      DAIMON_TURN__CHANNEL_BACKENDS: ${{ matrix.channel_backends }}
+      DAIMON_TURN__AGENT_BACKENDS: ${{ matrix.agent_backends }}
+      DAIMON_FLEET__ENABLED: ${{ matrix.fleet_enabled }}
+      DAIMON_CI_CONFIGURATION: ${{ matrix.configuration }}
+      TMPDIR: /dev/shm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
+        with:
+          database: "true"
+      - name: pytest (${{ matrix.configuration }})
+        run: >-
+          uv run pytest
+          tests/parity/test_turn_leg.py::test_turn_runs_on_the_selected_leg
+          packages/core/tests/turn/test_staging_configuration_paths.py
+          -n 2 --durations=20
+          --junitxml=staging-config-${{ matrix.configuration }}.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: staging-config-${{ matrix.configuration }}-junit
+          path: staging-config-${{ matrix.configuration }}.xml
+          if-no-files-found: ignore
+
   # Sharded like pytest-db (same plugin, same duration table, checked by
   # shard-check), but with two xdist workers per leg and the hang diagnostics
   # on every leg.
@@ -587,7 +642,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, docker-publish-candidate]
+    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

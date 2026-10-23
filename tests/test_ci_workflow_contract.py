@@ -94,6 +94,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "pytest-light",
         "mux-standalone",
         "pytest-notebook-host",
+        "pytest-staging-config",
         "docker-publish-candidate",
     }
     assert {leg["suite"] for leg in jobs["pytest-light"]["strategy"]["matrix"]["include"]} == {
@@ -117,13 +118,14 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
         "pytest-db",
         "pytest-discord",
         "pytest-mux-leg",
+        "pytest-staging-config",
         "pytest-light",
         "pytest-notebook-host",
     }
     for name, job in pytest_jobs.items():
         for command in _pytest_commands(job):
             assert "-n auto" not in command
-            if name in ("pytest-discord", "pytest-mux-leg"):
+            if name in ("pytest-discord", "pytest-mux-leg", "pytest-staging-config"):
                 assert " -n 2 " in command
             elif "-m slow" not in command:
                 assert " -n 4 --dist worksteal " in command
@@ -475,3 +477,41 @@ def test_mux_leg_is_a_blocking_ratchet_outside_the_deploy_gate() -> None:
     for name in ("pytest-db", "pytest-discord"):
         assert "mux_leg_known" not in " ".join(_pytest_commands(jobs[name]))
         assert "DAIMON_TURN__PATH" not in jobs[name]["env"]
+
+
+def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    job = jobs["pytest-staging-config"]
+    assert "pytest-staging-config" in jobs["deploy-gcp"]["needs"]
+    assert not job.get("continue-on-error")
+    legs = job["strategy"]["matrix"]["include"]
+    assert legs == [
+        {
+            "configuration": "enabled",
+            "path": "mux",
+            "channel_backends": "true",
+            "agent_backends": "true",
+            "fleet_enabled": "true",
+        },
+        {
+            "configuration": "legacy-off",
+            "path": "legacy",
+            "channel_backends": "false",
+            "agent_backends": "false",
+            "fleet_enabled": "false",
+        },
+    ]
+    for flag, matrix_key in (
+        ("DAIMON_TURN__PATH", "path"),
+        ("DAIMON_TURN__CHANNEL_BACKENDS", "channel_backends"),
+        ("DAIMON_TURN__AGENT_BACKENDS", "agent_backends"),
+        ("DAIMON_FLEET__ENABLED", "fleet_enabled"),
+        ("DAIMON_CI_CONFIGURATION", "configuration"),
+    ):
+        assert job["env"][flag] == f"${{{{ matrix.{matrix_key} }}}}"
+    command = " ".join(_pytest_commands(job))
+    for selected in (
+        "test_turn_runs_on_the_selected_leg",
+        "packages/core/tests/turn/test_staging_configuration_paths.py",
+    ):
+        assert selected in command
