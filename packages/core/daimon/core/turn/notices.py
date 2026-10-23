@@ -209,9 +209,6 @@ class RefusalNouns:
         )
 
 
-# A server that never had credit (a join with no signup credit): nothing "ran out".
-_NO_CREDIT_YET = _Copy("Your team has no Daimon credit yet.", "{Who} can add some with {billing}.")
-
 _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "balance_depleted": _COPY[TerminationReason.ADMISSION_BALANCE_DEPLETED],
     "cap_exceeded": _COPY[TerminationReason.ADMISSION_CAP_EXCEEDED],
@@ -334,8 +331,6 @@ def admission_refusal_text(
     copy = (_DM_REFUSALS.get(reason) if in_dm else None) or _REFUSALS[reason]
     if reason == "backend_unsupported" and cause is not None:
         copy = _BACKEND_REFUSALS[cause]
-    elif reason == "balance_depleted" and cause == "no_credit_yet":
-        copy = _NO_CREDIT_YET
     agent = agent_name or "This agent"
     named = provider_name(provider)
     # A daily model cap refusal carries the model id where `provider` would be.

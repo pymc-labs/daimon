@@ -151,8 +151,6 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
     assert exc_info.value.reason == "balance_depleted", (
         "an over-balance tenant must raise AdmissionDenied(reason='balance_depleted')"
     )
-    # It never had credit: the refusal says so rather than that it "ran out".
-    assert exc_info.value.cause == "no_credit_yet"
 
     from daimon.core.stores.turn_outcomes import list_for_tenant
     from daimon.core.turn.outcomes import drain_outcomes
@@ -676,47 +674,6 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
         assert admission.daimon_rule_tools == frozenset(), "the old admission is not mutated"
     finally:
         event.remove(engine, "before_cursor_execute", count)
-
-
-async def test_a_tenant_whose_credit_ran_out_is_refused_without_the_no_credit_yet_cause(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    from daimon.core.stores import tenant_ledger
-
-    tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
-    # Signup credit, then spent: the balance is 0 but it had credit.
-    for delta, reason in ((Decimal("1"), "trial"), (Decimal("-1"), "usage")):
-        await tenant_ledger.insert_entry(
-            db_session,
-            tenant_id=tenant.id,
-            delta_usd=delta,
-            reason=reason,
-            idempotency_key=f"{reason}:{tenant.id}",
-        )
-    await db_session.commit()
-    async with db_session_factory() as session:
-        assert await tenant_ledger.ever_credited(session, tenant_id=tenant.id)
-    router = resolved_agent_env_router(
-        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
-        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
-    )
-    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await admit(
-            deps,
-            tenant_id=tenant.id,
-            requester_org=RequesterOrg.HOST,
-            platform="discord",
-            external_user_id="user-1",
-            channel_id="chan-1",
-            now=_NOW,
-        )
-    assert (exc_info.value.reason, exc_info.value.cause) == ("balance_depleted", None)
 
 
 async def test_admit_gate_order_config_bail_wins_over_over_balance(

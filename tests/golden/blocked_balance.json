@@ -294,7 +294,7 @@
       "operation": "send",
       "payload": {
         "args": [
-          "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
+          "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
         ],
         "kwargs": {},
         "receiver": {

@@ -112,8 +112,6 @@ def admission_refusal_message(
     # (the people at the workspace that added Daimon): keep its two lines together.
     caused = reason == "backend_unsupported" and cause is not None
     override = _FOREIGN_REFUSALS.get(reason) if foreign and not caused else None
-    if override is not None and cause == "no_credit_yet":
-        override = ("Daimon has no credit yet.", f"Ask {_HOST_PEOPLE} to add some.")
     if override is None:
         return text
     headline, next_step = override

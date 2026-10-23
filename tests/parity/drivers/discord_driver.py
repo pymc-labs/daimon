@@ -88,7 +88,7 @@ from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_discord_modal, read_discord_view
 
 _BALANCE_BLOCKED_TEXT = (
-    "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
+    "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
 )
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 

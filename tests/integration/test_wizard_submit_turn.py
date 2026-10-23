@@ -1441,7 +1441,7 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
     assert any("recorded" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded, got: {posted_texts}"
     )
-    assert any("Your team has no Daimon credit yet." in text for text in posted_texts), (
+    assert any("Your team's Daimon credit has run out." in text for text in posted_texts), (
         f"the refusal must reuse the existing credit-depleted copy, got: {posted_texts}"
     )
 

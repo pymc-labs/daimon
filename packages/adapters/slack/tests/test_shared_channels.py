@@ -971,21 +971,6 @@ def test_admission_refusals_never_send_an_external_member_to_commands_or_admins(
         assert word not in text, (reason, text)
 
 
-def test_an_external_member_is_told_daimon_has_no_credit_yet_when_it_never_had_any() -> None:
-    from daimon.adapters.slack.runtime import admission_refusal_message
-
-    settings = MagicMock()
-    settings.slack.bot_display_name = "daimon"
-    text = admission_refusal_message(
-        "balance_depleted", settings, foreign=True, cause="no_credit_yet"
-    )
-    assert text == (
-        "Daimon has no credit yet.\n\nAsk someone in the workspace that added Daimon to add some."
-    )
-    member = admission_refusal_message("balance_depleted", settings, cause="no_credit_yet")
-    assert member.startswith("Your team has no Daimon credit yet.")
-
-
 def test_setup_notices_for_an_external_member_name_the_host_workspace_not_a_command() -> None:
     from daimon.adapters.slack.errors import not_set_up_notice, setup_out_of_date_notice
 

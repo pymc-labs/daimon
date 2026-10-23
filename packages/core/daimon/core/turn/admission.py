@@ -1054,12 +1054,7 @@ async def admit_impl(
         if await is_over_balance(
             sessionmaker=deps.sessionmaker, tenant_id=tenant_id, session=billing_session
         ):
-            from daimon.core.stores import tenant_ledger
-
-            credited = await tenant_ledger.ever_credited(billing_session, tenant_id=tenant_id)
-            raise AdmissionDenied(
-                reason="balance_depleted", cause=None if credited else "no_credit_yet"
-            )
+            raise AdmissionDenied(reason="balance_depleted")
         mark("balance")
 
         # --- Monthly usage cap ---
