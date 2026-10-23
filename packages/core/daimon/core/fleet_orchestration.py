@@ -1733,9 +1733,14 @@ class HostFleetPorts:
                                         code = worker_failure_code(
                                             cause, failure_code, backend=claimed.backend
                                         )
-                                        if isinstance(cause, asyncio.CancelledError):
+                                        if cancel.is_set() or isinstance(
+                                            cause, asyncio.CancelledError
+                                        ):
                                             # The budget watch says why it cancelled (a
-                                            # restart, the run's deadline, a limit).
+                                            # restart, the run's deadline, a limit). A turn
+                                            # it cancelled after bind ends non-COMPLETED,
+                                            # so the cancel shows as result_not_successful
+                                            # rather than a CancelledError (SMOKE 5ad12cc3).
                                             code = _CANCEL_CODES.get(
                                                 getattr(cancel, "reason", None) or "", code
                                             )
