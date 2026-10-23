@@ -1021,26 +1021,6 @@ def _agent_message_text(event: SessionEventOut) -> str | None:
     return text or None
 
 
-async def _turn_refused(
-    runtime: McpRuntime, auth: AuthIdentity, handle: str, turn_started_at: dt.datetime
-) -> bool:
-    """Whether this turn's latest idle is a refusal, which ends it with no reply to wait for."""
-    events = await _list_events_impl(
-        runtime,
-        auth,
-        handle,
-        None,
-        1,
-        "desc",
-        created_at_gte=turn_started_at.isoformat(),
-        types=["session.status_idle"],
-    )
-    return any(
-        refusal_error((event.model_extra or {}).get("stop_details")) is not None
-        for event in events.items
-    )
-
-
 def _event_timestamp(event: SessionEventOut) -> dt.datetime | None:
     """Read an event timestamp across current Managed Agents projections."""
     value = getattr(event, "processed_at", None)
@@ -1177,6 +1157,8 @@ async def _ask_impl(
         if current.status == "idle":
             page: str | None = None
             final_text: str | None = None
+            # The newest idle decides: a refusal ends the turn whatever text came before it.
+            refused: bool | None = None
             for _ in range(_MAX_EVENT_PAGES):
                 events = await _list_events_impl(
                     runtime,
@@ -1186,10 +1168,15 @@ async def _ask_impl(
                     100,
                     "desc",
                     created_at_gte=turn_started_at.isoformat(),
-                    types=["agent.message"],
+                    types=["agent.message", "session.status_idle"],
                 )
                 for event in events.items:
                     if event.id == turn_event_id:
+                        continue
+                    if event.type == "session.status_idle":
+                        if refused is None:
+                            details = (event.model_extra or {}).get("stop_details")
+                            refused = refusal_error(details) is not None
                         continue
                     final_text = _agent_message_text(event)
                     if final_text is not None:
@@ -1198,6 +1185,13 @@ async def _ask_impl(
                     break
                 page = events.next_page
 
+            if refused:
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.REFUSED)
+                raise ToolError(
+                    "Daimon's AI declined this request; rephrase it and ask again "
+                    f"with handle {handle}"
+                )
             if final_text is not None:
                 delivery = await deliver_hosted_charts(
                     runtime.client,
@@ -1216,14 +1210,6 @@ async def _ask_impl(
                     message=delivery.message,
                     chart_urls=delivery.chart_urls,
                     image_blocks=delivery.image_blocks,
-                )
-
-            if await _turn_refused(runtime, auth, handle, turn_started_at):
-                if (observation := current_outcome.get()) is not None:
-                    observation.finish(reason=TerminationReason.REFUSED)
-                raise ToolError(
-                    "Daimon's AI declined this request; rephrase it and ask again "
-                    f"with handle {handle}"
                 )
 
         remaining = deadline - clock()

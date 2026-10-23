@@ -981,14 +981,30 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session,
     assert rows[0].session_id == "ses_terminated001"
 
 
-@pytest.mark.parametrize("refused", [True, False])
-async def test_ask_reports_a_refused_turn_without_waiting(
-    db_session, db_engine, refused: bool
+_REFUSAL_IDLE = {
+    "id": "sevt_idle",
+    "type": "session.status_idle",
+    "stop_details": {"type": "refusal", "category": "cyber"},
+}
+_PLAIN_IDLE = {"id": "sevt_idle", "type": "session.status_idle"}
+_INTERIM = {"id": "sevt_msg", "type": "agent.message", "content": [{"type": "text", "text": "x"}]}
+
+
+@pytest.mark.parametrize(
+    ("events", "reason"),
+    [
+        ([_REFUSAL_IDLE], "refused"),
+        ([_REFUSAL_IDLE, _INTERIM], "refused"),
+        ([_PLAIN_IDLE], "ceiling"),
+    ],
+    ids=["refusal", "refusal_after_text", "plain_idle"],
+)
+async def test_ask_ends_a_refused_turn_without_waiting(
+    db_session, db_engine, events: list[dict[str, Any]], reason: str
 ) -> None:
-    """A refusal idles with no reply; only its `stop_details` says the turn is over."""
+    """A refusal idles with no reply to wait for; only its `stop_details` says so."""
     from daimon.core.stores.turn_outcomes import list_for_tenant
     from daimon.core.turn.outcomes import drain_outcomes
-    from daimon.core.turn.termination import TerminationReason
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     runtime = MagicMock()
@@ -996,11 +1012,7 @@ async def test_ask_reports_a_refused_turn_without_waiting(
     await db_session.commit()
     runtime.session_factory = async_sessionmaker(db_engine)
     auth = replace(_auth(), tenant_id=tenant.id)
-    idle: dict[str, Any] = {"id": "sevt_idle", "type": "session.status_idle"}
-    if refused:
-        idle["stop_details"] = {"type": "refusal", "category": "cyber"}
-    no_reply = MagicMock(items=[], next_page=None)
-    idle_page = MagicMock(items=[SessionEventOut.model_validate(idle)], next_page=None)
+    page = MagicMock(items=[SessionEventOut.model_validate(e) for e in events], next_page=None)
     elapsed = 0.0
 
     async def advance(seconds: float) -> None:
@@ -1018,9 +1030,9 @@ async def test_ask_reports_a_refused_turn_without_waiting(
         ),
         patch(
             "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
-            new=AsyncMock(side_effect=[no_reply, idle_page] * 3),
-        ),
-        pytest.raises(ToolError, match="declined" if refused else "120 seconds"),
+            new=AsyncMock(return_value=page),
+        ) as list_events,
+        pytest.raises(ToolError, match="declined" if reason == "refused" else "120 seconds"),
     ):
         await _ask_impl(
             runtime,
@@ -1031,13 +1043,16 @@ async def test_ask_reports_a_refused_turn_without_waiting(
             sleep=advance,
         )
 
+    refused = reason == "refused"
     assert elapsed == (0.0 if refused else 120.0), "a refusal must not wait out the timeout"
+    assert list_events.await_count == (1 if refused else 3), "one read per idle poll"
+    kwargs = list_events.await_args.kwargs
+    assert kwargs["types"] == ["agent.message", "session.status_idle"], kwargs
+    assert kwargs["created_at_gte"] == _started("ses_refused001")["turn_started_at"], kwargs
     await drain_outcomes()
     async with runtime.session_factory() as session:
         rows = await list_for_tenant(session, tenant.id)
-    assert [row.reason for row in rows] == [
-        TerminationReason.REFUSED if refused else TerminationReason.CEILING
-    ]
+    assert [row.reason for row in rows] == [reason], "the outcome names why the ask ended"
 
 
 async def test_ask_tool_result_preserves_images_and_structured_urls() -> None:
