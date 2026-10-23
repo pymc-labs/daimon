@@ -232,7 +232,9 @@ async def test_real_source_and_scoped_admin_grant_preserve_exact_authority(captu
     assert permissions.resources[0].resource.account_id == fleet.scope.account_id
     assert permissions.resources[0].native.value["resource"]["access"] == "read_only"
     assert permissions.seal_ids == frozenset({"root-seal"}) and permissions.memory_read_only
-    assert permissions.limits.deadline == NOW + timedelta(seconds=120)
+    # The run's time (600 s); each worker's 120 s is applied at spawn.
+    assert permissions.limits.deadline == NOW + timedelta(seconds=600)
+    assert permissions.max_worker_seconds == 120
     assert len(trace.requests) == 1
 
 
@@ -1317,17 +1319,18 @@ async def test_fleet_r7_only_gemini_workers_default_to_its_runtime_bound(capture
     """r7: the run's deadline is the default except where a profile caps runtime."""
     from daimon.core.neutral_resources import default_worker_limits, worker_runtime_ceiling
 
-    root = compose(captured)
+    # No grant worker time: only Gemini's profile caps a worker (10 min).
+    root = replace(compose(captured), max_worker_seconds=None)
     assert worker_runtime_ceiling(root, "anthropic") is None
     assert worker_runtime_ceiling(root, "openai") is None
-    assert worker_runtime_ceiling(root, "gemini") == 120
-    ceiling = root.limits.model_copy(update={"deadline": NOW + timedelta(minutes=10)})
+    assert worker_runtime_ceiling(root, "gemini") == 600
+    ceiling = root.limits.model_copy(update={"deadline": NOW + timedelta(minutes=20)})
     for provider in ("anthropic", "openai", "gemini"):
         bound = worker_runtime_ceiling(root, provider)
         limits = default_worker_limits(
             ceiling, _run(), (), provider=provider, now=NOW, max_runtime_s=bound
         )
-        expected = NOW + timedelta(seconds=120) if provider == "gemini" else ceiling.deadline
+        expected = NOW + timedelta(minutes=10) if provider == "gemini" else ceiling.deadline
         assert limits.deadline == expected
         late = default_worker_limits(
             ceiling,
@@ -1342,10 +1345,25 @@ async def test_fleet_r7_only_gemini_workers_default_to_its_runtime_bound(capture
     # The run's own deadline still wins when it is sooner.
     soon = ceiling.model_copy(update={"deadline": NOW + timedelta(seconds=60)})
     assert default_worker_limits(
-        soon, _run(), (), provider="gemini", now=NOW, max_runtime_s=120
+        soon, _run(), (), provider="gemini", now=NOW, max_runtime_s=600
     ).deadline == NOW + timedelta(seconds=60)
     with pytest.raises(WorkerSpecRefused, match="deadline: unbound"):
-        default_worker_limits(ceiling, _run(), (), provider="gemini", max_runtime_s=120)
+        default_worker_limits(ceiling, _run(), (), provider="gemini", max_runtime_s=600)
+
+
+async def test_the_grants_worker_time_caps_every_worker_and_the_run_keeps_its_own(captured):
+    """ROOT 10-min decision: the run gets max_run_seconds; each worker max_worker_seconds."""
+    from daimon.core.neutral_resources import worker_runtime_ceiling
+
+    root = compose(captured)
+    # The test grant: 600 s a run, 120 s a worker. The root (run) deadline is the run's.
+    assert root.max_worker_seconds == 120
+    assert root.limits.deadline == NOW + timedelta(seconds=600)
+    for provider in ("anthropic", "openai", "gemini"):
+        assert worker_runtime_ceiling(root, provider) == 120
+    # A grant worker time above Gemini's profile cap leaves Gemini at its cap.
+    assert worker_runtime_ceiling(replace(root, max_worker_seconds=900), "gemini") == 600
+    assert worker_runtime_ceiling(replace(root, max_worker_seconds=900), "openai") == 900
 
 
 def test_bounded_gemini_tokens_fit_the_prompt_and_the_budget():

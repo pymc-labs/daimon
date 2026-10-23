@@ -888,7 +888,9 @@ async def test_default_grant_duration_and_turn_count_bound_the_frozen_run(root_t
         deps.sessionmaker, tenant_id=source.tenant_id, run_id=parent.fleet.run_id
     )
     assert parent.limits.deadline == run.deadline_at
-    assert 0 < (parent.limits.deadline - now).total_seconds() <= 125
+    # The run gets the grant's run time; each worker's time is applied at spawn.
+    assert 0 < (parent.limits.deadline - now).total_seconds() <= current.max_run_seconds + 5
+    assert parent.max_worker_seconds == current.max_worker_seconds
     assert parent.limits.max_turns == current.limits.max_turns == 4
     assert parent.backend_grants == current.backends and parent.models == current.models
     assert len(transport.requests) == before

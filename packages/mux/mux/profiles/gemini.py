@@ -16,7 +16,7 @@ WORKER_MODEL = "gemini-3.5-flash-lite"
 # directly; a fleet worker runs it only on the bounded token envelope.
 ARGON_MODEL = "gemini-4-argon"
 WORKER_MAX_TOTAL_TOKENS = 4096
-WORKER_MAX_RUNTIME_S = 120
+WORKER_MAX_RUNTIME_S = 600
 
 INLINE_REUSE = Profile(
     provider="gemini",

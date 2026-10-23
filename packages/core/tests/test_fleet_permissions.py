@@ -282,12 +282,12 @@ def test_native_budget_requires_single_input_and_short_deadline():
     root = parent()
     values = root.limits.model_dump() | {
         "native_budget_usd": Decimal("0.02"),
-        "deadline": NOW + timedelta(seconds=120),
+        "deadline": NOW + timedelta(seconds=600),
         "max_turns": 1,
     }
     WorkerLimits.model_validate(values).require_native_dispatch(NOW)
     for changes, field in (
-        ({"deadline": NOW + timedelta(seconds=121)}, "deadline"),
+        ({"deadline": NOW + timedelta(seconds=601)}, "deadline"),
         ({"deadline": NOW}, "deadline"),
         ({"max_turns": 2}, "max_turns"),
         ({"budget_usd": Decimal("0.01")}, "native_budget_usd"),

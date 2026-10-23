@@ -955,8 +955,13 @@ class WorkerLimits(Contract):
             raise WorkerSpecRefused("native_budget_usd", "not_subset")
         if self.max_turns != 1:
             raise WorkerSpecRefused("max_turns", "not_subset")
-        if not 0 < (self.deadline - now).total_seconds() <= 120:
+        if not 0 < (self.deadline - now).total_seconds() <= NATIVE_DISPATCH_MAX_SECONDS:
             raise WorkerSpecRefused("deadline", "not_subset")
+
+
+#: A soft native budget (e.g. Astra's OpenAI spend cap) is checked by the provider
+#: after the fact, so its attempt stays time-bounded: one worker's default runtime.
+NATIVE_DISPATCH_MAX_SECONDS = 600
 
 
 class AgentFleetGrant(Contract):
@@ -1052,6 +1057,8 @@ class WorkerPermissions:
     seal_ids: frozenset[str] = frozenset()
     memory_read_only: bool = True
     agent_id: uuid.UUID | None = None
+    # The grant's per-worker runtime; the run's own deadline is in `limits`.
+    max_worker_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1113,7 +1120,7 @@ def task_worker_spec(
 def worker_runtime_ceiling(
     parent: WorkerPermissions, provider: Provider, backend: BackendConfig | None = None
 ) -> int | None:
-    """The shortest worker runtime a granted profile for this provider allows, if any."""
+    """The shortest runtime the grant or a granted profile for this provider allows, if any."""
     from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_RUNTIME_S
 
     profiles = (
@@ -1121,7 +1128,11 @@ def worker_runtime_ceiling(
         if backend is not None and backend.profile is not None
         else {grant.profile for grant in parent.backend_grants if grant.backend == provider}
     )
-    return WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None
+    ceilings = (
+        parent.max_worker_seconds,
+        WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None,
+    )
+    return min((ceiling for ceiling in ceilings if ceiling is not None), default=None)
 
 
 #: Tokens added to a bounded Gemini worker's input cap for the turn's own wrapping.
@@ -1250,8 +1261,8 @@ def default_worker_limits(
     """Fill omitted worker limits from the frozen root, so a model need not guess them.
 
     The deadline defaults to (and is never later than) the root's frozen deadline, and
-    to `now + max_runtime_s` when the selected profile caps a worker's runtime (a
-    Gemini worker gets 120 s); a later supplied deadline is shortened the same way. The
+    to `now + max_runtime_s` when the grant or the selected profile caps a worker's
+    runtime (10 min by default); a later supplied deadline is shortened the same way. The
     budget defaults to an even share, per remaining worker slot, of what the run and
     the provider line have left. Slots bound how many workers can be admitted, so
     parallel spawns reading the same snapshot never add up past either cap. A root that
@@ -1664,7 +1675,8 @@ def fleet_root_permissions(
         raise WorkerSpecRefused("origin", "unbound")
     spec, resources = _root_ceiling(source, account_id=fleet.scope.account_id)
     read_only = source.memory_read_only is not False
-    duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
+    # The run gets its own time; each worker is capped at spawn (`worker_runtime_ceiling`).
+    duration = min(grant.max_run_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
     limits = grant.limits.model_copy(update={"deadline": deadline})
     backend_grants, models = (
@@ -1689,6 +1701,7 @@ def fleet_root_permissions(
             seal_ids=seal_ids,
             memory_read_only=read_only,
             agent_id=source.agent_id,
+            max_worker_seconds=grant.max_worker_seconds,
         ),
         source,
         admission=admission,

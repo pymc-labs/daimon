@@ -15,7 +15,11 @@ if TYPE_CHECKING:
     from daimon.core.stores.domain import BackendAgent
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
+from daimon.core.neutral_resources import (
+    NATIVE_DISPATCH_MAX_SECONDS,
+    AgentFleetGrant,
+    WorkerLimits,
+)
 from daimon.core.stores.domain import FLEET_OFF, CompatibilityPreview, TenantBackendPolicy
 from mux.contracts.config import ConfigRevision, ResolvedBackend
 from mux.contracts.ids import ModelRef, Provider
@@ -30,6 +34,19 @@ from pydantic import (
     model_validator,
 )
 
+#: 10 min per worker, the most native spend-capped dispatch (e.g. Astra) allows; a run
+#: gets 20 min. The run's budget caps still bound the money.
+DEFAULT_FLEET_WORKER_SECONDS = NATIVE_DISPATCH_MAX_SECONDS
+DEFAULT_FLEET_RUN_SECONDS = 1200
+
+
+def _plain_seconds(seconds: int) -> str:
+    """`10 minutes` for whole minutes, else `90 seconds`."""
+    minutes, rest = divmod(seconds, 60)
+    if rest or not minutes:
+        return f"{seconds} seconds"
+    return "1 minute" if minutes == 1 else f"{minutes} minutes"
+
 
 class FleetConfigInput(BaseModel):
     """Chat-facing ceilings; the grant expiry and worker duration are distinct."""
@@ -39,7 +56,7 @@ class FleetConfigInput(BaseModel):
     max_workers: int | None = Field(default=None, gt=0, strict=True)
     budget_usd: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_worker_seconds: int | None = Field(default=None, gt=0, strict=True)
-    max_run_seconds: int = Field(default=600, gt=0, strict=True)
+    max_run_seconds: int = Field(default=DEFAULT_FLEET_RUN_SECONDS, gt=0, strict=True)
     max_turns: int = Field(default=1, gt=0, strict=True)
     max_root_turns: int = Field(default=3, gt=0, strict=True)
     expires_at: datetime | None = None
@@ -128,9 +145,6 @@ FLEET_UNAVAILABLE_HERE = "Fleets aren't available here yet."
 #: The fleet every agent has until its owner or an admin sets one or turns it off.
 DEFAULT_FLEET_MAX_WORKERS = 4
 DEFAULT_FLEET_BUDGET_USD = Decimal("2")
-#: Native spend-capped dispatch (e.g. Astra) needs a worker deadline of at most 120 s.
-DEFAULT_FLEET_WORKER_SECONDS = 120
-DEFAULT_FLEET_RUN_SECONDS = 600
 #: Fixed, so the default reads the same on every call and a frozen root never goes stale
 #: just because time passed; a policy or catalog change still changes its digest.
 DEFAULT_FLEET_EXPIRES_AT = datetime(2100, 1, 1, tzinfo=UTC)
@@ -502,8 +516,9 @@ def fleet_detail_lines(
     return (
         f"Up to {grant.max_workers} workers; ${grant.limits.budget_usd} per run.",
         "Each worker runs as its selected agent, using that agent's own model and settings.",
-        f"Each worker: up to {grant.max_worker_seconds} seconds; {grant.limits.max_turns} replies.",
-        f"Each run: up to {grant.max_run_seconds} seconds and "
+        f"Each worker: up to {_plain_seconds(grant.max_worker_seconds)}; "
+        f"{grant.limits.max_turns} replies.",
+        f"Each run: up to {_plain_seconds(grant.max_run_seconds)} and "
         f"{grant.max_root_turns} replies from the coordinating agent.",
         f"Fleet access expires: {grant.expires_at.isoformat()}.",
         budget,
