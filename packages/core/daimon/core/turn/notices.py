@@ -269,7 +269,7 @@ def _model_label(model: str | None) -> str:
     from mux.contracts.ids import ModelRef
 
     if not model:
-        return "OpenAI"
+        return "model"
     return model_name(ModelRef(provider=PERSISTENT_WORKSPACE.provider, id=model))
 
 

@@ -83,6 +83,17 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     ):
         raise UnsupportedCapability(("gemini_durable_runtime",), PROFILE)
     journal, usage = runtime.journal, runtime.usage_store
+    # Gemini usage reaches no ledger debit, and a root interaction has no token
+    # envelope: the daily model cap is checked before anything is created.
+    from daimon.core.turn.daily_model_cap import check_daily_model_cap
+
+    await check_daily_model_cap(
+        request,
+        provider=config.backend,
+        model=config.model,
+        price=usage.prices.get(config.model) if config.model is not None else None,
+        cap=request.deps.gemini_daily_model_cap_usd,
+    )
     deployment = journal.deployment
     if request.worker is not None or admission.backend_revision_origin == "agent":
         from daimon.core.turn.gemini_deployment import load_gemini_deployment

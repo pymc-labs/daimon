@@ -1,9 +1,9 @@
-"""What a tenant spent today on one OpenAI model, for the daily model cap.
+"""What a tenant spent today on one native model (OpenAI, Gemini), for the daily cap.
 
-OpenAI turns write no ledger debit (their infrastructure cost is unknown), so
-today's spend is priced from the observed token usage at list price, plus the
-reservations of fleet workers on that model that are still running. Counted in
-provider dollars (no markup), from midnight UTC.
+Native OpenAI and Gemini turns write no ledger debit (their infrastructure cost is
+unknown), so today's spend is priced from the observed token usage at list price,
+plus the reservations of fleet workers on that model that are still running.
+Counted in provider dollars (no markup), from midnight UTC.
 """
 
 from __future__ import annotations

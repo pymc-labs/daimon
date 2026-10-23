@@ -242,3 +242,12 @@ async def test_a_malformed_usage_row_is_skipped_not_fatal(sessions, monkeypatch)
 
     monkeypatch.setattr(openai_spend, "provider_cost_of", broken)
     assert await spent(sessions, "gpt-6-astra") == 0
+
+
+def test_a_gemini_refusal_names_the_gemini_model():
+    text = admission_refusal_text(
+        "provider_daily_cap_reached",
+        RefusalNouns.for_platform("discord"),
+        provider="gemini-4-argon",
+    )
+    assert "Today's Gemini 4 Argon budget for this server is used up." in text

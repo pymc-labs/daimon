@@ -2422,3 +2422,43 @@ async def test_fleet_r9_plain_gemini_worker_with_the_real_root_prompt_takes_the_
     assert sent["generation_config"] == {"max_output_tokens": limits.max_output_tokens}
     # No managed agent, so no 4096-token total cap for the prompt to overflow.
     assert not {"agent", "agent_config", "environment"} & sent.keys()
+
+
+async def test_a_used_up_daily_model_cap_refuses_before_google_is_called(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_clean: None,
+) -> None:
+    """Gemini usage reaches no ledger debit; the daily model cap stops the turn first."""
+    import httpx
+
+    from .test_gemini_runtime_transport import clients_for
+
+    manifest(monkeypatch, tmp_path / "manifest.json", [entry(selected, tmp_path)])
+    monkeypatch.setenv("N4_OFFLINE_GEMINI_KEY", "offline-selected-key")
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(500)
+
+    clients_for(monkeypatch, handle)
+    async with selected.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=selected.tenant_id)
+    deps = replace(selected.deps, state_store=None, gemini_daily_model_cap_usd=Decimal(0))
+
+    with pytest.raises(AdmissionDenied) as refused:
+        await bind_session_impl(
+            deps,
+            selected.admission,
+            tenant_id=selected.tenant_id,
+            platform=selected.platform,
+            external_user_id=selected.external_user_id,
+            thread_id=selected.thread_id,
+            session_account_id=selected.session_account_id,
+            reuse_existing=True,
+        )
+    model = selected.admission.backend_revision.model
+    assert (refused.value.reason, refused.value.provider) == ("provider_daily_cap_reached", model)
+    assert not [call for call in calls if call.method == "POST"], "nothing was created"
