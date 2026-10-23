@@ -24,7 +24,7 @@ from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
-from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
+from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
     build_context_xml,
@@ -94,7 +94,13 @@ from daimon.adapters.discord.turn_posts import (
     archive_thread_quietly,
     record_replacement_post,
 )
-from daimon.adapters.discord.views import CancelView
+from daimon.adapters.discord.typed_stop import (
+    ALREADY_STOPPING,
+    STOPPED,
+    TypedStops,
+    is_stop_request,
+)
+from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.vision import (
     build_image_url_prefix,
     build_skipped_image_prefix,
@@ -747,6 +753,8 @@ class DaimonBot(commands.Bot):
         # turn so the user doesn't lose messages they fired while the bot was busy.
         self._processing: set[int] = set()
         self._processing_tasks: dict[int, asyncio.Task[object]] = {}
+        # The running turn of each thread, for a typed "stop" (`_typed_stop`).
+        self._typed_stops = TypedStops()
         self._pending: dict[int, list[discord.Message]] = {}
         self._queued_reactions: set[int] = set()
         # Threads whose running turn lost its thread (deleted) or its right to write
@@ -2556,7 +2564,9 @@ class DaimonBot(commands.Bot):
         thread = message.channel
         thread_id = thread.id
         if thread_id in self._processing:
-            # The in-flight turn's delta context already carries this message.
+            # A typed stop from someone allowed stops the turn; anything else, the
+            # in-flight turn's delta context already carries.
+            await self._typed_stop(message, thread_id, reply_when_refused=False)
             return
         guild_id = str(message.guild.id)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -3222,6 +3232,9 @@ class DaimonBot(commands.Bot):
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
             if thread_id in self._processing:
+                # "@Daimon stop" stops the running reply instead of waiting behind it.
+                if await self._typed_stop(message, thread_id, reply_when_refused=True):
+                    return
                 queued_message = True
                 await self._queue_behind_inflight_turn(thread_id, message)
                 return
@@ -3366,6 +3379,41 @@ class DaimonBot(commands.Bot):
         async with self.runtime.sessionmaker() as session:
             await finish_messages(session, tenant_id=tenant_id, message_ids=pending)
             await session.commit()
+
+    async def _typed_stop(
+        self, message: discord.Message, thread_id: int, *, reply_when_refused: bool
+    ) -> bool:
+        """Stop the thread's running turn on a typed stop phrase: the Stop button's path.
+
+        True when the message was a stop request and was answered. Only the person
+        who asked or a server admin may stop; a plain (unmentioned) stop from anyone
+        else is left alone, an @-mentioned one is told who can stop.
+        """
+        if not is_stop_request(message.content):
+            return False
+        is_admin = isinstance(message.author, discord.Member) and (
+            admin_caller(message.author).is_server_admin
+        )
+        outcome = self._typed_stops.stop(thread_id, author_id=message.author.id, is_admin=is_admin)
+        log.info(
+            "turn.stop_typed",
+            platform="discord",
+            thread_id=str(thread_id),
+            pressed_by=str(message.author.id),
+            outcome=outcome,
+        )
+        if outcome == "no_running_turn" or (outcome == "not_allowed" and not reply_when_refused):
+            return False
+        reply = {
+            "stopped": STOPPED,
+            "already_stopping": ALREADY_STOPPING,
+            "not_allowed": STOP_NOT_ALLOWED,
+        }[outcome]
+        try:
+            await message.reply(reply, mention_author=False)
+        except discord.HTTPException as exc:
+            log.warning("turn.stop_typed_reply_failed", thread_id=str(thread_id), error=str(exc))
+        return True
 
     async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
         """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.
@@ -3920,6 +3968,7 @@ class DaimonBot(commands.Bot):
     def _release_thread(self, thread_id: int) -> None:
         self._processing_tasks.pop(thread_id, None)
         self._thread_stops.release(thread_id)
+        self._typed_stops.release(thread_id)
 
         def resume(_key: int, request: tuple[uuid.UUID, discord.Thread, str]) -> None:
             tenant_id, thread, guild_id = request
@@ -4151,6 +4200,9 @@ class DaimonBot(commands.Bot):
         cancel = asyncio.Event()
         # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
         self._thread_stops.watch(thread.id, cancel)
+        self._typed_stops.watch(
+            thread.id, requester_id=int(row.requester_external_user_id), cancel=cancel
+        )
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -4359,6 +4411,9 @@ class DaimonBot(commands.Bot):
             )
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
+            self._typed_stops.watch(
+                thread.id, requester_id=int(row.requester_external_user_id), cancel=cancel_event
+            )
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
@@ -5140,6 +5195,7 @@ class DaimonBot(commands.Bot):
         cancel = asyncio.Event()
         # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
         self._thread_stops.watch(thread.id, cancel)
+        self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -5724,6 +5780,7 @@ class DaimonBot(commands.Bot):
             )
 
         def _recovery_lifecycle(cancel_event: asyncio.Event) -> TurnLifecycle:
+            self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel_event)
             new_lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
