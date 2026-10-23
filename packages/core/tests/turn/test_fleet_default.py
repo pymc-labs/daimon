@@ -718,3 +718,51 @@ async def test_a_slack_turns_preparation_never_captures_a_default_fleet_source(
         current_origin_id.reset(token)
     assert result._source is None
     assert len(captured) == (1 if platform == "discord" else 0)
+
+
+async def test_a_real_freeze_names_left_out_logins_and_hands_over_nothing(root_turn):
+    """#1369 review: freeze -> card/spawn reply, and no reader of shared_logins while not live."""
+    from daimon.core.authz import Subject
+    from daimon.core.channel_backend import AgentBackendService, BackendActor
+    from daimon.core.stores.agent_files import put_agent_file
+    from mux.contracts.resources import ResourceBinding
+
+    deps, prepared, _, intent, _, scope, _, _ = root_turn
+    source = prepared._source
+    async with deps.sessionmaker.begin() as db:
+        await put_agent_file(
+            db,
+            tenant_id=source.tenant_id,
+            agent_id=source.agent_id,
+            key="SERVICE_KEY",
+            content="service-secret-value",
+            set_by_account_id=None,
+        )
+    reference = f"agent-env:{source.tenant_id}:{source.agent_id}:SERVICE_KEY"
+    with_key = source.model_copy(
+        update={
+            "resource_requirements": (
+                *source.resource_requirements,
+                ResourceBinding(
+                    id=reference, kind="credential", credential_ref=reference, target_path=".env"
+                ),
+            )
+        }
+    )
+    admin = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+    await AgentBackendService(deps.sessionmaker, enabled=True).set_credential_sharing(
+        source,
+        {"env:SERVICE_KEY": "share"},
+        with_key,
+        admin,
+        requester_account_id=admin.account_id,
+        run_id=None,
+    )
+    frozen = (deps, replace(prepared, _source=with_key), *root_turn[2:])
+    await freeze(frozen)
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    assert parent.shared_logins == frozenset()  # nothing reaches a worker while not live
+    assert parent.workers_run_without == (
+        "the stored key SERVICE_KEY (sharing with workers isn't available yet)",
+    )
+    assert "service-secret-value" not in json.dumps(list(parent.workers_run_without))

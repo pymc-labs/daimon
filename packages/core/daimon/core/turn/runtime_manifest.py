@@ -144,6 +144,68 @@ async def default_fleet_unavailable_here(
     return setting.kind == "default"
 
 
+#: Whether a native worker can be handed a shared login yet (A-2). Until then a saved
+#: "share" is frozen but nothing is handed over, and the card says so.
+LOGIN_SHARING_LIVE = False
+
+
+@dataclass(frozen=True)
+class FrozenLogins:
+    """A run's login decision: what it shares, what its workers get, what they lack."""
+
+    shared: frozenset[str] = frozenset()
+    handed: frozenset[str] = frozenset()
+    handed_servers: frozenset[str] = frozenset()
+    without: tuple[str, ...] = ()
+
+
+async def frozen_logins(deps: TurnDeps, source: BackendAgent) -> FrozenLogins:
+    """The run's shared logins and every login its workers run without, with the reason.
+
+    A saved "share" counts only if it still holds now (`still_shared`: the same
+    stored row it was saved for, and the saver may still share it). Frozen with the
+    root, so a choice made while the run is going applies from the next run only.
+    Only `handed` (shared AND sharing is live) ever reaches a worker.
+    """
+    from daimon.core.fleet_credentials import (
+        fleet_logins,
+        parse_sharing,
+        run_without_line,
+        still_shared,
+    )
+    from daimon.core.stores import agent_backends, agent_owners
+
+    async with deps.sessionmaker() as db:
+        current = await agent_backends.current(db, source.tenant_id, source.agent_id)
+        saved = parse_sharing(current.fleet_credential_sharing if current else None)
+        owner = await agent_owners.owner_of(db, source.tenant_id, source.agent_id)
+        logins = await fleet_logins(db, source)
+    shared = frozenset(
+        login.key for login in logins if still_shared(login, saved.get(login.key), owner=owner)
+    )
+    handed: frozenset[str] = shared if LOGIN_SHARING_LIVE else frozenset()
+
+    def choice(key: str) -> str | None:
+        entry = saved.get(key)
+        if entry is None or (entry.choice == "share" and key not in shared):
+            return None  # a share that no longer holds reads as not shared
+        return entry.choice
+
+    without = tuple(
+        run_without_line(login, choice(login.key), sharing_live=LOGIN_SHARING_LIVE)
+        for login in logins
+        if login.key not in handed
+    )
+    servers = frozenset(
+        login.label for login in logins if login.kind == "agent_mcp" and login.key in handed
+    )
+    return FrozenLogins(shared, handed, servers, without)
+
+
+async def frozen_shared_logins(deps: TurnDeps, source: BackendAgent) -> frozenset[str]:
+    return (await frozen_logins(deps, source)).shared
+
+
 async def read_agent_fleet_grant_or_off(
     deps: TurnDeps, admission: Admission, *, now: datetime
 ) -> AgentFleetGrant | None:
@@ -867,6 +929,16 @@ async def _freeze_root(
         limits=permissions.limits.model_copy(
             update={"deadline": min(request.deadline, permissions.limits.deadline)}
         ),
+    )
+    try:
+        decision = await frozen_logins(deps, source)
+    except Exception as error:
+        # Listing logins never fails a root: share nothing, and say so on the card.
+        log.warning("fleet.logins_unlisted", cause=type(error).__name__)
+        decision = FrozenLogins(without=("this agent's logins (they couldn't be listed)",))
+    # Only what is actually handed over is frozen as shared (none while not live).
+    permissions = replace(
+        permissions, shared_logins=decision.handed, workers_run_without=decision.without
     )
     environment = source_environment_record(prepared.admission.environment, scope)
     root = _FrozenRoot(

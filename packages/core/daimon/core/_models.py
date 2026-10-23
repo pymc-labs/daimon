@@ -3887,6 +3887,10 @@ class AgentBackendRevisionRecord(Base):
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     previous_local: Mapped[int | None] = mapped_column(Integer)
     fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # Per login key: "share" | "skip" | "ask" for fleet workers (#credshare); carried forward.
+    fleet_credential_sharing: Mapped[Any | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

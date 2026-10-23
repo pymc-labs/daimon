@@ -111,6 +111,7 @@ async def put_revision(
     agent_name: str,
     preview_digest: str,
     fleet_grant: JsonValue | None = None,
+    fleet_credential_sharing: JsonValue | None = None,
     drop_consent: JsonValue | None = None,
     model: str | None = None,
     profile: str | None = None,
@@ -131,6 +132,7 @@ async def put_revision(
         agent_name=agent_name,
         preview_digest=preview_digest,
         fleet_grant=fleet_grant,
+        fleet_credential_sharing=fleet_credential_sharing,
         drop_consent=drop_consent,
     )
     session.add(row)
