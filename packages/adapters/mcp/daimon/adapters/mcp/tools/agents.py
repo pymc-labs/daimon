@@ -1052,28 +1052,39 @@ async def _fork_agent_impl(
     # Forking is an admin's call: a fork routes nowhere and has no channel
     # pin of its own, so it is free to run anywhere the source can't.
     _require_admin(auth)
-    if new_copy_if_taken:
-        # "Make a copy of yourself" wants a new copy, never an earlier one.
-        new_name = await _free_agent_name(runtime, auth, new_name)
-    else:
-        await _reject_guild_name_collision(runtime, auth, new_name)
-    source = await resolve_setup_agent(
-        runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
-    )
     public_url = runtime.settings.mcp.public_url
-    try:
-        copy = await copy_agent(
-            runtime.client,
-            runtime.session_factory,
-            tenant_id=auth.tenant_id,
-            source=source,
-            new_name=new_name,
-            public_url=str(public_url) if public_url is not None else None,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
-            default_agent_name=runtime.deployment_default.agent_name,
+    async with contextlib.AsyncExitStack() as stack:
+        # Pick, check and create under the name's lock, so two copies at once
+        # never both take the same name.
+        await stack.enter_async_context(
+            agent_name_lock(runtime.session_factory, tenant_id=auth.tenant_id, name=new_name)
         )
-    except DaimonError as exc:
-        raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
+        if new_copy_if_taken:
+            # "Make a copy of yourself" wants a new copy, never an earlier one.
+            picked = await _free_agent_name(runtime, auth, new_name)
+            if picked != new_name:
+                # A creator naming `picked` outright locks that name, not ours.
+                await stack.enter_async_context(
+                    agent_name_lock(runtime.session_factory, tenant_id=auth.tenant_id, name=picked)
+                )
+                new_name = picked
+        await _reject_guild_name_collision(runtime, auth, new_name)
+        source = await resolve_setup_agent(
+            runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
+        )
+        try:
+            copy = await copy_agent(
+                runtime.client,
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                source=source,
+                new_name=new_name,
+                public_url=str(public_url) if public_url is not None else None,
+                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                default_agent_name=runtime.deployment_default.agent_name,
+            )
+        except DaimonError as exc:
+            raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
     info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
     if copy.dropped_skills:
         info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
@@ -1890,8 +1901,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         ``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
-        is the copy's. Pass true for "make a copy of yourself" asks, where the
-        person named no copy."""
+        is the copy's: name the copy by it, not ``new_name``. Pass true for "make a
+        copy of yourself" asks, where the person named no copy; when the person
+        names the copy, leave this false."""
         return await _fork_agent_impl(
             runtime,
             await _auth(ctx),
@@ -1955,8 +1967,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             summary says which); switching the default agent applies to every channel on
             this server. For "make a copy of yourself on Gemini": copy the agent with
             fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
-            one), hand this conversation to the copy with hand_off_task while it is
-            still on this provider, then switch the copy here; the confirmed switch moves
+            one; use the name and id it returns from here on), hand this conversation
+            to the copy with hand_off_task while it is still on this provider, then
+            switch the copy here; the confirmed switch moves
             this conversation to Gemini from the next message.
             First call without preview_digest and show the returned compatibility,
             shared-thread limits, what won't be available, and the cost line. Call again

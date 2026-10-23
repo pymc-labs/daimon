@@ -2589,8 +2589,9 @@
         <blank line>
         ``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
-        is the copy's. Pass true for "make a copy of yourself" asks, where the
-        person named no copy.
+        is the copy's: name the copy by it, not ``new_name``. Pass true for "make a
+        copy of yourself" asks, where the person named no copy; when the person
+        names the copy, leave this false.
       ''',
       'parameters': dict({
         'additionalProperties': False,
