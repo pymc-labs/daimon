@@ -277,15 +277,27 @@ def test_every_failure_reason_names_a_cause_and_a_fix():
             assert "; " in text, f"{code} names no fix: {text}"
 
 
-def test_the_cause_chain_is_followed_through_cause_and_context():
-    """A timeout raised during handling (context) under an explicit cause still counts."""
+def test_timeouts_and_quotas_follow_the_traceback_chain():
+    """The same rule as a refusal's cause: an explicit cause, else an unsuppressed
+    context; a context `raise ... from ...` replaced is not the cause."""
     try:
         try:
             raise TimeoutError
         except TimeoutError:
-            raise RuntimeError("cleanup failed") from ValueError("unrelated cause")
-    except RuntimeError as error:
-        assert worker_failure_code(error, "dispatch_refused") == "timed_out"
+            raise RuntimeError("cleanup failed")  # noqa: B904 - an implicit context
+    except RuntimeError as implicit:
+        assert worker_failure_code(implicit, "dispatch_refused") == "timed_out"
+    try:
+        try:
+            raise TimeoutError
+        except TimeoutError:
+            raise FleetConflict("x", reason="claim_changed") from None
+    except FleetConflict as replaced:
+        assert worker_failure_code(replaced, "dispatch_refused") == "dispatch_refused"
+    quota = ProviderError("rate_limited", retryable=True, native_code="quota_zero")
+    explicit = FleetConflict("x", reason="result_not_successful")
+    explicit.__cause__ = quota
+    assert worker_failure_code(explicit, "dispatch_refused") == "provider_quota_zero"
 
 
 async def test_the_budget_watch_stamps_its_cancel_reason():

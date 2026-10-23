@@ -186,17 +186,22 @@ def _timed_out(error: BaseException) -> bool:
 
 
 def _chain(error: BaseException) -> Iterator[BaseException]:
-    """`error` and everything it was raised from or during (`__cause__` and `__context__`)."""
+    """`error` and the chain a traceback shows under it: an explicit `__cause__`, else
+    an implicit `__context__` unless `raise ... from None` suppressed it (#1380 review).
+
+    One rule for every cause this module reads (a refusal's, a timeout, a quota).
+    """
     seen: set[int] = set()
-    pending: list[BaseException] = [error]
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
         seen.add(id(current))
         yield current
-        pending.extend(
-            linked for linked in (current.__context__, current.__cause__) if linked is not None
+        current = (
+            current.__cause__
+            if current.__cause__ is not None
+            else None
+            if current.__suppress_context__
+            else current.__context__
         )
 
 
@@ -217,10 +222,7 @@ def _admission_cause(error: BaseException) -> WorkerFailureCode | None:
     """A plain cause for an admission refusal, from its closed reason, cause or raise site."""
     from daimon.core.turn.errors import AdmissionDenied
 
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
+    for current in _chain(error):
         if isinstance(current, AdmissionDenied):
             if (code := _ADMISSION_REASON_CODES.get(current.reason)) is not None:
                 return code
@@ -232,15 +234,6 @@ def _admission_cause(error: BaseException) -> WorkerFailureCode | None:
                     "turn.runtime_manifest.select_runtime_manifest:"
                 ):
                     return "worker_runtime_missing"
-        # The chain a traceback shows: an explicit cause, else an implicit context
-        # unless `raise ... from None` suppressed it (that refusal was replaced).
-        current = (
-            current.__cause__
-            if current.__cause__ is not None
-            else None
-            if current.__suppress_context__
-            else current.__context__
-        )
     return None
 
 
