@@ -161,7 +161,9 @@ class _ConfirmationView(discord.ui.LayoutView):
                 )
                 always.callback = self._on_always
                 row.add_item(always)
-            row.add_item(details)
+            # An admin card already shows its details above the buttons.
+            if not prompt.admin:
+                row.add_item(details)
             container.add_item(row)
         footer = _footer(card, prompt)
         if footer is not None:

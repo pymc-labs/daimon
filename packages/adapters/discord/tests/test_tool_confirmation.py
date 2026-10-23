@@ -994,3 +994,13 @@ async def test_tenant_guild_resolves_only_a_discord_tenants_server(
     assert got == expected
     if expected is not None:
         client.get_guild.assert_called_once_with(42)
+
+
+def test_an_admin_card_shows_its_details_once_without_a_details_button() -> None:
+    """Friction #55: the details are inline on an admin card, so no button repeats them."""
+    prompt = _prompt().model_copy(update={"admin": True, "detail_lines": ("Model: gpt-6-luna",)})
+    view = build_confirmation_view(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
+    )
+    assert [b.label for b in _buttons(view)] == ["Confirm", "Deny"]
+    assert _texts(view).count("Model: gpt-6-luna") == 1
