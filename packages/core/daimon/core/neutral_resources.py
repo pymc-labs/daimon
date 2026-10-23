@@ -1958,6 +1958,51 @@ def freeze_root_permissions(
     )
 
 
+_MONEY_FIELDS = ("budget_usd", "native_budget_usd")
+
+
+def _canonical_money(limits: dict[str, object]) -> dict[str, object]:
+    """One spelling per amount, so an equal Decimal never changes a worker's digest.
+
+    `Decimal("0.6700") == Decimal("0.67")`, but their JSON strings differ and the
+    digest hashes strings. Every amount is written in its shortest exact form
+    ("2.00" -> "2"), so a worker admitted under the old spelling and run under the
+    new one fails its intent check once, at the deploy that ships this.
+    """
+
+    def canonical(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        try:
+            amount = Decimal(value)
+        except ArithmeticError:
+            return value
+        if not amount.is_finite():
+            return value
+        # Exact, whatever the ambient context: normalize() would round to its precision.
+        text = format(amount, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return "0" if text in ("-0", "", "0") else text
+
+    result = dict(limits)
+    for field in _MONEY_FIELDS:
+        if field in result:
+            result[field] = canonical(result[field])
+    providers = result.get("provider_limits_usd")
+    if isinstance(providers, dict):
+        result["provider_limits_usd"] = {
+            key: canonical(value) for key, value in cast(dict[str, object], providers).items()
+        }
+    return result
+
+
+def _sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def resolve_worker_spec(
     parent: WorkerPermissions,
     spec: AgentSpec | Agent,
@@ -1970,6 +2015,7 @@ def resolve_worker_spec(
     environment: EnvironmentSpec | None = None,
     limits: WorkerLimits | None = None,
     captured_source: BackendAgent | None = None,
+    digest_phase: Literal["spawn", "run_worker"] | None = None,
 ) -> ResolvedWorkerSpec:
     """Resolve existing spec shapes against authentic, finite parent authority.
 
@@ -2361,7 +2407,7 @@ def resolve_worker_spec(
         "backend": selected.model_dump(mode="json"),
         "resources": [resource.model_dump(mode="json") for resource in resources],
         "environment": environment.model_dump(mode="json") if environment is not None else None,
-        "limits": cap.model_dump(mode="json"),
+        "limits": _canonical_money(cap.model_dump(mode="json")),
         "origin": str(fleet.origin_id),
         "run": str(fleet.run_id),
         "place": asdict(fleet.place),
@@ -2376,9 +2422,20 @@ def resolve_worker_spec(
     }
     if captured_source is not None:
         body["capture"] = TypeAdapter(object).dump_python(dict(captured_source), mode="json")
-    digest = hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = _sha256(body)
+    if digest_phase is not None:
+        # Which part moved when a spawn and its run_worker disagree: ids and
+        # digests only, never content.
+        _log.info(
+            "fleet.worker_spec_digest",
+            phase=digest_phase,
+            run_id=str(fleet.run_id),
+            origin_id=str(fleet.origin_id),
+            model=resolved.model.id,
+            digest=digest[:12],
+            parts={key: _sha256(value)[:8] for key, value in sorted(body.items())},
+            system_chars=len(resolved.system or ""),
+        )
     child_scope = fleet.scope.model_copy(
         update={"authorization_id": f"worker:{fleet.origin_id}:{digest}"}
     )
