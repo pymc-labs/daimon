@@ -22,9 +22,18 @@ Daimon calls this store yet.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
@@ -42,7 +51,7 @@ from daimon.core._models import (
     TurnCardIntent,
     UsageObservation,
 )
-from daimon.core.stores import agent_backends, read_persisted_columns
+from daimon.core.stores import agent_backends, check_persisted_read, read_persisted_columns
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
@@ -67,7 +76,7 @@ from mux.state.store import (
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
-from sqlalchemy import ColumnElement, String, cast, func, select, text, update
+from sqlalchemy import ColumnElement, String, cast, func, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -319,6 +328,108 @@ async def get_binding(
     if row is None:
         return None
     binding = await _binding(session, row.binding_id, row.generation, read_persisted=read_persisted)
+    return None if is_released(binding) and not include_released else binding
+
+
+type SlotKey = tuple[uuid.UUID, str, str, str, str | None]
+
+
+def slot_key(slot: Slot) -> SlotKey:
+    """The columns `get_binding` matches a slot on, as one comparable key."""
+    values = _slot_values(slot)
+    return (
+        values["tenant_id"],
+        values["platform"],
+        values["channel_id"],
+        values["thread_id"],
+        values["account_id"],
+    )
+
+
+@dataclass(frozen=True)
+class SlotBindings:
+    """Binding rows of many slots from one batched read in the caller's transaction.
+
+    `slots` holds every slot key that was read: its (binding id, generation), or None
+    when the slot has no row. `bodies` holds every (binding id, generation) that was read.
+    """
+
+    slots: Mapping[SlotKey, tuple[str, int] | None]
+    bodies: Mapping[tuple[str, int], dict[str, Any] | None]
+
+
+async def read_slot_bindings(session: AsyncSession, slots: Iterable[Slot]) -> SlotBindings:
+    """`get_binding`'s two reads for every slot at once: two statements in total.
+
+    Reads only; refuses nothing. `cached_binding` answers `get_binding` from the result,
+    with the same refusals at the point the per-slot read would have refused.
+    """
+    keys = {slot_key(slot) for slot in slots}
+    if not keys:
+        return SlotBindings({}, {})
+    with session.no_autoflush:
+        found = {
+            (row.tenant_id, row.platform, row.channel_id, row.thread_id, row.account_id): (
+                row.binding_id,
+                row.generation,
+            )
+            for row in await session.execute(
+                select(
+                    ProviderBindingSlot.tenant_id,
+                    ProviderBindingSlot.platform,
+                    ProviderBindingSlot.channel_id,
+                    ProviderBindingSlot.thread_id,
+                    ProviderBindingSlot.account_id,
+                    ProviderBindingSlot.binding_id,
+                    ProviderBindingSlot.generation,
+                ).where(
+                    tuple_(
+                        ProviderBindingSlot.tenant_id,
+                        ProviderBindingSlot.platform,
+                        ProviderBindingSlot.channel_id,
+                        ProviderBindingSlot.thread_id,
+                    ).in_({key[:4] for key in keys})
+                )
+            )
+        }
+        located = {key: found.get(key) for key in keys}
+        pairs = {pair for pair in located.values() if pair is not None}
+        bodies: dict[tuple[str, int], dict[str, Any] | None] = dict.fromkeys(pairs)
+        if pairs:
+            for row in await session.execute(
+                select(
+                    ProviderBinding.binding_id, ProviderBinding.generation, ProviderBinding.binding
+                ).where(tuple_(ProviderBinding.binding_id, ProviderBinding.generation).in_(pairs))
+            ):
+                bodies[(row.binding_id, row.generation)] = row.binding
+    return SlotBindings(located, bodies)
+
+
+async def cached_binding(
+    session: AsyncSession,
+    cache: SlotBindings,
+    slot: Slot,
+    *,
+    read_persisted: bool = False,
+    include_released: bool = False,
+) -> BindingContract | None:
+    """`get_binding` answered from `read_slot_bindings`; a slot it did not read is read now."""
+    key = slot_key(slot)
+    if key not in cache.slots:
+        return await get_binding(
+            session, slot, read_persisted=read_persisted, include_released=include_released
+        )
+    if read_persisted:
+        check_persisted_read(session, select(ProviderBindingSlot.binding_id))
+    pair = cache.slots[key]
+    if pair is None:
+        return None
+    if read_persisted:
+        check_persisted_read(session, select(ProviderBinding.binding))
+    binding_id, generation = pair
+    body = cache.bodies[pair]
+    assert body is not None, f"binding {binding_id} lost generation {generation}"
+    binding = BindingContract.model_validate(body)
     return None if is_released(binding) and not include_released else binding
 
 

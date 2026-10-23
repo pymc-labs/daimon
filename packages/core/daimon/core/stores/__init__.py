@@ -26,6 +26,7 @@ from sqlalchemy.sql.util import find_tables
 __all__ = [
     "domain",
     "identity",
+    "check_persisted_read",
     "read_persisted_columns",
     "UnflushedReadState",
     "scoped_config_read",
@@ -47,6 +48,19 @@ async def read_persisted_columns(
 
     Caller owns scope, ordering and transaction. Pending new objects remain
     unflushed; persistent dirty/deleted state refuses without being overwritten.
+    """
+    projected = check_persisted_read(session, statement, reject_new=reject_new)
+    with session.no_autoflush:
+        return await session.execute(projected)
+
+
+def check_persisted_read(
+    session: AsyncSession, statement: Select[Any], *, reject_new: bool = False
+) -> Select[Any]:
+    """`read_persisted_columns`' refusal alone, without the read; returns the projection.
+
+    For a reader answering from rows it already read in this transaction: the same
+    unflushed state refuses at the same point the per-row read would have refused.
     """
     projected = statement.with_only_columns(*statement.selected_columns)
     guarded = {
@@ -73,5 +87,4 @@ async def read_persisted_columns(
                 raise UnflushedReadState(
                     f"unflushed {operation} on {table} before a persisted read"
                 )
-    with session.no_autoflush:
-        return await session.execute(projected)
+    return projected

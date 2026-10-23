@@ -40,7 +40,11 @@ from daimon.core.stores import fleet as fleet_store
 from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
-from daimon.core.stores.turn_usage import read_accounting_revisions
+from daimon.core.stores.turn_usage import (
+    AccountingPrefetch,
+    prefetch_accounting,
+    read_accounting_revisions,
+)
 from daimon.core.usage_delegation import HostUsageBinding, read_delegated_usage
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ProviderBinding
@@ -360,8 +364,18 @@ async def _fleet_worker_money(
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
     price_floor: bool,
+    prefetch: AccountingPrefetch | None = None,
 ) -> tuple[Decimal, Decimal, bool, bool]:
-    binding = await mux_state.get_binding(session, worker_slot(run, worker))
+    """One worker's (floor, debit, unpriced usage, no native evidence).
+
+    With the graph's `prefetch` it answers from those rows, with the same checks.
+    """
+    slot = worker_slot(run, worker)
+    binding = (
+        await mux_state.get_binding(session, slot)
+        if prefetch is None
+        else await mux_state.cached_binding(session, prefetch.bindings, slot)
+    )
     if binding is None:
         if worker.binding_id is not None:
             raise FleetConflict("accepted worker binding is unavailable")
@@ -372,7 +386,9 @@ async def _fleet_worker_money(
         or worker.binding_id not in (None, binding.id)
     ):
         raise FleetConflict("worker binding differs from its admitted identity")
-    rows = await read_accounting_revisions(session, tenant_id=run.tenant_id, binding=binding)
+    rows = await read_accounting_revisions(
+        session, tenant_id=run.tenant_id, binding=binding, prefetch=prefetch
+    )
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         debit = -sum((row.delta_usd for row in rows.ledger), Decimal(0))
@@ -381,13 +397,28 @@ async def _fleet_worker_money(
         if not rows.revisions or not price_floor:
             return debit, debit, False, False
         native = rows.revisions[0].observation.session
+        # The rows just read are this binding's revisions; prefetched, they are not re-read.
         usage = await read_delegated_usage(
-            session, scope=scope, bindings=(HostUsageBinding(binding, native),), prices=prices
+            session,
+            scope=scope,
+            bindings=(HostUsageBinding(binding, native),),
+            prices=prices,
+            rows=None if prefetch is None else {binding.id: rows},
         )
         floor = (usage.token_floor_usd * markup).quantize(
             Decimal("0.000001"), rounding=ROUND_CEILING
         )
         return max(floor, debit), debit, bool(usage.unpriced_observations), False
+
+
+async def _prefetch_fleet_money(
+    session: AsyncSession, graph: fleet_store.BudgetGraph, *, tenant_id: uuid.UUID
+) -> AccountingPrefetch | None:
+    """Every graph worker's binding and accounting rows in five statements, not per worker."""
+    slots = [worker_slot(run, worker) for run, workers in graph for worker in workers]
+    if not slots:
+        return None
+    return await prefetch_accounting(session, tenant_id=tenant_id, slots=slots)
 
 
 def _root_money(record: OperationRecord) -> tuple[Decimal, Decimal]:
@@ -679,6 +710,7 @@ async def _produce_fleet_budget(
         debits: dict[uuid.UUID, Decimal] = {}
         zero_spend: set[uuid.UUID] = set()
         unpriced_usage = False
+        prefetch = await _prefetch_fleet_money(session, graph, tenant_id=tenant_id)
         with localcontext() as arithmetic:
             arithmetic.prec = 80
             for other_run, members in graph:
@@ -692,6 +724,7 @@ async def _produce_fleet_budget(
                         prices=prices,
                         markup=markup,
                         price_floor=other_run.id == run.id,
+                        prefetch=prefetch,
                     )
                     unpriced_usage = unpriced_usage or unpriced
                     floors[member.id] = floor

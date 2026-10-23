@@ -17,7 +17,7 @@ from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.pricing import ModelRates, ProviderPrice, minimum_cost_of, provider_cost_of
 from daimon.core.stores.accounting_outbox import settled_amount
 from daimon.core.stores.root_usage import lock_root_usage
-from daimon.core.stores.turn_usage import read_accounting_revisions
+from daimon.core.stores.turn_usage import UsageAccountingRows, read_accounting_revisions
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_recording import TurnLedgerReason
 from mux.contracts.ids import ModelRef, ResourceRef, Scope
@@ -89,6 +89,7 @@ async def read_delegated_usage(
     scope: Scope,
     bindings: tuple[HostUsageBinding, ...],
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
+    rows: Mapping[str, UsageAccountingRows] | None = None,
 ) -> DelegatedUsageRead:
     """Read distinct host workers through their existing usage/outbox bindings.
 
@@ -97,6 +98,8 @@ async def read_delegated_usage(
     turn ID is missing. Original provider/session/observation IDs stay intact.
     Revisions replace earlier snapshots; native coverage selects disjoint work.
     This port performs no claims, debits, settlement, or reservation changes.
+    `rows` are this transaction's `read_accounting_revisions` of some bindings, by
+    binding id; they are used instead of reading those bindings again.
     """
     if scope.is_platform or scope.is_legacy_host_authorized or not bindings:
         raise ValueError("delegated usage requires admitted tenant worker bindings")
@@ -127,13 +130,17 @@ async def read_delegated_usage(
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         for member in bindings:
-            rows = await read_accounting_revisions(
-                session, tenant_id=tenant_id, binding=member.binding
+            read = (
+                rows[member.binding.id]
+                if rows is not None and member.binding.id in rows
+                else await read_accounting_revisions(
+                    session, tenant_id=tenant_id, binding=member.binding
+                )
             )
-            if rows.binding != member.binding:
+            if read.binding != member.binding:
                 raise ValueError("worker binding changed during usage attribution")
             latest: tuple[UsageObservation, ...] = ()
-            for revision in rows.revisions:
+            for revision in read.revisions:
                 value = revision.observation
                 if value.session != member.session or (
                     value.model is not None and value.model.provider != member.session.provider
@@ -150,8 +157,8 @@ async def read_delegated_usage(
                     unpriced += 1
                 else:
                     floor += amount
-            pending += sum(not item.settled for item in rows.outbox)
-            for row in rows.ledger:
+            pending += sum(not item.settled for item in read.outbox)
+            for row in read.ledger:
                 if row.idempotency_key in keys:
                     raise ValueError("delegated usage has overlapping monetary identities")
                 keys.add(row.idempotency_key)
