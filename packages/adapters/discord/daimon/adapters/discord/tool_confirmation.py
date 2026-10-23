@@ -378,6 +378,12 @@ def discord_confirmation_hook(
                 ),
                 default_agent_name=runtime.deployment_default.agent_name,
                 place_word="server",
+                # A hand-off earlier in this thread decides whose conversation moves.
+                handoff_thread=(
+                    ("discord", str(channel.parent_id), str(channel.id))
+                    if isinstance(channel, discord.Thread)
+                    else None
+                ),
                 # A channel-pin card clears only the channel this turn runs in.
                 pin_channel=ChannelRef(
                     tenant_id=str(tenant_id),

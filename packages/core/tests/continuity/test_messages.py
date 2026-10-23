@@ -283,7 +283,10 @@ def test_render_handoff_acknowledged_without_requested_work() -> None:
     ) == (
         "Ada will handle your next message.\n"
         "Send a message to continue.\n"
-        "Your conversation and files carry over. Ada uses its own connections and memory."
+        "Your conversation and files carry over while Ada stays on this model provider. "
+        "Ada uses its own connections and memory.\n"
+        "Switching Ada to another provider starts it fresh here: earlier messages and files "
+        "don't carry over."
     )
 
 
@@ -293,7 +296,10 @@ def test_render_handoff_acknowledged_appends_requested_work_line() -> None:
     ) == (
         "Ada will handle your next message.\n"
         "Send a message to continue.\n"
-        "Your conversation and files carry over. Ada uses its own connections and memory.\n"
+        "Your conversation and files carry over while Ada stays on this model provider. "
+        "Ada uses its own connections and memory.\n"
+        "Switching Ada to another provider starts it fresh here: earlier messages and files "
+        "don't carry over.\n"
         "Next: finish the report."
     )
 
