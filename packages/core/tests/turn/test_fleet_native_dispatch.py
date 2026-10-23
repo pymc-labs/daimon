@@ -1365,3 +1365,49 @@ async def test_dispatch_skips_a_second_failure_commit_run_worker_already_recorde
         assert commits == ([] if recorded else ["setup_error"])
     finally:
         await ports.close()
+
+
+async def test_a_dispatched_turn_at_the_ceiling_is_recorded_as_a_timeout_end_to_end(
+    worker_root, monkeypatch
+):
+    """LEAD (#1413 approval): through execute(), not just worker_failure_code."""
+    from daimon.core import headless_runner
+    from daimon.core.turn.ceiling import ceiling_error
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+    from daimon.core.turn.termination import TerminationReason
+
+    request, root, _, resolved, prices, _, _, _, _ = worker_root
+
+    async def ceiling(*_args, **_kwargs):
+        return RunOutcome(
+            state=TurnState(error=ceiling_error(), termination=TerminationReason.CEILING),
+            ma_session_id="session",
+            mapping_id=None,
+            recovered=False,
+        )
+
+    monkeypatch.setattr(headless_runner, "run_prepared_turn", ceiling)
+
+    async def preparation(parent):
+        return request
+
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2),
+        deps=replace(request.deps, fleet_enabled=True),
+    )
+    try:
+        reply = await FleetOrchestrator(ports).spawn(
+            root,
+            await _policy(request),
+            **_spawn_terms(request, root, resolved, "dispatched-ceiling"),
+        )
+        ended = await _settled(ports, root, reply["worker_id"])
+        expected = "provider_busy" if ended.backend == "gemini" else "timed_out"
+        assert (ended.status, ended.error_code) == ("failed", expected)
+    finally:
+        await ports.close()

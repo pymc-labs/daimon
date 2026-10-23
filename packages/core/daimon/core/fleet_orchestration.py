@@ -144,6 +144,13 @@ WorkerFailureCode = Literal[
     "shutdown",
     "run_deadline",
     "usage_unavailable",
+    "worker_budget_exceeded",
+    "run_budget_exceeded",
+    "provider_budget_exceeded",
+    "tenant_budget_exceeded",
+    "funding_unavailable",
+    "pricing_unavailable",
+    "accepted_attempt_inventory_unavailable",
 ]
 
 # Why the budget watch cancelled a worker (`cancel_workers`), as its failure code.
@@ -156,6 +163,35 @@ _CANCEL_CODES: dict[str, WorkerFailureCode] = {
     "watch_ended": "watch_ended",
     "watch_cancelled": "watch_ended",
 }
+
+#: A budget watch refusal (`FleetBudgetUsage.reason`) the card words on its own, so a
+#: worker over its budget reads "ask for a bigger budget", not a generic limit.
+_CANCEL_DETAIL_CODES: dict[str, WorkerFailureCode] = {
+    code: code
+    for code in (
+        "worker_budget_exceeded",
+        "run_budget_exceeded",
+        "provider_budget_exceeded",
+        "tenant_budget_exceeded",
+        "channel_budget_exceeded",
+        "funding_unavailable",
+        "pricing_unavailable",
+        "accepted_attempt_inventory_unavailable",
+    )
+}
+
+
+def cancel_failure_code(cancel: asyncio.Event) -> WorkerFailureCode | None:
+    """Why the budget watch cancelled this worker, as its failure code; None when it
+    didn't (not set, or a plain event)."""
+    from daimon.core.channel_budget import WorkerCancel
+
+    if not cancel.is_set() or not isinstance(cancel, WorkerCancel):
+        return None
+    if (detail := _CANCEL_DETAIL_CODES.get(cancel.detail or "")) is not None:
+        return detail
+    return _CANCEL_CODES.get(cancel.reason or "")
+
 
 # Admission refusals a person can act on, by their closed reason.
 _ADMISSION_REASON_CODES: dict[str, WorkerFailureCode] = {
@@ -1604,12 +1640,13 @@ class HostFleetPorts:
                                         code = worker_failure_code(
                                             cause, failure_code, backend=claimed.backend
                                         )
-                                        if isinstance(cause, asyncio.CancelledError):
-                                            # The budget watch says why it cancelled (a
-                                            # restart, the run's deadline, a limit).
-                                            code = _CANCEL_CODES.get(
-                                                getattr(cancel, "reason", None) or "", code
-                                            )
+                                        # The budget watch says why it cancelled (a restart,
+                                        # the run's deadline, a limit), before or after
+                                        # dispatch; this task's own deadline stays a timeout.
+                                        if not isinstance(cause, TimeoutError) and (
+                                            watched := cancel_failure_code(cancel)
+                                        ):
+                                            code = watched
                                         # run_worker records its own pre-native failures;
                                         # a second commit would only wait on the lock again.
                                         if not getattr(error, FAILURE_RECORDED, False):
