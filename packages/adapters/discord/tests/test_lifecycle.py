@@ -469,7 +469,7 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
     monkeypatch.setattr(turn_runner, "chat_tool_confirmation", lambda *args, **kwargs: None)
     monkeypatch.setattr(turn_runner, "trusted_servers_for", lambda *args: ())
     monkeypatch.setattr(turn_runner, "context_prompt", lambda *args, **kwargs: "")
-    monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args: None)
+    monkeypatch.setattr(turn_runner, "decide_before_send", lambda *args, **kwargs: None)
     reconciled: list[str] = []
 
     async def fake_settle(_anthropic: Any, _sessionmaker: Any, session_id: str, **_: Any) -> None:
