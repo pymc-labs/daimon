@@ -96,6 +96,11 @@ services:
     volumes:
       - ./runtime:/app/runtime:ro
     entrypoint: ["python", "-m", "daimon.adapters.discord"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
   # Opt-in: `docker compose --profile slack up -d`. Needs DAIMON_SLACK__* and
@@ -118,6 +123,11 @@ services:
     volumes:
       - ./runtime:/app/runtime:ro
     entrypoint: ["python", "-m", "daimon.adapters.slack"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8083/')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
   # Opt-in: `docker compose --profile teams up -d`. Needs DAIMON_TEAMS__* and
@@ -158,6 +168,11 @@ services:
     volumes:
       - ./runtime:/app/runtime:ro
     entrypoint: ["daimon-scheduler"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8082/')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
 
 volumes:
