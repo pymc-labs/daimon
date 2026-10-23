@@ -74,6 +74,7 @@ from daimon.adapters.mcp.tools.github_requests import register_github_request_to
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
+from daimon.adapters.mcp.tools.memory import register_memory_tools
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
 from daimon.adapters.mcp.tools.models import register_model_tools
@@ -577,6 +578,7 @@ def create_mcp_app(
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
+    register_memory_tools(mcp, runtime)  # memory for provider turns without a mount
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_agent_tool_rule_tools(mcp, runtime)

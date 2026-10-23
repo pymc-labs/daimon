@@ -40,11 +40,17 @@ from .test_gemini_runtime_transport import clients_for
 
 
 @pytest.fixture
-async def template(consent_request, source_mcp, monkeypatch, tmp_path):
-    from daimon.core.authz import Place
+def extra_catalogue(request):
+    """Extra tool names the live Daimon catalogue lists (e.g. the memory tools)."""
+    return tuple(getattr(request, "param", ()))
+
+
+@pytest.fixture
+async def template(consent_request, source_mcp, monkeypatch, tmp_path, extra_catalogue):
+    from daimon.core.authz import Place, Surface, build_agent_ref
     from daimon.core.channel_backend import AgentBackendService
     from daimon.core.scope import DeploymentDefault, ScopeContext
-    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.admission import AdmissionGrant, capture_backend_source
     from daimon.testing.asgi import mcp_session
 
     request, service, source, actor, accepted, router, *_ = consent_request
@@ -53,13 +59,27 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path):
     scope = admitted_session_scope(
         request.admission, tenant_id=request.tenant_id, session_id="preparation"
     )
+    origin = request.admission.backend_revision.channel.channel_id
+    place = Place(channel_id=request.thread_id, parent_channel_id=origin)
+    # The facts a real admission records, with the same subject and place the
+    # consent below is captured for (so the turn's source is the consented one).
+    admitted = AdmissionGrant(
+        tenant_id=request.tenant_id,
+        subject=actor.subject,
+        surface=Surface.CHANNEL,
+        turn_place=place,
+        agent=build_agent_ref(
+            request.admission.agent.name, request.admission.agent.metadata, "daimon"
+        ),
+        run_place=place,
+        channel_id=origin,
+        thread_id=request.thread_id,
+        is_dm=False,
+    )
     request = replace(
         request,
         scope=scope,
-        admission=replace(
-            request.admission,
-            origin_channel_id=request.admission.backend_revision.channel.channel_id,
-        ),
+        admission=replace(request.admission, origin_channel_id=origin, grant=admitted),
         now=lambda: datetime.now(UTC),
         deadline=datetime.now(UTC) + timedelta(seconds=30),
         deps=replace(
@@ -98,6 +118,16 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path):
         if body["method"] == "tools/list":
             token = call.headers["Authorization"].removeprefix("Bearer ")
             result = (await mcp_session(source_mcp, token=token, method="tools/list"))["result"]
+            result = {
+                **result,
+                "tools": [
+                    *result["tools"],
+                    *(
+                        {"name": name, "inputSchema": {"type": "object"}}
+                        for name in extra_catalogue
+                    ),
+                ],
+            }
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
 
     real = httpx.AsyncClient  # captured before the SDK edge is replaced
@@ -609,3 +639,199 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
     assert not run_module._PENDING_FINALIZERS  # pyright: ignore[reportPrivateUsage]
     events = [entry["event"] for entry in logs]
     assert "turn.finalize_timeout" in events and "turn.finalize_failed" in events
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_turn_without_a_recorded_grant_gets_no_memory(template):
+    """Memory posture comes only from a recorded admission grant; without one, none."""
+    from daimon.core.stores.turn_memory_grants import get_turn_memory_grant
+
+    request, *_ = template
+    request = replace(request, admission=replace(request.admission, grant=None))
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    token = await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    async with request.deps.sessionmaker() as db:
+        assert await get_mcp_token(db, jti=token_jti(token)) is not None
+        assert await get_turn_memory_grant(db, jti=token_jti(token)) is None
+    await runtime.end_of_turn()
+
+
+MEMORY = ("memory_delete", "memory_list", "memory_read", "memory_write")
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("extra_catalogue", [MEMORY], indirect=True)
+async def test_a_template_with_memory_tools_keeps_memory_deploys_and_records_its_grant(template):
+    """The tools path end to end: consent keeps memory, the turn deploys, its grant is the
+    admission's (review of #1355: the deployment once required a memory loss)."""
+    from daimon.core.stores.turn_memory_grants import get_turn_memory_grant
+
+    request, quote, *_ = template
+    assert "memory" not in quote.declared_drops, "memory is kept through the tools"
+    assert "mcp" not in quote.declared_drops
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    assert set(MEMORY) <= set(connection.tool_policy["allowed_tools"])
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    token = await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    async with request.deps.sessionmaker() as db:
+        grant = await get_turn_memory_grant(db, jti=token_jti(token))
+    admitted = request.admission.grant
+    assert grant is not None and admitted is not None
+    assert (str(grant.tenant_id), str(grant.account_id)) == (
+        request.scope.tenant_id,
+        request.scope.account_id,
+    )
+    assert (grant.channel_id, grant.thread_id) == (admitted.channel_id, admitted.thread_id)
+    assert grant.personal and not grant.read_only and not grant.is_dm
+    await runtime.end_of_turn()
+
+
+async def _memory_app(request):
+    """The real verifier, identity middleware and memory tools, on fake native memory."""
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.adapters.mcp.middleware.mcp_identity import (
+        IdentityMiddleware,
+        production_agent_id_resolver,
+        production_internal_resolver,
+        production_is_admin_resolver,
+        production_role_resolver,
+        production_subject_resolver,
+        production_tenant_resolver,
+    )
+    from daimon.adapters.mcp.tools.memory import register_memory_tools
+    from fastmcp import FastMCP
+
+    sessions = request.deps.sessionmaker
+    app = FastMCP(
+        "memory",
+        auth=DaimonJWTVerifier(
+            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(), sessionmaker=sessions
+        ),
+    )
+    identity = IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=sessions,
+    )
+    app.add_middleware(identity)
+    register_memory_tools(app, SimpleNamespace(session_factory=sessions, client=object()))  # pyright: ignore[reportArgumentType]
+    return app.http_app(), identity
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("extra_catalogue", [MEMORY], indirect=True)
+async def test_a_template_turn_writes_memory_until_a_seal_makes_it_read_only(template, monkeypatch):
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.testing.asgi import mcp_session
+
+    from ..test_memory_tools import FakeMemory
+
+    fake = FakeMemory()
+    from daimon.core import memory_resource, memory_view, mux_compat
+
+    monkeypatch.setattr(memory_resource, "create_memory_store", fake.create_store)
+    monkeypatch.setattr(memory_resource, "delete_memory_store", fake.delete_store)
+    monkeypatch.setattr(memory_view, "list_memory_entries", fake.entries)
+    monkeypatch.setattr(memory_view, "read_memory", fake.read)
+    monkeypatch.setattr(memory_view, "delete_memory", fake.delete)
+    monkeypatch.setattr(mux_compat, "write_memory", fake.write)
+    monkeypatch.setattr(mux_compat, "read_memory", fake.read)
+    request, *_ = template
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    token = await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    http, identity = await _memory_app(request)
+
+    async def call(name, **arguments):
+        return json.dumps(
+            await mcp_session(
+                http,
+                token=token,
+                method="tools/call",
+                params={"name": name, "arguments": arguments},
+            )
+        )
+
+    try:
+        assert "Saved shared/plan.md" in await call(
+            "memory_write", path="shared/plan.md", content="Postgres first"
+        )
+        assert "Postgres first" in await call("memory_read", path="shared/plan.md")
+        # A seal lands on this turn's channel mid-turn: the next write is refused.
+        async with request.deps.sessionmaker.begin() as db:
+            await set_access_policy(
+                db,
+                tenant_id=request.tenant_id,
+                policy=TenantAccessPolicy.model_validate(
+                    {"sealed_channel_ids": [request.admission.grant.channel_id]}
+                ),
+            )
+        refused = await call("memory_write", path="shared/other.md", content="x")
+        assert '"isError": true' in refused and "read-only" in refused
+        assert "/other.md" not in next(iter(fake.stores.values()))
+    finally:
+        await identity.drain_audit()
+        await runtime.end_of_turn()
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("extra_catalogue", [MEMORY], indirect=True)
+async def test_a_dm_turns_memory_follows_the_dm_memory_policy(template, monkeypatch):
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.turn_memory_grants import get_turn_memory_grant
+    from daimon.testing.asgi import mcp_session
+
+    from ..test_memory_tools import FakeMemory
+
+    fake = FakeMemory()
+    from daimon.core import memory_resource, memory_view, mux_compat
+
+    monkeypatch.setattr(memory_resource, "create_memory_store", fake.create_store)
+    monkeypatch.setattr(memory_view, "list_memory_entries", fake.entries)
+    monkeypatch.setattr(mux_compat, "write_memory", fake.write)
+    request, *_ = template
+    dm = replace(request.admission.grant, is_dm=True)
+    request = replace(request, admission=replace(request.admission, grant=dm))
+    async with request.deps.sessionmaker.begin() as db:
+        await set_access_policy(
+            db,
+            tenant_id=request.tenant_id,
+            policy=TenantAccessPolicy.model_validate({"dm_memory_read_only": True}),
+        )
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    token = await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    async with request.deps.sessionmaker() as db:
+        grant = await get_turn_memory_grant(db, jti=token_jti(token))
+    assert grant is not None and grant.is_dm
+    http, identity = await _memory_app(request)
+    try:
+        refused = json.dumps(
+            await mcp_session(
+                http,
+                token=token,
+                method="tools/call",
+                params={
+                    "name": "memory_write",
+                    "arguments": {"path": "shared/a.md", "content": "x"},
+                },
+            )
+        )
+        assert '"isError": true' in refused and "read-only" in refused
+        assert not any(fake.stores.values())
+    finally:
+        await identity.drain_audit()
+        await runtime.end_of_turn()

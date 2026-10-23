@@ -947,6 +947,23 @@ async def delete_memory(
     )
 
 
+async def write_memory(
+    client: AsyncAnthropic, store_id: str, path: str, content: str, *, scope: Scope
+) -> None:
+    """Create the memory at `path` (create-only: the native API has no revision-checked update)."""
+    backend, port = _memory_port(client, store_id, scope=scope)
+    await legacy_call(
+        port.write(
+            scope,
+            resource_ref(backend, "memory_store", store_id, scope=scope),
+            path,
+            content,
+            expected=None,
+            key=str(uuid4()),
+        )
+    )
+
+
 async def delete_memory_store(client: AsyncAnthropic, store_id: str, *, scope: Scope) -> None:
     backend, port = _memory_port(client, store_id, scope=scope)
     await legacy_call(

@@ -1842,6 +1842,12 @@ async def _capture_source_capabilities(
             from daimon.core.tool_safety import confirmation_gated_tools
 
             gated = confirmation_gated_tools()
+            if not template:
+                # Only a template turn's per-turn credential carries a memory grant;
+                # a pinned row's memory tools would refuse, so they stay a declared loss.
+                from daimon.core.memory_tools import MEMORY_TOOLS
+
+                gated = gated | frozenset(MEMORY_TOOLS)
             permissions = {
                 name: "ask" if name in gated else permission
                 for name, permission in permissions.items()
@@ -2299,6 +2305,27 @@ def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
     return target.model_copy(update={"extensions": None})
 
 
+def keeps_memory_through_tools(target: AgentSpec) -> bool:
+    """A Gemini target whose Daimon MCP connection runs every memory tool.
+
+    Only Gemini template turns mint a per-turn credential with a memory grant;
+    OpenAI (and Anthropic, which keeps memory natively) never count here.
+    """
+    from daimon.core.memory_tools import MEMORY_TOOLS
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME
+    from mux.profiles import INLINE_REUSE
+
+    if target.model.provider != INLINE_REUSE.provider:
+        return False
+    for connection in target.mcp_servers or ():
+        if connection.name != DAIMON_SERVER_NAME:
+            continue
+        allowed = connection.tool_policy.get("allowed_tools")
+        if isinstance(allowed, (list, tuple)) and set(MEMORY_TOOLS) <= {str(t) for t in allowed}:
+            return True
+    return False
+
+
 def classify_source_obligations(
     source: BackendAgent,
     target: AgentSpec | None,
@@ -2521,6 +2548,10 @@ def classify_source_obligations(
                     },
                 )
             )
+        if not retained and target is not None and keeps_memory_through_tools(target):
+            # A provider turn's Daimon memory tools reach the same stores, under a
+            # per-turn grant from its admission (`daimon.core.memory_tools`).
+            retained = True
         if not retained:
             missing.add("memory")
     if source.environment is not None and source.environment.spec.native_config is not None:

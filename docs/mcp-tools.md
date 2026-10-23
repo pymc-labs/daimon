@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 125 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 129 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -242,6 +242,17 @@ Media MCP tools: YouTube transcript and file upload.
 | --- | --- | --- |
 | `create_file_upload_url` | all callers | Post, send, or share a file to another channel, or from a routine — step 1 of 2. |
 | `fetch_youtube_transcript` | all callers | Fetch the transcript of a public YouTube video for summarization or Q&A. |
+
+## `memory`
+
+Memory tools for provider turns that cannot mount memory (Gemini, later OpenAI).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `memory_delete` | all callers | Delete one memory, only while it still has the content_sha256 you read. |
+| `memory_list` | all callers | List your memories (path and content_sha256), and whether memory is read-only here. |
+| `memory_read` | all callers | Read one memory by path: shared/<path> or personal/<path>. |
+| `memory_write` | all callers | Save a memory at shared/<path> or personal/<path>. |
 
 ## `microsoft.register`
 

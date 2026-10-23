@@ -23,6 +23,7 @@ import pytest
 import yaml
 from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.mcp_auth import token_jti
+from daimon.core.memory_tools import MEMORY_TOOLS
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores import mux_state
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
@@ -104,9 +105,17 @@ GATED_CATALOGUE = (
     "call_tool",
     "create_attachment_upload_url",
     "create_notebook_upload_url",
+    # A pinned row's memory tools would refuse (no per-turn grant): declared losses.
+    "memory_delete",
+    "memory_list",
+    "memory_read",
+    "memory_write",
     "publish_report",
     "search_tools",
 )
+#: What a pinned row's representation never runs: gated and publishing tools, and
+#: (until pinned credentials are per-turn) the memory tools.
+UNAVAILABLE_ON_PINNED = confirmation_gated_tools() | frozenset(MEMORY_TOOLS)
 GATED_PARAMS = {
     **PARAMS,
     "tools": [
@@ -758,9 +767,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
         expected_mcp = (
-            set(GATED_CATALOGUE) - confirmation_gated_tools()
-            if gated
-            else {"search_tools", "call_tool"}
+            set(GATED_CATALOGUE) - UNAVAILABLE_ON_PINNED if gated else {"search_tools", "call_tool"}
         )
         assert set(remote["allowed_tools"][0]["tools"]) == expected_mcp
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
@@ -785,14 +792,14 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     target = canonical.target_spec
     # No Gemini turn has a confirmation card: every gated or publishing tool in
     # the catalogue is a declared loss, pinned row or template alike.
-    gated = sorted(set(GATED_CATALOGUE) & confirmation_gated_tools())
+    gated = sorted(set(GATED_CATALOGUE) & UNAVAILABLE_ON_PINNED)
     markers = tuple(f"mcp_tool:daimon-mcp:{name}" for name in gated)
     assert {"add_skill", "publish_report"} <= set(gated)
     assert target.declared_drops == (*markers, "memory", "sandbox")
     assert all(marker in target.system for marker in markers)
     assert not {"tools", "skills", "mcp"}.intersection(target.declared_drops)
     assert len(target.skills) == len(native["base_environment"]["sources"]) == 11
-    allowed = set(GATED_CATALOGUE) - confirmation_gated_tools()
+    allowed = set(GATED_CATALOGUE) - UNAVAILABLE_ON_PINNED
     assert set(target.mcp_servers[0].tool_policy["allowed_tools"]) == allowed
     remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")
     assert remote["allowed_tools"] == [

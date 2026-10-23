@@ -2398,6 +2398,25 @@ other trace of the token (`mcp_header_echo`, `mcp_token_echo`). The MCP
 service's runtime manifest needs the same row, since the switch preview there
 captures the representation the consent pins.
 
+With the same capability the agent keeps its memory. The Daimon catalogue's
+memory tools (`memory_list`, `memory_read`, `memory_write`, `memory_delete`)
+reach the stores an Anthropic turn would mount: `shared/<path>` is the
+agent's store and `personal/<path>` the caller's own (only for a single-caller
+turn). So memory is no longer a declared drop for such a template. The turn's
+credential mint also records a `turn_memory_grants` row from the turn's
+admission (whether a personal store applies, the read-only posture, the
+channel and thread, the credential's expiry). The tools read it only by the
+credential's jti, and refuse any credential without one. Every write and delete
+re-checks the posture against the tenant policy as it is now, so a seal or the
+DM memory policy switched on mid-turn takes effect at the next write. An
+overwrite must name the content hash it read (`expected_content_sha256`);
+writes are otherwise create-only, and a replacement whose create fails restores
+the memory it replaced. One memory holds at most 100 kB (UTF-8), a store at
+most 1,000 memories through these tools, and a listing returns at most 1,000.
+A held turn (which natively mounts only its channel's store) and a fleet
+worker get no grant, so no memory. A pinned row's credential carries no grant
+yet, so its representation keeps the memory tools as declared losses.
+
 Selection only offers a row to the turn origin it serves: an agent's turn
 considers template and source-pinned rows; a channel's turn considers fixed
 plans with neither. A tenant-wide channel row and a template row therefore
