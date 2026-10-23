@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Literal
 
 from daimon.core._models import Account, AgentOwner, PlatformPrincipal
@@ -106,6 +107,34 @@ async def owned_by(
         )
     )
     return frozenset(rows)
+
+
+async def owner_identities(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    agent_ids: Collection[uuid.UUID],
+    *,
+    platform: str,
+) -> dict[uuid.UUID, tuple[uuid.UUID, str | None]]:
+    """Each owned agent's owner account and that person's user id on `platform`, if any."""
+    if not agent_ids:
+        return {}
+    rows = await session.execute(
+        select(AgentOwner.agent_id, AgentOwner.owner_account_id, PlatformPrincipal.external_id)
+        .join(Account, Account.id == AgentOwner.owner_account_id)
+        .outerjoin(
+            PlatformPrincipal,
+            (PlatformPrincipal.account_id == AgentOwner.owner_account_id)
+            & (PlatformPrincipal.tenant_id == tenant_id)
+            & (PlatformPrincipal.platform == platform),
+        )
+        .where(
+            AgentOwner.tenant_id == tenant_id,
+            AgentOwner.agent_id.in_(list(agent_ids)),
+            Account.tenant_id == tenant_id,
+        )
+    )
+    return {agent_id: (account_id, external_id) for agent_id, account_id, external_id in rows.all()}
 
 
 async def has_foreign_principal(

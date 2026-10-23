@@ -6132,6 +6132,60 @@ async def test_the_owner_sees_the_setup_they_edit(
     assert mine[0].mcp_servers is not None
 
 
+@pytest.mark.parametrize("named", [True, False])
+async def test_owner_says_who_to_ask_about_changing_an_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], named: bool
+) -> None:
+    """J5: "you" for the owner; the owner's stored name (else "another member") for others."""
+    from daimon.adapters.mcp.tools._owner import owner_labels
+    from daimon.core.stores.accounts import get_account
+    from daimon.core.stores.platform_names import KnownName, upsert_user_names
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_platform_principal
+
+    tenant_id, owner_id, member_id = await _owned_scoped_agent(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        await make_platform_principal(
+            session,
+            platform="discord",
+            external_id="ana",
+            tenant=await get_tenant(session, tenant_id),
+            account=await get_account(session, owner_id),
+        )
+        if named:
+            await upsert_user_names(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                names={"ana": KnownName(display_name="Ana")},
+            )
+    _, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    runtime = _runtime(client, session_factory=db_session_factory)
+
+    def person(account: uuid.UUID, user: str, *, admin: bool) -> AuthIdentity:
+        return AuthIdentity(
+            account_id=account,
+            tenant_id=tenant_id,
+            role=Role.ADMIN if admin else Role.USER,
+            is_admin=admin,
+            platform="discord",
+            platform_user_id=user,
+        )
+
+    owner, admin = person(owner_id, "ana", admin=False), person(member_id, "bo", admin=True)
+    mine = await _get_agent_impl(runtime, owner, "scoped-agent", expected_ma_agent_id="ag_scoped")
+    assert (mine.owned_by_you, mine.owner) == (True, "you")
+    theirs = await _get_agent_impl(runtime, admin, "scoped-agent", expected_ma_agent_id="ag_scoped")
+    expected = "Ana" if named else "another member"
+    assert (theirs.owned_by_you, theirs.owner) == (False, expected)
+    listed = await _list_agents_impl(runtime, admin, None)
+    assert [(a.name, a.owner) for a in listed] == [("scoped-agent", expected)]
+    # An agent nobody owns has no owner to ask: only an admin changes it.
+    assert await owner_labels(runtime, admin, ["ag_unowned"]) == {}
+
+
 async def test_a_member_who_creates_an_agent_in_chat_lists_gets_and_edits_it(
     db_preflight, db_nullpool_engine
 ) -> None:
@@ -6192,7 +6246,7 @@ async def test_a_member_who_creates_an_agent_in_chat_lists_gets_and_edits_it(
     assert stored[0]["metadata"]["daimon_account"] != str(creator.id)
 
     listed = await _list_agents_impl(runtime, me, None)
-    assert [(a.name, a.owned_by_you) for a in listed] == [("draft", True)]
+    assert [(a.name, a.owned_by_you, a.owner) for a in listed] == [("draft", True, "you")]
     assert [a.name for a in await _list_agents_impl(runtime, me, None, mine=True)] == ["draft"]
     got = await _get_agent_impl(runtime, me, "draft", expected_ma_agent_id="ag_draft")
     assert got.owned_by_you is True and got.system is not None

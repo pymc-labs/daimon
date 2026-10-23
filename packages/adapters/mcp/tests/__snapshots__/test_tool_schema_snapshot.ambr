@@ -3263,7 +3263,8 @@
         List agents visible here, including their attached ``mcp_servers`` and ``skills``.
         <blank line>
         Each agent says ``owned_by_you``: the caller owns it and may change it without
-        an admin. ``mine=true`` lists only the caller's own agents ("which agents do I
+        an admin, and ``owner``: who to ask about changing it (absent: admins only).
+        ``mine=true`` lists only the caller's own agents ("which agents do I
         own?"), wherever they answer, including ones that answer nowhere yet.
         ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
         admin nor its owner: setup details are for them, capabilities (name,
