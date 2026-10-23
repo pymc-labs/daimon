@@ -16,7 +16,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0127_fleet_credential_sharing"
-down_revision: str | None = "0122_thread_provider_release"
+down_revision: str | None = "0123_tenant_backends_explicit"
 branch_labels: str | None = None
 depends_on: str | None = None
 
