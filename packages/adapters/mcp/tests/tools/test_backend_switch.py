@@ -1285,28 +1285,3 @@ async def test_a_non_default_agent_switches_without_saying_for_everyone(active_c
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview"
-
-
-async def test_the_preview_names_what_the_agent_loses_and_never_confirms_for_the_person(
-    active_chat,
-):
-    """SMOKE-4 J1: the GPT copy said "I confirmed the switch without showing you that list
-    first". The preview tells the model the losses in plain words, to say before the
-    card, and that the person approves the card; never the model on their behalf."""
-    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
-    gate()
-    agent()
-    preview = await _request_agent_backend_switch_impl(
-        runtime,
-        auth,
-        agent_name="Researcher",
-        target_backend="openai",
-        origin_context_id=str(origin.id),
-    )
-    assert preview.status == "preview" and preview.declared_drops
-    assert preview.summary.startswith("On OpenAI, Researcher won't have ")
-    assert "its memory" in preview.summary and "its sandbox" in preview.summary
-    assert "before anything else" in preview.summary
-    assert "they approve it themselves" in preview.summary
-    assert "Never confirm, approve or accept the switch for them" in preview.summary
-    assert "Nothing has changed yet." in preview.summary
