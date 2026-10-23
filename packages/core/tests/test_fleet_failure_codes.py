@@ -47,6 +47,22 @@ def test_any_other_exception_is_a_setup_error_on_our_side(error, phase):
     assert worker_failure_code(error, phase) == "setup_error"
 
 
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+def test_a_raw_provider_or_transport_error_is_the_providers_not_ours(phase):
+    import anthropic
+    import httpx
+
+    request = httpx.Request("POST", "https://api.invalid/v1")
+    for error in (
+        httpx.ConnectError("down", request=request),
+        httpx.ReadTimeout("slow", request=request),
+        ConnectionResetError(),
+        anthropic.APIConnectionError(request=request),
+    ):
+        assert worker_failure_code(error, phase) == "provider_error"
+    assert "didn't respond" in (worker_error_text("provider_error") or "")
+
+
 def test_the_card_never_calls_a_setup_error_a_model_limit():
     text = worker_error_text("setup_error", ref="8d427e0b")
     assert text == "a setup error on our side (ref 8d427e0b)"

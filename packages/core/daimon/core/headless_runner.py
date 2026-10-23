@@ -672,7 +672,7 @@ async def commit_worker_transition(
     action: Callable[[AsyncSession, FleetWorker], Awaitable[FleetWorker]] | None = None,
     *,
     failure_code: Literal[
-        "preparation_refused", "dispatch_refused", "setup_error"
+        "preparation_refused", "dispatch_refused", "provider_error", "setup_error"
     ] = "preparation_refused",
 ) -> FleetWorker:
     async with request.deps.sessionmaker.begin() as db:
@@ -1115,8 +1115,14 @@ async def run_worker(
                         await orphan(prepared)
     except BaseException as error:
         if not native_started:
+            from daimon.core.fleet_orchestration import worker_failure_code
+
+            # A bug before native start is ours, never "couldn't be set up on that model".
+            failure_code = worker_failure_code(error, "preparation_refused")
             with contextlib.suppress(FleetConflict):
-                await asyncio.shield(commit_worker_transition(request, parent, claim))
+                await asyncio.shield(
+                    commit_worker_transition(request, parent, claim, failure_code=failure_code)
+                )
         if isinstance(error, TimeoutError):
             raise ceiling_error() from error
         raise

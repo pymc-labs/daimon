@@ -527,3 +527,42 @@ async def test_a_clone_worker_whose_source_has_native_controls_runs(native_worke
     )
     # The source's own controls reach the worker, from the source and not an override.
     assert allocated["model"]["effort"] == {"type": "medium"}
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (TypeError("a bug on our side"), "setup_error"),
+        (__import__("httpx").ConnectError("provider unreachable"), "provider_error"),
+    ],
+)
+async def test_real_run_worker_records_why_it_failed_before_native_start(
+    native_worker, monkeypatch, error, code
+):
+    """RESCORE-2 J4: run_worker's own handler recorded every pre-native failure as
+    preparation_refused, so a bug read on the card as the model being unable to run."""
+    from daimon.core import headless_runner
+    from daimon.core.fleet import worker_error_text
+
+    request, root, claimed, trace, _ = native_worker
+
+    async def broken(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", broken)
+    with pytest.raises(type(error)):
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    _, rows = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=claimed.tenant_id, run_id=claimed.run_id
+    )
+    (ended,) = [row for row in rows if row.id == claimed.id]
+    assert ended.status == "failed" and ended.error_code == code
+    assert "on that model" not in (worker_error_text(ended.error_code) or "")
+    assert not any(call.method == "POST" for call in trace.requests)

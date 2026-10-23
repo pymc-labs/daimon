@@ -115,6 +115,7 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
     "usage_unavailable": "its spending couldn't be measured, so it was stopped",
     # A bug on our side, never a model limit: the card adds a reference to the logs.
     "setup_error": "a setup error on our side",
+    "provider_error": "the model provider returned an error or didn't respond",
 }
 
 
