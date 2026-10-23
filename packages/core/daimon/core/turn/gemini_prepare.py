@@ -265,6 +265,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
             raise ScopeViolation(observation.id, "Gemini billing received foreign usage")
+        _warn_on_grounding(observation, tenant_id=request.tenant_id, binding_id=binding_id)
         # A moving alias has no verified resolved-price identity in this slice.
         # Preserve its counts in the outbox; never settle it using a guessed tariff.
         price = (
@@ -313,6 +314,24 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
     )
+
+
+def _warn_on_grounding(
+    observation: UsageObservation, *, tenant_id: object, binding_id: str
+) -> None:
+    """Grounding (search) calls carry a per-query price no tariff or daily cap counts.
+
+    Agent requests never offer them, so any count here is a leak to look at.
+    """
+    grounding = observation.native_meter.get("grounding_tool_count")
+    if isinstance(grounding, int) and not isinstance(grounding, bool) and grounding > 0:
+        structlog.get_logger(__name__).warning(
+            "turn.gemini_grounding_unexpected",
+            tenant_id=str(tenant_id),
+            binding_id=binding_id,
+            observation_id=observation.id,
+            grounding_tool_count=grounding,
+        )
 
 
 async def _settle_hold(

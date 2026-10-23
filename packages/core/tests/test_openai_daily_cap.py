@@ -251,3 +251,39 @@ def test_a_gemini_refusal_names_the_gemini_model():
         provider="gemini-4-argon",
     )
     assert "Today's Gemini 4 Argon budget for this server is used up." in text
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
+    import structlog.testing
+    from daimon.core.turn.gemini_prepare import (
+        _warn_on_grounding,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    session = ResourceRef(
+        provider="gemini",
+        kind="session",
+        id="g-session",
+        account_scope_id="daimon-deployment",
+        tenant_id=str(TENANT),
+        account_id="account",
+    )
+    observation = UsageObservation(
+        id="gemini:one:usage",
+        revision=1,
+        session=session,
+        model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+        grain="turn",
+        basis="cumulative",
+        input_tokens=10,
+        output_tokens=5,
+        native_meter={"total_input_tokens": 10, "grounding_tool_count": count},
+        completeness="measured",
+        observed_at=NOW,
+    )
+    with structlog.testing.capture_logs() as logs:
+        _warn_on_grounding(observation, tenant_id=TENANT, binding_id="b")
+    leaks = [entry for entry in logs if entry["event"] == "turn.gemini_grounding_unexpected"]
+    assert len(leaks) == (1 if count else 0)
+    if count:
+        assert leaks[0]["grounding_tool_count"] == count and leaks[0]["observation_id"]
