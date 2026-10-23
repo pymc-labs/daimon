@@ -113,11 +113,17 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
     "watch_ended": "the fleet ended before it finished",
     "shutdown": "Daimon restarted before it finished",
     "usage_unavailable": "its spending couldn't be measured, so it was stopped",
+    # A bug on our side, never a model limit: the card adds a reference to the logs.
+    "setup_error": "a setup error on our side",
 }
 
 
-def worker_error_text(code: str | None) -> str | None:
-    return WORKER_ERROR_TEXT.get(code) if code else None
+def worker_error_text(code: str | None, *, ref: str | None = None) -> str | None:
+    """The card's reason for a worker's error code; a setup error carries a log reference."""
+    text = WORKER_ERROR_TEXT.get(code) if code else None
+    if text is not None and code == "setup_error" and ref:
+        return f"{text} (ref {ref})"
+    return text
 
 
 class FleetConflict(Exception):

@@ -47,14 +47,16 @@ def source_read_only(request):
 
 @pytest.fixture
 async def native_worker(db_preflight, db_committing_engine, db_clean, source_read_only, request):
+    from daimon.core.turn.prepare import clone_overrides
     from mux.contracts.ids import SkillRef
-    from mux.contracts.resources import AgentPatch, ToolSpec
+    from mux.contracts.resources import ToolSpec
 
     resolved_tools = None
     kwargs = {}
     variant = getattr(request, "param", "")
     paid_w1 = variant.startswith("paid_w1")
-    effort = paid_w1 or getattr(request, "param", None) == "live_root_effort"
+    # clone_source_effort: a clone worker whose source carries native model controls.
+    effort = paid_w1 or variant in ("live_root_effort", "clone_source_effort")
     live = effort or getattr(request, "param", None) == "live_root_readback"
     if live or getattr(request, "param", None) == "resolved_readback":
         # Recorded response-only builtin types, reordered configs and resolved defaults.
@@ -126,7 +128,7 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
             captured = await load_backend_agent(
                 client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
             )
-    if variant in {"resolver_fresh", "clone_source"}:
+    if variant in {"resolver_fresh", "clone_source", "clone_source_effort"}:
         from daimon.core.channel_backend import load_backend_agent
 
         retained_environment = captured.environment
@@ -147,7 +149,7 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
             update={"deadline": datetime.now(UTC) + timedelta(minutes=10)}
         ),
     )
-    if variant in {"resolver_fresh", "clone_source"}:
+    if variant in {"resolver_fresh", "clone_source", "clone_source_effort"}:
         # Production worker intent inherits the complete root stamps.
         root = replace(root, spec=root.spec.model_copy(update={"metadata": source.metadata}))
     async with sm.begin() as db:
@@ -266,7 +268,7 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
                 update={"declared_drops": ("memory", "sandbox", "skills", "tools")}
             )
         resolved_tools = None  # The scripted ACK must echo this worker's compiled grant.
-    if variant == "clone_source":
+    if variant in ("clone_source", "clone_source_effort"):
         assert captured.source is not None
         root = replace(
             root,
@@ -277,8 +279,8 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
     resolved = resolve_worker_spec(
         root,
         requested,
-        overrides=AgentPatch.model_validate(root.spec.model_dump(mode="json"))
-        if variant == "clone_source"
+        overrides=clone_overrides(root.spec)
+        if variant in ("clone_source", "clone_source_effort")
         else None,
         policy=POLICY,
         now=datetime.now(UTC),

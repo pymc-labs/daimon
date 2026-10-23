@@ -1688,3 +1688,26 @@ async def test_a_root_refused_in_another_process_is_explained_by_its_own_setup(
         )
     else:
         assert "root_unavailable" in str(refused.value)
+
+
+async def test_a_model_the_person_named_that_isnt_allowed_is_asked_about_not_substituted() -> None:
+    """J7m: "fork yourself onto Gemini Pro" ran a paid worker on Argon, unasked."""
+    from daimon.adapters.mcp.tools.fleet import ASK_DONT_SUBSTITUTE
+
+    bridge, orchestrator = plain_bridge(fork_root())
+    async with Client(registered(bridge)) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+        for name in ("fleet_spawn", "fleet_agents"):
+            guidance = " ".join((tools[name].description or "").split())
+            assert "ask which" in guidance and "isn't available" in guidance
+        assert "Never run a paid worker on a substitute" in " ".join(
+            (tools["fleet_spawn"].description or "").split()
+        )
+        for model in ("gemini pro", "opus fast", "claude"):
+            with pytest.raises(ToolError) as refused:
+                await client.call_tool(
+                    "fleet_spawn",
+                    {"operation_key": "W1", "role": "W1", "task": "Go.", "model": model},
+                )
+            assert ASK_DONT_SUBSTITUTE in str(refused.value)
+    orchestrator.spawn.assert_not_awaited()

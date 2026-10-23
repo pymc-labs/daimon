@@ -502,3 +502,28 @@ async def test_worker_allocation_keeps_fresh_mentions_on_original_agent(native_w
         )
         == []
     )
+
+
+@pytest.mark.parametrize("native_worker", ["clone_source_effort"], indirect=True)
+async def test_a_clone_worker_whose_source_has_native_controls_runs(native_worker):
+    """RESCORE-2 J4: fleet-claude (its own model controls) failed extensions:dict_type."""
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, _ = native_worker
+    assert root.spec.extensions and claimed.spec["extensions"]
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    allocated = next(
+        call.json()
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/agents"
+    )
+    # The source's own controls reach the worker, from the source and not an override.
+    assert allocated["model"]["effort"] == {"type": "medium"}

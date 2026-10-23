@@ -99,6 +99,26 @@ _PLAIN_REFUSALS = {
 }
 
 
+def worker_failure_code(
+    error: BaseException, phase: Literal["preparation_refused", "dispatch_refused"]
+) -> Literal["preparation_refused", "dispatch_refused", "setup_error"]:
+    """The closed code a failed worker records: a refusal keeps its phase; a bug is ours.
+
+    Refusals are the typed errors admission, preparation and providers raise. Any
+    other exception (a ValidationError, TypeError, ...) is a defect on our side, so
+    the card must never present it as the model being unable to run here.
+    """
+    from daimon.core.errors import DaimonError
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from mux.errors import MuxError
+
+    refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
+    if not isinstance(error, Exception) or isinstance(error, refusal):
+        return phase
+    return "setup_error"
+
+
 class FleetRefused(ValueError):
     """Closed refusal code, with no request, result or credential material."""
 
@@ -1405,14 +1425,16 @@ class HostFleetPorts:
                                             prices=self.prices,
                                             cancel=cancel,
                                         )
-                                    except BaseException:
+                                    except BaseException as error:
                                         with suppress(FleetConflict):
                                             await asyncio.shield(
                                                 commit_worker_transition(
                                                     request,
                                                     parent,
                                                     claimed,
-                                                    failure_code=failure_code,
+                                                    failure_code=worker_failure_code(
+                                                        error, failure_code
+                                                    ),
                                                 )
                                             )
                                         raise
