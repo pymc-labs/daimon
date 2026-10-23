@@ -165,12 +165,14 @@ _COPY: dict[TerminationReason, _Copy] = {
 _FALLBACK = _Copy("Something went wrong.", _RETRY, "Send your message again.")
 # A `RESOLVER_MISS` whose missing piece is a named agent: it was deleted.
 _AGENT_GONE = _Copy(
-    "This channel's agent {agent} no longer exists.", "Ask {who} to pick another in {setup}."
+    "This channel's agent {agent} can't be found.", "Ask {who} to pick another in {setup}."
 )
 
 
-# Discord and Slack both render `<#id>` as a link to the channel; Teams has no such syntax.
-_CHANNEL_MENTIONS: dict[ChatPlatform, str] = {"discord": "<#{}>", "slack": "<#{}>"}
+# Discord renders `<#id>` as a link to the channel, and its adapter can tell from its cache
+# which channels the requester sees. Slack would need an API call per channel to know, and
+# Teams has no such syntax, so both keep "other channels".
+_CHANNEL_MENTIONS: dict[ChatPlatform, str] = {"discord": "<#{}>"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,9 +419,9 @@ def render_termination_notice(
 ) -> TerminationNotice | None:
     """Render one reason using the same words on every platform.
 
-    An admission refusal or a missing agent raised after the turn started is
-    worded from the error itself, as at admission; `nouns` (else words built
-    from the command arguments) supply the platform's words for it.
+    An `ADMISSION_DENIED` or `RESOLVER_MISS` notice is worded from the error that
+    caused it, as at admission, since those reasons cover several causes; `nouns`
+    (else words built from the command arguments) supply the platform's words.
     """
     if reason is TerminationReason.COMPLETED:
         return None
@@ -434,11 +436,11 @@ def render_termination_notice(
         verb=setup_verb,
         who=admin,
     )
-    if (specific := _specific_lines(chain, nouns, agent_name=agent_name, in_dm=in_dm)) is not None:
-        title, next_step = specific
-        return TerminationNotice(
-            reason=reason, title=title, next_step=next_step, request_id=request_id
-        )
+    specific = (
+        _specific_lines(chain, nouns, agent_name=agent_name, in_dm=in_dm)
+        if reason in _WORDED_BY_ERROR
+        else None
+    )
     if any(isinstance(cause, GitHubTokenMintUnavailable) for cause in chain):
         copy = _Copy(
             "GitHub access is temporarily unavailable.",
@@ -467,6 +469,8 @@ def render_termination_notice(
         who=admin,
         Who=_capitalised(admin),
     )
+    if specific is not None:
+        title, next_step = specific
     in_flight: tuple[str, ...] = ()
     finished = 0
     if state is not None:
@@ -493,6 +497,10 @@ def render_termination_notice(
     )
 
 
+# Reasons that stand for several causes: the error in the chain says which.
+_WORDED_BY_ERROR = frozenset({TerminationReason.ADMISSION_DENIED, TerminationReason.RESOLVER_MISS})
+
+
 def _specific_lines(
     chain: Sequence[BaseException],
     nouns: RefusalNouns,
@@ -514,7 +522,6 @@ def _specific_lines(
                 in_dm=in_dm,
                 cause=cause.cause,
                 provider=cause.provider,
-                channels=cause.channels,
             )
         elif isinstance(cause, MAResolverMissError) and cause.kind == "agent":
             text = resolver_miss_text(nouns, kind=cause.kind, name=cause.daimon_tag)

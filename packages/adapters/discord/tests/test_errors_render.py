@@ -350,7 +350,23 @@ def test_a_deleted_agent_is_named_with_where_to_pick_another() -> None:
     from daimon.adapters.discord.errors import setup_out_of_date_notice
 
     assert setup_out_of_date_notice(kind="agent", name="research") == (
-        "This channel's agent `research` no longer exists.\n\n"
+        "This channel's agent `research` can't be found.\n\n"
         "Ask an admin to pick another in `/agent-setup`."
     )
     assert setup_out_of_date_notice(kind="environment", name="py") == SETUP_OUT_OF_DATE_NOTICE
+
+
+def test_a_pinned_refusal_names_only_channels_everyone_can_see() -> None:
+    """Posted where anyone reads it, so a private or unknown channel is never named."""
+    from daimon.adapters.discord.bot import public_channel_ids
+
+    def channel(visible: bool) -> MagicMock:
+        found = MagicMock()
+        found.permissions_for.return_value = MagicMock(view_channel=visible)
+        return found
+
+    channels = {1: channel(True), 2: channel(False)}
+    guild = MagicMock()
+    guild.get_channel.side_effect = channels.get
+    assert public_channel_ids(guild, ("1", "2", "3", "C9")) == ("1",)
+    assert public_channel_ids(None, ("1",)) == ()

@@ -354,7 +354,10 @@ async def request_github_access_impl(
         card=status_card,
     )
     return GitHubRequestResult(
-        status="waiting", message="I've asked an admin.", request_id=request.id
+        status="waiting",
+        # The card says so too: with no admin who can see this channel, nobody was asked.
+        message=status_card.text if not visible_admins else "I've asked an admin.",
+        request_id=request.id,
     )
 
 

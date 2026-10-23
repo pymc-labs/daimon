@@ -39,8 +39,9 @@ class MaErrorMiddleware(Middleware):
 
 
 def _status_message(status: int) -> str:
-    """Plain words for an HTTP status: only a busy or failing service is worth retrying."""
-    if status == 429 or status >= 500:
+    """Plain words for an HTTP status: only a busy, conflicting or failing call is retried."""
+    if status in (409, 429) or status >= 500:
+        # 409 is usually a session still busy with an earlier request.
         return f"Daimon's AI service is busy or failing (HTTP {status}). Try again shortly."
     if status in (401, 403):
         return (

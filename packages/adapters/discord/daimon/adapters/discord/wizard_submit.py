@@ -76,6 +76,7 @@ from daimon.adapters.discord.bot import (
     _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     admission_refusal_message,
+    public_channel_ids,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import (
@@ -542,7 +543,7 @@ async def run_wizard_submit_turn_observed(
                         bot.runtime.settings,
                         cause=err.cause,
                         provider=err.provider,
-                        channels=err.channels,
+                        channels=public_channel_ids(interaction.guild, err.channels),
                     )
                 )
             return

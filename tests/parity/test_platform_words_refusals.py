@@ -100,7 +100,6 @@ def test_nouns_keep_each_platforms_current_words() -> None:
         admin="a workspace admin",
         billing="`/billing`",
         setup="`/agent-setup`",
-        channel_mention="<#{}>",
     )
     assert RefusalNouns.for_platform("teams").channel_mention is None
     assert RefusalNouns.for_platform("teams").billing == "`billing` in a 1:1 chat with me"

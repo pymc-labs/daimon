@@ -62,7 +62,7 @@ async def test_on_call_tool_does_not_swallow_tool_error() -> None:
 
 @pytest.mark.parametrize(
     ("status", "retry"),
-    [(429, True), (500, True), (503, True), (400, False), (401, False), (404, False)],
+    [(409, True), (429, True), (500, True), (503, True), (400, False), (401, False), (404, False)],
 )
 async def test_only_a_busy_or_failing_service_says_to_try_again(status: int, retry: bool) -> None:
     """A 4xx other than 429 fails the same way on retry, so it never says to retry."""

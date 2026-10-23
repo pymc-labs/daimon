@@ -523,6 +523,24 @@ def admission_refusal_message(
     )
 
 
+def public_channel_ids(
+    guild: discord.Guild | None, channel_ids: tuple[str, ...]
+) -> tuple[str, ...]:
+    """The ids among `channel_ids` that everyone in `guild` can see, from its cache.
+
+    A refusal is posted where anyone there reads it, so it names only channels every
+    member can open; a private or uncached channel is left out.
+    """
+    if guild is None:
+        return ()
+    shown: list[str] = []
+    for channel_id in channel_ids:
+        channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+        if channel is not None and channel.permissions_for(guild.default_role).view_channel:
+            shown.append(channel_id)
+    return tuple(shown)
+
+
 async def _resolve_agent_display_name(
     anthropic: _anthropic.AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
 ) -> str:
@@ -4948,7 +4966,7 @@ class DaimonBot(commands.Bot):
                         self.runtime.settings,
                         cause=err.cause,
                         provider=err.provider,
-                        channels=err.channels,
+                        channels=public_channel_ids(message.guild, err.channels),
                     )
                 )
             return

@@ -398,24 +398,52 @@ def test_a_pinned_agent_names_its_channels_where_the_platform_links_them() -> No
     assert discord == "analyst only works in <#111>, <#222>.\n\nAsk it there."
     many = admission_refusal_text(
         "runs_elsewhere",
-        RefusalNouns.for_platform("slack"),
+        RefusalNouns.for_platform("discord"),
         agent_name="analyst",
-        channels=("C1", "C2", "C3", "C4"),
+        channels=("1", "2", "3", "4"),
     )
-    assert many.startswith("analyst only works in <#C1>, <#C2>, <#C3> and 1 more.")
-    teams = admission_refusal_text(
-        "runs_elsewhere",
-        RefusalNouns.for_platform("teams"),
-        agent_name="analyst",
-        channels=("19:x",),
+    assert many.startswith("analyst only works in <#1>, <#2>, <#3> and 1 more.")
+    for platform in ("slack", "teams"):
+        unnamed = admission_refusal_text(
+            "runs_elsewhere",
+            RefusalNouns.for_platform(platform),
+            agent_name="analyst",
+            channels=("C1",),
+        )
+        assert unnamed == "analyst only works in other channels.\n\nAsk it there.", platform
+    assert (
+        admission_refusal_text(
+            "runs_elsewhere", RefusalNouns.for_platform("discord"), agent_name="analyst"
+        )
+        == "analyst only works in other channels.\n\nAsk it there."
+    ), "none left to name"
+
+
+def test_only_reasons_with_several_causes_are_worded_by_the_error() -> None:
+    """A reason with copy of its own keeps it, and its work lines, whatever is in the chain."""
+    state = TurnState(
+        content=[_tool("Bash", "pending")],
     )
-    assert teams == "analyst only works in other channels.\n\nAsk it there."
+    notice = render_termination_notice(
+        TerminationReason.UPSTREAM,
+        state=state,
+        error=AdmissionDenied(reason="backend_unsupported"),
+    )
+    assert notice is not None
+    assert notice.title == "Daimon's AI service failed on this reply."
+    held = render_termination_notice(
+        TerminationReason.ADMISSION_DENIED,
+        state=state,
+        error=AdmissionDenied(reason="provider_hold_cap_reached"),
+    )
+    assert held is not None and "temporary" in held.next_step
+    assert held.in_flight == ("Bash",), "the work lines stay"
 
 
 def test_a_deleted_agent_is_named_with_where_to_pick_another() -> None:
     nouns = RefusalNouns.for_platform("discord")
     assert resolver_miss_text(nouns, kind="agent", name="re`search") == (
-        "This channel's agent `research` no longer exists.\n\n"
+        "This channel's agent `research` can't be found.\n\n"
         "Ask an admin to pick another in `/agent-setup`."
     )
     assert resolver_miss_text(nouns, kind="environment", name="py") == (
@@ -427,4 +455,4 @@ def test_a_deleted_agent_is_named_with_where_to_pick_another() -> None:
         nouns=nouns,
     )
     assert notice is not None
-    assert notice.title == "This channel's agent `research` no longer exists."
+    assert notice.title == "This channel's agent `research` can't be found."

@@ -120,7 +120,6 @@ def _error_message(exc: Exception, *, settings: Settings, team_id: str) -> str:
             in_dm=True,
             cause=exc.cause,
             provider=exc.provider,
-            channels=exc.channels,
         )
     return render_error(exc, request_id=bound_request_id())
 

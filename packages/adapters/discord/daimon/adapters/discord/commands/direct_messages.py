@@ -59,7 +59,6 @@ def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
             in_dm=True,
             cause=exc.cause,
             provider=exc.provider,
-            channels=exc.channels,
         )
     return str(exc) if isinstance(exc, DaimonError) else fallback
 

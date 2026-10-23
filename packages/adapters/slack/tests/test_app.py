@@ -7251,7 +7251,7 @@ async def test_orchestrate_with_a_stale_setup_posts_the_out_of_date_notice(
         ("POST", URL("https://slack.com/api/chat.postMessage"))
     ]
     assert posts[-1].kwargs["json"]["text"] == (
-        "This channel's agent `gone` no longer exists.\n\n"
+        "This channel's agent `gone` can't be found.\n\n"
         "Ask an admin to pick another in `/agent-setup`."
     )
 

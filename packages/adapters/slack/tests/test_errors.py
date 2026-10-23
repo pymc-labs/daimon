@@ -275,7 +275,7 @@ class TestRenderError:
 
     def test_a_deleted_agent_is_named(self) -> None:
         assert setup_out_of_date_notice(kind="agent", name="research") == (
-            "This channel's agent `research` no longer exists.\n\n"
+            "This channel's agent `research` can't be found.\n\n"
             "Ask an admin to pick another in `/agent-setup`."
         )
         foreign = setup_out_of_date_notice(foreign=True, kind="agent", name="research")

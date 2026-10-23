@@ -2435,7 +2435,6 @@ class SlackApp:
                         foreign=standing.foreign,
                         cause=err.cause,
                         provider=err.provider,
-                        channels=err.channels,
                     ),
                 )
             return
