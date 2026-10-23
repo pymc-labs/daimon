@@ -149,16 +149,11 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
     """
     from sqlalchemy import text as real_text
 
-    # Either way the watch asks for the tenant lock: waiting, or (since the OWNER 3
-    # follow-up) trying without waiting.
-    watch_locks = {
-        "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))",
-        "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))",
-    }
+    watch_lock = "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"
     held, release = asyncio.Event(), asyncio.Event()
 
     def text(sql: str, *args, **kwargs):
-        if sql in watch_locks:
+        if sql == watch_lock:
             sql = sql.replace(
                 "hashtextextended(:key, 0)", "hashtextextended(:key || '|watch-busy', 0)"
             )
