@@ -1707,6 +1707,50 @@ async def test_claimed_worker_opaque_source_is_refused_before_funding_or_native_
 
 @pytest.mark.parametrize("provider", ["gemini"], indirect=True)
 @pytest.mark.parametrize("clone_source", [False, True], indirect=True)
+async def test_a_template_representation_in_a_recapture_never_moves_the_worker_digest(
+    claimed_worker_request, monkeypatch
+):
+    """A capture taken again in run_worker must never move the worker's digest.
+
+    Staging (smoke c1c6d452): run_worker (and its pre-dispatch guard) re-capture
+    the root under the WORKER's Gemini revision, which selects the code-default
+    agent template and adds its `representations`; the spawn's capture had none.
+    That evidence is not intent, so the digest leaves it out.
+    """
+    import asyncio
+
+    from daimon.core import headless_runner
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, root, worker, prices, _, _ = claimed_worker_request
+    # As `for_worker` hands it over: the root's source, captured as the spawn was.
+    spawned = await capture_preparation_source(
+        replace(request, scope=root.fleet.scope, source=None, worker=None)
+    )
+    from daimon.core.stores.domain import SourceRepresentation
+
+    template = SourceRepresentation(source_pin="0" * 64, target=request.worker.spec)
+
+    async def moved(*_args, **_kwargs):
+        # What a capture under the worker's Gemini revision returns: the same source,
+        # plus the code-default template's representation.
+        return spawned.model_copy(update={"representations": (template,)})
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", moved)
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded", "same source, same intent: no intent_changed"
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("clone_source", [False, True], indirect=True)
 async def test_claimed_worker_runs_through_budget_binding_and_journal_result(
     claimed_worker_request,
 ):
