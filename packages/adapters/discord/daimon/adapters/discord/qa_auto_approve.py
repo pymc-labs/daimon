@@ -17,9 +17,9 @@ asks the metadata server):
    and is not writable from inside this container;
 3. the GCE metadata server names a project ending in `-staging`.
 
-Publish cards that leave a lasting public link (`lasting_public_link`: a
-report, a permanent or editable notebook, a file in a notebook) always stay
-manual, so a prompt-injected QA turn can't publish lasting public data.
+Publish cards (`lasting_public_link`: a report, any notebook upload, a file in
+a notebook) always stay manual, so a prompt-injected QA turn can't publish
+lasting public data.
 
 Every attempt that passes the gate is logged and written to the security audit
 log, approved or refused. A gate that fails for any reason means a normal card.

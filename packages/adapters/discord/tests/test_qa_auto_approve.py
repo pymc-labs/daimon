@@ -286,9 +286,19 @@ def _publish(tool: str, **data: object) -> ConfirmationPrompt:
         _publish("publish_report", title="Q3", recipients=["a@example.test"]),
         _publish("create_notebook_upload_url", slug="nb", permanent=True),
         _publish("create_notebook_upload_url", slug="nb", editable=True),
+        # A re-upload to an existing (maybe permanent) notebook names only its slug.
+        _publish("create_notebook_upload_url", slug="existing-permanent-blog"),
+        _publish("create_notebook_upload_url", slug="nb", ttl_days=1),
         _publish("create_attachment_upload_url", slug="nb", name="data.csv"),
     ],
-    ids=["report", "permanent_notebook", "editable_notebook", "attachment"],
+    ids=[
+        "report",
+        "permanent_notebook",
+        "editable_notebook",
+        "slug_only_reupload",
+        "scratch_ttl_notebook",
+        "attachment",
+    ],
 )
 async def test_a_lasting_public_link_stays_manual(gate, prompt: ConfirmationPrompt) -> None:
     _, audit = gate
@@ -303,12 +313,6 @@ async def test_a_lasting_public_link_stays_manual(gate, prompt: ConfirmationProm
     finally:
         waiting.cancel()
         await asyncio.gather(waiting, return_exceptions=True)
-
-
-async def test_a_short_lived_read_only_notebook_link_is_approved(gate) -> None:
-    prompt = _publish("create_notebook_upload_url", slug="nb", ttl_days=1)
-    assert prompt.lasting_public_link is False
-    assert isinstance(await discord_confirmation_hook(_channel())(prompt), ApprovedConfirmation)
 
 
 async def test_a_tool_rule_card_is_approved_once_without_saving_a_rule(
