@@ -1575,6 +1575,17 @@ class BillingSettings(BaseModel):
             "before use."
         ),
     )
+    openai_daily_model_cap_usd: Decimal = Field(
+        default=Decimal("20"),
+        ge=0,
+        description=(
+            "Most a tenant may spend each UTC day on any one OpenAI model, in provider "
+            "USD at list price, counted across every agent turn and fleet worker. "
+            "OpenAI sessions carry no native spend limit on this project, so this is "
+            "the guard. A turn or worker that would start past it is refused until "
+            "midnight UTC. 0 allows no OpenAI turns."
+        ),
+    )
 
 
 class SupportSettings(BaseModel):

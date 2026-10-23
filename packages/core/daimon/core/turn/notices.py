@@ -231,6 +231,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "Couldn't set up GPT for this {scope} yet.",
         "Try again shortly.",
     ),
+    "provider_daily_cap_reached": _Copy(
+        "Today's {model} budget for this {scope} is used up.",
+        "It resets at midnight UTC; ask {who} to raise it, or use another model.",
+    ),
 }
 # A provider refusal names its real cause and the chat words that fix it.
 _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
@@ -257,6 +261,15 @@ _PROVIDER_NAMES = {
     INLINE_REUSE.provider: "Gemini",
     LOOP.provider: "a self-hosted model",
 }
+
+
+def _model_label(model: str | None) -> str:
+    from daimon.core.agent_model_names import model_name
+    from mux.contracts.ids import ModelRef
+
+    if not model:
+        return "OpenAI"
+    return model_name(ModelRef(provider=PERSISTENT_WORKSPACE.provider, id=model))
 
 
 def provider_name(provider: str | None) -> str:
@@ -294,7 +307,10 @@ def admission_refusal_text(
         copy = _BACKEND_REFUSALS[cause]
     agent = agent_name or "This agent"
     named = provider_name(provider)
+    # A daily model cap refusal carries the model id where `provider` would be.
+    model = _model_label(provider) if reason == "provider_daily_cap_reached" else named
     words = {
+        "model": model,
         "agent": agent,
         "agent_mid": agent_name or "this agent",
         "provider": named,

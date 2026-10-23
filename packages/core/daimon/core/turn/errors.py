@@ -34,6 +34,9 @@ AdmissionDenialReason = Literal[
     # The operator's prepaid hold for a provider's attempts (Gemini Flash) is used
     # up. Nothing to do with a channel budget; an admin releases or raises it.
     "provider_hold_cap_reached",
+    # A tenant's daily spend cap on one OpenAI model is used up; it resets at
+    # midnight UTC. `AdmissionDenied.provider` carries the model id for the copy.
+    "provider_daily_cap_reached",
     # A provider resource this turn needs is still being set up (the tenant's
     # first GPT environment): nothing is wrong; the same request works shortly.
     "provider_setup_pending",
