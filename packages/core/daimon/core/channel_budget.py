@@ -1053,8 +1053,6 @@ class WorkerCancel(asyncio.Event):
     def __init__(self) -> None:
         super().__init__()
         self.reason: WorkerCancelReason | None = None
-        # The watch's specific refusal for a "budget" cancel (`FleetBudgetUsage.reason`).
-        self.detail: str | None = None
 
 
 def cancel_workers(
@@ -1081,7 +1079,7 @@ def cancel_workers(
     )
     for _, event in pending:
         if isinstance(event, WorkerCancel):
-            event.reason, event.detail = reason, detail
+            event.reason = reason
         event.set()
 
 

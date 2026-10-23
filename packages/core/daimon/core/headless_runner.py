@@ -1333,7 +1333,7 @@ async def run_worker(
                         await orphan(prepared)
     except BaseException as error:
         if not native_started:
-            from daimon.core.fleet_orchestration import cancel_failure_code, worker_failure_code
+            from daimon.core.fleet_orchestration import worker_failure_code
 
             # The dispatcher's own deadline (its asyncio.timeout) shows here as a cancel:
             # that's this worker running out of time, not the fleet ending.
@@ -1344,9 +1344,7 @@ async def run_worker(
             failure_code = (
                 "preparation_deadline_exceeded"
                 if deadline_hit
-                # The budget watch's own reason, when it is what cancelled this worker.
-                else cancel_failure_code(cancel)
-                or worker_failure_code(error, "preparation_refused")
+                else worker_failure_code(error, "preparation_refused")
             )
             await asyncio.shield(
                 commit_worker_failure(request, parent, claim, failure_code=failure_code)
