@@ -215,7 +215,12 @@ skills, MCP server attachments (including token forms and OAuth connections),
 keys, model provider, its required capabilities, and its fleet, from chat and
 from the Discord, Slack and Teams setup panels. They see their agent's setup
 (its prompt and connections) and find it with `list_agents` (`mine=true`), even
-while it answers nowhere. Making the agent share threads stays with admins,
+while it answers nowhere. An owner reaches their own agents past channel
+isolation too, including a channel's copy they own, since the copy keeps its
+source's owner. Because the owner can rewrite the prompt, keys an admin added
+to that agent are not secret from its owner: the agent can be told to use or
+reveal them. Give an agent's keys only to an agent whose owner may hold them.
+A person from another organisation is never an agent's owner. Making the agent share threads stays with admins,
 because it applies in every channel the agent answers in that doesn't pin a
 backend; the owner may keep an admin's choice or return to one thread per
 person. If two people create agents of the same name at once, one is refused;

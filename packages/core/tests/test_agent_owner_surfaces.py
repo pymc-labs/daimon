@@ -193,3 +193,47 @@ async def test_a_copy_is_owned_by_its_maker_and_a_channel_copy_keeps_the_owner(
         sessions, tenant_id=tenant.id, source_id="ag_unowned", copy_id="ag_c2", owner="source"
     )
     assert await owner_of("ag_c2") is None
+
+
+async def test_an_owner_from_another_organisation_is_never_the_owner(tenant_people) -> None:
+    from daimon.core._models import PlatformPrincipal
+    from daimon.core.mcp_attach import decide_mcp_replacement
+    from sqlalchemy import update
+
+    sessions, tenant, owner, _other = tenant_people
+    agent = ma_agent(id="ag_owned", name="helper", tenant_id=tenant.id)
+
+    async def replace_outcome() -> str:
+        return await decide_mcp_replacement(
+            sessions,
+            tenant_id=tenant.id,
+            platform="slack",
+            agent=agent,
+            caller=AdminCaller(platform_user_id="U-OWNER"),
+            default=DeploymentDefault(),
+        )
+
+    assert (await _facts(sessions, tenant, user="U-OWNER", account=None)).owned_by_caller
+    assert await replace_outcome() == "allow"
+    async with sessions.begin() as session:
+        await session.execute(
+            update(PlatformPrincipal)
+            .where(PlatformPrincipal.account_id == owner.id)
+            .values(foreign_home_id="other-org")
+        )
+    assert not (await _facts(sessions, tenant, user="U-OWNER", account=None)).owned_by_caller
+    assert not (await _facts(sessions, tenant, user=None, account=owner.id)).owned_by_caller
+    assert await replace_outcome() == "needs_admin"
+
+
+async def test_a_creator_outside_the_tenant_is_never_recorded(tenant_people) -> None:
+    from daimon.core.agent_ownership import record_agent_creator
+
+    sessions, tenant, _owner, _other = tenant_people
+    async with sessions.begin() as session:
+        stranger = await make_account(session)
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_new")
+    assert not await record_agent_creator(
+        sessions, tenant_id=tenant.id, agent_id=agent_id, account_id=stranger.id
+    )
+    assert await agent_owner(sessions, tenant_id=tenant.id, agent_id=agent_id) is None

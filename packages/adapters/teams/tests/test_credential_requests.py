@@ -22,6 +22,7 @@ from daimon.adapters.teams import credential_requests as module
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core import credential_submit
+from daimon.core._models import PlatformPrincipal
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.credential_requests import ENV_FILE_TARGET, build_skill_repo_target
@@ -52,6 +53,7 @@ from daimon.testing.factories import make_account
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import SecretStr
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -962,3 +964,71 @@ async def test_someone_from_another_organisation_opens_a_request_like_anyone(
         await service.turns.drain(5)
 
     assert "value" not in _field(theirs), "a channel click from another tenant gets the form"
+
+
+@pytest.mark.parametrize(
+    ("submitter", "refused"),
+    [("29:owner", False), ("29:member", True), ("29:guest", True)],
+    ids=["owner", "member", "owner-but-from-another-organisation"],
+)
+async def test_a_key_replacement_is_decided_for_the_submitter_s_ownership(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    provisioned_tenant: None,
+    submitter: str,
+    refused: bool,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_owners
+    from daimon.testing.factories import make_platform_principal
+
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, TENANT)
+        assert tenant is not None
+        owner = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=owner, platform="teams", external_id="29:owner"
+        )
+        await make_platform_principal(
+            session, tenant=tenant, platform="teams", external_id="29:member"
+        )
+        guest = await make_account(session, tenant=tenant)
+        guest_principal = await make_platform_principal(
+            session, tenant=tenant, account=guest, platform="teams", external_id="29:guest"
+        )
+        await session.execute(
+            sa_update(PlatformPrincipal)
+            .where(PlatformPrincipal.id == guest_principal.id)
+            .values(foreign_home_id="other-org")
+        )
+        for account in (owner.id, guest.id):
+            agent_id = derive_agent_uuid(
+                tenant_id=TENANT, ma_agent_id=MA_ID if account == owner.id else "agt_guest"
+            )
+            await agent_owners.set_owner(
+                session,
+                tenant_id=TENANT,
+                agent_id=agent_id,
+                owner_account_id=account,
+                source="admin_assigned",
+            )
+    handler = TeamsCredentialRequests(
+        runtime=_runtime(db_session_factory),
+        sender=MagicMock(),
+        spawn=MagicMock(),
+        dispatch=AsyncMock(),
+    )
+    target = "agt_guest" if submitter == "29:guest" else MA_ID
+    row = SimpleNamespace(tenant_id=TENANT, account_id=owner.id)
+    assert (
+        await handler._replacement_refused(  # pyright: ignore[reportPrivateUsage]
+            row,  # pyright: ignore[reportArgumentType]
+            ma_agent(id=target, name="daimon", tenant_id=TENANT),
+            is_admin=False,
+            submitter_id=submitter,
+        )
+        is refused
+    )

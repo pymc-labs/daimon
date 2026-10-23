@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from daimon.core._models import Account, AgentOwner
+from daimon.core._models import Account, AgentOwner, PlatformPrincipal
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,7 +67,15 @@ async def set_owner(
 async def record_creator(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, account_id: uuid.UUID
 ) -> bool:
-    """Record the account that created the agent, unless it already has an owner."""
+    """Record the account that created the agent, unless it already has an owner.
+
+    The account must belong to the tenant, as for `set_owner`.
+    """
+    belongs = await session.scalar(
+        select(Account.id).where(Account.id == account_id, Account.tenant_id == tenant_id)
+    )
+    if belongs is None:
+        raise LookupError("owner account is not in this tenant")
     result = await session.execute(
         insert(AgentOwner)
         .values(
@@ -98,3 +106,21 @@ async def owned_by(
         )
     )
     return frozenset(rows)
+
+
+async def has_foreign_principal(
+    session: AsyncSession, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> bool:
+    """Whether any of the account's platform identities belongs to another organisation."""
+    return (
+        await session.scalar(
+            select(PlatformPrincipal.id)
+            .where(
+                PlatformPrincipal.tenant_id == tenant_id,
+                PlatformPrincipal.account_id == account_id,
+                PlatformPrincipal.foreign_home_id.is_not(None),
+            )
+            .limit(1)
+        )
+        is not None
+    )

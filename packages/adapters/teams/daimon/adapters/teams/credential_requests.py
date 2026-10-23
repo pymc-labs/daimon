@@ -69,7 +69,7 @@ from daimon.core.credential_submit import (
     write_skill_repo_submit,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
@@ -99,7 +99,6 @@ from daimon.core.operation_policy import (
     OperationKind,
     TargetFacts,
     decide_operation,
-    needs_reachability_read,
 )
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
@@ -123,7 +122,6 @@ from daimon.core.stores.agent_files import (
     agent_env_writes_allowed,
 )
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.teams_threads import conversation_of
 from microsoft_teams.api import (
     Attachment,
@@ -466,7 +464,9 @@ class TeamsCredentialRequests:
         is_admin = actor.is_admin
         work: Awaitable[None]
         if row.kind == "env":
-            work = self._save_env(row, agent, secret, is_admin=is_admin, service_url=url)
+            work = self._save_env(
+                row, agent, secret, is_admin=is_admin, submitter_id=actor.user_id, service_url=url
+            )
         elif row.kind == "env_file":
             work = self._save_env_file(row, agent, entries, service_url=url)
         elif row.kind == "mcp":
@@ -623,26 +623,18 @@ class TeamsCredentialRequests:
             await self._dispatch(row.tenant_id, row.origin_thread_id, service_url)
 
     async def _replacement_refused(
-        self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent, *, is_admin: bool
+        self,
+        row: CredentialRequestRow,
+        agent: BetaManagedAgentsAgent,
+        *,
+        is_admin: bool,
+        submitter_id: str,
     ) -> bool:
-        """Re-decide a replacement's role check against whoever submitted (Slack's rule)."""
-        managed = reachable = False
-        if not is_admin:
-            managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-            if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=managed):
-                async with self._runtime.sessionmaker() as session:
-                    reachable = await is_agent_shared_for_key_changes(
-                        session,
-                        tenant_id=row.tenant_id,
-                        agent_names=(
-                            agent.name,
-                            str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
-                        ),
-                        ma_agent_id=str(agent.id),
-                        default=self._runtime.deployment_default,
-                        caller_account_id=row.account_id,
-                        caller_platform_user_id=row.requester_platform_user_id,
-                    )
+        """Re-decide a replacement against whoever submitted: an admin, or the agent's owner.
+
+        Ownership is read for the submitter's Teams identity, never the request's account.
+        """
+        managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
         owned = False
         if not is_admin and not managed:
             async with self._runtime.sessionmaker() as session:
@@ -650,10 +642,11 @@ class TeamsCredentialRequests:
                     session,
                     tenant_id=row.tenant_id,
                     ma_agent_id=str(agent.id),
-                    account_id=row.account_id,
+                    platform="teams",
+                    platform_user_id=submitter_id,
                 )
         facts = TargetFacts(
-            is_daimon_managed=managed, is_reachable_in_tenant=reachable, owned_by_caller=owned
+            is_daimon_managed=managed, is_reachable_in_tenant=False, owned_by_caller=owned
         )
         return decide_operation("key_replace", is_admin=is_admin, target=facts) != "allow"
 
@@ -664,12 +657,15 @@ class TeamsCredentialRequests:
         secret: str,
         *,
         is_admin: bool,
+        submitter_id: str,
         service_url: str | None,
     ) -> None:
         """Consume, write and queue the continuation in one transaction, as Slack does."""
 
         async def replacement_refused() -> bool:
-            return await self._replacement_refused(row, agent, is_admin=is_admin)
+            return await self._replacement_refused(
+                row, agent, is_admin=is_admin, submitter_id=submitter_id
+            )
 
         plan = await prepare_env_submit(
             self._runtime.sessionmaker, row=row, replacement_refused=replacement_refused
