@@ -14,11 +14,12 @@ import httpx
 import pytest
 from daimon.adapters.teams.commands import fresh_start, parse_command
 from daimon.adapters.teams.http_service import TeamsHttpService
-from daimon.adapters.teams.identity import DENIED
+from daimon.adapters.teams.identity import NOT_FOR_ORGANIZATION, SETTING_UP, SETUP_FAILED
 from daimon.core._models import ThreadSession
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.tenants import set_provision_status
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -101,7 +102,26 @@ async def test_unprovisioned_organisation_is_told_no_turn_runs(
         await post_activity(service, make_message_activity())
         await finish_turns(service.turns)
     assert turns == []
-    assert [r.body.get("text") for r in teams_api_fake.activity_requests] == [DENIED]
+    assert [r.body.get("text") for r in teams_api_fake.activity_requests] == [NOT_FOR_ORGANIZATION]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"), [("pending", SETTING_UP), ("failed", SETUP_FAILED)]
+)
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_an_organisation_whose_setup_is_unfinished_is_told_why(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    status: str,
+    expected: str,
+) -> None:
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    await set_provision_status(db_session_factory, tenant_id=tenant_id, status=status)
+    async with _running(db_session_factory, teams_api_fake) as (service, turns):
+        await post_activity(service, make_message_activity())
+        await finish_turns(service.turns)
+    assert turns == []
+    assert [r.body.get("text") for r in teams_api_fake.activity_requests] == [expected]
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

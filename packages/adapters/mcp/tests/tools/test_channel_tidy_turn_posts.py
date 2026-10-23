@@ -54,6 +54,7 @@ _ALL_PERMS: int = _base._ALL_PERMS  # pyright: ignore[reportPrivateUsage]
 
 _SOMEONE_ELSE = "43"
 _ADMINISTRATOR = 1 << 3
+_MANAGE_GUILD = 1 << 5
 _VIEW_CHANNEL = 1 << 10
 
 _CARD_EMBED = {"type": "rich", "description": "Thinking…"}
@@ -191,11 +192,15 @@ async def test_the_person_who_opened_the_thread_may_tidy_replies_given_to_others
     assert reply not in fake.messages, "the conversation's opener speaks for the thread"
 
 
+@pytest.mark.parametrize(
+    "admin_perm", [_ADMINISTRATOR, _MANAGE_GUILD], ids=["administrator", "manage-server"]
+)
 async def test_a_server_admin_may_tidy_a_turn_they_did_not_start(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: Any, admin_perm: int
 ) -> None:
+    # One definition of server admin: Manage Server counts, as it does everywhere else.
     world = await _world(committing_sessionmaker)
-    fake.everyone_perms = _ALL_PERMS | _ADMINISTRATOR
+    fake.everyone_perms = _ALL_PERMS | admin_perm
     await _auto_thread(world, opener=_SOMEONE_ELSE)
     reply = await _turn_post(world, fake, requester=_SOMEONE_ELSE)
     auth, origin = await world.turn(thread=_THREAD)

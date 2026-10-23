@@ -535,6 +535,6 @@ async def test_unregistered_server_keeps_setup_guidance_from_real_tenant_resolut
 
     interaction.followup.send.assert_called_once()
     assert interaction.followup.send.call_args.args[0].startswith(
-        "This server is not registered. Ask a server admin to finish setup.\n\n-# Ref "
+        "Setting Daimon up in this server. Try again in a moment.\n\n-# Ref "
     )
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True

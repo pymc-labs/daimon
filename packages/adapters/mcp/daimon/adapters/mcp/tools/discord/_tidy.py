@@ -54,6 +54,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.agent_identity import identity_enabled_for
 from daimon.core.channel_tidy import TidyOperation, TidyTarget
+from daimon.core.native_admins import is_guild_admin_by_permissions
 from daimon.core.stores.agent_posts import AgentPostRow, get_post, list_posts_in, mark_deleted
 from daimon.core.stores.turn_origins import request_thread_archive
 from fastmcp.exceptions import ToolError
@@ -101,7 +102,7 @@ async def _resolve_target(
     channel_id: str,
 ) -> _Target:
     guild_id = _require_guild_id(auth)
-    _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
+    guild, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
     channel = _require_guild_channel(await _resolve_channel(c, channel_id), guild_id)
     parent_id: str | None = None
     if isinstance(channel, discord.Thread):
@@ -116,7 +117,14 @@ async def _resolve_target(
         channel=channel,
         parent_id=parent_id,
         bot_user_id=c.user.id,
-        requester_is_admin=member.guild_permissions.administrator,
+        # The same server-admin rule as everywhere else: owner, Administrator
+        # or Manage Server.
+        requester_is_admin=is_guild_admin_by_permissions(
+            user_id=member.id,
+            owner_id=guild.owner_id,
+            administrator=member.guild_permissions.administrator,
+            manage_guild=member.guild_permissions.manage_guild,
+        ),
     )
 
 

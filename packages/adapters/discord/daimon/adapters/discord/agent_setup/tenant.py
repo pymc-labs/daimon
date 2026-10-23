@@ -3,13 +3,15 @@
 The runtime no longer carries a boot-time tenant_id; each panel/modal
 callback derives its own guild's tenant id and checks it exists in tenants. Panels
 gate behind ``require_registered_guild`` so a provisioned tenant is guaranteed
-by the time a callback fires — a resolution miss is a bug, not a flow.
+by the time a callback fires; a miss (a panel left open across a removal)
+starts the same setup and asks the person to try again.
 """
 
 from __future__ import annotations
 
 import uuid
 
+from daimon.adapters.discord.checks import guild_setup_reply
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -28,5 +30,5 @@ async def resolve_tenant_for_panel(
     async with runtime.sessionmaker() as session:
         row = await get_tenant(session, tenant_id)
     if row is None:
-        raise UserFacingError("This server is not registered. Ask a server admin to finish setup.")
+        raise UserFacingError(guild_setup_reply(interaction))
     return tenant_id

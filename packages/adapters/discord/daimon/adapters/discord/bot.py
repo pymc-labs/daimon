@@ -1612,6 +1612,11 @@ class DaimonBot(commands.Bot):
             return
         self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
 
+    def start_provisioning(self, guild: discord.Guild) -> None:
+        """`_ensure_provisioning` in the background, for a slash command that
+        must answer within Discord's 3-second window."""
+        self._spawn(self._ensure_provisioning(guild))
+
     def start_orphan_recovery(self) -> None:
         """Start the boot sweep before the gateway can deliver a turn.
 
