@@ -1121,18 +1121,17 @@ async def _capture_backend_source(
     from daimon.core.turn.admission import capture_backend_source
     from daimon.core.turn.deps import build_turn_deps
 
-    if (
-        origin is not None
-        and await session_card_gap(
+    if origin is not None and (
+        gap := await session_card_gap(
             runtime,
             auth,
             origin,
             tool_name="request_agent_backend_switch",
             require_public_context=True,
         )
-        is not None
     ):
-        raise channel_backend.AgentBackendRefused("source_context_unavailable")
+        # The gap names the cause, in the refusal log line and its copy.
+        raise channel_backend.AgentBackendRefused("source_context_unavailable", detail=gap)
     deps = build_turn_deps(
         runtime.settings,
         runtime.client,
@@ -1177,6 +1176,30 @@ _SOURCE_DETAIL_WORDS: Final[Mapping[str, str]] = {
     "check it still exists",
     "environment": "its working environment is missing or archived",
     "place": "this conversation's channel couldn't be verified",
+}
+
+#: Why this conversation can't show the switch's Confirm card (a `CardGap`).
+_CARD_GAP_WORDS: Final[Mapping[str, str]] = {
+    "source_context_unavailable": (
+        "I can't confirm a change from a direct message or from a conversation that "
+        "started somewhere else. Ask in a server channel or thread where I answer."
+    ),
+    "no_live_session": (
+        "I couldn't find my conversation in this thread, so I can't post the Confirm card. "
+        "Mention me again here, or in a new thread."
+    ),
+    "other_agents_session": (
+        "Another agent's conversation runs in this thread, so I can't post the Confirm "
+        "card here. Mention me in a new thread."
+    ),
+    "session_not_gated": (
+        "This thread's conversation started without the Confirm card for this change. "
+        "Mention me in a new thread."
+    ),
+    "session_unreadable": (
+        "I couldn't check this conversation just now, so I can't post the Confirm card. "
+        "Try again in a minute."
+    ),
 }
 
 
@@ -1236,6 +1259,11 @@ def _backend_switch_refusal(
             + (provider_name(current) if current is not None else "its current provider")
             + "."
         )
+    elif reason == "source_context_unavailable":
+        text = _CARD_GAP_WORDS.get(
+            getattr(refused, "detail", None) or reason,
+            _CARD_GAP_WORDS["source_context_unavailable"],
+        )
     elif reason == "source_unavailable":
         detail: str | None = getattr(refused, "detail", None)
         text = (
@@ -1262,10 +1290,6 @@ def _backend_switch_refusal(
             ),
             "model_not_selectable": f"That model isn't available on {provider}. Pick another.",
             "profile_not_selectable": f"That model isn't available on {provider}. Pick another.",
-            "source_context_unavailable": (
-                "I can't confirm a change from this conversation. "
-                "Ask in a public channel or thread where I answer."
-            ),
             "selfhosted_requires_channel_configuration": (
                 f"A self-hosted model is set per channel, not per agent. Ask {admin}."
             ),

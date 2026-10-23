@@ -467,7 +467,7 @@ async def test_a_private_session_context_refuses_the_preview(active_chat):
     del frozen["metadata"]["daimon_thread"]
     gate()
     agent()
-    with pytest.raises(ToolError, match="public channel or thread"):
+    with pytest.raises(ToolError, match="server channel or thread where I answer"):
         await _request_agent_backend_switch_impl(
             runtime,
             auth,
@@ -506,7 +506,7 @@ async def test_a_thread_opened_by_a_channel_mention_previews_the_switch(active_c
         )
         assert preview.status == "preview"
     else:
-        with pytest.raises(ToolError, match="public channel or thread"):
+        with pytest.raises(ToolError, match="server channel or thread where I answer"):
             await _request_agent_backend_switch_impl(
                 runtime,
                 auth,
@@ -834,7 +834,23 @@ def _admin_auth():
     [
         ({"reason": "agent_not_found"}, "no agent named 'X'"),
         ({"reason": "backend_not_allowed"}, "OpenAI isn't allowed in this server"),
-        ({"reason": "source_context_unavailable"}, "public channel or thread"),
+        ({"reason": "source_context_unavailable"}, "server channel or thread where I answer"),
+        (
+            {"reason": "source_context_unavailable", "detail": "no_live_session"},
+            "couldn't find my conversation in this thread",
+        ),
+        (
+            {"reason": "source_context_unavailable", "detail": "other_agents_session"},
+            "Another agent's conversation",
+        ),
+        (
+            {"reason": "source_context_unavailable", "detail": "session_not_gated"},
+            "started without the Confirm card",
+        ),
+        (
+            {"reason": "source_context_unavailable", "detail": "session_unreadable"},
+            "Try again in a minute",
+        ),
         ({"reason": "stale_preview"}, "preview again"),
         ({"reason": "owner_or_admin_required"}, "needs its owner"),
         (
