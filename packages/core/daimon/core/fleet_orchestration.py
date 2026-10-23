@@ -128,6 +128,7 @@ WorkerFailureCode = Literal[
     "worker_runtime_missing",
     "setup_error",
     "preparation_deadline_exceeded",
+    "shutdown",
 ]
 
 
@@ -1505,9 +1506,10 @@ class HostFleetPorts:
                                                     request,
                                                     parent,
                                                     claimed,
-                                                    failure_code=worker_failure_code(
-                                                        error, failure_code
-                                                    ),
+                                                    failure_code="shutdown"
+                                                    if request.deps.running_turns.shutting_down
+                                                    and isinstance(error, asyncio.CancelledError)
+                                                    else worker_failure_code(error, failure_code),
                                                 )
                                             )
                                         raise
