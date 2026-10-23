@@ -104,6 +104,9 @@ async def test_every_login_is_named_without_its_value(owned):
     assert by_key["env:OWNER_KEY"].label == "the stored key OWNER_KEY"
     assert by_key["repo:pymc-labs/app"].kind == "repository"
     assert "github_app" not in by_key  # no live GitHub grants on this agent
+    assert not by_key["caller"].shareable  # Daimon's own credential shares its vault
+    assert not by_key["repo:pymc-labs/app"].shareable
+    assert by_key["env:OWNER_KEY"].shareable and by_key[f"agent-mcp:{stored.id}"].shareable
     unknown = by_key["vault:something-new"]
     assert unknown.kind == "unknown" and not unknown.shareable
     dumped = json.dumps([login.__dict__ for login in logins])
@@ -117,8 +120,7 @@ async def test_every_login_is_named_without_its_value(owned):
 @pytest.mark.parametrize(
     ("installed_by", "requester", "admin", "owner", "allowed"),
     [
-        ("caller", True, False, False, True),  # your own connections
-        ("caller", False, True, True, False),  # only the requester answers
+        ("owner", False, True, True, False),  # only the requester answers
         ("owner", True, False, True, True),  # the owner's own stored login
         ("owner", True, False, False, False),  # a plain member can't
         ("owner", True, True, False, True),
@@ -173,7 +175,7 @@ async def test_choices_are_saved_by_owner_or_admin_and_audited_by_key(people):
     owner, admin, member = actors["owner"], actors["admin"], actors["member"]
     saved = await service.set_credential_sharing(
         agent,
-        {"env:OWNER_KEY": "share", "caller": "share", "agent-mcp:x": "skip"},
+        {"env:OWNER_KEY": "share", "caller": "skip", "agent-mcp:x": "skip"},
         logins(),
         owner,
         requester_account_id=owner.account_id,
@@ -181,9 +183,19 @@ async def test_choices_are_saved_by_owner_or_admin_and_audited_by_key(people):
     )
     assert saved.fleet_credential_sharing == {
         "env:OWNER_KEY": "share",
-        "caller": "share",
+        "caller": "skip",
         "agent-mcp:x": "skip",
     }
+    # The requester's own connections can't be handed to workers yet: no "share".
+    with pytest.raises(AgentBackendRefused, match="credential share not allowed"):
+        await service.set_credential_sharing(
+            agent,
+            {"caller": "share"},
+            logins(),
+            owner,
+            requester_account_id=owner.account_id,
+            run_id=None,
+        )
     # An owner can't share a login an admin (or someone unknown) stored.
     with pytest.raises(AgentBackendRefused, match="credential share not allowed"):
         await service.set_credential_sharing(
@@ -229,7 +241,7 @@ async def test_choices_are_saved_by_owner_or_admin_and_audited_by_key(people):
     shares = [event for event in events if event.tool_name == "fleet_credentials"]
     assert {(event.operation, event.reason) for event in shares} >= {
         ("share", "login=env:OWNER_KEY"),
-        ("share", "login=caller"),
+        ("skip", "login=caller"),
         ("skip", "login=agent-mcp:x"),
         ("share", f"login=agent-mcp:x; run={run}"),
     }
@@ -242,14 +254,14 @@ async def test_a_saved_choice_survives_other_agent_changes(people):
     admin = actors["admin"]
     saved = await service.set_credential_sharing(
         agent,
-        {"caller": "share"},
+        {"env:OWNER_KEY": "share"},
         logins(),
         admin,
         requester_account_id=admin.account_id,
         run_id=None,
     )
     switched = await service.set_backend(agent, "openai", saved.local, admin)
-    assert switched.fleet_credential_sharing == {"caller": "share"}
+    assert switched.fleet_credential_sharing == {"env:OWNER_KEY": "share"}
 
 
 async def test_the_run_freezes_only_shared_present_and_shareable_logins(owned):
@@ -267,8 +279,7 @@ async def test_the_run_freezes_only_shared_present_and_shareable_logins(owned):
         agent,
         {
             "env:OWNER_KEY": "share",
-            "caller": "share",
-            f"agent-mcp:{stored.id}": "skip",
+            f"agent-mcp:{stored.id}": "share",
             "env:ADMIN_KEY": "ask",
         },
         present,
@@ -277,7 +288,7 @@ async def test_the_run_freezes_only_shared_present_and_shareable_logins(owned):
         run_id=None,
     )
     frozen = await frozen_shared_logins(deps, source)
-    assert frozen == {"env:OWNER_KEY", "caller"}
+    assert frozen == {"env:OWNER_KEY", f"agent-mcp:{stored.id}"}
     # A shared login the agent no longer has is not frozen.
     fewer = source.model_copy(
         update={
@@ -288,7 +299,7 @@ async def test_the_run_freezes_only_shared_present_and_shareable_logins(owned):
             )
         }
     )
-    assert await frozen_shared_logins(deps, fewer) == {"caller"}
+    assert await frozen_shared_logins(deps, fewer) == {f"agent-mcp:{stored.id}"}
 
 
 async def test_every_left_out_login_is_named_with_its_reason(owned):
@@ -315,9 +326,9 @@ async def test_every_left_out_login_is_named_with_its_reason(owned):
     assert not runtime_manifest.LOGIN_SHARING_LIVE
     assert set(without) == {
         "linear (skipped)",
-        "your own connections (not shared)",
+        "your own connections (can't be shared with workers yet)",
         "the stored key OWNER_KEY (sharing with workers isn't available yet)",
         "the stored key ADMIN_KEY (not shared)",
         "a stored login (can't be shared)",
-        "the repository pymc-labs/app (not shared)",
+        "the repository pymc-labs/app (can't be shared with workers yet)",
     }

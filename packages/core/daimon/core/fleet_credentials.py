@@ -23,6 +23,8 @@ LoginKind = Literal["agent_mcp", "caller_mcp", "github_app", "env", "repository"
 Installer = Literal["owner", "admin", "caller", "unknown"]
 Choice = Literal["share", "skip", "ask"]
 CHOICES: tuple[Choice, ...] = ("share", "skip", "ask")
+#: A stored login whose server isn't on the agent any more: never shareable.
+UNMATCHED_CONNECTOR = "a connected tool"
 
 #: Only a native Anthropic worker session can receive a shared login today
 #: (its own vault and .env). OpenAI/Gemini workers run without connectors.
@@ -41,8 +43,15 @@ class ConnectorLogin:
 
     @property
     def shareable(self) -> bool:
-        """An unknown kind is never shareable (fail closed); it is listed as skipped."""
-        return self.kind != "unknown"
+        """What a worker can be handed today: stored connector logins and stored keys.
+
+        Unknown kinds never (fail closed). The requester's own connections live in
+        the vault that also carries Daimon's own credential, and GitHub app access
+        needs its repo helpers and identity, so neither is handed to a worker yet.
+        """
+        return self.kind in ("agent_mcp", "env") and (
+            self.kind != "agent_mcp" or self.label != UNMATCHED_CONNECTOR
+        )
 
 
 def may_share(
@@ -137,7 +146,7 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
             )
             name = servers.get(canonical_mcp_url(url)) if url is not None else None
             # No record of who stored it: an admin's to share (fail closed).
-            add(ConnectorLogin(reference, "agent_mcp", name or "a connected tool", "unknown"))
+            add(ConnectorLogin(reference, "agent_mcp", name or UNMATCHED_CONNECTOR, "unknown"))
         elif reference.startswith("caller-mcp:"):
             add(ConnectorLogin("caller", "caller_mcp", "your own connections", "caller"))
         elif reference.startswith("agent-env:") and binding.target_path is not None:
@@ -199,7 +208,11 @@ def card_line(logins: tuple[ConnectorLogin, ...]) -> str:
 def run_without_line(login: ConnectorLogin, choice: str | None, *, sharing_live: bool) -> str:
     """One login the workers run without, by name, with the plain reason."""
     if not login.shareable:
-        return f"{login.label} (can't be shared)"
+        return (
+            f"{login.label} (can't be shared)"
+            if login.kind == "unknown"
+            else f"{login.label} (can't be shared with workers yet)"
+        )
     if choice == "skip":
         return f"{login.label} (skipped)"
     if choice == "share" and not sharing_live:
