@@ -162,7 +162,7 @@ async def test_a_click_calls_core_once_as_the_clicker_and_redraws_from_the_db(mo
     assert kwargs["tenant_id"] == TENANT and kwargs["platform"] == "discord"
     assert (kwargs["run_id"], kwargs["row"], kwargs["choice"]) == (RUN, 0, "share")
     assert kwargs["digest"] == DIGEST[:12] and kwargs["clicker_platform_user_id"] == "9"
-    assert callable(kwargs["live_admin"])
+    assert callable(kwargs["live_subject"]) and "live_admin" not in kwargs
     view = interaction.message.edit.await_args.kwargs["view"]
     assert "GITHUB_TOKEN: shared" in _texts(view)
     interaction.followup.send.assert_not_awaited()
@@ -429,17 +429,92 @@ async def test_the_bot_posts_a_login_card_only_in_the_runs_own_thread(case, expe
             raise discord.NotFound(MagicMock(status=404, reason="x"), "x")
         return channel
 
+    warned: list[str] = []
     bot = SimpleNamespace(
         _channel_by_id=channel_by_id,
         _may_post_in=AsyncMock(return_value=case != "may_not_post"),
+        _warn_login_card=lambda _card, reason: warned.append(reason),
     )
     found = await DaimonBot._login_card_thread(  # type: ignore[arg-type]
         bot, card(thread_id=None if case == "no_thread" else "71")
     )
     assert (found is thread) is expected
+    assert warned == ([] if expected else [warned[0]])
+
+
+def test_each_login_card_warning_is_logged_once_per_run(monkeypatch):
+    from daimon.adapters.discord import bot as bot_module
+    from daimon.adapters.discord.bot import DaimonBot
+
+    logged: list[str] = []
+    monkeypatch.setattr(bot_module.log, "warning", lambda event, **_: logged.append(event))
+    fake = SimpleNamespace(_login_card_warned=set())
+    for _ in range(3):
+        DaimonBot._warn_login_card(fake, card(), "no_thread")  # type: ignore[arg-type]
+    DaimonBot._warn_login_card(fake, card(run_id=UUID(int=43)), "no_thread")  # type: ignore[arg-type]
+    assert logged == ["fleet.login_card_no_thread"] * 2
+
+
+async def test_a_claim_write_that_raises_leaves_no_live_copy(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import LoginPollState
+
+    core = _Core(monkeypatch, (card(),))
+    core.record.side_effect = RuntimeError("db down")
+    state = LoginPollState()
+    post, _ = await _poll(state=state)
+    post.return_value.delete.assert_awaited_once()
+    assert state.orphans == []
+
+
+def test_final_words_truncate_long_labels():
+    rows = (LoginCardRow(0, "K" * 300, "share"),)
+    text = _texts(build_login_view(card(state="decided", rows=rows)))
+    assert "K" * 80 not in text and "K" * 79 + "…" in text
 
 
 def test_the_poller_is_fast_enough_for_the_spawn_wait():
     from daimon.core.fleet_login_decision import LOGIN_WAIT_S
 
     assert fleet_login.POLL_INTERVAL_S * 5 <= LOGIN_WAIT_S
+
+
+@pytest.mark.parametrize(
+    ("role", "foreign", "admin", "client"),
+    [("ADMIN", None, True, False), ("USER", None, False, False), ("ADMIN", "T_OTHER", False, True)],
+)
+async def test_the_clicker_subject_is_built_live_like_the_turn_path(
+    monkeypatch, role, foreign, admin, client
+):
+    from contextlib import asynccontextmanager
+
+    from daimon.adapters.discord import bot as bot_module
+    from daimon.core.stores import identity
+    from daimon.core.stores.domain import Role
+
+    monkeypatch.setattr(bot_module, "requester_role", AsyncMock(return_value=(Role[role], [])))
+    lookups: list[dict] = []
+
+    async def find(_session, **kwargs):
+        lookups.append(kwargs)
+        return SimpleNamespace(foreign_home_id=foreign)
+
+    monkeypatch.setattr(identity, "find_platform_principal", find)
+
+    @asynccontextmanager
+    async def sessions():
+        yield object()
+
+    answer = LoginAnswer(card(card_message_id="500"))
+    from daimon.core import fleet_login_decision
+
+    calls = AsyncMock(return_value=answer)
+    monkeypatch.setattr(fleet_login_decision, "answer_login_click", calls)
+    interaction = _interaction()
+    interaction.client.runtime.sessionmaker = sessions
+    await LoginButton(
+        discord.ui.Button(custom_id=login_custom_id(RUN, 0, "share", DIGEST))
+    ).callback(interaction)
+    subject = await calls.await_args.kwargs["live_subject"]()
+    assert subject.platform_user_id == "9" and subject.is_admin is admin
+    assert subject.client is client
+    assert lookups == [{"tenant_id": TENANT, "platform": "discord", "external_id": "9"}]

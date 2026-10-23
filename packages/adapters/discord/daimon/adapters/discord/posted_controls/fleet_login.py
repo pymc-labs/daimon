@@ -14,7 +14,7 @@ import asyncio
 import re
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Literal, Self, cast
 
@@ -31,6 +31,7 @@ import discord
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.authz import Subject
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -59,6 +60,8 @@ _TITLE: Final = "Share your logins with this fleet's workers?"
 CLICK_FAILED_TEXT: Final = "Something went wrong with this card. Try again in a minute."
 #: A final card that keeps failing to show is given up on after this many polls.
 MAX_FINAL_ATTEMPTS: Final = 5
+#: A duplicate copy whose delete keeps failing is left (and logged) after this many polls.
+MAX_ORPHAN_DELETE_ATTEMPTS: Final = 5
 #: Login rows with buttons on one card: five components each, within Discord's 40.
 MAX_ROWS_SHOWN: Final = 5
 _LABEL_MAX: Final = 80
@@ -97,7 +100,12 @@ def build_login_view(card: LoginCard) -> discord.ui.LayoutView:
     container.add_item(discord.ui.TextDisplay(f"**{_TITLE}**"))
     container.add_item(discord.ui.Separator(visible=False))
     if card.final:
-        container.add_item(discord.ui.TextDisplay(final_state_text(card) or "No logins to share."))
+        short = replace(
+            card,
+            rows=tuple(replace(row, label=_label(row.label)) for row in card.rows),
+            without=tuple(_label(line) for line in card.without),
+        )
+        container.add_item(discord.ui.TextDisplay(final_state_text(short) or "No logins to share."))
     else:
         container.add_item(
             discord.ui.TextDisplay(
@@ -196,9 +204,23 @@ class LoginButton(
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
         clicker = str(interaction.user.id)
 
-        async def live_admin() -> bool:
+        async def live_subject() -> Subject:
+            """The clicker as the turn path builds them: the live role, and a client
+            (another organisation) never an admin (`admission`: HOST on Discord, so a
+            known foreign home is what makes one)."""
+            from daimon.core.authz import build_subject
+            from daimon.core.stores.identity import find_platform_principal
+
             role, _ = await requester_role(guild, clicker)
-            return role is Role.ADMIN
+            async with bot.runtime.sessionmaker() as session:
+                principal = await find_platform_principal(
+                    session, tenant_id=tenant_id, platform="discord", external_id=clicker
+                )
+            return build_subject(
+                is_admin=role is Role.ADMIN,
+                platform_user_id=clicker,
+                client=principal is not None and principal.foreign_home_id is not None,
+            )
 
         await interaction.response.defer()
         try:
@@ -211,7 +233,7 @@ class LoginButton(
                 row=self.login_row,
                 choice=self.choice,
                 clicker_platform_user_id=clicker,
-                live_admin=live_admin,
+                live_subject=live_subject,
                 limiter=bot.login_click_limiter,
             )
         except Exception:
@@ -281,7 +303,7 @@ async def _remove_orphans(state: LoginPollState) -> None:
         except discord.NotFound:
             pass
         except Exception as error:
-            if _retryable(error) and attempts + 1 < MAX_FINAL_ATTEMPTS:
+            if _retryable(error) and attempts + 1 < MAX_ORPHAN_DELETE_ATTEMPTS:
                 kept.append((message, attempts + 1))
             else:
                 log.warning("fleet.login_card_copy_left", message_id=message.id)
@@ -307,9 +329,16 @@ async def _post_open(
     message = await find(card) or await post(card)
     if message is None:
         return
-    if await fleet.record_login_card(
-        sessionmaker, tenant_id=card.tenant_id, run_id=card.run_id, message_id=str(message.id)
-    ):
+    try:
+        claimed = await fleet.record_login_card(
+            sessionmaker, tenant_id=card.tenant_id, run_id=card.run_id, message_id=str(message.id)
+        )
+    except Exception:
+        # The claim never landed: no live copy may be left; the next poll posts again.
+        state.orphans.append((message, 0))
+        await _remove_orphans(state)
+        raise
+    if claimed:
         return
     now_card = next(
         (

@@ -818,6 +818,8 @@ class DaimonBot(commands.Bot):
 
         # One per process: refused fleet login-card clicks, capped per (run, clicker).
         self.login_click_limiter = LoginClickLimiter()
+        # (run, reason) pairs already warned about, so a 2 s poller logs each once.
+        self._login_card_warned: set[tuple[uuid.UUID, str]] = set()
         # One-shot guard for the orphaned-turn sweep. on_ready re-fires on every
         # full gateway reconnect, and a second run would reap the turns THIS
         # process is currently rendering.
@@ -3796,25 +3798,30 @@ class DaimonBot(commands.Bot):
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
 
+    def _warn_login_card(self, card: LoginCard, reason: str) -> None:
+        if (card.run_id, reason) not in self._login_card_warned:
+            self._login_card_warned.add((card.run_id, reason))
+            log.warning(f"fleet.login_card_{reason}", run_id=str(card.run_id))
+
     async def _login_card_thread(self, card: LoginCard) -> discord.Thread | None:
         """The run's own thread, in the run's own server, or None."""
         if card.thread_id is None or not card.thread_id.isdigit():
-            log.warning("fleet.login_card_no_thread", run_id=str(card.run_id))
+            self._warn_login_card(card, "no_thread")
             return None
         try:
             channel = await self._channel_by_id(int(card.thread_id))
         except (discord.NotFound, discord.Forbidden):
-            log.warning("fleet.login_card_thread_gone", run_id=str(card.run_id))
+            self._warn_login_card(card, "thread_gone")
             return None
         if (
             not isinstance(channel, discord.Thread)
             or derive_tenant_uuid(platform="discord", workspace_id=str(channel.guild.id))
             != card.tenant_id
         ):
-            log.warning("fleet.login_card_foreign_thread", run_id=str(card.run_id))
+            self._warn_login_card(card, "foreign_thread")
             return None
         if not await self._may_post_in(tenant_id=card.tenant_id, channel=channel):
-            log.warning("fleet.login_card_post_refused", run_id=str(card.run_id))
+            self._warn_login_card(card, "post_refused")
             return None
         return channel
 
