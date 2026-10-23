@@ -1693,6 +1693,8 @@ async def answers_for_everyone(
     from daimon.core.scope import TenantScopeRef
     from daimon.core.stores.scoped_config_read import get_scope
 
+    # A partial provider reply leaves no source record (`source_agent_record`), so
+    # the managed mark can't be read: only the names below decide then.
     metadata = agent.source.spec.metadata if agent.source is not None else None
     if is_builtin_agent(name=agent.name, metadata=metadata, default_agent_name=default_agent_name):
         return True

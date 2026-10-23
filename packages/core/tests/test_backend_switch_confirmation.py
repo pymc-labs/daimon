@@ -1158,7 +1158,7 @@ async def test_a_default_agent_card_is_refused_unless_its_for_everyone(owned_pre
         await prepare(_switch_prompt(preview))
     assert str(refused.value) == (
         "Switching Researcher changes it for everyone on this server. "
-        "To try Gemini just here, I can make a copy of me on Gemini."
+        "To try Gemini just here, I can make a copy of me on Gemini. Nothing changed."
     )
     trace.queue(reply())
     assert await check(_switch_prompt(preview), "requester") == str(refused.value)
@@ -1184,11 +1184,12 @@ async def test_a_switch_that_lands_before_the_card_is_posted_says_who_won(owned_
     with pytest.raises(CardRefusal) as refused:
         await prepare(_switch_prompt(preview))
     assert str(refused.value) == (
-        "Someone just switched Researcher; it's now on OpenAI. Ask again if you still want Gemini."
+        "Someone just switched Researcher; it's now on OpenAI. "
+        "Ask again if you still want Gemini. Nothing changed."
     )
 
 
-async def test_a_refusal_worded_for_the_person_reaches_the_model_as_is():
+async def test_a_refusal_worded_for_the_person_reaches_the_model_with_do_not_retry():
     from unittest.mock import AsyncMock
 
     from daimon.core.confirmation import CardRefusal
@@ -1208,7 +1209,9 @@ async def test_a_refusal_worded_for_the_person_reaches_the_model_as_is():
     )
     assert isinstance(posture, PolicyApproval)
     result = await posture.decide(_call())
-    assert result.allow is False and result.deny_message == said
+    # The person's words, then one instruction for the model only.
+    assert result.allow is False
+    assert result.deny_message == f"{said} Nothing changed. Do not retry it."
 
 
 async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_preview):
