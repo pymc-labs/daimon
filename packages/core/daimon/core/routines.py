@@ -1,10 +1,17 @@
-"""Rules the chat `routines` panels share: status glyph, label, order and who may act. Pure."""
+"""Rules the chat `routines` panels share: status glyph, label, order and who may act.
+
+Pure, apart from `channel_agent`, which reads the agent a channel answers with.
+"""
 
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
+from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.scoped_config_read import resolve
+from sqlalchemy.ext.asyncio import AsyncSession
 
 PANEL_CAP = 25
 
@@ -47,3 +54,30 @@ def can_manage_routine(row: RoutineRow, *, user_id: str | None, is_admin: bool) 
     ownerless routine is admin-only.
     """
     return is_admin or (user_id is not None and row.created_by_user_id == user_id)
+
+
+def may_schedule_agent(
+    agent_name: str, *, is_admin: bool, talking_to: bool = False, answers_here: str | None = None
+) -> bool:
+    """Who may make a routine for `agent_name`, the same in chat and on every panel.
+
+    A routine runs as its agent, with that agent's repository, keys,
+    connectors and memory, so a member may schedule only the agent they are
+    talking to (`talking_to`) or the one the routine's channel answers with
+    (`answers_here`, from `channel_agent`). Any agent is an admin's call.
+    """
+    return is_admin or talking_to or (answers_here is not None and answers_here == agent_name)
+
+
+async def channel_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str | None,
+    default: DeploymentDefault,
+) -> str | None:
+    """The agent `channel_id` answers with (the workspace default without one)."""
+    config = await resolve(
+        session, context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id), default=default
+    )
+    return config.agent_name

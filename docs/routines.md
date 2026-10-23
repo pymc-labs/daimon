@@ -10,11 +10,13 @@ the agent's baseline repository grants.
 A routine may name a **destination**: a channel or a thread. With one, the run
 is told where its result goes, and if the agent does not post there itself,
 Daimon posts its full final reply there after the run (see
-[Delivery](#delivery)). Without one — every routine created before this
-existed, and any created without it — nothing is delivered anywhere: the
-result is only recorded on the row, and if it should land in a channel the
-prompt has to tell the agent to call `send_message` itself (see
-[mcp-tools.md](mcp-tools.md#channels)). Session output files, which an
+[Delivery](#delivery)). A routine asked for in a conversation and naming no
+destination gets that conversation as its destination: the thread it was asked
+in (see [Creating one](#creating-one)). Without one — a routine made in a
+private DM, by the Slack or Teams panel, or by a caller with no conversation —
+nothing is delivered anywhere: the result is only recorded on the row, and if
+it should land in a channel the prompt has to tell the agent to call
+`send_message` itself (see [mcp-tools.md](mcp-tools.md#channels)). Session output files, which an
 interactive Slack turn uploads to the thread, are **not** swept for a routine
 either way; [slack.md](slack.md) says so, and the code agrees: the headless
 path installs a no-op lifecycle with nothing to render to.
@@ -73,12 +75,26 @@ to send a message to continue. They never fall back to Anthropic resolution.
 
 ## Creating one
 
+A `create_routine` call with no destination and a live `origin_context_id`
+(the turn it was asked in) defaults its destination to that conversation:
+on Discord the thread (or the channel, for a turn outside a thread), on Slack
+`<channel>:<thread ts>`, on Teams the channel thread
+`<channel>;messageid=<root>`. The defaulted destination goes through every
+check a named one does — the caller must be able to post there, the access
+policy, the agent's pin and the agent scope rule below — and if it fails the
+call is refused, asking for a channel or thread to post to, rather than saved
+record-only. A private DM (a `dm:` scope, a Slack IM, a Teams personal or
+group chat) has no destination a routine can post to, so one made there is
+still only recorded. To keep a routine made in a channel record-only, clear
+its destination afterwards with `update_routine(clear_destination=true)`.
+
 Operators can opt into requiring a destination for the MCP `create_routine`
-tool with `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`. A call without both
-destination fields then receives a warning that nothing was created, before
-agent lookup or saving a routine. The default is `false`, preserving
-record-only creation. Existing routines and `update_routine`, including
-clearing a destination, are unaffected.
+tool with `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`. A call that ends up
+without one (it named none and had no conversation to default to) then
+receives a warning that nothing was created, before agent lookup or saving a
+routine. The default is `false`, preserving record-only creation for those
+calls. Existing routines and `update_routine`, including clearing a
+destination, are unaffected.
 
 Five MCP tools — `create_routine`, `list_routines`, `get_routine`,
 `update_routine`, `delete_routine` — are registered by
@@ -126,11 +142,17 @@ The platform surfaces differ, and the difference is deliberate:
   ("every weekday at 9am, post the sales numbers"), and labels the schedule
   field "Schedule (advanced: cron, like 0 9 * * 1-5)". The panel rows and the
   confirmation show the schedule in words (`daimon.core.cron_words`).
-- **Teams** `routines` (1:1 chat) matches Slack: admins create through a
+- **Teams** `routines` (1:1 chat) matches Slack: it creates through a
   dialog, and the panel writes the row the same way
   (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). Its form
   and schedule words read the same as Slack's. The shared rules (glyph, label,
-  ordering, admin-or-creator) live in `daimon.core.routines`.
+  ordering, admin-or-creator, and `may_schedule_agent`, who may schedule which
+  agent) live in `daimon.core.routines`. Both panels apply the same rule as
+  `create_routine` in chat: a member may create a routine for the agent the
+  panel's channel answers with (on Teams, the 1:1 chat's, which is the
+  workspace default agent), and its agent picker lists only that agent; an
+  admin may pick any agent. The submission is checked again before the row
+  is written.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
@@ -384,7 +406,7 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 
 | Action | MCP | Discord | Slack and Teams |
 | --- | --- | --- | --- |
-| create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
+| create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | any member, for the agent the panel's channel answers with; any agent for an admin |
 | list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
 | pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
@@ -447,9 +469,17 @@ The middle line says what failed in plain words, never the raw error, by
 the `TerminationReason` the scheduler records where it catches the failure: a
 model request that failed for good (`UPSTREAM`), a run that took too long
 (`CEILING`), a used-up monthly cap, or otherwise "Something went wrong while
-it was running." A depleted balance or used-up channel budget says it in the
-turn refusal's words (`daimon.core.turn.notices`, naming the platform's
-billing command), then that it will try again. The notice is queued only
+it was running." Only these say it will try again at the next scheduled time.
+
+A refusal no later run gets past by itself says it in the turn refusal's words
+(`daimon.core.turn.notices`, naming the platform's commands), then
+`It will fail the same way at every scheduled time until that's fixed.`: a
+depleted balance, a channel that isn't set up or whose setup is out of date
+(`MISSING_CONFIG`, `RESOLVER_MISS`), any admission refusal raised during the
+run (`AdmissionDenied`, worded by its own reason and cause, so a provider
+that isn't turned on names the provider and the chat words that switch it),
+and the protected, pinned, isolated or otherwise denied admission reasons. A
+used-up channel budget ends `It won't run until the budget has room again.` The notice is queued only
 while `last_error` is still null, so a routine that keeps failing posts once
 and stays quiet until a run succeeds; the panels still show every failure.
 It never replaces a post that is pending or claimed, so an undelivered result

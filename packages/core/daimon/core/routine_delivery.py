@@ -61,7 +61,12 @@ from daimon.core.stores.routines import (
     routine_platform,
     settle_routine_delivery,
 )
-from daimon.core.turn.notices import RefusalNouns, render_termination_notice
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.notices import (
+    RefusalNouns,
+    admission_refusal_text,
+    render_termination_notice,
+)
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_origin import words_sentence
@@ -292,10 +297,11 @@ def destination_shape_error(platform: str, kind: str, destination_id: str) -> st
 
 
 _NEXT_RUN = "It will try again at its next scheduled time."
+_UNTIL_FIXED = "It will fail the same way at every scheduled time until that's fixed."
 
 #: What a failed run says, by why it ended: what went wrong, then what
-#: happens next. A credit or channel budget refusal says it in the turn
-#: notice's words instead (`render_termination_notice`), then `_NEXT_RUN`.
+#: happens next. Only these, and any reason not named below, can pass on
+#: their own, so only they say it will try again.
 _ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
     TerminationReason.CEILING: ("It took too long, so Daimon stopped it.", _NEXT_RUN),
     TerminationReason.UPSTREAM: ("The request to the AI model failed.", _NEXT_RUN),
@@ -309,29 +315,51 @@ _ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
     ),
 }
 _OTHER_FAILURE = ("Something went wrong while it was running.", _NEXT_RUN)
-_TURN_NOTICE_FAILURES = (
-    TerminationReason.ADMISSION_BALANCE_DEPLETED,
-    TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
-)
+#: A refusal no later run gets past by itself (a setting, a provider or the
+#: access policy has to change) says it in the turn refusal's words, then
+#: `_UNTIL_FIXED` (or, for a used-up channel budget, when it has room again).
+_REFUSAL_FAILURES: Final[dict[TerminationReason, str]] = {
+    TerminationReason.ADMISSION_BALANCE_DEPLETED: _UNTIL_FIXED,
+    TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED: (
+        "It won't run until the budget has room again."
+    ),
+    TerminationReason.ADMISSION_CHANNEL_PROTECTED: _UNTIL_FIXED,
+    TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE: _UNTIL_FIXED,
+    TerminationReason.ADMISSION_CHANNEL_ISOLATED: _UNTIL_FIXED,
+    TerminationReason.ADMISSION_DENIED: _UNTIL_FIXED,
+    TerminationReason.MISSING_CONFIG: _UNTIL_FIXED,
+    TerminationReason.RESOLVER_MISS: _UNTIL_FIXED,
+}
 
 
-def failure_notice_text(reason: TerminationReason, *, platform: str) -> str:
+def failure_notice_text(
+    reason: TerminationReason, *, platform: str, error: BaseException | None = None
+) -> str:
     """The notice a failed run posts to its destination.
 
     Plain words by why the run ended: the raw error never reaches the
     channel, since it can quote a provider message or a file name the readers
     there should not see. `platform` names its setup and billing commands.
+    `error` is what the run raised, if anything: an admission refusal names
+    its own cause (a provider that isn't turned on, say) as a turn's would.
     """
     nouns = RefusalNouns.for_caller(platform)
-    if reason in _TURN_NOTICE_FAILURES and (
-        notice := render_termination_notice(
+    refused = isinstance(error, AdmissionDenied) and reason not in _ROUTINE_FAILURES
+    if (then := _REFUSAL_FAILURES.get(reason)) is not None or refused:
+        then = then or _UNTIL_FIXED
+        if isinstance(error, AdmissionDenied):
+            refusal = admission_refusal_text(
+                error.reason, nouns, cause=error.cause, provider=error.provider
+            )
+            return f"{refusal}\n\n{then}"
+        if notice := render_termination_notice(
             reason,
             setup_command=nouns.setup,
             billing_command=nouns.billing,
             setup_verb=nouns.verb,
-        )
-    ):
-        return f"{notice.plain_text()}\n\n{_NEXT_RUN}"
+            admin=nouns.who,
+        ):
+            return f"{notice.title}\n\n{notice.next_step}\n\n{then}"
     return "\n\n".join(_ROUTINE_FAILURES.get(reason, _OTHER_FAILURE))
 
 
@@ -341,18 +369,20 @@ async def record_failure(
     *,
     error: str,
     reason: TerminationReason | None,
+    cause: BaseException | None = None,
 ) -> None:
     """Record a failed run and, for the first failure in a row, queue a notice.
 
     `reason` is why the run ended, classified where it was caught; `None`
-    says nothing to the destination (a deploy cutting the run short). The
+    says nothing to the destination (a deploy cutting the run short).
+    `cause` is the exception the run raised, when there was one. The
     notice goes through the same outbox as a result, so the chat adapter
     posts it with every check a result gets. One per failing streak: a routine
     that keeps failing stays quiet until a run succeeds (`queue_failure_notice`).
     """
     if reason is not None:
         notice = failure_notice_text(
-            reason, platform=await routine_platform(session, routine_id) or ""
+            reason, platform=await routine_platform(session, routine_id) or "", error=cause
         )
         if await queue_failure_notice(session, routine_id, notice=notice):
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))

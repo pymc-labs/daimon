@@ -26,6 +26,7 @@ from daimon.core.stores.routines import (
     get_routine,
     record_result,
 )
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.testing.factories import make_tenant
@@ -135,20 +136,20 @@ async def _deliver(sm: async_sessionmaker[AsyncSession]) -> list[str]:
             TerminationReason.ADMISSION_BALANCE_DEPLETED,
             "slack",
             "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
-            "\n\nIt will try again at its next scheduled time.",
+            "\n\nIt will fail the same way at every scheduled time until that's fixed.",
         ),
         (
             TerminationReason.ADMISSION_BALANCE_DEPLETED,
             "teams",
             "Your team's Daimon credit has run out.\n\n"
             "An admin can top up with `billing` in a 1:1 chat with me."
-            "\n\nIt will try again at its next scheduled time.",
+            "\n\nIt will fail the same way at every scheduled time until that's fixed.",
         ),
         (
             TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
             "discord",
             "This channel's budget is used up.\n\nAn admin can raise it."
-            "\n\nIt will try again at its next scheduled time.",
+            "\n\nIt won't run until the budget has room again.",
         ),
         (
             TerminationReason.ADMISSION_CAP_EXCEEDED,
@@ -168,6 +169,18 @@ async def _deliver(sm: async_sessionmaker[AsyncSession]) -> list[str]:
             "Something went wrong while it was running.\n\n"
             "It will try again at its next scheduled time.",
         ),
+        (
+            TerminationReason.MISSING_CONFIG,
+            "discord",
+            "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
+            "\n\nIt will fail the same way at every scheduled time until that's fixed.",
+        ),
+        (
+            TerminationReason.ADMISSION_CHANNEL_ISOLATED,
+            "slack",
+            "This channel only uses its own agents.\n\nAsk an admin to pick one."
+            "\n\nIt will fail the same way at every scheduled time until that's fixed.",
+        ),
     ],
 )
 def test_notice_says_what_failed_in_plain_words(
@@ -179,6 +192,36 @@ def test_notice_says_what_failed_in_plain_words(
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
+        (
+            AdmissionDenied(reason="provider_hold_cap_reached"),
+            "This model's prepaid spending hold is used up.\n\nAsk an admin to release or "
+            "raise it.\n\nIt will fail the same way at every scheduled time until that's fixed.",
+        ),
+        (
+            AdmissionDenied(
+                reason="backend_unsupported", cause="provider_not_allowed", provider="gemini"
+            ),
+            "Gemini isn't turned on for this server.",
+        ),
+    ],
+)
+def test_a_refusal_no_later_run_gets_past_names_its_cause_and_says_so(
+    error: AdmissionDenied, expected: str
+) -> None:
+    reason = termination_reason(error)
+    text = failure_notice_text(reason, platform="discord", error=error)
+    assert text.startswith(expected), "the turn refusal's own words"
+    assert "next scheduled time" not in text, "it does not promise a retry that fails again"
+    assert text.endswith("until that's fixed.")
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            AdmissionDenied(reason="provider_hold_cap_reached"),
+            "This model's prepaid spending hold is used up.",
+        ),
         (TurnError(kind="upstream", message="The PDF specified was not valid"), _MODEL_NOTICE),
         (
             anthropic.APIConnectionError(request=httpx.Request("POST", "https://x")),

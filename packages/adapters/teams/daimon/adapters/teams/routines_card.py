@@ -119,9 +119,10 @@ def panel_card(
     if hidden:
         more = f"+{hidden} more not shown."
         body.append(TextBlock(text=more, is_subtle=True, size="Small", wrap=True))
-    actions: list[Action] = [_button("Refresh", "refresh")]
-    if is_admin:
-        actions.append(SubmitAction(title="New routine", data=OpenDialogData(CREATE_DIALOG)))
+    actions: list[Action] = [
+        _button("Refresh", "refresh"),
+        SubmitAction(title="New routine", data=OpenDialogData(CREATE_DIALOG)),
+    ]
     body.append(ActionSet(actions=actions))
     return AdaptiveCard(body=body, fallback_text="Routines")
 

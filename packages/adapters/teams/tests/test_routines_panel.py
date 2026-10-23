@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from daimon.adapters.teams.http_service import TeamsHttpService
-from daimon.adapters.teams.routines_panel import ADMIN_ONLY, NOT_OWNER
+from daimon.adapters.teams.routines_panel import NOT_HERE, NOT_OWNER
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
@@ -29,7 +29,6 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
-    notice_text,
     post_activity,
     running_service,
 )
@@ -94,7 +93,7 @@ async def test_a_member_sees_only_their_own_routines(
     card = json.dumps(teams_api_fake.activity_requests[-1].body)
     assert "my standup" in card and str(mine.id) in card, "the creator manages their own"
     assert "their digest" not in card, "another person's routine is not listed"
-    assert "New routine" not in card, "only an admin is offered create"
+    assert "New routine" in card, "a member may create one too, as in chat"
 
 
 async def test_an_admin_sees_and_manages_every_routine(
@@ -153,19 +152,51 @@ async def test_an_admin_deletes_any_routine_after_confirming(
     assert "Routine deleted" in json.dumps(done), "the panel returns with a notice"
 
 
-async def test_create_dialog_is_admin_only(
+def _agents_two(request: httpx.Request) -> httpx.Response:
+    if request.method == "GET" and request.url.path == "/v1/agents":
+        agents = [ma_agent(tenant_id=TENANT, name=name) for name in ("daimon", "acme-project")]
+        return list_response([agent.model_dump(mode="json") for agent in agents])
+    return httpx.Response(404, json={"error": f"unhandled {request.url.path}"})
+
+
+async def test_create_follows_the_chat_rule_for_who_may_schedule_which_agent(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
+    """As in chat: a member schedules the agent this chat answers with, an admin any."""
     fetch = {"data": {"dialog_id": "routine_create", "msteams": {"type": "task/fetch"}}}
-    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as service:
+    form = {"action": "routine_create", "timezone": "UTC", "message": "standup"}
+    form |= {"cron": "0 9 * * *"}
+    runtime = build_teams_runtime(
+        db_session_factory, anthropic=build_fake_anthropic(_agents_two), admins=(AAD_OBJECT_ID,)
+    )
+    async with running_service(runtime, teams_api_fake) as service:
         admin = await post_activity(service, make_invoke("task/fetch", fetch))
-        user = await post_activity(
+        member = await post_activity(
             service, make_invoke("task/fetch", fetch, user=OTHER_AAD_OBJECT_ID)
+        )
+        refused = await post_activity(
+            service,
+            make_invoke(
+                "task/submit", {"data": form | {"agent": "acme-project"}}, user=OTHER_AAD_OBJECT_ID
+            ),
+        )
+        created = await post_activity(
+            service,
+            make_invoke(
+                "task/submit", {"data": form | {"agent": "daimon"}}, user=OTHER_AAD_OBJECT_ID
+            ),
         )
 
     assert admin["task"]["type"] == "continue", "an admin gets the form"
-    assert '"daimon"' in json.dumps(admin), "the agent picker lists the tenant's agents"
-    assert notice_text(user) == ADMIN_ONLY, "a refusal opens as a one-line dialog"
+    assert '"acme-project"' in json.dumps(admin), "an admin may pick any agent"
+    assert member["task"]["type"] == "continue", "a member gets the form too"
+    assert '"daimon"' in json.dumps(member)
+    assert '"acme-project"' not in json.dumps(member), "only the agent that answers here"
+    assert refused["task"]["value"] == NOT_HERE.format(agent="acme-project")
+    assert "Routine created for daimon" in created["task"]["value"]
+    async with db_session_factory() as session:
+        [row] = await list_routines_for_tenant(session, tenant_id=TENANT)
+    assert (row.created_by_user_id, row.agent_name) == (OTHER_AAD_OBJECT_ID, "daimon")
 
 
 async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(

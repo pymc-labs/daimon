@@ -2,7 +2,8 @@
 
 Mirrors Slack's `/routines` panel and its rules: a member sees only the
 routines they created, an admin sees all; only an admin or the creator may
-pause, resume, read the last output or delete one; only an admin may create.
+pause, resume, read the last output or delete one; a member may create one
+for the agent this chat answers with, an admin for any agent, as in chat.
 Every click re-verifies the clicker and re-reads the row, so a stale card
 grants nothing.
 """
@@ -41,7 +42,12 @@ from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.routines import can_manage_routine, panel_rows
+from daimon.core.routines import (
+    can_manage_routine,
+    channel_agent,
+    may_schedule_agent,
+    panel_rows,
+)
 from daimon.core.stores import routines as store
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.api import (
@@ -58,7 +64,8 @@ log = structlog.get_logger()
 
 GONE = "This routine no longer exists."
 NOT_OWNER = "Only the routine's creator or an admin can do that."
-ADMIN_ONLY = "Only an admin can create routines."
+NOT_HERE = "{agent} doesn't answer here, so only an admin can schedule it."
+NO_AGENT = "No agent answers here, so there's none you can schedule.\n\nAsk an admin."
 NEW_ROUTINE = "New routine"
 _EVENT = "teams.routines.failed"
 
@@ -153,34 +160,64 @@ class RoutinesPanel:
         )
         return replace_card(card)
 
+    async def _schedulable(self, actor: Actor) -> list[str]:
+        """The agents `actor` may schedule here, by the rule chat uses."""
+        agents = await list_agents_by_tenant(self._runtime.anthropic, tenant_id=actor.tenant_id)
+        names = sorted(
+            name for agent in agents if (name := agent.metadata.get(MA_METADATA_KEY_NAME))
+        )
+        if actor.is_admin:
+            return names
+        here = await self._answers_here(actor)
+        return [
+            name for name in names if may_schedule_agent(name, is_admin=False, answers_here=here)
+        ]
+
+    async def _answers_here(self, actor: Actor) -> str | None:
+        async with self._runtime.sessionmaker() as session:
+            return await channel_agent(
+                session,
+                tenant_id=actor.tenant_id,
+                channel_id=None,
+                default=self._runtime.deployment_default,
+            )
+
     async def _form(
         self, actor: Actor, values: dict[str, str], error: str | None = None
     ) -> TaskModuleInvokeResponse:
-        agents = await list_agents_by_tenant(self._runtime.anthropic, tenant_id=actor.tenant_id)
-        names = (agent.metadata.get(MA_METADATA_KEY_NAME) for agent in agents)
-        form = create_form(sorted(name for name in names if name), values, error)
+        form = create_form(await self._schedulable(actor), values, error)
         return dialog(NEW_ROUTINE, form)
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
-        if actor is None or not actor.is_admin:
-            return dialog_notice(NEW_ROUTINE, DENIED if actor is None else ADMIN_ONLY)
+        if actor is None:
+            return dialog_notice(NEW_ROUTINE, DENIED)
+        if not await self._schedulable(actor):
+            return dialog_notice(NEW_ROUTINE, NO_AGENT)
         return await self._form(actor, {})
 
     async def _submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, ctx.activity)
-        if actor is None or not actor.is_admin:
-            return dialog_message(DENIED if actor is None else ADMIN_ONLY)
+        if actor is None:
+            return dialog_message(DENIED)
         values = form_values(ctx.activity.value.data)
+        if (
+            values["agent"]
+            and not actor.is_admin
+            and not may_schedule_agent(
+                values["agent"], is_admin=False, answers_here=await self._answers_here(actor)
+            )
+        ):
+            return dialog_message(NOT_HERE.format(agent=values["agent"]))
         error = await self._create(actor, values)
         if error is not None:
             return await self._form(actor, values, error)
         created = created_notice(values["agent"], values["cron"], values["timezone"])
         if ctx.activity.reply_to_id:
             panel = await self._panel(
-                actor.tenant_id, user_id=actor.user_id, is_admin=True, notice=created
+                actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin, notice=created
             )
             await edit_origin_card(ctx, panel)
         return dialog_message(created)

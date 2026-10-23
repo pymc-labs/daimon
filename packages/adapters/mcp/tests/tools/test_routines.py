@@ -1332,20 +1332,24 @@ async def test_create_routine_refuses_a_private_slack_channel_the_caller_is_not_
         )
 
 
-async def test_create_routine_without_a_destination_budgets_the_turns_channel(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
+async def _origin(
     db_session: AsyncSession,
-) -> None:
-    tenant = await make_tenant(db_session, platform="discord")
+    *,
+    platform: str,
+    channel: str,
+    thread: str,
+) -> tuple[uuid.UUID, uuid.UUID, str]:
+    """A tenant, an account and the id of its live turn origin in `channel` / `thread`."""
+    tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
     account = await make_account(db_session, tenant=tenant)
     now = datetime.now(UTC)
     origin = await create_origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
-        platform="discord",
-        parent_channel_id="444",
-        thread_id="999",
+        platform=platform,
+        parent_channel_id=channel,
+        thread_id=thread,
         responder_ma_agent_id="ag_resolved",
         responder_name="daimon",
         configuration_target_ma_agent_id=None,
@@ -1357,29 +1361,160 @@ async def test_create_routine_without_a_destination_budgets_the_turns_channel(
         now=now,
     )
     await db_session.commit()
+    return tenant.id, account.id, str(origin.id)
+
+
+async def _create_here(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    origin_context_id: str,
+    *,
+    platform: str = "discord",
+    agents: tuple[tuple[str, str], ...] = (("ag_resolved", "daimon"),),
+    agent_name: str = "daimon",
+    talking_to: str | None = "ag_resolved",
+) -> RoutineRow:
     runtime = _runtime(
         committing_sessionmaker,
         client=_ma_client_with_agents(
-            [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+            [_ma_agent(agent_id=aid, name=name, tenant_id=tenant_id) for aid, name in agents]
         ),
     )
-    auth = dataclasses.replace(_auth_identity(tenant_id=tenant.id), account_id=account.id)
+    auth = dataclasses.replace(
+        _auth_identity(
+            tenant_id=tenant_id,
+            platform=platform,
+            external_id=_GUILD if platform == "discord" else "T_TEST",
+            platform_user_id="111" if platform == "discord" else "u_test",
+            talking_to=talking_to,
+        ),
+        account_id=account_id,
+    )
+    return await _create_routine_impl(
+        runtime,
+        auth,
+        agent_name=agent_name,
+        cron_expr="0 9 * * 1",
+        timezone="UTC",
+        trigger_message="weekly summary",
+        origin_context_id=origin_context_id,
+    )
 
-    async def create(origin_context_id: str) -> RoutineRow:
-        return await _create_routine_impl(
-            runtime,
-            auth,
-            agent_name="daimon",
-            cron_expr="0 9 * * 1",
-            timezone="UTC",
-            trigger_message="weekly summary",
-            origin_context_id=origin_context_id,
-        )
 
-    here = await create(str(origin.id))
+async def test_a_routine_made_in_a_conversation_without_a_destination_posts_back_there(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _text_channel()
+    _discord_channels(
+        monkeypatch, {999: _private_thread(parent=parent, caller_is_member=True), 444: parent}
+    )
+    tenant_id, account_id, origin_id = await _origin(
+        db_session, platform="discord", channel="444", thread="999"
+    )
+
+    here = await _create_here(committing_sessionmaker, tenant_id, account_id, origin_id)
+    assert (here.destination_kind, here.destination_id) == ("thread", "999"), (
+        "it posts in the thread it was asked in"
+    )
     assert here.channel_id == "444", "spend is budgeted against the channel it was made in"
-    unknown = await create(str(uuid.uuid4()))
+
+    unknown = await _create_here(committing_sessionmaker, tenant_id, account_id, str(uuid.uuid4()))
+    assert unknown.destination_kind is None, "with no conversation there is nowhere to post"
     assert unknown.channel_id is None, "without a live origin the routine is unbudgeted"
+
+
+async def test_a_routine_made_in_a_slack_thread_posts_back_to_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _slack_client(monkeypatch)
+    tenant_id, account_id, origin_id = await _origin(
+        db_session, platform="slack", channel="C0123ABC", thread="1717.5"
+    )
+    row = await _create_here(
+        committing_sessionmaker, tenant_id, account_id, origin_id, platform="slack"
+    )
+    assert (row.destination_kind, row.destination_id) == ("thread", "C0123ABC:1717.5")
+
+
+async def test_a_routine_made_in_a_private_dm_is_only_recorded(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+) -> None:
+    """A routine cannot post into a DM, so one made there keeps the record-only path."""
+    tenant_id, account_id, origin_id = await _origin(
+        db_session, platform="slack", channel="C0123ABC", thread="dm:" + str(uuid.uuid4())
+    )
+    row = await _create_here(
+        committing_sessionmaker, tenant_id, account_id, origin_id, platform="slack"
+    )
+    assert (row.destination_kind, row.destination_id) == (None, None)
+
+
+async def test_a_conversation_a_routine_cannot_post_in_is_refused_with_the_fix(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _text_channel()
+    _discord_channels(
+        monkeypatch, {999: _private_thread(parent=parent, caller_is_member=False), 444: parent}
+    )
+    tenant_id, account_id, origin_id = await _origin(
+        db_session, platform="discord", channel="444", thread="999"
+    )
+    with pytest.raises(ToolError, match="would post here.*Name a channel or thread"):
+        await _create_here(committing_sessionmaker, tenant_id, account_id, origin_id)
+
+
+async def test_the_agent_scope_check_applies_to_a_defaulted_destination(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member may schedule the agent the conversation's channel answers with, and
+    no other, exactly as if they had named that channel."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    _slack_client(monkeypatch)
+    tenant_id, account_id, origin_id = await _origin(
+        db_session, platform="slack", channel="C0123ABC", thread="1717.5"
+    )
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant_id, channel_id="C0123ABC"),
+        tenant_id=tenant_id,
+        agent_name="channel-agent",
+        mode="agent",
+    )
+    await db_session.commit()
+    agents = (("ag_resolved", "daimon"), ("ag_channel", "channel-agent"), ("ag_other", "other"))
+
+    row = await _create_here(
+        committing_sessionmaker,
+        tenant_id,
+        account_id,
+        origin_id,
+        platform="slack",
+        agents=agents,
+        agent_name="channel-agent",
+    )
+    assert row.agent_name == "channel-agent", "the agent the conversation's channel answers with"
+    with pytest.raises(ToolError, match="only a workspace admin can schedule it"):
+        await _create_here(
+            committing_sessionmaker,
+            tenant_id,
+            account_id,
+            origin_id,
+            platform="slack",
+            agents=agents,
+            agent_name="other",
+        )
 
 
 async def test_create_routine_by_a_channel_bound_key_records_its_channel(
