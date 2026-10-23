@@ -1290,7 +1290,7 @@ async def test_a_bug_while_running_a_worker_is_recorded_as_a_setup_error(worker_
         markup=Decimal(1),
         preparation=preparation,
         pool=pool,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         reply = await FleetOrchestrator(ports).spawn(
