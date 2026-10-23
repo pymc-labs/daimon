@@ -442,6 +442,8 @@ async def _refresh_mapped(
     monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
     archive = unittest.mock.AsyncMock()
     anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(archive=archive)))
+    anthropic.with_options = unittest.mock.Mock(return_value=anthropic)
+    anthropic.with_middleware = unittest.mock.Mock(return_value=anthropic)
     await _refresh_github_app_sessions(
         anthropic,
         db_session_factory,
@@ -885,6 +887,8 @@ async def test_mcp_app_session_with_erased_requester_is_retired(
             vaults=SimpleNamespace(archive=archive_vault),
         )
     )
+    anthropic.with_options = unittest.mock.Mock(return_value=anthropic)
+    anthropic.with_middleware = unittest.mock.Mock(return_value=anthropic)
     await _refresh_github_app_sessions(
         anthropic,
         db_session_factory,
@@ -898,6 +902,7 @@ async def test_mcp_app_session_with_erased_requester_is_retired(
     )
     desired.assert_not_awaited()
     archive_session.assert_awaited_once_with("mcp-erased-requester")
+    anthropic.with_options.assert_called_once_with(max_retries=0)
     archive_vault.assert_awaited_once_with("mcp-vault")
     revoke.assert_awaited_once()
 

@@ -281,6 +281,8 @@ from daimon.core.turn.slots import (
 )
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
+    QUEUE_NOTICE,
+    HeldThreads,
     ThreadQueue,
     claim_dispatch,
     dispatch_and_drain,
@@ -428,7 +430,7 @@ class SlackApp:
     def __init__(self, *, runtime: SlackRuntime) -> None:
         self.runtime = with_budget_notifier(runtime)
         # Slack timestamps are unique only within a workspace conversation.
-        self._processing: set[tuple[str, str, str]] = set()
+        self._processing: HeldThreads[tuple[str, str, str]] = HeldThreads()
         self._pending: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         # Continuation dispatches skipped because the conversation was processing,
         # keyed by team, channel, and thread ts: re-run when it is released (see
@@ -1943,12 +1945,19 @@ class SlackApp:
             # Append before awaiting reactions_add so a Slack API error on the
             # reaction call does not drop the enqueued event.
             self._pending.setdefault(thread_key, []).append(event)
+            generation = self._processing.generation(thread_key)
+            notify = self._processing.should_notify(thread_key)
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
                     timestamp=event_ts,
                     name=_PENDING_REACTION,
                 )
+            if notify and self._processing.is_current(thread_key, generation):
+                with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+                    await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                        channel=channel, thread_ts=thread_id, text=QUEUE_NOTICE
+                    )
             return
 
         # (2) Per-tenant turn slot. Admission is one synchronous span (no await
@@ -2055,7 +2064,7 @@ class SlackApp:
 
     @property
     def _thread_queue(self) -> ThreadQueue[tuple[str, str, str], dict[str, Any]]:
-        return ThreadQueue(self._processing, self._pending)
+        return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
     async def _drain_pending_mentions(
         self,

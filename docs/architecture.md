@@ -110,7 +110,10 @@ The Discord process also reports Discord 429 retries by route and longest retry 
 A Discord mention gets a best-effort 👀 reaction before turn admission resolves
 its agent and environment. The reaction clears when the turn completes, fails
 or is cancelled. A queued follow-up uses ⌛ instead, cleared after its batch
-settles. A mention waiting for a turn slot also gets ⌛, cleared when the wait ends. An opening mention gets no reply in the parent channel while its thread
+settles. On Discord, Slack and Teams, a mention queued behind a turn older than
+three minutes also gets one short notice that its message runs next, at most
+once per active turn in that thread. Core owns the timing and deduplication.
+A mention waiting for a turn slot also gets ⌛, cleared when the wait ends. An opening mention gets no reply in the parent channel while its thread
 opens, and its existing acknowledgment covers naming and creation. A thread
 that cannot be opened gets one plain reply under the mention.
 

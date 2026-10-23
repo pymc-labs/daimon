@@ -52,7 +52,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import build_test_engine
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -2762,7 +2762,7 @@ async def _run_turn_behind_a_busy_lease(
     *,
     thread_id: str,
     cancel: asyncio.Event,
-    deadline: datetime | None,
+    ceiling_after_s: float | None,
     stop_after_s: float | None = None,
 ) -> _QueuedTurn:
     """Run user B's mux turn on a thread whose lease user A's turn always holds.
@@ -2856,7 +2856,12 @@ async def _run_turn_behind_a_busy_lease(
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=0.001,
-            deadline=deadline,
+            # Fixture setup must not consume the lease-wait deadline.
+            deadline=(
+                datetime.now(UTC) + timedelta(seconds=ceiling_after_s)
+                if ceiling_after_s is not None
+                else None
+            ),
         )
         async with sessionmaker() as s:
             rows = list(
@@ -2924,7 +2929,7 @@ async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring
         monkeypatch,
         thread_id="thread-queued-ceiling",
         cancel=asyncio.Event(),
-        deadline=datetime.now(UTC) + timedelta(seconds=0.5),
+        ceiling_after_s=2.0,
     )
     waited = asyncio.get_running_loop().time() - started
     outcome, rows, requests = queued.outcome, queued.rows, queued.requests
@@ -2953,7 +2958,7 @@ async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
         monkeypatch,
         thread_id="thread-queued-stop",
         cancel=asyncio.Event(),
-        deadline=None,
+        ceiling_after_s=None,
         stop_after_s=0.2,
     )
 
@@ -4910,3 +4915,79 @@ async def test_job_completion_wake_only_reads_job_and_restores_parent_tools(
         assert state["agent"]["mcp_servers"] == original_servers
     finally:
         await deps.anthropic.close()
+
+
+async def test_attended_accepted_post_with_lost_ack_is_replayed_without_resend(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An ordinary attended legacy turn has no durable send claim to disable retries."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-1",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+    from .conftest import make_agent_message
+
+    answer = make_agent_message(event_id="accepted_answer", text="Accepted exactly once")
+    done = make_status_idle(event_id="accepted_done")
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        events_by_session={
+            "sess_1": [answer.model_dump(mode="json"), done.model_dump(mode="json")]
+        },
+    )
+    accepted_posts: list[httpx.Request] = []
+
+    def accept_then_lose_ack(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions/sess_1/events":
+            accepted_posts.append(request)
+            raise httpx.ReadTimeout(
+                "provider accepted input; acknowledgement lost", request=request
+            )
+        return router.dispatch(request)
+
+    client = build_fake_anthropic(accept_then_lose_ack).with_options(max_retries=8)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), anthropic=client, turn_path="legacy"
+    )
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+    assert len(accepted_posts) == 1, "lost acknowledgement must never repeat the accepted POST"
+    assert accepted_posts[0].extensions["timeout"]["read"] == 600.0
+    assert client.max_retries == 8, "turn mutation policy must not change the shared client"
+    assert not outcome.recovered and outcome.state.error is None
+    assert outcome.state.content == [TextBlock(kind="text", text="Accepted exactly once")]

@@ -94,7 +94,9 @@ def _make_runtime(
     discord_settings.bot_display_name = "daimon"
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
-    anthropic = AsyncMock()
+    anthropic = AsyncMock(max_retries=8)
+    anthropic.with_options = MagicMock(return_value=anthropic)
+    anthropic.with_middleware = MagicMock(return_value=anthropic)
     anthropic.beta.agents.retrieve = AsyncMock(return_value=ma_agent())
     anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     # Dead-session recovery's transcript rescue (`_replay_previous_session`)

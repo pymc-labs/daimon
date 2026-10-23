@@ -1883,7 +1883,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         await asyncio.Event().wait()
 
     with (
-        patch.object(deps.anthropic.beta.sessions.events, "send", stalled),
+        patch("mux.drivers.anthropic.transport.LegacyTurnTransport.send", stalled),
         patch.object(core_direct_messages, "_SHUTDOWN_INTERRUPT_TIMEOUT_S", 0.05),
     ):
         await asyncio.wait_for(core_direct_messages._settle_shutdown_cancelled_dm(deps, row), 2)
