@@ -208,10 +208,29 @@ def test_cheap_worker_model_is_canonical_and_admitted_before_compilation(
     assert worker.spec.model == ModelRef(provider="gemini", id=revision.model)
     deployment = plan.worker_deployment(worker, revision)
     assert deployment.agent == worker.spec
-    assert deployment.max_total_tokens == WORKER_MAX_TOTAL_TOKENS == 4096
+    assert deployment.max_total_tokens == WORKER_MAX_TOTAL_TOKENS == 65_536
     assert compile_agent(deployment.agent, max_total_tokens=deployment.max_total_tokens)[
         "agent_config"
-    ] == {"type": "antigravity", "model": "gemini-3.5-flash-lite", "max_total_tokens": 4096}
+    ] == {"type": "antigravity", "model": "gemini-3.5-flash-lite", "max_total_tokens": 65_536}
+
+
+def test_the_unbounded_worker_token_cap_fits_the_worker_hold() -> None:
+    """10 min of work needs more than 4096 tokens; 65,536 still fits the $0.49 hold.
+
+    Every token of an unbounded turn priced at the highest tariff of any model the
+    unbounded path runs (Flash and Flash-Lite) is the worst case.
+    """
+    from daimon.core.turn.runtime_defaults import (
+        _GEMINI_WORKER_HOLD,  # pyright: ignore[reportPrivateUsage]
+    )
+    from mux.drivers.gemini import FLASH_PRIMARY
+    from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+
+    prices = pricing.provider_prices(INLINE_REUSE.profile_id)
+    for model in (FLASH_PRIMARY, WORKER_MODEL):
+        price = prices[(INLINE_REUSE.provider, model)]
+        worst = WORKER_MAX_TOTAL_TOKENS * max(price.input, price.output) / Decimal(10**6)
+        assert worst <= Decimal(_GEMINI_WORKER_HOLD), (model, worst)
 
 
 @pytest.mark.parametrize("worker_target", ("argon",), indirect=True)
@@ -221,7 +240,7 @@ def test_argon_worker_compiles_only_on_the_bounded_envelope(
     plan, revision, worker = worker_target
     check_backend(revision, worker=True)
     assert worker.backend.model == revision.model == "gemini-4-argon"
-    # Unbounded (the 4096-token cap path is Flash's), Argon is refused.
+    # Unbounded (the total-token cap path is Flash's), Argon is refused.
     with pytest.raises(AdmissionDenied):
         plan.worker_deployment(worker, revision)
     # A bounded envelope whose worst case at Argon's tariff fits the $0.05 hold:
@@ -1407,7 +1426,7 @@ async def test_worker_materialization_runs_the_real_headless_driver(
     assert json.loads(inputs[0].content)["agent_config"] == {
         "type": "antigravity",
         "model": selected.worker.spec.model.id,
-        "max_total_tokens": 4096,
+        "max_total_tokens": 65_536,
     }
     operation = f"fleet:{worker.run_id}:spawn:{worker.ordinal}"
     store = selected.deps.state_store

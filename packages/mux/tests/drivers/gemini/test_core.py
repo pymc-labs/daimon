@@ -716,7 +716,7 @@ async def test_agent_worker_budget_is_in_the_owned_template_and_blocks_another_i
     assert transport.requests[0]["agent_config"] == {
         "type": "antigravity",
         "model": "gemini-3.5-flash-lite",
-        "max_total_tokens": 4096,
+        "max_total_tokens": 65_536,
     }
     assert transport.requests[0]["system_instruction"] == "Kept"
     assert transport.requests[0]["tools"] == []

@@ -1516,6 +1516,7 @@ async def test_explicit_gemini_worker_caps_must_fit_the_worker_budget(
 async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given(captured):
     from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused
     from daimon.core.neutral_resources import task_worker_spec
+    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS
 
     source, _, grant, _, policy, _ = captured
     flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
@@ -1553,9 +1554,21 @@ async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given
     )
     kept = owner._bounded_gemini(root, explicit, resolve, fill=True, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
     assert (kept.limits.max_input_tokens, kept.limits.max_output_tokens) == (262144, 65536)
-    # Without a fill, a prompt the unbounded 4096-token cap cannot hold is refused clearly.
+    # Without a fill, the real ~24k-character root prompt fits the unbounded cap...
+    assert owner._bounded_gemini(root, base, resolve, fill=False, trigger="Go.") is base  # pyright: ignore[reportPrivateUsage]
+    # ...and a prompt the cap cannot hold is refused clearly.
+    huge = "x" * (4 * WORKER_MAX_TOTAL_TOKENS)
+    huge_root = replace(root, spec=root.spec.model_copy(update={"system": huge}), base_system=huge)
+    huge_spec = task_worker_spec(huge_root, role="W4", task="Compare X and Y.", model=flash.id)
+    huge_base = resolve_worker_spec(
+        huge_root,
+        huge_spec,
+        policy=policy,
+        now=NOW,
+        limits=huge_root.limits.model_copy(update={"max_turns": 1}),
+    )
     with pytest.raises(FleetRefused, match="prompt_exceeds_worker_token_cap"):
-        owner._bounded_gemini(root, base, resolve, fill=False, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
+        owner._bounded_gemini(huge_root, huge_base, resolve, fill=False, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
     # Other providers are untouched.
     luna = resolver(task_worker_spec(root, role="W2", task="Compare.", model="gpt-6-luna"))
     other = luna(root.limits.model_copy(update={"max_turns": 1}))
