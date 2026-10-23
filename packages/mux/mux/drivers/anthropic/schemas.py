@@ -44,14 +44,22 @@ type _BuiltinToolName = Literal[
 ]
 
 
+_URL_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search"})
+
+
 class BuiltinToolConfig(ToolDefaults):
     name: _BuiltinToolName
     type: _BuiltinToolName | None = None
+    # A URL tool's sources, as Managed Agents echoes them on readback (SMOKE d75 J4).
+    # Kept exactly as given and sent back as given; never set by Daimon.
+    url_sources: JsonValue | None = None
 
     @model_validator(mode="after")
     def matching_type(self) -> Self:
         if "type" in self.model_fields_set and self.type != self.name:
             raise ValueError("builtin tool config type must match its name")
+        if "url_sources" in self.model_fields_set and self.name not in _URL_TOOLS:
+            raise ValueError("only a URL tool's config carries url_sources")
         return self
 
 

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Claude workers: the native tool schema now models `url_sources`, which Managed Agents echoes on a `web_fetch`/`web_search` config. A named agent's clone worker (J4 `fleet-claude`) passes its readback and runs; it used to fail as "a setup error on our side". The value is kept and sent back exactly as echoed, never set by Daimon, and only URL tools may carry it.
 - Fleet: a Stop that races a run's first worker spawn still leaves the run owing its end card. Ending a run now locks the run row first, so its check for a spawned worker sees a spawn that was committing at that moment.
 - Hand-off and switch copy is accurate across providers: a hand-off says the conversation and files carry over only while the agent stays on its provider, and on Discord the switch card says "this conversation moves… earlier messages aren't carried over" for an agent this thread was handed to (never in a setup conversation, which doesn't move).
 - Approval cards can be configured to wait up to 24 hours (`confirmation_timeout_s`, was at most one hour), but a card never shows or keeps a time past its turn's end: it expires just before the turn would. A card still open after 10 minutes pings its requester once in the thread ("This is still waiting for your click."). A card nobody clicked before it ended says "This request ended before anyone clicked. Ask again to redo it." A click after the turn has ended still can't run the request.

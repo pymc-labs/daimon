@@ -417,6 +417,11 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
             if controls["fault"] == "echo_other_effort" and agent.id == "new-worker":
                 model = raw["model"]["id"] if isinstance(raw["model"], dict) else raw["model"]
                 raw["model"] = {"id": model, "speed": "standard", "effort": {"type": "high"}}
+            if controls["fault"] == "echo_url_sources" and agent.id == "new-worker":
+                # SMOKE d75 J4 (probe2): MA echoes url_sources on the web_fetch config.
+                for config in raw["tools"][0]["configs"]:
+                    if config["name"] == "web_fetch":
+                        config["url_sources"] = {"type": "any"}
             if controls["fault"] == "builtin_widening" and agent.id == "new-worker":
                 for config in raw["tools"][0]["configs"]:
                     if config["name"] == "bash":

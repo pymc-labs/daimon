@@ -471,6 +471,25 @@ async def test_resolved_readback_widening_refuses_before_native_session_allocati
     assert not any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
 
 
+@pytest.mark.parametrize("native_worker", ["resolved_readback"], indirect=True)
+async def test_a_url_sources_echo_on_web_fetch_passes_the_readback_and_runs(native_worker):
+    """SMOKE d75 J4: MA echoes url_sources on the web_fetch config; the worker runs."""
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = "echo_url_sources"
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Read the facts",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    assert any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+
+
 @pytest.mark.parametrize("native_worker", ["resolver_fresh", "clone_source"], indirect=True)
 async def test_worker_allocation_keeps_fresh_mentions_on_original_agent(native_worker):
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME

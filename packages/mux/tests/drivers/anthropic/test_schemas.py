@@ -220,3 +220,45 @@ def test_per_tool_mcp_permissions_keep_siblings_and_never_relax_ask(policy):
             config.intent(
                 exact=True, mcp_catalogues={"daimon-mcp": frozenset({"add_skill", "call_tool"})}
             )
+
+
+@pytest.mark.parametrize("tool", ["web_fetch", "web_search"])
+@pytest.mark.parametrize(
+    "sources", [{"type": "any"}, ["https://docs.example.com"], {"allowed": [], "blocked": None}]
+)
+def test_a_url_tool_echo_with_url_sources_round_trips_exactly(tool, sources):
+    """SMOKE d75 J4: MA echoes url_sources on a URL tool's config (probe2)."""
+    from mux.drivers.anthropic.schemas import AgentToolsConfig
+
+    echoed = {
+        "tools": [
+            {
+                "type": "agent_toolset_20260401",
+                "configs": [
+                    {"name": "read", "enabled": True, "type": "read"},
+                    {"name": tool, "enabled": False, "type": tool, "url_sources": sources},
+                ],
+            }
+        ]
+    }
+    config = AgentToolsConfig.model_validate(echoed)
+    assert config.model_dump(mode="json", exclude_unset=True) == echoed
+    # Never invented: a config without it dumps without it.
+    bare = AgentToolsConfig.model_validate(
+        {"tools": [{"type": "agent_toolset_20260401", "configs": [{"name": tool}]}]}
+    )
+    assert (
+        "url_sources"
+        not in bare.model_dump(mode="json", exclude_unset=True)["tools"][0]["configs"][0]
+    )
+
+
+def test_url_sources_on_a_non_url_tool_and_other_unknown_keys_stay_refused():
+    from mux.drivers.anthropic.schemas import AgentToolsConfig
+    from pydantic import ValidationError
+
+    for config in ({"name": "bash", "url_sources": {"type": "any"}}, {"name": "web_fetch", "x": 1}):
+        with pytest.raises(ValidationError):
+            AgentToolsConfig.model_validate(
+                {"tools": [{"type": "agent_toolset_20260401", "configs": [config]}]}
+            )
