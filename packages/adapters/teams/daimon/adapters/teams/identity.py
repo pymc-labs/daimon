@@ -102,6 +102,10 @@ class TeamsInbound:
     `timestamp` is when it was sent (ISO 8601); the channel and team names
     come from the activity, General's filled in.
     `from_form` marks a submitted form's turn: its `activity_id` names no message.
+    `handover_agent_id` marks a verified Hand over click re-sent as a mention;
+    it stays separate in the queue and cannot become a command or setup input.
+    Its `handover_notice_id` is where cosmetic reactions belong, while the
+    invoke's own id deduplicates and identifies the input.
     `sender_id` is the sender's Bot Framework id (`29:…`), which a reply only
     they see is addressed to; Graph-read messages have none. `is_targeted`
     marks a channel message only the bot sees (a slash command, say): it is
@@ -132,6 +136,8 @@ class TeamsInbound:
     channel_type: str | None = None
     team_name: str | None = None
     from_form: bool = False
+    handover_agent_id: str | None = None
+    handover_notice_id: str | None = None
     sender_id: str | None = None
     is_targeted: bool = False
     is_foreign: bool = False

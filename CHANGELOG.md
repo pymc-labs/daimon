@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when status is unknown. Turn mutations retain their original timeout and disable
   automatic SDK retries.
 
+- The hand-over button on Discord, Slack and Teams now re-sends the clicker's
+  latest readable message to the new agent, or a fixed prompt when none can be
+  read. It uses normal mention intake, including the usual hourglass and queue
+  behind a running turn. Later mentions run after the click; repeated or refused
+  clicks start no extra turn.
+
+
 - Keep completed routine replies deliverable when generated-file collection fails, with a note that files could not be attached.
 - Record routine failures and queue channel/thread failure notices after the scheduler heals a stale agent ID.
 - Correct the routines documentation: owner-DM execution failures and busy-owner skips record an error without sending a notice.

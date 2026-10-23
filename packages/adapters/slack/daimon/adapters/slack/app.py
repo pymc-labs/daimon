@@ -1511,7 +1511,7 @@ class SlackApp:
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
             self._spawn(self._confirmations.handle_click(payload))
         elif action_id == HAND_OVER_ACTION_ID:
-            self._spawn(handle_hand_over_click(self.runtime, payload))
+            self._spawn(handle_hand_over_click(self.runtime, payload, app=self))
 
     async def _lookup_host_member(self, team_id: str, user_id: str) -> bool:
         """Ask users.info whether `user_id` is a host member; cache a positive answer only."""
@@ -1781,7 +1781,9 @@ class SlackApp:
                 )
                 capture_exception_with_scope(exc)
                 return
-            mentioned = mentions_bot(event, bot_user_id=bot_user_id)
+            mentioned = bool(event.get("_handover_agent_id")) or mentions_bot(
+                event, bot_user_id=bot_user_id
+            )
             if by_name and mentioned:
                 return  # its app_mention event runs the turn
             if not by_name and not mentioned:
@@ -1950,7 +1952,7 @@ class SlackApp:
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=channel,
-                    timestamp=event_ts,
+                    timestamp=event.get("_reaction_ts") or event_ts,
                     name=_PENDING_REACTION,
                 )
             if notify and self._processing.is_current(thread_key, generation):
@@ -2036,7 +2038,7 @@ class SlackApp:
                 with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                     await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                         channel=channel,
-                        timestamp=event_ts,
+                        timestamp=event.get("_reaction_ts") or event_ts,
                         name="eyes",
                     )
                 await self._run_thread_turn(
@@ -2091,7 +2093,9 @@ class SlackApp:
 
         def compose(queued: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
             unsettled.update((id(event), event) for event in queued)
-            return group_by_author(queued, author)
+            return group_by_author(
+                queued, author, separate=lambda event: bool(event.get("_handover_agent_id"))
+            )
 
         async def run(user_events: list[dict[str, Any]]) -> None:
             try:
@@ -2158,7 +2162,7 @@ class SlackApp:
         """
         for event in events:
             q_channel: str = event.get("channel") or channel
-            q_ts: str = event.get("event_ts") or event.get("ts") or ""
+            q_ts: str = event.get("_reaction_ts") or event.get("event_ts") or event.get("ts") or ""
             try:
                 await web_client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                     channel=q_channel,
@@ -2512,7 +2516,7 @@ class SlackApp:
             requester_foreign=standing.foreign,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
-            trigger_ts=str(event.get("ts") or "") or None,
+            trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
             agent_name=_lc_agent_name,
             model_id=_lc_model_id,
             markup=self.runtime.turn_deps.markup,
@@ -3015,7 +3019,7 @@ class SlackApp:
                         tenant_id, False
                     )
                     is True,
-                    trigger_ts=str(event.get("ts") or "") or None,
+                    trigger_ts=str(event.get("_reaction_ts") or event.get("ts") or "") or None,
                     agent_name=_lc_agent_name,
                     model_id=_lc_model_id,
                     markup=self.runtime.turn_deps.markup,
