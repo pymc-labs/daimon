@@ -831,16 +831,20 @@ class DiscordFleetCard:
                 return False
 
     async def allow_sealed_responses(self) -> bool:
-        """Only the trusted snapshot's proven absence restores ordinary delivery.
+        """Ordinary delivery only for no run, or a run nothing was spawned into yet.
 
-        An unresolved or foreign root never permits disclosure. Active fleet
-        text is governed by collect/review, including on terminal failure.
+        Every turn holds a fleet run, so a run alone can't withhold a plain
+        turn's answer. Text sealed before any worker exists can't carry worker
+        output; once one exists, fleet text is governed by collect/review,
+        including on terminal failure. An unresolved or foreign root never
+        permits disclosure.
         """
         async with self._lock:
             try:
-                return await self._snapshot(None) is None
+                snapshot = await self._snapshot(None)
             except (FleetRefused, WorkerSpecRefused):
                 return False
+            return snapshot is None or not snapshot[3]
 
     async def allow_summary(self) -> bool:
         """Compatibility gate for callers that only need disclosure authority."""
@@ -902,7 +906,7 @@ class DiscordFleetCard:
                     )
                 except (FleetRefused, WorkerSpecRefused):
                     view = None
-                if view is not None and (ready or blocked or self._message is not None):
+                if view is not None and (ready or blocked or workers or self._message is not None):
                     await self._display(view)
             details = _worker_list(workers)
             if deferred:

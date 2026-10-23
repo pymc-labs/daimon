@@ -2421,3 +2421,40 @@ def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
     assert "**W1** (without its files, its connected tools) ·" in text
     # Every task worker runs without tools and skills; that isn't news.
     assert "**W2** ·" in text
+
+
+@pytest.mark.parametrize("rows", ["none", "worker"])
+async def test_sealed_answers_wait_only_once_something_was_spawned(rows):
+    # Every turn holds a fleet run: an empty one must not withhold a plain
+    # turn's answer written before a trailing tool call.
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), () if rows == "none" else (worker(),))
+    assert await card.allow_sealed_responses() is (rows == "none")
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    sealed = "An answer written before a trailing tool call. " * 30
+    state = TurnState(
+        content=[
+            TextBlock(kind="text", text=sealed),
+            ToolUseBlock(kind="tool_use", id="tool", type="agent.tool_use", name="read", input={}),
+        ]
+    )
+    await lifecycle.on_render(state)
+    posted = any(
+        sealed.strip()[:40] in str(call.kwargs.get("content", ""))
+        for call in send.await_args_list + edit.await_args_list
+    )
+    assert posted is (rows == "none")
+
+
+async def test_the_answer_shows_a_running_fleets_card_never_posted_by_a_render():
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), (worker(status="running"),))
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Started the workers.")])
+    )
+    assert "**Fleet — running**" in _headlines(send, edit)
