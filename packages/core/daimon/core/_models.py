@@ -3955,6 +3955,16 @@ class FleetRun(Base):
             "total_budget_usd >= 0 AND reserved_usd >= 0 AND observed_usd >= 0",
             name="ck_fleet_run_amounts",
         ),
+        CheckConstraint(
+            "end_notice IS NULL OR end_notice IN ('owed', 'shown', 'given_up')",
+            name="ck_fleet_run_end_notice",
+        ),
+        Index(
+            "ix_fleet_run_end_notice_owed",
+            "platform",
+            "end_notice_due_at",
+            postgresql_where=text("end_notice = 'owed'"),
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
@@ -3985,6 +3995,15 @@ class FleetRun(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Whether the thread was told the run ended: "owed" from the end until a
+    # terminal card is rendered ("shown"), or the poller gives up ("given_up").
+    end_notice: Mapped[str | None] = mapped_column(Text)
+    end_notice_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    end_notice_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The run's live card, so a later render edits it instead of posting another.
+    card_message_id: Mapped[str | None] = mapped_column(Text)
 
 
 class FleetWorker(Base):

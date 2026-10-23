@@ -21,7 +21,7 @@ from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker, holds_slot
+from daimon.core.fleet import RUN_TRANSITIONS, TERMINAL, FleetRun, FleetWorker, holds_slot
 from daimon.core.fleet_orchestration import Control, FleetOrchestrator, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerPermissions, WorkerSpecRefused
@@ -34,7 +34,9 @@ import discord
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.stores.fleet import EndNotice
     from daimon.core.turn.deps import TurnDeps
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 type ParentLoader = Callable[
     [discord.Interaction | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None]
@@ -351,6 +353,82 @@ def history_finder(thread: discord.Thread) -> FindPosted:
     return find
 
 
+#: Worker codes that mean the run's deadline cut it off.
+_DEADLINE_CODES = frozenset({"deadline_expired", "run_deadline", "timed_out"})
+
+
+def fleet_ended_text(workers: Sequence[FleetWorker]) -> str:
+    """The plain line for a run that ended with no result delivered in its thread."""
+    why = (
+        "it ran out of time before its result was delivered here"
+        if any(row.error_code in _DEADLINE_CODES for row in workers)
+        else "its result wasn't delivered here"
+    )
+    details = _worker_list(workers)
+    return f"The fleet ended: {why}." + (f" Workers: {details}." if details else "")
+
+
+#: Remember a run's card message; the flag says a terminal card is now showing,
+#: which settles the run's owed end notice.
+type RecordCard = Callable[[FleetRun, discord.Message, bool], Awaitable[None]]
+
+
+async def show_fleet_ended(
+    thread: discord.Thread, notice: EndNotice, record: RecordCard | None = None
+) -> None:
+    """Settle the run's card to its final state, then post the run-end line.
+
+    The card is the stored message, else the one whose controls name the run;
+    one that is gone or can't be edited is posted again (and remembered, so a
+    retry edits it). A run a wake already answered gets only the card.
+    """
+    run = notice.run
+    view = build_fleet_view(run, notice.workers)
+    card: discord.Message | None = None
+    if notice.card_message_id is not None and notice.card_message_id.isdigit():
+        try:
+            card = await thread.fetch_message(int(notice.card_message_id))
+        except discord.NotFound:
+            card = None
+    if card is None:
+        card = await history_finder(thread)(run.id)
+    shown: discord.Message | None = None
+    if card is not None:
+        try:
+            shown = await card.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.NotFound, discord.Forbidden):
+            # Gone, or no longer ours to edit: post the final card afresh below.
+            log.info("fleet.card_end_edit_failed", run_id=str(run.id))
+        else:
+            shown = shown or card
+    if shown is None:
+        shown = await thread.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+    view.stop()
+    if record is not None:
+        # The line below is still owed: the notice settles when this returns.
+        await record(run, shown, False)
+    if not notice.delivered:
+        await thread.send(
+            fleet_ended_text(notice.workers), allowed_mentions=discord.AllowedMentions.none()
+        )
+
+
+def record_card(sessionmaker: async_sessionmaker[AsyncSession]) -> RecordCard:
+    """Store a run's card message id; a terminal card settles the owed notice."""
+    from daimon.core.stores import fleet
+
+    async def record(run: FleetRun, message: discord.Message, terminal: bool) -> None:
+        await fleet.record_card(
+            sessionmaker,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            message_id=str(message.id),
+            terminal=terminal,
+        )
+
+    return record
+
+
 class FleetControl(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.LayoutView]],
     template=r"fleet:(?P<run>[0-9a-f]{32}):(?P<worker>all|[0-9a-f]{32}):(?P<version>[0-9]+):(?P<action>kill|resume)",
@@ -422,9 +500,15 @@ class DiscordFleetCardFactory:
     No database, provider or permission projection is invented by this factory.
     """
 
-    def __init__(self, service: FleetOrchestrator, load_parent: ParentResolver) -> None:
+    def __init__(
+        self,
+        service: FleetOrchestrator,
+        load_parent: ParentResolver,
+        record: RecordCard | None = None,
+    ) -> None:
         self._service = service
         self._resolve = load_parent
+        self._record = record
         # One live card per run in this process: a wake turn edits the card its
         # root turn posted instead of leaving that one at "running".
         self._posted: dict[uuid.UUID, discord.Message] = {}
@@ -517,7 +601,7 @@ class DiscordFleetCardFactory:
             except (WorkerSpecRefused, ScopeViolation, SQLAlchemyError):
                 raise FleetRefused("prerequisites_unavailable") from None
 
-        return cls(service, resolve)
+        return cls(service, resolve, record_card(deps.sessionmaker))
 
     def __call__(
         self,
@@ -574,6 +658,7 @@ class DiscordFleetCardFactory:
             posted=self._posted,
             find_posted=history_finder(thread),
             wake_id=wake_id,
+            record=self._record,
         )
         return card
 
@@ -640,6 +725,7 @@ class DiscordFleetCard:
         posted: MutableMapping[uuid.UUID, discord.Message] | None = None,
         find_posted: FindPosted | None = None,
         wake_id: uuid.UUID | None = None,
+        record: RecordCard | None = None,
     ) -> None:
         self._run_id = run_id
         self._service = service
@@ -656,6 +742,9 @@ class DiscordFleetCard:
         # The worker_finished wake this turn runs for: its own claim is not a
         # wake still owed to the root, and it settles through the wake owner.
         self._wake_id = wake_id
+        self._record = record
+        # The run the last rendered view showed, for `record`.
+        self._rendered: FleetRun | None = None
 
     @property
     def run_id(self) -> uuid.UUID | None:
@@ -694,6 +783,7 @@ class DiscordFleetCard:
         blocked: bool = False,
         partial: bool = False,
     ) -> discord.ui.LayoutView:
+        self._rendered = run
         return build_fleet_view(
             run,
             workers,
@@ -740,6 +830,13 @@ class DiscordFleetCard:
             self._posted[self._run_id] = self._message
             while len(self._posted) > _POSTED_CARDS_LIMIT:
                 self._posted.pop(next(iter(self._posted)))
+        run = self._rendered
+        if self._record is not None and run is not None and self._message is not None:
+            try:
+                # A terminal card on show settles the run's owed end notice.
+                await self._record(run, self._message, run.status not in RUN_TRANSITIONS)
+            except Exception:
+                log.warning("fleet.card_record_failed", run_id=str(run.id), exc_info=True)
 
     async def _adopt(self, view: discord.ui.LayoutView) -> bool:
         """Edit the card an earlier turn of this run posted in this thread, if any."""

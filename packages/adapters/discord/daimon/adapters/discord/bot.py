@@ -134,6 +134,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
+from daimon.core.fleet_run_end import run_run_end_poller
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -259,7 +260,9 @@ from discord.http import HTTPClient
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+    from daimon.core.fleet_run_end import EndOutcome
     from daimon.core.stores.agent_posts import AgentPostRow
+    from daimon.core.stores.fleet import EndNotice
 
 log = structlog.get_logger()
 
@@ -1204,6 +1207,16 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
+            if self.runtime.turn_deps.fleet_enabled:
+                # An ended fleet no turn rendered the end of: settle its card, say so.
+                self._spawn(
+                    run_run_end_poller(
+                        self.runtime.sessionmaker,
+                        platform="discord",
+                        post=self._post_fleet_run_end,
+                        should_stop=lambda: self.draining or self.is_closed(),
+                    )
+                )
             # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
             self._spawn(
@@ -3771,6 +3784,29 @@ class DaimonBot(commands.Bot):
     async def _channel_by_id(self, channel_id: int) -> object:
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+    async def _post_fleet_run_end(self, notice: EndNotice) -> EndOutcome:
+        """Settle an ended run's card and post its line in the run's own thread."""
+        from daimon.adapters.discord.posted_controls.fleet import record_card, show_fleet_ended
+        from daimon.core.fleet_orchestration import FleetRefused
+
+        run = notice.run
+        try:
+            channel = await self._channel_by_id(int(run.thread_id))
+            if (
+                not isinstance(channel, discord.Thread)
+                or derive_tenant_uuid(platform="discord", workspace_id=str(channel.guild.id))
+                != run.tenant_id
+                or not await self._may_post_in(tenant_id=run.tenant_id, channel=channel)
+            ):
+                return "give_up"
+            await show_fleet_ended(channel, notice, record_card(self.runtime.sessionmaker))
+            return "shown"
+        except (ValueError, FleetRefused):
+            return "give_up"
+        except discord.HTTPException as exc:
+            # A gone, locked or forbidden thread never takes the post; 429/5xx may.
+            return "retry" if exc.status == 429 or exc.status >= 500 else "give_up"
 
     async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
         try:

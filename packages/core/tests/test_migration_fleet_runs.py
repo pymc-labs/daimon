@@ -13,11 +13,13 @@ from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 TABLES = {"fleet_run", "fleet_worker"}
+#: The fleet tables' migrations, oldest first: the models are their sum.
+MIGRATIONS = ("0093_fleet_runs", "0128_fleet_run_end_notice")
 
 
-def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0093_fleet_runs.py"
-    spec = importlib.util.spec_from_file_location("fleet_runs_migration", path)
+def migration(name: str = MIGRATIONS[0]) -> ModuleType:
+    path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
+    spec = importlib.util.spec_from_file_location(f"{name}_migration", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -29,15 +31,17 @@ async def test_fleet_migration_upgrade_downgrade_upgrade_matches_the_models(
     db_session: AsyncSession,
 ) -> None:
     connection = await db_session.connection()
-    module = migration()
+    modules = [migration(name) for name in MIGRATIONS]
 
     def cycle(sync: Connection) -> None:
         here = sync.scalar(text("SELECT current_schema()"))
         before = set(inspect(sync).get_table_names(schema=here)) - TABLES
         with Operations.context(MigrationContext.configure(sync)):
-            module.downgrade()
+            for module in reversed(modules):
+                module.downgrade()
             assert not TABLES.intersection(inspect(sync).get_table_names(schema=here))
-            module.upgrade()
+            for module in modules:
+                module.upgrade()
             assert sync.scalar(text("SHOW lock_timeout")) == "5s"
             assert set(inspect(sync).get_table_names(schema=here)) - TABLES == before
             for name in TABLES:
