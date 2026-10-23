@@ -35,8 +35,10 @@ from mux.state.operations import Begun, OperationRecord
 from mux.state.store import (
     SESSION_REF,
     ConfigRevisionConflict,
+    adopt_released,
     binding_slot,
     check_binding_successor,
+    is_released,
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 
@@ -155,9 +157,13 @@ class MemoryStateStore:
 
     # Bindings
 
-    async def get_binding(self, slot: Slot) -> ProviderBinding | None:
+    async def get_binding(
+        self, slot: Slot, *, include_released: bool = False
+    ) -> ProviderBinding | None:
         history = self.data.bindings.get(_slot_key(slot), ())
-        return _detach(history[-1]) if history else None
+        if not history or (is_released(history[-1]) and not include_released):
+            return None
+        return _detach(history[-1])
 
     async def put_binding(
         self, binding: ProviderBinding, *, expected_generation: int
@@ -166,9 +172,11 @@ class MemoryStateStore:
             staged = self.data.snapshot()
             key = _slot_key(binding_slot(binding))
             history = staged.bindings.get(key, ())
-            check_binding_successor(
-                history[-1] if history else None, binding, expected_generation=expected_generation
+            current = history[-1] if history else None
+            binding, expected_generation = adopt_released(
+                current, binding, expected_generation=expected_generation
             )
+            check_binding_successor(current, binding, expected_generation=expected_generation)
             if staged.binding_ids.get(binding.id, key) != key:
                 raise ValueError(f"binding id {binding.id} already names another slot")
             slot = binding_slot(binding)

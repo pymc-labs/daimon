@@ -60,7 +60,7 @@ from mux.errors import ContinuityLost, ProviderError, ScopeViolation, Unsupporte
 from mux.profiles.openai import NATIVE_MODELS, SPEND_CAPPED_MODELS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
-from mux.state.store import StateStore
+from mux.state.store import ERA_REF, StateStore, adopted_identity
 
 
 async def unknown_infrastructure(observation: UsageObservation) -> Decimal | None:
@@ -267,7 +267,9 @@ async def _create(
         )
     # Stable per empty slot, including after a crash. Changed config/plan gets a
     # digest conflict, not a fresh operation which might create a second session.
-    key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json()))
+    # A released slot's era suffix keeps an earlier era's creation from replaying.
+    _, era = adopted_identity(await store.get_binding(slot, include_released=True), "")
+    key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json())) + era
     digest = request_digest(
         {"spec": spec.model_dump(mode="json"), "controls": runtime.controls.model_dump(mode="json")}
     )
@@ -472,8 +474,12 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             raise ScopeViolation(native.ref.id, "OpenAI creation returned a foreign session")
         if native.state == "terminated":
             raise ContinuityLost(native.ref.id, ("OpenAI session terminated during creation",))
+        binding_id, era = adopted_identity(
+            await store.get_binding(slot, include_released=True),
+            str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
+        )
         binding = ProviderBinding(
-            id=str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
+            id=binding_id,
             thread=slot.thread,
             provider="openai",
             profile=revision.profile,
@@ -483,6 +489,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
                 "account_scope": runtime.account_scope_id,
                 "model": revision.model or "",
                 "plan_digest": plan_digest,
+                **({ERA_REF: era} if era else {}),
             },
             generation=1,
             config_revision=revision.local,

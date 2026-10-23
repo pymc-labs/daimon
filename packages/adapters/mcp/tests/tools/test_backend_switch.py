@@ -958,3 +958,143 @@ def test_an_unsupported_switch_names_the_provider_it_stays_on():
     refused = AgentBackendRefused("source_unsupported", missing=("instructions",))
     text = str(_backend_switch_refusal(refused, "X", "openai", _admin_auth(), current="gemini"))
     assert "or keep it on Gemini." in text
+
+
+async def _release_rows(runtime, auth):
+    from daimon.core.thread_release import pending_releases
+
+    async with runtime.session_factory() as session:
+        return await pending_releases(session, tenant_id=auth.tenant_id)
+
+
+async def test_switching_the_agent_answering_here_moves_this_conversation(active_chat):
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+    )
+    assert await _release_rows(runtime, auth) == []  # a preview moves nothing
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert "This conversation moves to Gemini from the next message" in changed.summary
+    assert "aren't carried over" in changed.summary
+    ((channel, thread, account, _),) = await _release_rows(runtime, auth)
+    assert (channel, thread, account) == ("channel", "thread", str(auth.account_id))
+
+
+async def test_switching_a_copy_leaves_this_conversation_and_says_so(active_chat):
+    import httpx
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
+
+    runtime, auth, origin, service, trace, payload, _, gate, _, _ = active_chat
+    _without_own_tools(payload)
+    copy = {**payload, "id": "agent_copy", "name": "Researcher-copy"}
+    copy["metadata"] = {**payload["metadata"], "daimon_name": "Researcher-copy"}
+    trace.router.add("GET", r"/v1/agents/agent_copy", lambda *_: httpx.Response(200, json=copy))
+
+    def agent():
+        trace.queue(ScriptedReply("GET", "/v1/agents", list_response([payload, copy])))
+
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher-copy",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+    )
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher-copy",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert "isn't the one answering here" in changed.summary
+    assert await _release_rows(runtime, auth) == []
+
+
+@pytest.mark.parametrize("kind", ["handoff", "setup"])
+async def test_a_confirmed_switch_of_the_copy_this_thread_was_handed_to_moves_it(active_chat, kind):
+    """J2: hand this conversation to the copy (same provider), then switch the copy
+    with a confirmation: the confirmed switch moves the conversation. A setup
+    conversation, whose agent is only its configuration target, never moves."""
+    import httpx
+    from daimon.core.stores.thread_agent_bindings import create_binding
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
+
+    runtime, auth, origin, service, trace, payload, _, gate, _, _ = active_chat
+    _without_own_tools(payload)
+    copy = {**payload, "id": "agent_copy", "name": "Researcher-copy"}
+    copy["metadata"] = {**payload["metadata"], "daimon_name": "Researcher-copy"}
+    trace.router.add("GET", r"/v1/agents/agent_copy", lambda *_: httpx.Response(200, json=copy))
+    async with runtime.session_factory.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=auth.tenant_id,
+            platform="discord",
+            parent_channel_id="channel",
+            thread_id="thread",
+            responder_ma_agent_id="agent_copy",
+            responder_name="Researcher-copy",
+            kind=kind,
+        )
+
+    def agent():
+        trace.queue(ScriptedReply("GET", "/v1/agents", list_response([payload, copy])))
+
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher-copy",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+    )
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher-copy",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    rows = await _release_rows(runtime, auth)
+    if kind == "handoff":
+        assert "This conversation moves to Gemini from the next message" in changed.summary
+        assert len(rows) == 1
+    else:
+        assert "isn't the one answering here" in changed.summary
+        assert rows == []

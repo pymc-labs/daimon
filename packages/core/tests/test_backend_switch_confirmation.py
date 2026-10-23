@@ -900,7 +900,7 @@ async def test_card_names_the_model_and_where_the_switch_applies(
         if default_agent
         else "Affects new conversations wherever Researcher answers"
     )
-    assert prepared.consequence.startswith(reach + "; existing threads keep their model.")
+    assert prepared.consequence.startswith(reach + "; other existing threads keep their model.")
     assert prepared.detail_lines[-1] == preview.cost_line
     # The same card for the default model refuses: the server preview differs.
     other = prompt.model_copy(
@@ -1014,3 +1014,28 @@ async def test_the_card_says_plainly_that_saved_keys_wont_be_available(owned_pre
     assert prepared.consequence.count("saved keys") == 1
     assert "credentials" not in prepared.action + prepared.consequence
     assert "Nothing is deleted" in prepared.consequence
+
+
+@pytest.mark.parametrize("answering", ["Researcher", "someone-else", None])
+async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers_here(
+    owned_preview, answering
+):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        answering_agent_name=answering,
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    moves = "This conversation moves to OpenAI from your next message"
+    assert (moves in prepared.consequence) == (answering == "Researcher")
+    assert "other existing threads keep their model" in prepared.consequence

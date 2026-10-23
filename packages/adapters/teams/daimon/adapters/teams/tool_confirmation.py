@@ -283,6 +283,9 @@ class TeamsConfirmationCards:
                     tenant_id=tenant_id,
                     account_id=account_id,
                     current_admin=current_admin,
+                    answering_agent_name=(
+                        getattr(getattr(admission, "config", None), "agent_name", None)
+                    ),
                     default_agent_name=runtime.deployment_default.agent_name,
                     place_word="team",
                     # A channel-pin card clears only the channel this turn runs in.

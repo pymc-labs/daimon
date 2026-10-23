@@ -56,19 +56,52 @@ def test_decide_handoff_refuses_in_a_setup_thread() -> None:
     )
 
 
-def test_decide_handoff_refuses_an_unreachable_destination() -> None:
+def test_decide_handoff_refuses_an_unreachable_destination_to_a_caller_who_needs_an_admin() -> None:
     decision = decide_handoff(
         destination_ma_agent_id="agt_research",
         destination_name="research-bot",
         destination_reachable=False,
         existing_binding_kind=None,
         origin_responder_ma_agent_id="agt_daimon",
-        access=ALLOW,
+        access=Decision(False, "admin_required"),
     )
 
     assert decision == HandoffRefused(reason="unreachable", destination_name="research-bot"), (
-        "an agent nobody can reach cannot be handed a task"
+        "a member learns the agent answers nowhere"
     )
+
+
+def test_an_admin_may_hand_this_thread_to_an_agent_routed_nowhere_yet() -> None:
+    """A fresh copy: the thread is the only place it answers, no channel routing."""
+    decision = decide_handoff(
+        destination_ma_agent_id="agt_copy",
+        destination_name="daimon-gemini",
+        destination_reachable=False,
+        existing_binding_kind=None,
+        origin_responder_ma_agent_id="agt_daimon",
+        access=ALLOW,
+        caller_is_admin=True,
+    )
+
+    assert decision == HandoffAllowed(
+        destination_ma_agent_id="agt_copy", destination_name="daimon-gemini"
+    )
+
+
+def test_a_member_allowed_by_a_channel_rule_still_cant_hand_off_to_an_unrouted_agent() -> None:
+    """`authorize(HAND_OFF)` passes for a member through a channel rule; that is not
+    enough to bring in an agent routed nowhere, with its keys and connections."""
+    decision = decide_handoff(
+        destination_ma_agent_id="agt_unrouted",
+        destination_name="old-agent",
+        destination_reachable=False,
+        existing_binding_kind=None,
+        origin_responder_ma_agent_id="agt_daimon",
+        access=ALLOW,
+        caller_is_admin=False,
+    )
+
+    assert decision == HandoffRefused(reason="unreachable", destination_name="old-agent")
 
 
 def test_decide_handoff_refuses_the_agent_that_already_answers_here() -> None:
@@ -128,7 +161,7 @@ def test_decide_handoff_reports_unreachable_before_same_agent() -> None:
         destination_reachable=False,
         existing_binding_kind=None,
         origin_responder_ma_agent_id="agt_research",
-        access=ALLOW,
+        access=Decision(False, "admin_required"),
     )
 
     assert isinstance(decision, HandoffRefused) and decision.reason == "unreachable", (

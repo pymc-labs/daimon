@@ -426,8 +426,8 @@ async def test_invalid_default_pin_refuses_before_selecting_a_new_provider(
         )
         get_binding = host.store.get_binding
 
-        async def corrupted(slot):
-            return damaged if slot == host.slot else await get_binding(slot)
+        async def corrupted(slot, **options):
+            return damaged if slot == host.slot else await get_binding(slot, **options)
 
         monkeypatch.setattr(host.store, "get_binding", corrupted)
     before = (len(host.wire.requests), len(host.calls))
@@ -580,7 +580,7 @@ async def test_foreign_binding_is_refused_before_retained_config_or_provider_io(
     await host.change()
     before = (len(host.wire.requests), len(host.calls))
 
-    async def read(slot):
+    async def read(slot, **_):
         assert slot == host.slot
         return binding
 
@@ -772,3 +772,121 @@ async def test_refused_agent_selection_leaves_no_revision_for_a_rollback_reader(
     assert host.wire.requests == []
     assert host.created == []
     assert not any(req.url.path.endswith("/events") for req in host.calls)
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_confirmed_release_moves_this_thread_to_the_new_provider_with_a_fresh_session(
+    selector_host,
+):
+    from daimon.core.thread_release import request_thread_release
+    from mux.state.store import ERA_REF
+
+    host = selector_host
+    first = await host.prepare("thread")
+    before = await host.store.get_binding(host.slot)
+    assert before is not None and before.provider == "anthropic"
+    latest = await host.change(BackendConfig(backend="openai", profile=PROFILE, model="gpt-6-luna"))
+    stays = await host.prepare("thread")
+    assert stays.ma_session_id == first.ma_session_id and stays.session_ref is None
+
+    seen = await host.store.get_binding(host.slot, include_released=True)
+    async with host.sessions.begin() as db:
+        await request_thread_release(
+            db, host.slot, generation=seen.generation, now=datetime.now(UTC)
+        )
+    moved = await host.prepare("thread")
+    assert moved.admission.backend_revision == latest
+    assert moved.session_ref is not None and moved.session_ref.provider == "openai"
+    after = await host.store.get_binding(host.slot)
+    assert after is not None and after.provider == "openai"
+    # The same slot identity, through the compare-and-swap, never in place.
+    assert after.id == before.id and after.generation == before.generation + 2
+    assert after.native_refs.get(ERA_REF) == f":g{before.generation + 1}"
+    assert after.native_refs["session"] != first.ma_session_id
+    again = await host.prepare("thread")
+    assert again.session_ref == moved.session_ref and again.reused
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_release_requested_before_the_binding_moved_is_never_applied(selector_host):
+    from daimon.core.thread_release import request_thread_release
+
+    host = selector_host
+    first = await host.prepare("thread")
+    seen = await host.store.get_binding(host.slot, include_released=True)
+    async with host.sessions.begin() as db:
+        await request_thread_release(
+            db, host.slot, generation=seen.generation, now=datetime.now(UTC)
+        )
+    current = await host.store.get_binding(host.slot)
+    # Another turn rebinds the slot after the confirmation saw it.
+    moved = current.model_copy(update={"generation": current.generation + 1})
+    await host.store.put_binding(moved, expected_generation=current.generation)
+    await host.change(BackendConfig(backend="openai", profile=PROFILE, model="gpt-6-luna"))
+    stays = await host.prepare("thread")
+    assert stays.ma_session_id == first.ma_session_id and stays.session_ref is None
+    assert await host.store.get_binding(host.slot) == moved
+
+
+async def _request_release(host):
+    from daimon.core.thread_release import request_thread_release
+
+    seen = await host.store.get_binding(host.slot, include_released=True)
+    async with host.sessions.begin() as db:
+        await request_thread_release(
+            db, host.slot, generation=seen.generation if seen else 0, now=datetime.now(UTC)
+        )
+    return seen
+
+
+async def _apply(host):
+    from daimon.core.thread_release import apply_thread_release
+
+    return await apply_thread_release(
+        host.sessions,
+        host.store,
+        host.slot,
+        tenant_id=TENANT,
+        account_id=ACCOUNT,
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_refused_turn_leaves_the_release_for_the_next_one(selector_host, monkeypatch):
+    from daimon.core.thread_release import pending_releases
+    from daimon.core.turn import admission
+
+    host = selector_host
+    await host.prepare("thread")
+    seen = await _request_release(host)
+
+    async def refuse(*args, **kwargs):
+        raise AdmissionDenied(reason="backend_unsupported")
+
+    # Any refusal after the release is found (access, balance, provider).
+    monkeypatch.setattr(admission, "load_access_policy", refuse)
+    with pytest.raises(AdmissionDenied):
+        await host.prepare("thread")
+    assert await host.store.get_binding(host.slot) == seen, "nothing was released"
+    async with host.sessions() as db:
+        assert len(await pending_releases(db, tenant_id=TENANT)) == 1
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_release_interrupted_after_its_binding_write_is_finished_not_redone(
+    selector_host,
+):
+    from daimon.core.thread_release import pending_releases
+    from mux.state.store import released_successor
+
+    host = selector_host
+    await host.prepare("thread")
+    seen = await _request_release(host)
+    # The binding write committed, then the request's transaction failed.
+    await host.store.put_binding(released_successor(seen), expected_generation=seen.generation)
+    assert await _apply(host) is True
+    after = await host.store.get_binding(host.slot, include_released=True)
+    assert after.generation == seen.generation + 1
+    async with host.sessions() as db:
+        assert await pending_releases(db, tenant_id=TENANT) == []

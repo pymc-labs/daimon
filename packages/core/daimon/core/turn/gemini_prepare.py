@@ -32,6 +32,7 @@ from mux.contracts.resources import SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
+from mux.state.store import ERA_REF, adopted_identity
 
 log = structlog.get_logger(__name__)
 
@@ -138,7 +139,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             prior.id,
             ("bound Gemini session cannot be replaced by fresh preparation",),
         )
-    binding_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
+    derived_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
+    # A released slot keeps its id; its era suffix keeps earlier creations from
+    # replaying. Only a binding this host adopted (it carries its era) may differ
+    # from the derived id.
+    binding_id, era = (
+        (prior.id if ERA_REF in prior.native_refs else derived_id, "")
+        if prior is not None
+        else adopted_identity(await store.get_binding(slot, include_released=True), derived_id)
+    )
     if prior is not None and (
         prior.id != binding_id
         or prior.provider != "gemini"
@@ -160,10 +169,10 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             spec = deployment.agent
             if (variant := system_for_platform(spec.system, request.platform)) is not None:
                 spec = spec.model_copy(update={"system": variant})
-            agent = await backend.agents.create(request.scope, spec, key=f"{binding_id}:agent")
+            agent = await backend.agents.create(request.scope, spec, key=f"{binding_id}{era}:agent")
         environment = (
             await backend.environments.create(
-                request.scope, deployment.environment, key=f"{binding_id}:environment"
+                request.scope, deployment.environment, key=f"{binding_id}{era}:environment"
             )
             if deployment.max_output_tokens is None
             else None
@@ -183,15 +192,25 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                     )
                 },
             ),
-            key=f"{binding_id}:session",
+            key=f"{binding_id}{era}:session",
         )
-        binding = session.binding.model_copy(update={"legacy_account_id": request.scope.account_id})
+        binding = session.binding.model_copy(
+            update={
+                "legacy_account_id": request.scope.account_id,
+                "native_refs": {**session.binding.native_refs, **({ERA_REF: era} if era else {})},
+            }
+        )
         try:
-            await store.put_binding(binding, expected_generation=0)
+            # A released slot is adopted at its next generation: keep what was written.
+            binding = await store.put_binding(binding, expected_generation=0)
         except BindingConflict:
             winner = await store.get_binding(slot)
-            if winner != binding:
+            if (
+                winner is None
+                or winner.model_copy(update={"generation": binding.generation}) != binding
+            ):
                 raise
+            binding = winner
         session_ref = session.ref
     else:
         binding = prior

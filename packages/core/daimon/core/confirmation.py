@@ -643,6 +643,7 @@ def backend_switch_callbacks(
     default_agent_name: str | None = None,
     place_word: str = "server",
     pin_channel: ChannelRef | None = None,
+    answering_agent_name: str | None = None,
 ) -> tuple[
     Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
     Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
@@ -899,7 +900,14 @@ def backend_switch_callbacks(
                 "detail_lines": details,
                 "consequence": (
                     reach
-                    + "; existing threads keep their model."
+                    + "; other existing threads keep their model."
+                    + (
+                        f" This conversation moves to {provider} from your next message "
+                        "(unless it's shared or this channel pins its provider); earlier "
+                        "messages here aren't carried over."
+                        if answering_agent_name == agent.name
+                        else ""
+                    )
                     + (
                         f"\n{unavailable}. Nothing is deleted; switch back any time."
                         if unavailable

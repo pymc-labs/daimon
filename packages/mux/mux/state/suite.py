@@ -26,7 +26,13 @@ from mux.errors import BindingConflict, OperationConflict, ScopeViolation
 from mux.state.journal import JournalEntry
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.operations import InvalidTransition, SendClaimed, recovery, request_digest
-from mux.state.store import ConfigRevisionConflict, StateStore, bind_new_slot
+from mux.state.store import (
+    ConfigRevisionConflict,
+    StateStore,
+    bind_new_slot,
+    is_released,
+    released_successor,
+)
 from mux.state.usage_ledger import UsageRevisionConflict
 
 type StoreMaker = Callable[[], StateStore]
@@ -186,6 +192,27 @@ async def check_binding_cas_on_generation(make: StoreMaker) -> None:
         await store.put_binding(_binding(2, id_="other"), expected_generation=1)
     rebound = await store.put_binding(_binding(2, session="sesn_2"), expected_generation=1)
     assert await store.get_binding(SHARED) == rebound
+
+
+async def check_a_released_slot_reads_unbound_and_its_next_bind_keeps_its_identity(
+    make: StoreMaker,
+) -> None:
+    store = make()
+    bound = await store.put_binding(_binding(), expected_generation=0)
+    released = await store.put_binding(released_successor(bound), expected_generation=1)
+    assert is_released(released) and released.id == bound.id and released.generation == 2
+    assert await store.get_binding(SHARED) is None, "a released slot reads as unbound"
+    assert await store.get_binding(SHARED, include_released=True) == released
+    # Another host's first bind adopts the slot: its identity, the next generation.
+    adopted = await store.put_binding(
+        _binding(session="sesn_2", id_="other_host"), expected_generation=0
+    )
+    assert (adopted.id, adopted.generation) == (bound.id, 3)
+    assert adopted.native_refs["session"] == "sesn_2"
+    assert await store.get_binding(SHARED) == adopted
+    # Nothing else skips the compare-and-swap: a bound slot refuses another first bind.
+    with raises(BindingConflict):
+        await store.put_binding(_binding(session="sesn_3", id_="third"), expected_generation=0)
 
 
 async def check_a_binding_id_names_one_slot(make: StoreMaker) -> None:
@@ -616,6 +643,7 @@ __all__ = [
     "THREAD",
     "TTL",
     "check_a_binding_id_names_one_slot",
+    "check_a_released_slot_reads_unbound_and_its_next_bind_keeps_its_identity",
     "check_a_changed_replay_of_the_current_revision_is_refused",
     "check_a_foreign_lease_cannot_claim_an_unwritten_journal",
     "check_a_rebind_keeps_the_old_session_journal_with_its_slot",

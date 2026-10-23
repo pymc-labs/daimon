@@ -448,6 +448,71 @@ def _reject_unknown_model(model: ModelSelection) -> None:
         raise ToolError(f"Model '{choice_id}' is not available. Choose one of: {allowed}")
 
 
+async def _move_this_thread(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    agent_name: str,
+    target: Provider,
+    *,
+    pinned_here: bool,
+) -> str:
+    """After a confirmed switch, move the requester's own slot of this thread too.
+
+    Only when the switched agent is the one answering here, and never a shared
+    thread (it stays pinned for everyone in it). Says plainly what happens.
+    """
+    from daimon.core.stores import mux_state, thread_agent_bindings
+    from daimon.core.thread_release import caller_slot, request_thread_release
+    from daimon.core.turn.notices import provider_name
+
+    provider = provider_name(target)
+    if pinned_here:
+        return "This channel pins its own provider, so this conversation stays on it."
+    async with runtime.session_factory() as session:
+        handed = await thread_agent_bindings.get_binding(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=origin.platform,
+            parent_channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+        )
+    # Who answers this conversation's next message: a hand-off's agent, else this
+    # turn's responder. A setup conversation's configuration target never moves it.
+    answering = (
+        handed.responder_name
+        if handed is not None and handed.kind == "handoff"
+        else origin.responder_name
+    )
+    if (handed is not None and handed.kind == "setup") or agent_name != answering:
+        return f"{agent_name} isn't the one answering here, so this conversation is unchanged."
+    slot = caller_slot(
+        tenant_id=auth.tenant_id,
+        platform=origin.platform,
+        channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        account_id=auth.account_id,
+    )
+    async with runtime.session_factory.begin() as session:
+        shared = slot.model_copy(update={"account_id": None})
+        if await mux_state.get_binding(session, shared) is not None:
+            return (
+                "This conversation is shared, so it stays on its current model; "
+                f"start a new thread to talk to {agent_name} on {provider}."
+            )
+        pinned = await mux_state.get_binding(session, slot, include_released=True)
+        await request_thread_release(
+            session,
+            slot,
+            generation=pinned.generation if pinned is not None else 0,
+            now=datetime.datetime.now(datetime.UTC),
+        )
+    return (
+        f"This conversation moves to {provider} from the next message; "
+        "earlier messages here aren't carried over."
+    )
+
+
 def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
     """Native agent edits share the alias resolver without changing model controls."""
     choice = model_choice_id(model)
@@ -1535,6 +1600,10 @@ async def _request_agent_backend_switch_impl(
                 account_id=auth.account_id,
                 subject=mcp_subject(auth, is_admin=auth.is_admin),
             )
+            from daimon.core.turn.notices import provider_name
+
+            before = await service.current(agent)
+            old_provider = provider_name((before.backend if before else None) or DEFAULT_BACKEND)
             await service.set_backend(
                 agent,
                 target_backend,
@@ -1551,8 +1620,16 @@ async def _request_agent_backend_switch_impl(
             )
             status = "changed"
             summary = (
-                "Model provider changed. New conversations with this agent use it; "
-                "existing threads keep their model."
+                f"Model provider changed. New conversations with {agent_name} use "
+                f"{provider_name(target_backend)}; other existing threads keep {old_provider}. "
+                + await _move_this_thread(
+                    runtime,
+                    auth,
+                    origin,
+                    agent_name,
+                    target_backend,
+                    pinned_here=await _channel_pin_line(runtime, origin) is not None,
+                )
             )
         channel_pin = await _channel_pin_line(runtime, origin)
         if channel_pin is not None:
@@ -1846,11 +1923,13 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             preview; never ask which model. Never ask the person for a model id.
             Ambiguous model names return the choices.
             The switch applies to
-            new conversations wherever the agent answers; switching the default agent
-            applies to every channel on this server. For "fork agent to gemini", copy the
-            agent with fork_agent, then switch the copy; say plainly that the copy isn't
-            answering anywhere yet, and that switching the agent itself is how to use
-            Gemini here.
+            new conversations wherever the agent answers, and to this conversation
+            from the next message when the switched agent answers here (the result's
+            summary says which); switching the default agent applies to every channel on
+            this server. For "make a copy of yourself on Gemini": copy the agent with
+            fork_agent, hand this conversation to the copy with hand_off_task while it is
+            still on this provider, then switch the copy here; the confirmed switch moves
+            this conversation to Gemini from the next message.
             First call without preview_digest and show the returned compatibility,
             shared-thread limits, what won't be available, and the cost line. Call again
             with the same model and that preview's expected_revision, preview_digest and

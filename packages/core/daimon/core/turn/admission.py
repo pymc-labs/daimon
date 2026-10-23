@@ -97,6 +97,7 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.thread_release import apply_thread_release, release_due
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
@@ -509,6 +510,18 @@ async def admit_impl(
             shared = shared and not is_dm
         await session.commit()
         mark("identity")
+        # A confirmed provider switch from this thread moves the caller's own slot:
+        # select as if released now, apply once the turn is admitted (below).
+        released = False
+        state_store = deps.state_store or mux_state.PostgresStateStore(deps.sessionmaker)
+        own_slot = Slot(
+            thread=ThreadRef(
+                channel=channel_ref(tenant_id, platform, channel_id), thread_id=thread_id or ""
+            ),
+            account_id=str(principal.account_id),
+        )
+        if deps.backend_selection_enabled and thread_id is not None and not is_dm:
+            released = await release_due(deps.sessionmaker, state_store, own_slot)
         if is_dm and client:
             # A client has no private conversation with Daimon.
             raise AdmissionDenied(reason="client_requester")
@@ -581,6 +594,8 @@ async def admit_impl(
             if backend_ever_shared:
                 slots.insert(0, Slot(thread=thread))
             for slot in slots:
+                if released and slot.account_id is not None:
+                    continue  # A due release: this caller's slot selects afresh.
                 binding = (
                     await deps.state_store.get_binding(slot)
                     if deps.state_store is not None
@@ -620,7 +635,7 @@ async def admit_impl(
                 backend_revision_origin = source if source != "default" else None
                 backend_footer_profile = retained.profile
                 break
-            if retained_revision is None:
+            if retained_revision is None and not released:
                 # A caller's older session remains on its original default
                 # backend even if neutral thread bindings did not yet exist.
                 previous = await get_thread_session_at(
@@ -1158,6 +1173,16 @@ async def admit_impl(
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
     )
+    if released:
+        # Admitted: now the release may consume its request (`daimon.core.thread_release`).
+        await apply_thread_release(
+            deps.sessionmaker,
+            state_store,
+            own_slot,
+            tenant_id=tenant_id,
+            account_id=principal.account_id,
+            now=now,
+        )
     mark("result")
     _log.info(
         "turn.admission_timing",

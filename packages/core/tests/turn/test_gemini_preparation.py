@@ -826,3 +826,25 @@ async def test_host_requested_cancel_remains_interrupted_and_journals_observed_s
     assert len({row.observation_id for row in applied}) == 1
     # Both readings were recorded; only the final (cancelled) one settled the hold.
     assert settled == ["cancel-root"]
+
+
+async def test_a_released_gemini_slot_is_adopted_with_a_fresh_session_not_a_replay(
+    host: Host,
+) -> None:
+    from mux.state.store import ERA_REF, released_successor
+
+    first = await prepare(host)
+    slot = Slot(thread=ThreadRef(channel=CHANNEL, thread_id="thread"), account_id=str(ACCOUNT))
+    store = host.journal.state_store
+    bound = await store.get_binding(slot)
+    assert bound is not None
+    await store.put_binding(released_successor(bound), expected_generation=bound.generation)
+    assert await store.get_binding(slot) is None
+    second = await prepare(host)
+    assert not second.reused and second.session_ref != first.session_ref
+    adopted = await store.get_binding(slot)
+    assert adopted is not None
+    assert (adopted.id, adopted.generation) == (bound.id, bound.generation + 2)
+    assert adopted.native_refs[ERA_REF] == f":g{bound.generation + 1}"
+    third = await prepare(host)
+    assert third.reused and third.session_ref == second.session_ref

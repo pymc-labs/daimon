@@ -60,8 +60,10 @@ from mux.state.operations import Begun, OperationRecord
 from mux.state.store import (
     SESSION_REF,
     ConfigRevisionConflict,
+    adopt_released,
     binding_slot,
     check_binding_successor,
+    is_released,
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
@@ -299,8 +301,13 @@ async def _binding(
 
 
 async def get_binding(
-    session: AsyncSession, slot: Slot, *, read_persisted: bool = False
+    session: AsyncSession,
+    slot: Slot,
+    *,
+    read_persisted: bool = False,
+    include_released: bool = False,
 ) -> BindingContract | None:
+    """The slot's binding; None for a released slot (`is_released`) unless asked."""
     statement = select(ProviderBindingSlot.binding_id, ProviderBindingSlot.generation).where(
         *_where_slot(ProviderBindingSlot, slot)
     )
@@ -309,11 +316,10 @@ async def get_binding(
         if read_persisted
         else await session.execute(statement)
     ).one_or_none()
-    return (
-        await _binding(session, row.binding_id, row.generation, read_persisted=read_persisted)
-        if row
-        else None
-    )
+    if row is None:
+        return None
+    binding = await _binding(session, row.binding_id, row.generation, read_persisted=read_persisted)
+    return None if is_released(binding) and not include_released else binding
 
 
 async def put_binding(
@@ -332,6 +338,9 @@ async def put_binding(
         await _binding(session, current_slot.binding_id, current_slot.generation)
         if current_slot
         else None
+    )
+    binding, expected_generation = adopt_released(
+        current, binding, expected_generation=expected_generation
     )
     check_binding_successor(current, binding, expected_generation=expected_generation)
     if current_slot is None:
@@ -1097,9 +1106,11 @@ class PostgresStateStore:
         async with self._tx() as session:
             return await latest_config_revision(session, channel)
 
-    async def get_binding(self, slot: Slot) -> BindingContract | None:
+    async def get_binding(
+        self, slot: Slot, *, include_released: bool = False
+    ) -> BindingContract | None:
         async with self._tx() as session:
-            return await get_binding(session, slot)
+            return await get_binding(session, slot, include_released=include_released)
 
     async def put_binding(
         self, binding: BindingContract, *, expected_generation: int

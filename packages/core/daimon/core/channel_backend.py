@@ -149,13 +149,18 @@ async def effective_thread_backend(
             if caller_id is not None
             else None
         )
+        from daimon.core.thread_release import release_pending
+
         thread = ThreadRef(channel=channel, thread_id=thread_id)
         slots = [Slot(thread=thread)] if ever_shared else []
+        released = False
         if principal is not None:
             slots.append(Slot(thread=thread, account_id=str(principal.account_id)))
+            # A confirmed switch from this thread: its next turn selects afresh.
+            released = await release_pending(session, slots[-1])
         for slot in slots:
             binding = await mux_state.get_binding(session, slot)
-            if binding is None:
+            if binding is None or (released and slot.account_id is not None):
                 continue
             if binding.thread != slot.thread or binding.legacy_account_id != slot.account_id:
                 raise ScopeViolation(binding.id, "selected binding differs from authorized thread")
@@ -175,7 +180,7 @@ async def effective_thread_backend(
             ):
                 raise BackendUnsupported("retained_binding_mismatch")
             return retained.backend
-        if principal is not None:
+        if principal is not None and not released:
             previous = await get_thread_session_at(
                 session,
                 tenant_id=tenant_id,

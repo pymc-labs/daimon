@@ -3602,6 +3602,39 @@ class ThreadLease(Base):
     active: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
+class ThreadProviderRelease(Base):
+    """A confirmed provider switch's request to move one caller's thread.
+
+    The next admitted turn in the slot applies it (`daimon.core.thread_release`): when the
+    slot's binding is still at `generation` (0 = unbound), it writes a released
+    successor through the binding compare-and-swap, and the turn then selects its
+    provider afresh. Applied or stale, the row is deleted.
+    """
+
+    __tablename__ = "thread_provider_release"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "channel_id",
+            "thread_id",
+            "account_id",
+            name="uq_thread_provider_release_slot",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MuxOperation(Base):
     """An idempotent operation: found by (tenant, account, key), owned by a principal.
 

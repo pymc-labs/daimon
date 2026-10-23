@@ -350,6 +350,7 @@ async def hand_over_thread(
         existing_binding_kind=binding.kind if binding is not None else None,
         origin_responder_ma_agent_id=current_responder_ma_agent_id,
         access=access,
+        caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
     )
     if isinstance(decision, HandoffRefused):
         raise ThreadHandoffRefused(decision)

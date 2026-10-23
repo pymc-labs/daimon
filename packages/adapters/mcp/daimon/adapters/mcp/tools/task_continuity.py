@@ -46,7 +46,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.native_admins import AdminCaller
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import ChatPlatform
+from daimon.core.stores.domain import ChatPlatform, TurnOriginRow
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import (
@@ -66,6 +66,7 @@ from daimon.core.thread_handoff import (
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 #: What the model must do with the returned copy. Both tools return final
 #: person-facing text, so the model's job is to relay it, not to rewrite it.
@@ -239,6 +240,14 @@ async def _hand_off_task_impl(
                 now=datetime.now(UTC),
                 recorded=recorded,
             )
+            # After the decision, so authorization speaks first; raising rolls it back.
+            await _refuse_another_providers_destination(
+                session,
+                auth,
+                origin,
+                destination_ma_agent_id=destination.id,
+                destination_name=destination_name,
+            )
             if repo is not None and unsaved_work is None:
                 # Raised inside the transaction, so the binding rolls back.
                 raise ToolError(render_tool_unsaved_work_question(repo))
@@ -308,6 +317,67 @@ async def _hand_off_task_impl(
         continuation_recorded=request is not None,
         confirmation=confirmation,
         instruction=_REPLY_VERBATIM,
+    )
+
+
+async def _refuse_another_providers_destination(
+    session: AsyncSession,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    *,
+    destination_ma_agent_id: str,
+    destination_name: str,
+) -> None:
+    """Refuse a hand-off to an agent on another provider than this thread is pinned to.
+
+    The thread keeps its provider, so the destination would answer here on the
+    old one. Moving a thread drops its history, which only a confirmed switch
+    may do (`daimon.core.thread_release`), never this unconfirmed tool.
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends, mux_state
+    from daimon.core.stores.thread_sessions import get_thread_session_at
+    from daimon.core.thread_release import caller_slot
+    from daimon.core.turn.notices import provider_name
+    from mux.contracts.config import DEFAULT_BACKEND
+
+    setting = await agent_backends.current(
+        session,
+        auth.tenant_id,
+        derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=destination_ma_agent_id),
+    )
+    target = (setting.backend if setting is not None else None) or DEFAULT_BACKEND
+    slot = caller_slot(
+        tenant_id=auth.tenant_id,
+        platform=origin.platform,
+        channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        account_id=auth.account_id,
+    )
+    pinned = await mux_state.get_binding(
+        session, slot.model_copy(update={"account_id": None})
+    ) or await mux_state.get_binding(session, slot)
+    if pinned is not None:
+        here = pinned.provider
+    elif await get_thread_session_at(
+        session,
+        tenant_id=auth.tenant_id,
+        platform=origin.platform,
+        thread_id=origin.thread_id,
+        account_id=auth.account_id,
+        at=datetime.now(UTC),
+    ):
+        here = DEFAULT_BACKEND
+    else:
+        return  # Nothing pins this thread yet: the destination's provider applies.
+    if here == target:
+        return
+    raise ToolError(
+        f"{destination_name} runs on {provider_name(target)}, and this conversation runs on "
+        f"{provider_name(here)}, so it can't take over here. Nothing changed. To have "
+        f"{destination_name} answer here, hand this conversation over while it is on "
+        f"{provider_name(here)}, then switch it with a confirmation; or ask it in a new "
+        "conversation."
     )
 
 
