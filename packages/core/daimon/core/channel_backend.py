@@ -1629,7 +1629,11 @@ class AgentBackendService:
             )
 
     async def recheck_copy_consent(
-        self, copy: BackendAgent, revision: AgentBackendRevision
+        self,
+        copy: BackendAgent,
+        revision: AgentBackendRevision,
+        *,
+        account_id: uuid.UUID | None = None,
     ) -> bool:
         """Whether a copy's carried consent still matches its capture; withdraw it if not.
 
@@ -1672,7 +1676,7 @@ class AgentBackendService:
             await security_audit.append_event(
                 session,
                 tenant_id=copy.tenant_id,
-                account_id=None,
+                account_id=account_id,
                 agent_id=copy.agent_id,
                 platform=None,
                 platform_user_id=None,

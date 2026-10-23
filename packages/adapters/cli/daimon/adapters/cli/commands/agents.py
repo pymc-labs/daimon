@@ -1199,6 +1199,7 @@ async def agents_fork(
         capture_source=_fork_capture(rt, tenant_id, principal.account_id, principal.os_user, dst),
         # The operator's copy takes everything an admin's does.
         carry="all",
+        actor_account_id=principal.account_id,
     )
     await ensure_agent_face(
         rt.sessionmaker,

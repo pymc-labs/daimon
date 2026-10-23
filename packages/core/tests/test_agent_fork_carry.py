@@ -333,6 +333,7 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
         extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: "chan"} if channel_copy else None,
         **({"carry": carry} if carry is not None else {}),
         capture_source=_no_switch_capture,
+        actor_account_id=account.id,
     )
 
     assert created[0]["metadata"][MA_METADATA_KEY_COPY_OF] == "source"
@@ -343,7 +344,8 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
         store = await get_memory_store_id(session, tenant_id=tenant.id, agent_id=copy_uuid)
     notes = fork_notes(copy, "mine")
     assert (
-        'crm (https://crm.example.com) needs connecting again: ask in chat "connect crm to mine".'
+        "crm (https://crm.example.com) needs connecting again with its full address (it's on "
+        'source): ask in chat "connect crm to mine".'
     ) in notes
     assert not any("SECRET" in note for note in notes), "a server's path or query is never echoed"
     kept_back = "source's memory and fleet setup stay with source."
@@ -356,6 +358,9 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
     assert kept_back not in notes
     assert revision is not None and revision.backend is None
     assert revision.fleet_grant is not None
+    async with factory() as session:
+        rows = await security_audit.list_events(session, tenant_id=tenant.id, agent_id=copy_uuid)
+    assert [(r.operation, r.account_id) for r in rows] == [("copy", account.id)]
     assert store is not None and store != mount["memory_store_id"]
     copied = {(m["path"], m["content"]) for m in memory.memories[store]}
     assert copied == {("/conventions.md", "tabs"), ("/project/facts.md", "due friday")}
@@ -622,7 +627,7 @@ async def test_a_carried_consent_that_no_longer_matches_the_copy_is_withdrawn(ow
         return target
 
     service = AgentBackendService(sessions, enabled=True, capture_source=capture)
-    assert not await service.recheck_copy_consent(copy, written)
+    assert not await service.recheck_copy_consent(copy, written, account_id=actor.account_id)
     current = await service.current(copy)
     assert current is not None and (current.local, current.backend) == (2, None)
     assert current.drop_consent is None and current.fleet_grant is not None
@@ -630,7 +635,7 @@ async def test_a_carried_consent_that_no_longer_matches_the_copy_is_withdrawn(ow
         rows = await security_audit.list_events(
             session, tenant_id=copy.tenant_id, agent_id=copy.agent_id
         )
-    assert [r.operation for r in rows] == ["copy_withdrawn"]
+    assert [(r.operation, r.account_id) for r in rows] == [("copy_withdrawn", actor.account_id)]
 
 
 class _Allowed:

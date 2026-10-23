@@ -1155,5 +1155,10 @@ async def test_a_cli_fork_of_a_switched_agent_with_memory_keeps_a_consent_its_tu
         explicit_target_name="Copy",
     )
     assert source_preservation_pin(captured) == setting.drop_consent.source_pin
+    async with rt.sessionmaker() as db:
+        rows = await security_audit.list_events(
+            db, tenant_id=tenant.id, agent_id=copy.agent_id, tool_name="agent_backend"
+        )
+    assert [(r.operation, r.account_id) for r in rows] == [("copy", principal.account_id)]
     assert "It runs on OpenAI, like Research." in output.getvalue()
     assert "It has a copy of Research's shared memory." in output.getvalue()

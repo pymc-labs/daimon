@@ -182,7 +182,8 @@ def fork_notes(copy: AgentCopy, new_name: str) -> tuple[str, ...]:
     for server, origin in carry.reconnect:
         at = f" ({origin})" if origin else ""
         notes.append(
-            f'{server}{at} needs connecting again: ask in chat "connect {server} to {new_name}".'
+            f"{server}{at} needs connecting again with its full address (it's on {source}): "
+            f'ask in chat "connect {server} to {new_name}".'
         )
     if carry.github_repos:
         repos = ", ".join(carry.github_repos)
@@ -335,6 +336,7 @@ async def copy_agent(
     extra_metadata: Mapping[str, str] | None = None,
     capture_source: CaptureSource | None = None,
     carry: CopyCarryScope = "settings",
+    actor_account_id: uuid.UUID | None = None,
 ) -> AgentCopy:
     """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
 
@@ -344,6 +346,7 @@ async def copy_agent(
     its turns will, which a provider switch that dropped features needs to be
     carried (`AgentBackendService.carry_to_copy`). `carry` is chosen by who
     makes the copy (`CopyCarryScope`); unsaid, it is `"settings"`.
+    `actor_account_id` is who made it, for the audit rows of what it carries.
     """
     async with sessionmaker() as session:
         try:
@@ -429,6 +432,7 @@ async def copy_agent(
         new_name=new_name,
         channel_copy=MA_METADATA_KEY_CHANNEL_COPY in (extra_metadata or {}),
         carry_all=carry == "all",
+        actor_account_id=actor_account_id,
         admin=subject.is_admin and not subject.via_agent_key and not subject.client,
         capture_source=capture_source,
         reconnect=reconnect,
@@ -472,6 +476,7 @@ class _CarryArgs:
     channel_copy: bool
     carry_all: bool
     admin: bool
+    actor_account_id: uuid.UUID | None
     capture_source: CaptureSource | None
     reconnect: tuple[tuple[str, str], ...]
 
@@ -577,11 +582,11 @@ async def _carry(
                 # A copied grant is a second budget under the same limits: an admin's call.
                 fleet_grant=full and args.admin,
                 shared_threads=full and args.admin,
-                account_id=None,
+                account_id=args.actor_account_id,
                 now=datetime.now(UTC),
             )
             if backend.revision is not None and not await service.recheck_copy_consent(
-                backend_agent, backend.revision
+                backend_agent, backend.revision, account_id=args.actor_account_id
             ):
                 backend = CarriedBackend(
                     None,
