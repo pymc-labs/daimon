@@ -130,3 +130,66 @@ async def test_a_longer_message_still_queues_behind_the_reply(queued_bot: Daimon
     finish.set()
     await task
     assert len(calls) == 2
+
+
+def _live_fleet(bot: DaimonBot, text: str) -> AsyncMock:
+    """The thread has a still-running fleet run; its card answers a typed stop with `text`."""
+    card = AsyncMock()
+    card.stop_typed.return_value = text
+    bot._live_fleet_card = AsyncMock(return_value=(card, AsyncMock()))  # type: ignore[method-assign]
+    return card.stop_typed
+
+
+@pytest.mark.asyncio
+async def test_stop_the_fleet_stops_its_workers_and_the_running_reply(
+    queued_bot: DaimonBot,
+) -> None:
+    from daimon.adapters.discord.posted_controls.fleet import FLEET_STOPPING, TypedPresser
+
+    task, cancel, finish, calls = await _running_turn(queued_bot)
+    stop_typed = _live_fleet(queued_bot, FLEET_STOPPING)
+    stop = _typed("<@999> stop the fleet", REQUESTER)
+    await queued_bot.on_message(stop)
+    (presser,) = stop_typed.await_args.args
+    assert isinstance(presser, TypedPresser) and presser.user is stop.author
+    assert cancel.is_set(), "the root reply stops with its workers"
+    stop.reply.assert_awaited_once_with(FLEET_STOPPING, mention_author=False)  # type: ignore[attr-defined]
+    finish.set()
+    await task
+    assert calls == ["write a long story"]
+
+
+@pytest.mark.asyncio
+async def test_stop_with_a_live_fleet_and_no_running_reply_starts_no_turn(
+    queued_bot: DaimonBot,
+) -> None:
+    from daimon.adapters.discord.posted_controls.fleet import FLEET_STOPPING
+
+    turns: list[str] = []
+
+    async def turn(message: discord.Message, guild_id: str, tenant_id: uuid.UUID, **_: object):
+        turns.append(message.content)
+
+    queued_bot._handle_mention = turn  # type: ignore[method-assign]
+    stop_typed = _live_fleet(queued_bot, FLEET_STOPPING)
+    stop = _typed("<@999> stop", REQUESTER)
+    await queued_bot.on_message(stop)
+    stop_typed.assert_awaited_once()
+    stop.reply.assert_awaited_once_with(FLEET_STOPPING, mention_author=False)  # type: ignore[attr-defined]
+    assert turns == []
+
+
+@pytest.mark.asyncio
+async def test_a_member_who_did_not_start_the_fleet_is_told_who_can_stop_it(
+    queued_bot: DaimonBot,
+) -> None:
+    refusal = "Only the person who started this fleet, or a server admin, can stop it."
+    task, cancel, finish, _ = await _running_turn(queued_bot)
+    _live_fleet(queued_bot, refusal)
+    stop = _typed("<@999> stop the fleet", STRANGER)
+    await queued_bot.on_message(stop)
+    assert not cancel.is_set(), "a refused fleet stop leaves the reply running too"
+    stop.reply.assert_awaited_once_with(refusal, mention_author=False)  # type: ignore[attr-defined]
+    cancel.set()
+    finish.set()
+    await task

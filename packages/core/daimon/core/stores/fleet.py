@@ -926,6 +926,35 @@ async def record_card(
         )
 
 
+async def live_run_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> tuple[uuid.UUID, str] | None:
+    """The newest still-running fleet run of a thread with a posted card: (run id, card message).
+
+    For a typed stop in that thread; the card's own control path proves authority.
+    """
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(FleetRunRow.id, FleetRunRow.card_message_id)
+                .where(
+                    FleetRunRow.tenant_id == tenant_id,
+                    FleetRunRow.platform == platform,
+                    FleetRunRow.thread_id == thread_id,
+                    FleetRunRow.status.in_(_run_from("cancelled")),
+                    FleetRunRow.card_message_id.is_not(None),
+                )
+                .order_by(FleetRunRow.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+    return None if row is None or row.card_message_id is None else (row.id, row.card_message_id)
+
+
 async def run_status(
     sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID, for_update: bool = False
 ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:

@@ -243,3 +243,27 @@ async def test_an_owed_run_without_workers_is_cleared_unposted(pooled):
     assert post.notices == []
     row = await _row(pooled, run)
     assert row.end_notice is None and row.end_notice_attempts == 0
+
+
+async def test_a_thread_s_live_run_card_is_found_until_the_run_ends(pooled):
+    """A typed "stop the fleet" finds the thread's running run by its posted card."""
+
+    async def live(run):
+        return await fleet.live_run_card(
+            pooled, tenant_id=run.tenant_id, platform="discord", thread_id="thread"
+        )
+
+    run = await _run(pooled)
+    assert await live(run) is None, "no card posted yet"
+    await fleet.record_card(
+        pooled, tenant_id=run.tenant_id, run_id=run.id, message_id="901", terminal=False
+    )
+    assert await live(run) == (run.id, "901")
+    assert (
+        await fleet.live_run_card(
+            pooled, tenant_id=run.tenant_id, platform="discord", thread_id="another-thread"
+        )
+        is None
+    )
+    await _end(pooled, run, status="cancelled")
+    assert await live(run) is None

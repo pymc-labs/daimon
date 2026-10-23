@@ -11,9 +11,9 @@ import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
 import structlog
 from daimon.adapters.discord.checks import ADMIN_NOUN
@@ -38,11 +38,34 @@ if TYPE_CHECKING:
     from daimon.core.turn.deps import TurnDeps
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+
+class Presser(Protocol):
+    """Who acts on a fleet card: a button press, or the author of a typed stop."""
+
+    @property
+    def user(self) -> discord.User | discord.Member: ...
+
+    @property
+    def guild_id(self) -> int | None: ...
+
+    @property
+    def channel_id(self) -> int | None: ...
+
+
+@dataclass(frozen=True)
+class TypedPresser:
+    """A typed "stop" in the run's thread, acting as its author would by pressing Stop."""
+
+    user: discord.User | discord.Member
+    guild_id: int | None
+    channel_id: int | None
+
+
 type ParentLoader = Callable[
-    [discord.Interaction | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None]
+    [Presser | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None]
 ]
 type ParentResolver = Callable[
-    [discord.Thread, int, uuid.UUID | None, uuid.UUID | None, discord.Interaction | None],
+    [discord.Thread, int, uuid.UUID | None, uuid.UUID | None, Presser | None],
     Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None],
 ]
 type Send = Callable[..., Awaitable[discord.Message]]
@@ -531,7 +554,7 @@ class DiscordFleetCardFactory:
             requester_id: int,
             intent_id: uuid.UUID | None,
             run_id: uuid.UUID | None,
-            interaction: discord.Interaction | None,
+            interaction: Presser | None,
         ) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
             from daimon.adapters.discord.checks import admin_caller
 
@@ -621,7 +644,7 @@ class DiscordFleetCardFactory:
             return None
         card: DiscordFleetCard
 
-        async def current(interaction: discord.Interaction | None):
+        async def current(interaction: Presser | None):
             actor_id = interaction.user.id if interaction is not None else requester_id
             result = await self._resolve(
                 thread, requester_id, turn_card_intent_id, card.run_id, interaction
@@ -665,6 +688,7 @@ class DiscordFleetCardFactory:
 
 
 _NOT_CONTROLLER = f"Only the person who started this fleet, or {ADMIN_NOUN}, can {{verb}} it."
+FLEET_STOPPING = "Stopping this fleet and its workers."
 _ALREADY_ENDED = "This fleet has already stopped."
 _WORKER_ENDED = "This worker has already finished."
 _UNREACHABLE = "Couldn't reach the fleet just now. Try again in a moment."
@@ -753,7 +777,7 @@ class DiscordFleetCard:
         return self._run_id
 
     async def _snapshot(
-        self, interaction: discord.Interaction | None
+        self, interaction: Presser | None
     ) -> tuple[WorkerPermissions, TenantAccessPolicy, FleetRun, tuple[FleetWorker, ...]] | None:
         result = await self._load_parent(interaction)
         if result is None:
@@ -927,6 +951,45 @@ class DiscordFleetCard:
                     _refusal_text(refused, action), ephemeral=True
                 )
                 return False
+
+    async def stop_typed(self, presser: Presser, *, message: discord.Message | None) -> str:
+        """A typed stop in the run's thread: the card's Stop-all, by its author; the reply text.
+
+        The same authority as the button (the fleet's starter or a current server
+        admin, checked by the shared owner), at the run's current version.
+        """
+        async with self._lock:
+            try:
+                snapshot = await self._snapshot(presser)
+                if snapshot is None:
+                    raise FleetRefused("foreign_run")
+                parent, policy, run, _ = snapshot
+                reply = await self._service.control(
+                    parent,
+                    policy,
+                    run_id=run.id,
+                    worker_id=None,
+                    action="kill",
+                    expected_version=run.version,
+                    operation_key=f"discord:fleet:{run.id}:all:{run.version}:kill",
+                    now=self._clock(),
+                )
+                if reply.get("accepted") is not True:
+                    return _IN_FLIGHT
+                log.info(
+                    "fleet.control_typed",
+                    run_id=str(run.id),
+                    action="kill",
+                    pressed_by=str(presser.user.id),
+                    presser_is_admin=parent.subject.is_admin,
+                )
+                run, workers = await self._service.read_snapshot(parent, policy, run.id)
+                if message is not None:
+                    self._message = message
+                await self._display(self._render(run, workers))
+                return FLEET_STOPPING
+            except (FleetRefused, WorkerSpecRefused) as refused:
+                return _refusal_text(refused, "kill")
 
     async def allow_sealed_responses(self) -> bool:
         """Ordinary delivery only for no run, or a run nothing was spawned into yet.

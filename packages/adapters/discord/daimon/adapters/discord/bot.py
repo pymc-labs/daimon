@@ -953,12 +953,39 @@ class DaimonBot(commands.Bot):
     ) -> DiscordFleetCard | None:
         """Rebuild through the captured post and the same transport owner."""
         thread, message = interaction.channel, interaction.message
-        if (
-            not isinstance(thread, discord.Thread)
-            or message is None
-            or self.runtime.fleet_card_factory is None
-            or not self.runtime.settings.fleet.enabled
-        ):
+        if not isinstance(thread, discord.Thread) or message is None:
+            return None
+        return await self._fleet_card_from_post(thread, message, run_id=run_id)
+
+    async def _live_fleet_card(
+        self, thread: discord.Thread
+    ) -> tuple[DiscordFleetCard, discord.Message] | None:
+        """The card of this thread's still-running fleet run, rebuilt from its post."""
+        from daimon.core.stores import fleet as fleet_store
+
+        if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
+            return None
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+        live = await fleet_store.live_run_card(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=str(thread.id),
+        )
+        if live is None:
+            return None
+        run_id, message_id = live
+        try:
+            message = await thread.fetch_message(int(message_id))
+        except discord.HTTPException:
+            return None
+        card = await self._fleet_card_from_post(thread, message, run_id=run_id)
+        return None if card is None or card.run_id != run_id else (card, message)
+
+    async def _fleet_card_from_post(
+        self, thread: discord.Thread, message: discord.Message, *, run_id: uuid.UUID
+    ) -> DiscordFleetCard | None:
+        if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
             return None
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
         async with self.runtime.sessionmaker() as session:
@@ -2563,10 +2590,11 @@ class DaimonBot(commands.Bot):
             return
         thread = message.channel
         thread_id = thread.id
+        # A typed stop from someone allowed stops the running reply or fleet.
+        if await self._typed_stop(message, thread, reply_when_refused=False):
+            return
         if thread_id in self._processing:
-            # A typed stop from someone allowed stops the turn; anything else, the
-            # in-flight turn's delta context already carries.
-            await self._typed_stop(message, thread_id, reply_when_refused=False)
+            # The in-flight turn's delta context already carries this message.
             return
         guild_id = str(message.guild.id)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
@@ -3231,10 +3259,12 @@ class DaimonBot(commands.Bot):
             # Per-thread mention queueing. Check before claiming an in-flight slot
             # so that queued mentions never consume a slot they won't use.
             thread_id = message.channel.id
+            # "@Daimon stop" stops the running reply or fleet instead of waiting behind it.
+            if isinstance(message.channel, discord.Thread) and await self._typed_stop(
+                message, message.channel, reply_when_refused=True
+            ):
+                return
             if thread_id in self._processing:
-                # "@Daimon stop" stops the running reply instead of waiting behind it.
-                if await self._typed_stop(message, thread_id, reply_when_refused=True):
-                    return
                 queued_message = True
                 await self._queue_behind_inflight_turn(thread_id, message)
                 return
@@ -3381,19 +3411,49 @@ class DaimonBot(commands.Bot):
             await session.commit()
 
     async def _typed_stop(
-        self, message: discord.Message, thread_id: int, *, reply_when_refused: bool
+        self, message: discord.Message, thread: discord.Thread, *, reply_when_refused: bool
     ) -> bool:
-        """Stop the thread's running turn on a typed stop phrase: the Stop button's path.
+        """A typed stop phrase in a thread: the Stop buttons' paths.
 
-        True when the message was a stop request and was answered. Only the person
-        who asked or a server admin may stop; a plain (unmentioned) stop from anyone
-        else is left alone, an @-mentioned one is told who can stop.
+        With a still-running fleet run in the thread, the fleet card's Stop-all (the
+        same authority as the button: its starter or a server admin), and the running
+        reply's Stop too. Otherwise the running reply's Stop: its asker or a server
+        admin. True when the message was a stop request and was answered; a plain
+        (unmentioned) stop from someone not allowed is left alone, an @-mentioned
+        one is told who can stop.
         """
         if not is_stop_request(message.content):
             return False
+        from daimon.adapters.discord.posted_controls.fleet import FLEET_STOPPING, TypedPresser
+
+        thread_id = thread.id
         is_admin = isinstance(message.author, discord.Member) and (
             admin_caller(message.author).is_server_admin
         )
+        fleet = await self._live_fleet_card(thread)
+        if fleet is not None:
+            card, card_message = fleet
+            text = await card.stop_typed(
+                TypedPresser(user=message.author, guild_id=thread.guild.id, channel_id=thread_id),
+                message=card_message,
+            )
+            stopped = text == FLEET_STOPPING
+            if stopped:
+                # The root reply, if one is still running, stops with its workers.
+                self._typed_stops.stop(thread_id, author_id=message.author.id, is_admin=True)
+            log.info(
+                "turn.stop_typed",
+                platform="discord",
+                thread_id=str(thread_id),
+                pressed_by=str(message.author.id),
+                outcome="fleet_stopped" if stopped else "fleet_refused",
+            )
+            if not stopped and not reply_when_refused:
+                return False
+            await self._reply_quietly(message, text)
+            return True
+        if thread_id not in self._processing:
+            return False
         outcome = self._typed_stops.stop(thread_id, author_id=message.author.id, is_admin=is_admin)
         log.info(
             "turn.stop_typed",
@@ -3409,11 +3469,14 @@ class DaimonBot(commands.Bot):
             "already_stopping": ALREADY_STOPPING,
             "not_allowed": STOP_NOT_ALLOWED,
         }[outcome]
-        try:
-            await message.reply(reply, mention_author=False)
-        except discord.HTTPException as exc:
-            log.warning("turn.stop_typed_reply_failed", thread_id=str(thread_id), error=str(exc))
+        await self._reply_quietly(message, reply)
         return True
+
+    async def _reply_quietly(self, message: discord.Message, text: str) -> None:
+        try:
+            await message.reply(text, mention_author=False)
+        except discord.HTTPException as exc:
+            log.warning("turn.stop_typed_reply_failed", message_id=str(message.id), error=str(exc))
 
     async def _queue_behind_inflight_turn(self, thread_id: int, message: discord.Message) -> None:
         """Queue ``message`` behind the thread's in-flight turn, then mark it ⌛.
