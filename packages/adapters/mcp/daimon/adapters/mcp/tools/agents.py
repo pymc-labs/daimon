@@ -1879,7 +1879,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context, source_name: str, new_name: str, expected_ma_agent_id: str | None = None
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
-        Admin-only. Copies its prompt, model, skills and the MCP servers that need
+        Admin-only. Only for a saved, named copy someone asked to keep. Running
+        copies of yourself on several models at once is not this: that is a fleet
+        of task workers (fleet_spawn), which needs no admin.
+        Copies its prompt, model, skills and the MCP servers that need
         no stored token. The copy starts with no credentials: no repo binding or
         GitHub access, no API/service keys and no connector tokens; attach its own
         with ``request_agent_key`` and the repo tools. An agent an operator pinned

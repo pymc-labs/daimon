@@ -8,6 +8,8 @@ unchanged; adapters add specific handlers on top in the cutover plans.
 
 from __future__ import annotations
 
+import re
+import sys
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -52,6 +54,11 @@ class AdmissionDenied(DaimonError):
     Carries only closed literals — no rendered user-facing text. Denial copy
     stays adapter-side. A `backend_unsupported` refusal may name its `cause`
     and the `provider` involved, so the copy can name the fix.
+
+    A `backend_unsupported` refusal also records its `site`, the code location
+    that raised it ("turn.runtime_manifest.select_worker_row:812"): about 150
+    places raise it, and logs need to say which one. It is derived from our own
+    module, function and line, so it never carries request data.
     """
 
     def __init__(
@@ -65,6 +72,20 @@ class AdmissionDenied(DaimonError):
         self.reason: AdmissionDenialReason = reason
         self.cause: BackendRefusalCause | None = cause
         self.provider: str | None = provider
+        self.site: str | None = raise_site() if reason == "backend_unsupported" else None
+
+
+_SITE = re.compile(r"[a-z_][a-z0-9_.]*\.[A-Za-z_][A-Za-z0-9_<>]*:\d+")
+
+
+def raise_site(depth: int = 2) -> str | None:
+    """`module.function:line` of the daimon code that constructed the refusal."""
+    frame = sys._getframe(depth)  # pyright: ignore[reportPrivateUsage]
+    module = str(frame.f_globals.get("__name__", ""))
+    if not module.startswith("daimon."):
+        return None
+    site = f"{module.removeprefix('daimon.core.')}.{frame.f_code.co_name}:{frame.f_lineno}"
+    return site if _SITE.fullmatch(site) else None
 
 
 class DmSourceSealedError(DaimonError):

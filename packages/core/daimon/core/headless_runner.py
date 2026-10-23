@@ -55,7 +55,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -133,6 +133,9 @@ from mux.state.lease import Lease, Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.mutation_retry import MutationRetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.fleet_orchestration import WorkerFailureCode
 
 log = structlog.get_logger(__name__)
 
@@ -671,9 +674,7 @@ async def commit_worker_transition(
     worker: FleetWorker,
     action: Callable[[AsyncSession, FleetWorker], Awaitable[FleetWorker]] | None = None,
     *,
-    failure_code: Literal[
-        "preparation_refused", "dispatch_refused", "provider_error", "setup_error"
-    ] = "preparation_refused",
+    failure_code: WorkerFailureCode = "preparation_refused",
 ) -> FleetWorker:
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet_store.lock_budget(

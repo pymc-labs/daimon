@@ -527,6 +527,8 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         cause: dict[str, object] = {"type": safe_types.get(type(error), "redacted")}
         if isinstance(error, (AgentBackendRefused, AdmissionDenied)):
             cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
+        if isinstance(error, AdmissionDenied) and error.site is not None:
+            cause["site"] = error.site  # Our own module.function:line, never request data.
         if isinstance(error, FleetConflict):
             cause["reason"] = (
                 error.reason

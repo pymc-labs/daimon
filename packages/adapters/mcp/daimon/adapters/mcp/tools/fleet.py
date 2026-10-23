@@ -808,6 +808,10 @@ def register_fleet_tools(
     ) -> dict[str, JsonValue]:
         """Start one worker in this turn's fleet run. Call once per worker, in parallel.
 
+        This is what "fork yourself across Opus 5.5, Astra and Argon", "run
+        copies of yourself on X and Y" or "compare these models" means: start one
+        task worker per named model with task + model. No admin is needed and no
+        saved agent is made (fork_agent is only for a saved, named copy).
         Usually pass only operation_key (unique per worker, e.g. "W1"), role,
         task (the worker's full instructions), model (a model the fleet
         allows, by id or plain name, e.g. "gpt-6-astra" or "astra"; omit it

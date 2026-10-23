@@ -95,10 +95,10 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
         await admit_impl(deps, **kwargs)
     diagnostics = [row for row in logs if row["event"] == "turn.backend_unsupported"]
     assert diagnostics[-1]["stage"] == "preparation_counterpart"
-    assert diagnostics[-1]["causes"][0] == {
-        "type": "AdmissionDenied",
-        "reason": "backend_unsupported",
-    }
+    first = diagnostics[-1]["causes"][0]
+    # The refusal names the code site that raised it (SMOKE-1: 12+ candidate sites).
+    assert first.pop("site").startswith("turn.runtime_manifest.read_preparation_counterpart:")
+    assert first == {"type": "AdmissionDenied", "reason": "backend_unsupported"}
     assert any(cause["type"] == "UnsupportedCapability" for cause in diagnostics[-1]["causes"])
     assert "private" not in str(refused.value)
     assert (refused.value.cause, refused.value.provider) == ("agent_backend", provider)
