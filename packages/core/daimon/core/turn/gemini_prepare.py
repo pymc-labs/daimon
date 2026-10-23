@@ -84,7 +84,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         raise UnsupportedCapability(("gemini_durable_runtime",), PROFILE)
     journal, usage = runtime.journal, runtime.usage_store
     # Gemini usage reaches no ledger debit, and a root interaction has no token
-    # envelope: the daily model cap is checked before anything is created.
+    # envelope: the daily model cap refuses plainly here, before anything is
+    # created. Each fallback attempt is checked again (`CappedFlashAccounting`).
     from daimon.core.turn.daily_model_cap import check_daily_model_cap
 
     await check_daily_model_cap(
@@ -321,16 +322,25 @@ def _warn_on_grounding(
 ) -> None:
     """Grounding (search) calls carry a per-query price no tariff or daily cap counts.
 
-    Agent requests never offer them, so any count here is a leak to look at.
+    Agent requests never offer them, so any count here is a leak to look at. The
+    usage reports them as a list of `{type, count}` (google-genai `GroundingToolCount`).
     """
-    grounding = observation.native_meter.get("grounding_tool_count")
-    if isinstance(grounding, int) and not isinstance(grounding, bool) and grounding > 0:
+    raw = observation.native_meter.get("grounding_tool_count")
+    entries = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    counts = {
+        str(item.get("type")): count
+        for item in entries
+        if isinstance(count := item.get("count"), int) and not isinstance(count, bool)
+    }
+    total = sum(counts.values())
+    if total > 0:
         structlog.get_logger(__name__).warning(
             "turn.gemini_grounding_unexpected",
             tenant_id=str(tenant_id),
             binding_id=binding_id,
             observation_id=observation.id,
-            grounding_tool_count=grounding,
+            grounding_tool_count=total,
+            grounding_types=sorted(counts),
         )
 
 

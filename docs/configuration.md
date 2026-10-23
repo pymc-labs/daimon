@@ -1232,8 +1232,10 @@ payment before use.
 
 Most a tenant may spend each UTC day on any one Gemini model, in provider USD at list
 price, counted across every agent turn and fleet worker. A Gemini agent turn has no
-token envelope and its usage reaches no ledger debit, so this is the guard. A turn or
-worker that would start past it is refused until midnight UTC. 0 allows no Gemini turns.
+token envelope and its usage reaches no ledger debit, so this is the guard. Checked as
+each turn or worker starts and again at every Flash fallback attempt, never mid-answer;
+a model with no current tariff is refused. It resets at midnight UTC. 0 allows no Gemini
+turns.
 
 ### `DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`
 
@@ -1241,8 +1243,9 @@ worker that would start past it is refused until midnight UTC. 0 allows no Gemin
 
 Most a tenant may spend each UTC day on any one OpenAI model, in provider USD at list
 price, counted across every agent turn and fleet worker. OpenAI sessions carry no native
-spend limit on this project, so this is the guard. A turn or worker that would start
-past it is refused until midnight UTC. 0 allows no OpenAI turns.
+spend limit on this project, so this is the guard. Checked as each turn or worker
+starts, never mid-turn; a model with no current tariff is refused. It resets at midnight
+UTC. 0 allows no OpenAI turns.
 
 ## Support
 

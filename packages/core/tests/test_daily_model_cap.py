@@ -13,7 +13,7 @@ import pytest_asyncio
 from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.pricing import ProviderPrice, minimum_cost_of
 from daimon.core.stores import mux_state
-from daimon.core.stores.openai_spend import openai_spend_today, utc_midnight
+from daimon.core.stores.model_spend import model_spend_today, utc_midnight
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.openai_host import (
@@ -127,7 +127,7 @@ async def record(sm, name: str, value: UsageObservation) -> None:
 
 async def spent(sm, model: str, *, tenant: uuid.UUID = TENANT, now: datetime = NOW) -> Decimal:
     async with sm() as db:
-        return await openai_spend_today(
+        return await model_spend_today(
             db,
             tenant_id=tenant,
             provider="openai",
@@ -229,18 +229,18 @@ async def test_an_expired_or_missing_tariff_refuses_instead_of_counting_nothing(
                 cast(Any, SimpleNamespace(price=price)),
                 _revision("gpt-6-astra"),
             )
-        assert refused.value.reason == "provider_daily_cap_reached"
+        assert refused.value.reason == "provider_price_unavailable"
 
 
 async def test_a_malformed_usage_row_is_skipped_not_fatal(sessions, monkeypatch):
-    from daimon.core.stores import openai_spend
+    from daimon.core.stores import model_spend
 
     await record(sessions, "astra", usage(BINDINGS["astra"][1], "gpt-6-astra"))
 
     def broken(*_args, **_kwargs):
         raise ValueError("cached tokens exceed input")
 
-    monkeypatch.setattr(openai_spend, "provider_cost_of", broken)
+    monkeypatch.setattr(model_spend, "provider_cost_of", broken)
     assert await spent(sessions, "gpt-6-astra") == 0
 
 
@@ -255,6 +255,7 @@ def test_a_gemini_refusal_names_the_gemini_model():
 
 @pytest.mark.parametrize("count", [0, 2])
 def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
+    """The real usage shape: a list of `{type, count}` per grounding tool."""
     import structlog.testing
     from daimon.core.turn.gemini_prepare import (
         _warn_on_grounding,  # pyright: ignore[reportPrivateUsage]
@@ -277,7 +278,13 @@ def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
         basis="cumulative",
         input_tokens=10,
         output_tokens=5,
-        native_meter={"total_input_tokens": 10, "grounding_tool_count": count},
+        native_meter={
+            "total_input_tokens": 10,
+            "grounding_tool_count": [
+                {"type": "google_search", "count": count},
+                {"type": "url_context", "count": 0},
+            ],
+        },
         completeness="measured",
         observed_at=NOW,
     )
@@ -287,3 +294,90 @@ def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
     assert len(leaks) == (1 if count else 0)
     if count:
         assert leaks[0]["grounding_tool_count"] == count and leaks[0]["observation_id"]
+        assert leaks[0]["grounding_types"] == ["google_search", "url_context"]
+
+
+class _Inner:
+    def __init__(self) -> None:
+        self.attempts: list[str] = []
+
+    async def before_attempt(self, *, model, attempt) -> None:
+        self.attempts.append(model.id)
+
+    async def after_attempt(self, *, receipt) -> None:
+        return None
+
+
+class _Source:
+    """The primary answers 503; any other create is recorded."""
+
+    def __init__(self) -> None:
+        self.created: list[str] = []
+
+    async def create(self, request):
+        from mux.errors import ProviderError
+
+        model = request["agent_config"]["model"]
+        self.created.append(model)
+        if model == "gemini-3.8-flash":
+            raise ProviderError("overloaded", retryable=True, native_code="503")
+        return {"id": "interaction", "status": "in_progress"}
+
+
+def _flash_request() -> dict[str, Any]:
+    return {
+        "agent": "antigravity",
+        "agent_config": {"type": "antigravity", "model": "gemini-3.8-flash"},
+    }
+
+
+async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(monkeypatch):
+    """A 503 on the primary moves down the chain; each fallback model is capped too."""
+    from daimon.core.turn import daily_model_cap
+    from daimon.core.turn.daily_model_cap import CappedFlashAccounting
+    from mux.drivers.gemini.flash import FlashTransport
+
+    checked: list[str] = []
+
+    async def cap(_request, *, provider, model, price, cap):
+        checked.append(model)
+        if model != "gemini-3.8-flash":
+            raise AdmissionDenied(reason="provider_daily_cap_reached", provider=model)
+
+    monkeypatch.setattr(daily_model_cap, "check_daily_model_cap", cap)
+    inner, source = _Inner(), _Source()
+    accounting = CappedFlashAccounting(inner, cast(Any, None), {}, Decimal(20))
+    with pytest.raises(AdmissionDenied) as refused:
+        await FlashTransport(cast(Any, source), accounting).create(_flash_request())
+
+    assert refused.value.provider == "gemini-flash-latest"
+    assert source.created == ["gemini-3.8-flash"], "the fallback was never created"
+    assert checked == ["gemini-3.8-flash", "gemini-flash-latest"]
+    assert inner.attempts == ["gemini-3.8-flash"], "no hold for the refused fallback"
+
+
+async def test_a_fallback_without_a_tariff_refuses_as_unpriced():
+    """gemini-flash-latest has no dated tariff: never run uncounted."""
+    from contextlib import asynccontextmanager
+
+    from daimon.core.turn.daily_model_cap import CappedFlashAccounting
+
+    @asynccontextmanager
+    async def no_db():
+        yield None
+
+    request = SimpleNamespace(
+        tenant_id=TENANT,
+        worker=None,
+        now=lambda: NOW,
+        deps=SimpleNamespace(sessionmaker=no_db, markup=Decimal(1)),
+    )
+    accounting = CappedFlashAccounting(_Inner(), cast(Any, request), {}, Decimal(20))
+    with pytest.raises(AdmissionDenied) as refused:
+        await accounting.before_attempt(
+            model=ModelRef(provider="gemini", id="gemini-flash-latest"), attempt=2
+        )
+    assert (refused.value.reason, refused.value.provider) == (
+        "provider_price_unavailable",
+        "gemini-flash-latest",
+    )

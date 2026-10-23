@@ -33,7 +33,7 @@ def utc_midnight(now: datetime) -> datetime:
     return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-async def openai_spend_today(
+async def model_spend_today(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
@@ -80,7 +80,7 @@ async def openai_spend_today(
             if cost is None:
                 cost = minimum_cost_of(effective, rates)
         except ValueError:
-            log.warning("openai_spend.usage_row_skipped", tenant_id=str(tenant_id), model=model)
+            log.warning("model_spend.usage_row_skipped", tenant_id=str(tenant_id), model=model)
             continue
         spent += cost or Decimal(0)
     # A running worker's reservation is customer dollars (with markup). Counted in

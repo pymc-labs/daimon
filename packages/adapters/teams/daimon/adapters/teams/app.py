@@ -261,6 +261,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "provider_hold_cap_reached": "turn.skipped.provider_hold_cap_reached",
     "provider_setup_pending": "turn.skipped.provider_setup_pending",
     "provider_daily_cap_reached": "turn.skipped.provider_daily_cap_reached",
+    "provider_price_unavailable": "turn.skipped.provider_price_unavailable",
 }
 
 

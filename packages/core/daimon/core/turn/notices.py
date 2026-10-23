@@ -232,6 +232,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "Couldn't set up GPT for this {scope} yet.",
         "Try again shortly.",
     ),
+    "provider_price_unavailable": _Copy(
+        "Daimon can't price {model} right now, so it won't run it.",
+        "Use another model, or try again later.",
+    ),
     "provider_daily_cap_reached": _Copy(
         "Today's {model} budget for this {scope} is used up.",
         "It resets at midnight UTC; use another model until then.",
@@ -270,7 +274,12 @@ def _model_label(model: str | None) -> str:
 
     if not model:
         return "model"
-    return model_name(ModelRef(provider=PERSISTENT_WORKSPACE.provider, id=model))
+    provider = (
+        INLINE_REUSE.provider
+        if model.startswith(INLINE_REUSE.provider)
+        else PERSISTENT_WORKSPACE.provider
+    )
+    return model_name(ModelRef(provider=provider, id=model))
 
 
 def provider_name(provider: str | None) -> str:
@@ -309,7 +318,11 @@ def admission_refusal_text(
     agent = agent_name or "This agent"
     named = provider_name(provider)
     # A daily model cap refusal carries the model id where `provider` would be.
-    model = _model_label(provider) if reason == "provider_daily_cap_reached" else named
+    model = (
+        _model_label(provider)
+        if reason in ("provider_daily_cap_reached", "provider_price_unavailable")
+        else named
+    )
     words = {
         "model": model,
         "agent": agent,
