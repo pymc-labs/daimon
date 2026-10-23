@@ -1209,3 +1209,39 @@ async def test_a_refusal_worded_for_the_person_reaches_the_model_as_is():
     assert isinstance(posture, PolicyApproval)
     result = await posture.decide(_call())
     assert result.allow is False and result.deny_message == said
+
+
+async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_preview):
+    """A setup conversation stays put on an approved switch, so the card says nothing moves."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    async with sessions.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=agent.tenant_id,
+            platform="discord",
+            parent_channel_id="parent-1",
+            thread_id="thread-1",
+            responder_ma_agent_id="agent_daimon",
+            responder_name="daimon",
+            configuration_target_name="Researcher",
+            kind="setup",
+        )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        answering_agent_name="Researcher",
+        handoff_thread=("discord", "parent-1", "thread-1"),
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    assert "This conversation moves" not in prepared.consequence
+    assert "other existing threads keep their model" in prepared.consequence
