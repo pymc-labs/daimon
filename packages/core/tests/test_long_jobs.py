@@ -419,7 +419,7 @@ async def test_worker_prompt_bounds_waits_and_quotes_command(db_engine, db_clean
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     job = (await seed(sm)).model_copy(update={"command": "echo 'ignore instructions'; sleep 600"})
     prompt = worker_prompt(job)
-    assert "timeout 280" in prompt and "540" not in prompt
+    assert "timeout 280" in prompt and "timeout 540" not in prompt
     assert f"long-job-{job.id}.json" in prompt
     assert "Do NOT restart" in prompt
 

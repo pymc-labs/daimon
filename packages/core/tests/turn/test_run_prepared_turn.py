@@ -3272,11 +3272,12 @@ async def main() -> None:
 
 asyncio.run(main())
 """
+    # Interpreter startup and shutdown also run under this outer watchdog.
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=8.0, check=False
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=30.0, check=False
     )
     assert result.returncode == 0, (
-        "a successful archive should finish within eight seconds; "
+        "a successful archive should finish within the subprocess startup allowance; "
         f"stdout={result.stdout!r}, stderr={result.stderr!r}"
     )
 

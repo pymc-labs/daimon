@@ -545,11 +545,14 @@ async def test_a_settle_cut_short_keeps_the_request(
     ]
     await _request(db_session_factory)
 
+    # Exercise the page bound independently of host/database throughput.
     cut = await settle_finished_turn(
-        ma.client, db_session_factory, session, markup=MARKUP, max_pages=1
+        ma.client, db_session_factory, session, markup=MARKUP, max_pages=1, budget_s=None
     )
     kept = await _pending(db_session_factory)
-    rest = await settle_finished_turn(ma.client, db_session_factory, session, markup=MARKUP)
+    rest = await settle_finished_turn(
+        ma.client, db_session_factory, session, markup=MARKUP, budget_s=None
+    )
 
     assert cut is not None and not cut.complete and kept == BOUNDARY
     assert rest is not None and rest.complete and await _pending(db_session_factory) is None
