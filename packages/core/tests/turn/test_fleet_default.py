@@ -762,7 +762,6 @@ async def test_a_real_freeze_names_left_out_logins_and_hands_over_nothing(root_t
     await freeze(frozen)
     parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
     assert parent.shared_logins == frozenset()  # nothing reaches a worker while not live
-    assert parent.workers_run_without == (
-        "the stored key SERVICE_KEY (sharing with workers isn't available yet)",
-    )
+    # The requester here isn't an admin now, so the admin's share needs re-confirming.
+    assert parent.workers_run_without == ("the stored key SERVICE_KEY (needs re-confirming)",)
     assert "service-secret-value" not in json.dumps(list(parent.workers_run_without))

@@ -18,6 +18,7 @@ import importlib.resources
 import re
 import shlex
 import uuid
+from collections.abc import Mapping
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -33,6 +34,7 @@ from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
 from mux.contracts.ids import Scope
+from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -252,6 +254,7 @@ async def upload_env_and_mount(
     agent_id: uuid.UUID,
     ttl_hours: int = 1,
     exclude_github: bool = False,
+    keys: Mapping[str, str] | None = None,
 ) -> BetaManagedAgentsFileResourceParams | None:
     """Fetch the agent's tenant-scoped secrets, upload them as a `.env`, mount it.
 
@@ -263,11 +266,24 @@ async def upload_env_and_mount(
     resources entirely).
 
     The requested mount_path is ".env"; MA serves it at
-    `/mnt/session/uploads/.env` (skills read from there).
+    `/mnt/session/uploads/.env` (skills read from there). `keys`, when given, maps
+    the only key names written (a fleet worker's shared keys) to their approved
+    versions; a missing or changed key refuses.
     """
     async with session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
     rows = [row for row in rows if session_env_key(row.key, exclude_github=exclude_github)]
+    if keys is not None:
+        # A fleet worker gets only the stored keys its requester shared, each at the
+        # exact version that was approved: a key rotated since refuses the worker.
+        from daimon.core.fleet_credentials import stored_key_version
+
+        rows = [row for row in rows if row.key in keys]
+        found = {
+            row.key: stored_key_version(row.last_set_by_account_id, row.updated_at) for row in rows
+        }
+        if found != dict(keys):
+            raise ScopeViolation("worker-resources", "a shared key changed since it was approved")
     if not rows:
         return None
 

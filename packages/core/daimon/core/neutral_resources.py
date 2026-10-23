@@ -1055,6 +1055,12 @@ class WorkerPermissions:
     # The logins the requester chose to share with this run's workers, frozen with the
     # root (keys from `fleet_credentials`); a later choice applies from the next run.
     shared_logins: frozenset[str] = frozenset()
+    # The connectors (server names) those shared logins belong to, resolved at freeze
+    # (unused until connector logins can be shared, A-3).
+    shared_servers: frozenset[str] = frozenset()
+    # The stored-row version each shared login was approved at, frozen with the root:
+    # a worker gets the row only at that exact version (a rotation never reaches it).
+    shared_versions: tuple[tuple[str, str], ...] = ()
     # Every login this run's workers run without, by name with the reason, so it is
     # never dropped silently (the fleet card and spawn result show it).
     workers_run_without: tuple[str, ...] = ()
@@ -1503,7 +1509,11 @@ def _with_root_model(
 
 
 def _root_ceiling(
-    source: BackendAgent, *, account_id: str
+    source: BackendAgent,
+    *,
+    account_id: str,
+    shared: frozenset[str] = frozenset(),
+    shared_servers: frozenset[str] = frozenset(),
 ) -> tuple[AgentSpec, tuple[ResourceBinding, ...]]:
     """The captured source's worker ceiling and the resources it carries, memory included."""
     from daimon.core.memory_resource import memory_mount
@@ -1513,7 +1523,7 @@ def _root_ceiling(
     if actual is None or source.effective_spec is None:
         raise WorkerSpecRefused("origin", "unbound")
     try:
-        ceiling = worker_source_ceiling(source)
+        ceiling = worker_source_ceiling(source, shared=shared, shared_servers=shared_servers)
     except ValueError:
         raise WorkerSpecRefused("tools", "unsupported") from None
     # The complete capture remains the input to the existing obligation classifier.
@@ -1622,6 +1632,8 @@ def fleet_root_permissions(
     now: datetime,
     seal_ids: frozenset[str] = frozenset(),
     own_backends: tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]] | None = None,
+    shared_logins: frozenset[str] = frozenset(),
+    shared_servers: frozenset[str] = frozenset(),
 ) -> WorkerPermissions:
     """Compose captured source; caller joins origin/binding and rechecks grant epoch.
 
@@ -1656,7 +1668,12 @@ def fleet_root_permissions(
         != (fleet.scope.tenant_id, fleet.scope.account_id)
     ):
         raise WorkerSpecRefused("origin", "unbound")
-    spec, resources = _root_ceiling(source, account_id=fleet.scope.account_id)
+    spec, resources = _root_ceiling(
+        source,
+        account_id=fleet.scope.account_id,
+        shared=shared_logins,
+        shared_servers=shared_servers,
+    )
     read_only = source.memory_read_only is not False
     duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
@@ -1683,6 +1700,8 @@ def fleet_root_permissions(
             seal_ids=seal_ids,
             memory_read_only=read_only,
             agent_id=source.agent_id,
+            shared_logins=shared_logins,
+            shared_servers=shared_servers,
         ),
         source,
         admission=admission,
@@ -2334,12 +2353,18 @@ def resolve_worker_spec(
         if guidance not in system.split("\n\n"):
             resolved = resolved.model_copy(update={"system": system + "\n\n" + guidance})
     if captured_source is not None:
+        from daimon.core.fleet_credentials import SHAREABLE_PROVIDERS
+
+        native = selected.backend in SHAREABLE_PROVIDERS
         missing = classify_source_obligations(
             captured_source,
             resolved,
             environment=environment,
             resources=resources,
             worker_ceiling=True,
+            # Only a native worker can receive a shared login (its own vault and .env).
+            shared=parent.shared_logins if native else frozenset(),
+            shared_servers=parent.shared_servers if native else frozenset(),
         )
         if missing:
             field = {

@@ -157,9 +157,13 @@ class FrozenLogins:
     handed: frozenset[str] = frozenset()
     handed_servers: frozenset[str] = frozenset()
     without: tuple[str, ...] = ()
+    # (login key, approved row version) for every handed login.
+    handed_versions: tuple[tuple[str, str], ...] = ()
 
 
-async def frozen_logins(deps: TurnDeps, source: BackendAgent) -> FrozenLogins:
+async def frozen_logins(
+    deps: TurnDeps, source: BackendAgent, *, admin_now: UUID | None = None
+) -> FrozenLogins:
     """The run's shared logins and every login its workers run without, with the reason.
 
     A saved "share" counts only if it still holds now (`still_shared`: the same
@@ -180,15 +184,25 @@ async def frozen_logins(deps: TurnDeps, source: BackendAgent) -> FrozenLogins:
         saved = parse_sharing(current.fleet_credential_sharing if current else None)
         owner = await agent_owners.owner_of(db, source.tenant_id, source.agent_id)
         logins = await fleet_logins(db, source)
+
+    # Admin status only exists as the chat platform reports it, for this turn's
+    # requester: an admin's saved share counts only when that admin is the one asking.
+    def is_admin_now(account: UUID) -> bool:
+        return admin_now is not None and account == admin_now
+
     shared = frozenset(
-        login.key for login in logins if still_shared(login, saved.get(login.key), owner=owner)
+        login.key
+        for login in logins
+        if still_shared(login, saved.get(login.key), owner=owner, admin_now=is_admin_now)
     )
     handed: frozenset[str] = shared if LOGIN_SHARING_LIVE else frozenset()
 
     def choice(key: str) -> str | None:
         entry = saved.get(key)
-        if entry is None or (entry.choice == "share" and key not in shared):
-            return None  # a share that no longer holds reads as not shared
+        if entry is None:
+            return None
+        if entry.choice == "share" and key not in shared:
+            return "reconfirm"  # the row changed, or its admin isn't the one asking
         return entry.choice
 
     without = tuple(
@@ -197,9 +211,18 @@ async def frozen_logins(deps: TurnDeps, source: BackendAgent) -> FrozenLogins:
         if login.key not in handed
     )
     servers = frozenset(
-        login.label for login in logins if login.kind == "agent_mcp" and login.key in handed
+        login.server
+        for login in logins
+        if login.kind == "agent_mcp" and login.key in handed and login.server is not None
     )
-    return FrozenLogins(shared, handed, servers, without)
+    versions = tuple(
+        sorted(
+            (login.key, login.version)
+            for login in logins
+            if login.key in handed and login.version is not None
+        )
+    )
+    return FrozenLogins(shared, handed, servers, without, versions)
 
 
 async def frozen_shared_logins(deps: TurnDeps, source: BackendAgent) -> frozenset[str]:
@@ -881,6 +904,16 @@ async def _freeze_root(
     if deps.fleet_root_grants is not None:
         raise WorkerSpecRefused("origin", "unsupported")
     try:
+        decision = await frozen_logins(
+            deps,
+            source,
+            admin_now=prepared.admission.account_id if grant.subject.is_admin else None,
+        )
+    except Exception as error:
+        # Listing logins never fails a root: share nothing, and say so on the card.
+        log.warning("fleet.logins_unlisted", cause=type(error).__name__)
+        decision = FrozenLogins(without=("this agent's logins (they couldn't be listed)",))
+    try:
         permissions = fleet_root_permissions(
             source,
             grant,
@@ -900,6 +933,8 @@ async def _freeze_root(
             policy=policy,
             now=now(),
             seal_ids=prepared.admission.origin_seal_ids,
+            shared_logins=decision.handed,
+            shared_servers=decision.handed_servers,
         )
     except WorkerSpecRefused as error:
         # Only when the agent's own setup can't become worker authority (e.g. a
@@ -930,15 +965,10 @@ async def _freeze_root(
             update={"deadline": min(request.deadline, permissions.limits.deadline)}
         ),
     )
-    try:
-        decision = await frozen_logins(deps, source)
-    except Exception as error:
-        # Listing logins never fails a root: share nothing, and say so on the card.
-        log.warning("fleet.logins_unlisted", cause=type(error).__name__)
-        decision = FrozenLogins(without=("this agent's logins (they couldn't be listed)",))
-    # Only what is actually handed over is frozen as shared (none while not live).
     permissions = replace(
-        permissions, shared_logins=decision.handed, workers_run_without=decision.without
+        permissions,
+        workers_run_without=decision.without,
+        shared_versions=decision.handed_versions,
     )
     environment = source_environment_record(prepared.admission.environment, scope)
     root = _FrozenRoot(
@@ -2223,7 +2253,12 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
     return frozenset(paired)
 
 
-def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
+def worker_source_ceiling(
+    source: BackendAgent,
+    *,
+    shared: frozenset[str] = frozenset(),
+    shared_servers: frozenset[str] = frozenset(),
+) -> BackendAgent:
     """Exclude validated native-only capabilities and their paired resources.
 
     Nothing with its own login enters a worker ceiling: the agent can still run a
@@ -2235,7 +2270,13 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
       (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
     - stored secrets the session would write to a file (`.env`);
     - repositories cloned with a login.
+
+    `shared` (login keys) and `shared_servers` are what the requester chose to hand
+    this run's workers, frozen with its root: those logins, and the connectors
+    they belong to, stay in the ceiling. Nothing else does.
     """
+    from daimon.core.fleet_credentials import login_key_of
+
     spec = source.effective_spec
     if spec is None:
         return source
@@ -2246,6 +2287,16 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     )
     if stored_logins:
         logins |= {server.name for server in spec.mcp_servers or ()}
+    # A shared connector stays only if every login it carries is shared too.
+    logins -= {
+        name
+        for name in shared_servers
+        if all(
+            server.credential_ref is None or server.credential_ref in shared
+            for server in spec.mcp_servers or ()
+            if server.name == name
+        )
+    }
     drops: set[str] = set()
     if logins - excluded:
         drops.add("mcp")
@@ -2271,6 +2322,9 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     }
     resources: list[ResourceBinding] = []
     for binding in source.resource_requirements:
+        if login_key_of(binding) in shared:
+            resources.append(binding)
+            continue
         paired = _mcp_credential_servers(source, binding)
         if (paired and paired <= excluded) or (
             binding.kind == "credential" and binding.credential_ref in credentials
@@ -2380,15 +2434,24 @@ def classify_source_obligations(
     asks_before_publishing: bool = False,
     worker_ceiling: bool = False,
     retained_agent: ResourceRef | None = None,
+    shared: frozenset[str] = frozenset(),
+    shared_servers: frozenset[str] = frozenset(),
 ) -> frozenset[str]:
-    """One source-preservation rule for pre-allocation normalization and preparation."""
+    """One source-preservation rule for pre-allocation normalization and preparation.
+
+    `shared` / `shared_servers` are a fleet run's frozen shared logins: under the
+    worker ceiling those (and only those) are proven by the worker's own vault and
+    .env, which the worker session builds from the same frozen set.
+    """
+    from daimon.core.fleet_credentials import login_key_of
+
     ceiling_drops: set[str] = set()
     if worker_ceiling:
         before: set[str] = (
             set(source.effective_spec.declared_drops) if source.effective_spec else set()
         )
         try:
-            source = worker_source_ceiling(source)
+            source = worker_source_ceiling(source, shared=shared, shared_servers=shared_servers)
         except ValueError:
             return frozenset({"source_definition", "tools"})
         if source.effective_spec is not None:
@@ -2508,6 +2571,8 @@ def classify_source_obligations(
     retained_credentials.discard(None)
     for server in spec.mcp_servers or ():
         if server.credential_ref and not native_retained:
+            if worker_ceiling and server.credential_ref in shared:
+                continue
             if represented and server.credential_ref in represented.credential_refs:
                 continue
             if server.name in retained_mcp or server.credential_ref in retained_credentials:
@@ -2521,6 +2586,9 @@ def classify_source_obligations(
     ):
         missing.add("credentials")
     for resource in source.resource_requirements:
+        if worker_ceiling and login_key_of(resource) in shared:
+            # Handed over by the worker's own vault / filtered .env (fleet_credentials).
+            continue
         if (
             native_retained
             and resource.kind == "credential"
@@ -2569,8 +2637,14 @@ def classify_source_obligations(
         from daimon.core.memory_resource import memory_mount
 
         retained = False
-        if len(resources) == 1 and source.memory_store_id is not None:
-            native, ref = resources[0].native, resources[0].resource
+        # The worker's shared logins sit beside its memory mount; only the mount counts.
+        mounts = [
+            resource
+            for resource in resources
+            if not (worker_ceiling and login_key_of(resource) in shared)
+        ]
+        if len(mounts) == 1 and source.memory_store_id is not None:
+            native, ref = mounts[0].native, mounts[0].resource
             retained = (
                 source.source is not None
                 and source.resource_scope is not None
@@ -2904,10 +2978,23 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         else (),
         asks_before_publishing=request.admission.asks_before_publishing,
         worker_ceiling=worker is not None,
+        # A native worker's frozen shared logins (none for any other worker).
+        shared=worker.permissions.shared_logins
+        if worker is not None and worker.backend.backend in _shareable_providers()
+        else frozenset(),
+        shared_servers=worker.permissions.shared_servers
+        if worker is not None and worker.backend.backend in _shareable_providers()
+        else frozenset(),
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
     return replace(request, source=source, target_spec=target)
+
+
+def _shareable_providers() -> frozenset[str]:
+    from daimon.core.fleet_credentials import SHAREABLE_PROVIDERS
+
+    return SHAREABLE_PROVIDERS
 
 
 async def read_preparation_counterpart(

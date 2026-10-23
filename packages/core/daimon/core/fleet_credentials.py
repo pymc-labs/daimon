@@ -11,6 +11,7 @@ NAME.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
@@ -30,6 +31,9 @@ Installer = Literal["owner", "admin", "caller", "unknown"]
 Choice = Literal["share", "skip", "ask"]
 SaverRole = Literal["admin", "owner"]
 CHOICES: tuple[Choice, ...] = ("share", "skip", "ask")
+#: Stored keys that are GitHub's own credentials: never handed to a worker (GitHub
+#: access goes through the app, never a copied token).
+UNSHAREABLE_KEYS: frozenset[str] = frozenset({"env:GITHUB_TOKEN", "env:GH_TOKEN"})
 #: A stored login whose server isn't on the agent any more: never shareable.
 UNMATCHED_CONNECTOR = "a connected tool"
 
@@ -52,18 +56,19 @@ class ConnectorLogin:
     installed_by: Installer
     account_label: str | None = None
     version: str | None = None
+    # The agent's connector this login belongs to (matched by URL), if any.
+    server: str | None = None
 
     @property
     def shareable(self) -> bool:
-        """What a worker can be handed today: stored connector logins and stored keys.
+        """What a worker can be handed in v1: stored keys (not GitHub's own tokens).
 
-        Unknown kinds never (fail closed). The requester's own connections live in
-        the vault that also carries Daimon's own credential, and GitHub app access
-        needs its repo helpers and identity, so neither is handed to a worker yet.
+        Unknown kinds never (fail closed). Stored connector logins need native-worker
+        MCP admission (A-3); the requester's own connections live in the vault that
+        also carries Daimon's own credential; GitHub access needs its repo helpers
+        and identity. All of those read "can't be shared with workers yet".
         """
-        return self.kind in ("agent_mcp", "env") and (
-            self.kind != "agent_mcp" or self.label != UNMATCHED_CONNECTOR
-        )
+        return self.kind == "env" and self.key not in UNSHAREABLE_KEYS
 
     @property
     def savable(self) -> bool:
@@ -143,26 +148,30 @@ def may_share(
 
 
 def still_shared(
-    login: ConnectorLogin, saved: SavedChoice | None, *, owner: uuid.UUID | None
+    login: ConnectorLogin,
+    saved: SavedChoice | None,
+    *,
+    owner: uuid.UUID | None,
+    admin_now: Callable[[uuid.UUID], bool],
 ) -> bool:
     """Whether a saved "share" still holds for this login as it is NOW.
 
-    Re-checked at every freeze: the same row version it was saved for, and the saver
-    may still share it under the current installer classification (an admin, or the
-    owner, still the owner, sharing a key that is still theirs).
+    Re-checked at every freeze: a stored row that has a version, the same version it
+    was saved for, and the saver may still share it under the current installer
+    classification. An admin's share needs that person to be an admin NOW
+    (`admin_now`); an owner's needs them to still be the owner.
     """
-    return (
-        saved is not None
-        and saved.choice == "share"
-        and login.shareable
-        and saved.version == login.version
-        and may_share(
-            login,
-            actor_account_id=saved.by,
-            requester_account_id=saved.by,
-            is_admin=saved.role == "admin",
-            is_owner=saved.role == "owner" and owner == saved.by,
-        )
+    if saved is None or saved.choice != "share" or not login.shareable:
+        return False
+    if not login.version or saved.version != login.version:
+        return False
+    is_admin = saved.role == "admin" and admin_now(saved.by)
+    return may_share(
+        login,
+        actor_account_id=saved.by,
+        requester_account_id=saved.by,
+        is_admin=is_admin,
+        is_owner=saved.role == "owner" and owner == saved.by,
     )
 
 
@@ -205,6 +214,11 @@ def _repository_name(url: str) -> str:
 
 def _version(*parts: object) -> str:
     return ":".join(part.isoformat() if isinstance(part, datetime) else str(part) for part in parts)
+
+
+def stored_key_version(last_set_by: uuid.UUID | None, updated_at: datetime) -> str:
+    """The version a stored key's share is pinned to: who last set it, and when."""
+    return _version(last_set_by, updated_at)
 
 
 async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[ConnectorLogin, ...]:
@@ -255,6 +269,7 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
                     name or UNMATCHED_CONNECTOR,
                     "unknown",
                     version=_version(stored[1]) if stored is not None else None,
+                    server=name,
                 )
             )
         elif reference.startswith("caller-mcp:"):
@@ -276,7 +291,9 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
                     "env",
                     f"the stored key {key}",
                     "owner" if by_owner else "unknown",
-                    version=_version(setters[1], setters[2]) if setters is not None else None,
+                    version=stored_key_version(setters[1], setters[2])
+                    if setters is not None
+                    else None,
                 )
             )
         else:
@@ -330,6 +347,8 @@ def run_without_line(login: ConnectorLogin, choice: str | None, *, sharing_live:
         )
     if choice == "skip":
         return f"{login.label} (skipped)"
+    if choice == "reconfirm":
+        return f"{login.label} (needs re-confirming)"
     if choice == "share" and not sharing_live:
         return f"{login.label} (sharing with workers isn't available yet)"
     return f"{login.label} (not shared)"

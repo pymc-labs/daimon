@@ -1,6 +1,7 @@
 """Admin ceilings meet actual captured source through the resource owner."""
 
 import json
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1911,3 +1912,207 @@ async def test_fleet_hold_comes_from_the_root_agents_live_pinned_row(
             fill_token_limits=True,
         )
     assert holds == [Decimal("0.12") if pin == "stale" else Decimal("0.11")]
+
+
+@pytest.mark.parametrize("captured", ("haiku55",), indirect=True)
+@pytest.mark.parametrize("rotated", [False, True])
+async def test_a_shared_key_reaches_a_native_worker_end_to_end(
+    captured, owned, monkeypatch, rotated
+):
+    """CREDSHARE v1, through create_session: the worker's session gets a .env with ONLY
+    its shared key, at the approved version, and starts; a key rotated since refuses."""
+    from anthropic.types.beta import BetaEnvironment
+    from daimon.core.fleet_credentials import fleet_logins, login_key_of
+    from daimon.core.mux_compat import sdk_agent
+    from daimon.core.sessions import create_session
+    from daimon.core.stores.agent_files import put_agent_file
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    source, _, _, _, policy, _ = captured
+    sessions = owned[3]
+    async with sessions.begin() as db:
+        for key in ("SHARED_KEY", "OTHER_KEY"):
+            await put_agent_file(
+                db,
+                tenant_id=source.tenant_id,
+                agent_id=source.agent_id,
+                key=key,
+                content=f"{key.lower()}-value",
+                set_by_account_id=None,
+            )
+    # The root as the session will re-capture it: its stored keys are projected now.
+    environment = BetaEnvironment.model_validate(dict(source.environment.native))
+    actual = sdk_agent(source.source)
+    trace = ScriptedTransport(router=MARouter())
+    async with trace.client() as client:
+        source = await project_session_resources(
+            source,
+            agent=actual,
+            environment=environment,
+            session_factory=sessions,
+            tenant_id=source.tenant_id,
+            agent_uuid=source.agent_id,
+            account_id=uuid.UUID(source.resource_scope.account_id),
+            resource_scope=source.resource_scope,
+            memory_read_only=True,
+        )
+    async with sessions() as db:
+        logins = {login.key: login for login in await fleet_logins(db, source)}
+    shared = frozenset({"env:SHARED_KEY"})
+    root = compose(
+        (source, *captured[1:]),
+        shared_logins=shared,
+    )
+    root = replace(root, shared_versions=(("env:SHARED_KEY", logins["env:SHARED_KEY"].version),))
+    worker = resolve_worker_spec(
+        root,
+        root.spec,
+        policy=policy,
+        now=NOW,
+        resources=root.resources,
+        environment=root.environment,
+        limits=root.limits,
+        captured_source=source,
+    )
+    assert {login_key_of(binding) for binding in worker.resources} == {None, "env:SHARED_KEY"}
+    source = source.model_copy(update={"resource_scope": worker.permissions.fleet.scope})
+    if rotated:
+        async with sessions.begin() as db:
+            await put_agent_file(
+                db,
+                tenant_id=source.tenant_id,
+                agent_id=source.agent_id,
+                key="SHARED_KEY",
+                content="rotated-value",
+                set_by_account_id=None,
+            )
+    uploads: list[bytes] = []
+    snapshots = {}
+    execution = source.source.model_copy(
+        update={
+            "ref": source.source.ref.model_copy(update={"id": "worker-agent"}),
+            "native": None,
+            "spec": worker.spec,
+        }
+    )
+    executing = sdk_agent(execution)
+    router = MARouter()
+
+    def upload(call, match):
+        uploads.append(call.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "file_env",
+                "type": "file",
+                "filename": ".env",
+                "mime_type": "text/plain",
+                "size_bytes": len(call.content),
+                "created_at": "2026-10-13T23:00:00Z",
+                "downloadable": False,
+            },
+        )
+
+    def native(call, match):
+        if call.method == "POST":
+            payload = json.loads(call.content)
+            session = ma_session(
+                id="worker-session",
+                agent=executing,
+                environment_id=environment.id,
+                metadata=payload["metadata"],
+                resources=[item for item in payload["resources"] if item.get("type") != "file"],
+            ).model_dump(mode="json")
+            # Read back as the provider serves a mounted upload.
+            session["resources"] = [
+                {**item, "mount_path": "/mnt/session/uploads/.env"}
+                if item.get("type") == "file"
+                else next(other for other in session["resources"] if other.get("type") != "file")
+                for item in payload["resources"]
+            ]
+            snapshots["session"] = session
+        return httpx.Response(200, json=snapshots["session"])
+
+    router.add("POST", r"/v1/files", upload)
+    router.add("POST", r"/v1/sessions", native)
+    router.add("GET", r"/v1/sessions/worker-session", native)
+    router.add(
+        "GET",
+        r"/v1/environments/.*",
+        lambda call, match: httpx.Response(200, json=dict(source.environment.native)),
+    )
+    trace = ScriptedTransport(router=router)
+
+    async def fence():
+        return None
+
+    async with trace.client() as client:
+        from daimon.core.config import McpSettings
+        from daimon.core.scope import ResolvedConfig
+        from daimon.core.turn.admission import Admission
+        from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
+        from daimon.core.turn.runtime_manifest import prepare_source
+        from daimon.testing.turn_fakes import deps_for_pinned_mux
+        from mux.contracts.config import ConfigRevision
+
+        deps = replace(
+            deps_for_pinned_mux(client, sessions),
+            agent_backends=True,
+            channel_backends=True,
+            mcp=McpSettings(),
+        )
+        await prepare_source(
+            ProviderPreparationRequest(
+                deps=deps,
+                admission=Admission(
+                    account_id=root.fleet.account_id,
+                    agent=sdk_agent(source.source),
+                    environment=environment,
+                    config=ResolvedConfig(agent_name="helper", environment_name="test-env"),
+                    memory_read_only=True,
+                    backend_revision=ConfigRevision.create(
+                        root.fleet.root.channel, 1, worker.backend
+                    ),
+                    backend_revision_origin="agent",
+                ),
+                scope=worker.permissions.fleet.scope,
+                tenant_id=source.tenant_id,
+                platform="discord",
+                external_user_id="member",
+                thread_id="worker-thread",
+                session_account_id=root.fleet.account_id,
+                reuse_existing=True,
+                capabilities=DEFAULT_MA_CAPABILITIES,
+                transfer=None,
+                deadline=worker.limits.deadline,
+                now=lambda: NOW,
+                worker=worker,
+                source=source,
+            )
+        )
+        kwargs = dict(
+            agent=executing,
+            environment=environment,
+            tenant_id=source.tenant_id,
+            account_id=root.fleet.account_id,
+            agent_uuid=source.agent_id,
+            session_factory=sessions,
+            resource_source=source,
+            worker=worker,
+            before_create=fence,
+            memory_read_only=True,
+        )
+        if rotated:
+            with pytest.raises(Exception, match="changed since it was approved"):
+                await create_session(client, **kwargs)
+            assert uploads == [] and not any("/v1/sessions" in r.path for r in trace.requests)
+            return
+        result = await create_session(client, **kwargs)
+    assert len(uploads) == 1
+    body = uploads[0].decode(errors="replace")
+    assert "shared_key-value" in body and "other_key-value" not in body
+    assert "OTHER_KEY" not in body
+    kinds = sorted(item.get("type") for item in snapshots["session"]["resources"])
+    assert "file" in kinds and len(kinds) == 2  # the .env and the warm memory
+    assert result.id == "worker-session"
