@@ -28,6 +28,7 @@ from mux.drivers.gemini.deployment import (
 )
 from mux.drivers.gemini.flash import (
     ATTEMPT_MODELS,
+    CREATE_DEADLINE,
     FLASH_MODELS,
     FLASH_PRIMARY,
     FlashAccounting,
@@ -169,6 +170,7 @@ __all__ = [
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",
     "ATTEMPT_MODELS",
+    "CREATE_DEADLINE",
     "AgentCatalogTransport",
     "FLASH_MODELS",
     "FLASH_PRIMARY",

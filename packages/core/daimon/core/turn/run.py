@@ -820,7 +820,7 @@ async def _replace_dead_session_locked(
 @contextlib.contextmanager
 def _create_deadline(deadline: datetime) -> Iterator[None]:
     """A rate-limited Gemini create retries only while this turn can still answer."""
-    from mux.drivers.gemini.flash import CREATE_DEADLINE
+    from mux.drivers.gemini import CREATE_DEADLINE
 
     token = CREATE_DEADLINE.set(deadline)
     try:
