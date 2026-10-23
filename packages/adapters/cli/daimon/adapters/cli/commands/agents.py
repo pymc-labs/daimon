@@ -30,7 +30,7 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_override,
 )
 from daimon.core import channel_backend
-from daimon.core.agent_fork import copy_agent
+from daimon.core.agent_fork import CaptureSource, copy_agent, fork_notes
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
 from daimon.core.authz import Subject
@@ -1172,7 +1172,7 @@ async def agents_fork(
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
-        await get_or_create_cli_principal(
+        principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
@@ -1195,6 +1195,8 @@ async def agents_fork(
         # The CLI is the deployment operator.
         subject=Subject(is_admin=True),
         default_agent_name=rt.deployment_default.agent_name,
+        # A provider switch that dropped features is carried only from the copy's own capture.
+        capture_source=_fork_capture(rt, tenant_id, principal.account_id, principal.os_user, dst),
     )
     await ensure_agent_face(
         rt.sessionmaker,
@@ -1210,6 +1212,46 @@ async def agents_fork(
     if copy.dropped_skills:
         left_off = ", ".join(copy.dropped_skills)
         console.print(f"[yellow]Left off the copy: {left_off}[/yellow]")
+    for note in fork_notes(copy, dst):
+        console.print(note, markup=False)
+
+
+def _fork_capture(
+    rt: CliRuntime, tenant_id: uuid.UUID, account_id: uuid.UUID, os_user: str, name: str
+) -> CaptureSource:
+    """Capture a new copy the way the provider-switch command captures an agent.
+
+    Built on first use: only a source whose switch dropped features needs it.
+    """
+
+    async def capture(agent: channel_backend.BackendAgent) -> channel_backend.BackendAgent:
+        from daimon.core.authz import Place
+        from daimon.core.scope import ScopeContext
+        from daimon.core.turn.admission import capture_backend_source
+        from daimon.core.turn.deps import build_turn_deps
+
+        deps = build_turn_deps(
+            rt.settings,
+            rt.anthropic,
+            rt.sessionmaker,
+            deployment_default=rt.deployment_default,
+            resolver_cache=rt.resolver_cache,
+            billing_config=None,
+        )
+        return await capture_backend_source(
+            deps,
+            agent,
+            context=ScopeContext(tenant_id=tenant_id, account_id=account_id, platform="cli"),
+            subject=Subject(is_admin=True),
+            place=Place(),
+            is_dm=False,
+            slack_turn_context_id=None,
+            private_dm_id=None,
+            external_user_id=os_user,
+            explicit_target_name=name,
+        )
+
+    return capture
 
 
 class _BackfillRow(BaseModel):

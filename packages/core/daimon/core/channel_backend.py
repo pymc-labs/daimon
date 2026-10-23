@@ -393,6 +393,20 @@ class AgentSettings:
 
 
 @dataclass(frozen=True)
+class CarriedBackend:
+    """What `AgentBackendService.carry_to_copy` gave a copy.
+
+    `revision` is the copy's first setting, None when nothing was written;
+    `left_backend` names a source provider the copy does not run on yet;
+    `fleet` says whether the source's fleet grant came along.
+    """
+
+    revision: AgentBackendRevision | None
+    left_backend: Provider | None
+    fleet: bool
+
+
+@dataclass(frozen=True)
 class BackendSelectionState:
     agent: BackendAgent
     revision: AgentBackendRevision | None
@@ -1431,6 +1445,119 @@ class AgentBackendService:
         return await self._change(
             agent, None, expected_revision, actor, "revert", expected_preview_digest
         )
+
+    async def carry_to_copy(
+        self,
+        source: AgentBackendRevision,
+        copy: BackendAgent,
+        *,
+        fleet_grant: bool,
+        account_id: uuid.UUID | None,
+        now: datetime,
+    ) -> CarriedBackend:
+        """Give a new copy of an agent its source's provider, model, settings and fleet grant.
+
+        The copy is the forker's own call (`authorize(FORK)`), so no card is
+        asked again, except where the source's switch carries consent to drop
+        features: that consent is pinned to the source, so the copy's is taken
+        afresh from its own capture and kept only when it drops nothing the
+        source's admin did not already accept. Without a capture, or when the
+        copy would drop more, the provider is left at the default and named in
+        `left_backend`. A copy that already has a setting is never overwritten.
+        """
+        backend, model = source.backend, source.model
+        settings = AgentSettings.of(source)
+        left: Provider | None = None
+        grant: JsonValue | None = None
+        if fleet_grant and source.fleet_grant is not None:
+            value = AgentFleetGrant.model_validate_json(json.dumps(source.fleet_grant))
+            if value.expires_at > now:
+                # The copy's first setting is revision 1, so its grant's epoch is too.
+                grant = value.model_copy(update={"epoch": 1}).model_dump(mode="json")
+        async with policy_store.policy_write_transaction(
+            self._sessions, tenant_id=copy.tenant_id
+        ) as session:
+            if await agent_backends.current(session, copy.tenant_id, copy.agent_id) is not None:
+                return CarriedBackend(None, None, fleet=False)
+            consent: JsonValue | None = None
+            preview: CompatibilityPreview | None = None
+            if source.drop_consent is not None:
+                if self._capture_source is not None and backend is not None:
+                    try:
+                        preview = await self._preview(session, copy, backend, model, settings)
+                    except (DaimonError, UnsupportedCapability):
+                        preview = None
+                    if (
+                        preview is not None
+                        and preview.drop_consent is not None
+                        and set(preview.declared_drops) <= set(source.declared_drops)
+                    ):
+                        consent = preview.drop_consent.model_dump(mode="json")
+                    else:
+                        preview = None
+                if preview is None:
+                    left, backend, model, settings = backend, None, None, AgentSettings()
+            if backend is not None or not settings.is_default():
+                try:
+                    check_backend(
+                        ConfigRevision.create(
+                            ChannelRef(
+                                tenant_id=str(copy.tenant_id), platform="cli", channel_id=copy.name
+                            ),
+                            1,
+                            agent_selection(backend or DEFAULT_BACKEND, model, settings),
+                        )
+                    )
+                except DaimonError:
+                    # Not runnable here any more: the copy starts on the default instead.
+                    left = left or backend
+                    backend, model, settings = None, None, AgentSettings()
+                    consent = preview = None
+            if backend is None and settings.is_default() and grant is None:
+                return CarriedBackend(None, left, fleet=False)
+            if preview is None:
+                preview = compatibility_preview(
+                    copy,
+                    backend or DEFAULT_BACKEND,
+                    await self._policy(session, copy.tenant_id),
+                    cost_line="Copied from the agent it was made from.",
+                    model=model,
+                    settings=settings,
+                )
+            try:
+                revision = await agent_backends.put_revision(
+                    session,
+                    tenant_id=copy.tenant_id,
+                    agent_id=copy.agent_id,
+                    agent_name=copy.name,
+                    local=1,
+                    backend=backend,
+                    previous_local=None,
+                    digest=_revision_digest(copy, backend, grant, consent, model, settings),
+                    preview_digest=preview.digest,
+                    fleet_grant=grant,
+                    drop_consent=consent,
+                    model=model,
+                    profile=settings.profile,
+                    requires=cast(JsonValue, settings.facts().get("requires")),
+                    thread_mode=settings.thread_mode,
+                )
+            except IntegrityError:
+                return CarriedBackend(None, left, fleet=False)
+            await security_audit.append_event(
+                session,
+                tenant_id=copy.tenant_id,
+                account_id=account_id,
+                agent_id=copy.agent_id,
+                platform=None,
+                platform_user_id=None,
+                tool_name="agent_backend",
+                operation="copy",
+                outcome="allowed",
+                reason=f"copied from {source.agent_id}:{source.local}",
+                scope=f"agent_backend:{copy.agent_id}:{revision.local}",
+            )
+            return CarriedBackend(revision, left, fleet=grant is not None)
 
     async def audit(
         self,

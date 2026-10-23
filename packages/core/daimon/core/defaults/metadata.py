@@ -42,6 +42,10 @@ MA_METADATA_KEY_ISOLATED = "daimon_isolated"
 # Stamped on the copy `set_channel_rule` makes, with the channel it was
 # made for, so `archive_channel_copy` archives only such copies.
 MA_METADATA_KEY_CHANNEL_COPY = "daimon_isolation_copy"
+# Stamped on a copy of a seeded agent (`agent_fork.copy_agent`) with that
+# agent's seeded name, carried through copies of copies, so the copy keeps the
+# platform-limited skills `defaults/` gives it (`channel_skills.platform_skill_refs`).
+MA_METADATA_KEY_COPY_OF = "daimon_copy_of"
 # Stamped on a reader variant (see `daimon.core.reader_agent`) with the
 # source agent's spec-hash-or-fallback fingerprint, so a subsequent publish
 # can tell "unchanged source, reuse the variant" from "source moved, update

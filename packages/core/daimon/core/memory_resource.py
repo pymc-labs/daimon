@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 import anthropic as anthropic_errors
 import structlog
@@ -40,7 +41,14 @@ from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import archive_memory_store, create_memory_store, delete_memory_store
+from daimon.core.mux_compat import (
+    archive_memory_store,
+    create_memory_store,
+    delete_memory_store,
+    list_memory_entries,
+    read_memory,
+    write_memory,
+)
 from daimon.core.stores.agent_memory_stores import (
     clear_channel_memory_store,
     clear_memory_store,
@@ -404,6 +412,71 @@ async def ensure_channel_memory_store_and_mount(
             READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS if read_only else CHANNEL_MEMORY_INSTRUCTIONS
         ),
     }
+
+
+# Ceiling on the memories one copy takes, so a fork stays one tool call.
+COPY_MEMORY_LIMIT = 500
+
+
+@dataclass(frozen=True)
+class CopiedMemory:
+    copied: int
+    """Memories written into the copy's shared store."""
+    left: int
+    """Memories past `COPY_MEMORY_LIMIT`, not copied."""
+
+
+async def copy_shared_memory(
+    anthropic: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    source_agent_id: uuid.UUID,
+    copy_agent_id: uuid.UUID,
+    copy_name: str,
+) -> CopiedMemory | None:
+    """Copy the source's shared memory into a new copy's own shared store.
+
+    Only the shared store: it is already seen by everyone who talks to the
+    source. Personal and channel stores are never copied. None when the source
+    has no shared store yet, which costs one DB read and no API call. Raises
+    `anthropic.APIError` on a failed read or write; whatever was written stays.
+    """
+    async with session_factory() as session:
+        source_store = await get_memory_store_id(
+            session, tenant_id=tenant_id, agent_id=source_agent_id
+        )
+    if source_store is None:
+        return None
+    scope = resource_scope(tenant_id=str(tenant_id))
+    entries = [
+        item
+        async for item in list_memory_entries(anthropic, source_store, path_prefix="/", scope=scope)
+        if item.type == "memory"
+    ]
+    if not entries:
+        return CopiedMemory(0, 0)
+    mount = await ensure_memory_store_and_mount(
+        anthropic,
+        session_factory,
+        tenant_id=tenant_id,
+        agent_id=copy_agent_id,
+        agent_name=copy_name,
+    )
+    target = mount["memory_store_id"]
+    copied = 0
+    for item in entries[:COPY_MEMORY_LIMIT]:
+        memory = await read_memory(anthropic, source_store, item.id, scope=scope)
+        await write_memory(anthropic, target, item.path, memory.content or "", scope=scope)
+        copied += 1
+    _log.info(
+        "memory_store.copied",
+        tenant_id=str(tenant_id),
+        source_agent_id=str(source_agent_id),
+        copy_agent_id=str(copy_agent_id),
+        count=copied,
+    )
+    return CopiedMemory(copied, max(0, len(entries) - COPY_MEMORY_LIMIT))
 
 
 async def archive_memory_store_for_agent(

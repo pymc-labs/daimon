@@ -69,7 +69,7 @@ async def test_fork_drops_every_server_backed_by_a_stored_token(
         {"type": "mcp_toolset", "mcp_server_name": "docs"},
     ]
 
-    kept_servers, kept_tools = await strip_credentialed_mcp_servers(
+    kept_servers, kept_tools, dropped = await strip_credentialed_mcp_servers(
         sessionmaker=db_session_factory,
         tenant_id=tenant.id,
         source_agent_uuid=source,
@@ -79,6 +79,7 @@ async def test_fork_drops_every_server_backed_by_a_stored_token(
 
     assert kept_servers == [servers[1]], "the token-backed server must not reach the fork"
     assert kept_tools == [tools[0], tools[2]], "its toolset goes with it"
+    assert dropped == ("crm",), "the receipt names the server to connect again"
 
 
 async def test_fork_keeps_everything_when_the_source_holds_no_tokens(
@@ -95,7 +96,7 @@ async def test_fork_keeps_everything_when_the_source_holds_no_tokens(
         source_agent_uuid=uuid.uuid4(),
         mcp_servers=servers,
         tools=tools,
-    ) == (servers, tools)
+    ) == (servers, tools, ())
 
 
 async def test_archive_best_effort_happy_path(
