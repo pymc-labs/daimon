@@ -458,7 +458,10 @@ async def prepare_controlled_root(
         "grant_digest": request_digest(value.model_dump(mode="json")),
         "deadline": deadline.isoformat(),
         "max_inputs": min(3, value.max_root_turns),
-        "native_budget_usd": str(value.native_root_budget_usd),
+        # Without a native cap the grant's figure only sizes the cash hold: say so.
+        ("native_budget_usd" if native_budget is not None else "hold_budget_usd"): str(
+            value.native_root_budget_usd
+        ),
         "cash_budget_usd": str(value.root_cash_budget_usd),
         "profile": profile,
         "model": model,

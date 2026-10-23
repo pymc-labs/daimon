@@ -477,7 +477,8 @@ async def require_root_funding(
         raise FleetConflict("root funding requires a private admitted actor")
     cash, native = (
         _parse_usd(str(controls.get("cash_budget_usd"))),
-        _parse_usd(str(controls.get("native_budget_usd"))),
+        # `hold_budget_usd`: the same figure for a provider with no native cap.
+        _parse_usd(str(controls.get("native_budget_usd", controls.get("hold_budget_usd")))),
     )
     with localcontext() as arithmetic:
         arithmetic.prec = 80

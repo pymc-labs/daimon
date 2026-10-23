@@ -670,7 +670,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             multi_agent_enabled=False,
             container_size="small" if deployment.profile == PROFILE else None,
             spend_limit_usd_cents=native_limit,
-            require_spend_control_echo=budget is not None,
+            require_spend_control_echo=budget is not None and native_limit is not None,
         ),
     )
 

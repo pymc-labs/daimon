@@ -154,6 +154,9 @@ async def test_a_root_without_a_native_cap_keeps_the_host_hold_and_no_native_bud
     assert request.native_budget_usd is None
     assert request.root_controls is not None
     assert request.root_controls["cash_budget_usd"] == "0.06"
+    # The grant's figure only sizes the hold here; nothing records it as a native cap.
+    assert "native_budget_usd" not in request.root_controls
+    assert request.root_controls["hold_budget_usd"] == "0.03"
     root = await root_record(root_turn)
     assert root.result["root_finance"]["exposure_usd"] == "0.06"
 
