@@ -552,3 +552,68 @@ async def test_sdk_errors_record_the_http_status_for_logs(status: int, category:
         assert exc.value.native_error_code == f"http_{status}"
         assert "SECRET" not in str(exc.value)
         await client.aio.aclose()
+
+
+def _quota_body(limit: int, model: str = "gemini-4-argon") -> dict[str, JsonValue]:
+    """Google's 429 shape (smoke 2026-10-23), trimmed to the fields read."""
+    quota = "free_tier_requests"
+    return {
+        "error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "message": (
+                "You exceeded your current quota.\n* Quota exceeded for metric: "
+                f"generativelanguage.googleapis.com/generate_content_{quota}, "
+                f"limit: {limit}, model: {model}\nPlease retry in 17h26m16s."
+            ),
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [
+                        {
+                            "quotaMetric": f"generativelanguage.googleapis.com/generate_content_{quota}",
+                            "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                            "quotaDimensions": {"location": "global", "model": model},
+                        }
+                    ],
+                },
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "62776s"},
+            ],
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "native_code", "retryable", "model"),
+    [
+        (_quota_body(0), "quota_zero", False, "gemini-4-argon"),
+        (_quota_body(10), "quota_exhausted", True, "gemini-4-argon"),
+        ({"error": {"code": 429, "message": "slow down"}}, None, True, None),
+    ],
+)
+async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
+    body: dict[str, JsonValue], native_code: str | None, retryable: bool, model: str | None
+) -> None:
+    """A model the plan gives no quota is never retried; a spent quota refills."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).get("i1")
+        error = exc.value
+        assert (error.category, error.native_code) == ("rate_limited", native_code)
+        assert error.retryable is retryable
+        assert error.native_param == model
+        assert error.native_error_code == "http_429"
+        assert len(calls) == 1
+        await client.aio.aclose()

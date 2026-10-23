@@ -381,6 +381,52 @@ def high_demand(error: Exception) -> bool:
     return any(isinstance(m, str) and "high demand" in m.lower() for m in messages)
 
 
+_QUOTA_FAILURE = "type.googleapis.com/google.rpc.QuotaFailure"
+
+
+def quota_failure(error: Exception) -> tuple[str, str | None] | None:
+    """A 429's quota cause: ("quota_zero" | "quota_exhausted", model) or None.
+
+    `quota_zero` is a quota of 0 for the model on this project's plan (the
+    free tier gives some models none): retrying never helps. Any other spent
+    quota is a rate limit that refills. Only Google's own structured fields are
+    read; the message is checked for its "limit: 0" line alone.
+    """
+    body: object = getattr(error, "body", None) or getattr(error, "details", None)
+    if not isinstance(body, dict):
+        return None
+    outer = cast(dict[str, object], body)
+    nested: object = outer.get("error", outer)
+    if not isinstance(nested, dict):
+        return None
+    payload = cast(dict[str, object], nested)
+    details = payload.get("details")
+    violations: list[dict[str, object]] = []
+    for item in cast(list[object], details) if isinstance(details, list) else []:
+        if not isinstance(item, dict):
+            continue
+        detail = cast(dict[str, object], item)
+        if detail.get("@type") == _QUOTA_FAILURE:
+            found = detail.get("violations")
+            violations += [
+                cast(dict[str, object], v)
+                for v in (cast(list[object], found) if isinstance(found, list) else [])
+                if isinstance(v, dict)
+            ]
+    if not violations:
+        return None
+    models = {
+        str(cast(dict[str, object], v["quotaDimensions"]).get("model"))
+        for v in violations
+        if isinstance(v.get("quotaDimensions"), dict)
+        and cast(dict[str, object], v["quotaDimensions"]).get("model")
+    }
+    model = next(iter(models)) if len(models) == 1 else None
+    message = payload.get("message")
+    zero = isinstance(message, str) and "limit: 0," in message
+    return ("quota_zero" if zero else "quota_exhausted"), model
+
+
 def normalize_error(error: Exception) -> ProviderError:
     status = (
         error.status_code
@@ -405,6 +451,16 @@ def normalize_error(error: Exception) -> ProviderError:
         # Distinct from 503: the Flash fallback chain moves models only on a 503.
         return ProviderError(
             "overloaded", retryable=True, native_code="high_demand", native_error_code=http
+        )
+    if status == 429 and (quota := quota_failure(error)) is not None:
+        code, model = quota
+        # A quota of 0 never refills: retrying it only looks like a stall.
+        return ProviderError(
+            "rate_limited",
+            retryable=code != "quota_zero",
+            native_code=code,
+            native_error_code=http,
+            native_param=model,
         )
     category = categories.get(status or 0, "upstream")
     return ProviderError(

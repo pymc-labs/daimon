@@ -61,10 +61,13 @@ def definite_rejection(error: ProviderError) -> int | None:
     """The 4xx status of a create Google rejected outright, else None.
 
     Needs the provider's own HTTP status: a local refusal (no status), e.g. a
-    response check after a 200, may follow an accepted request. Timeouts, 429,
-    5xx and network failures may have been accepted too.
+    response check after a 200, may follow an accepted request. Timeouts, a bare
+    429, 5xx and network failures may have been accepted too; a 429 naming its
+    QuotaFailure was not.
     """
     code = error.native_error_code or ""
+    if code == "http_429" and error.native_code in ("quota_zero", "quota_exhausted"):
+        return 429  # Google's QuotaFailure: refused before any interaction existed
     if error.category not in _DEFINITE or not code.startswith("http_4"):
         return None
     status = code.removeprefix("http_")

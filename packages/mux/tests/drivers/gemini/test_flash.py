@@ -404,3 +404,23 @@ async def test_a_failed_release_never_breaks_the_call() -> None:
     await policy.create(request())
     source.reads["native"] = [cancelled()]
     assert (await policy.cancel("native"))["status"] == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("native_code", "rejected"),
+    [("quota_zero", 429), ("quota_exhausted", 429), (None, None)],
+)
+def test_a_429_naming_its_quota_is_a_definite_rejection(
+    native_code: str | None, rejected: int | None
+) -> None:
+    """Google refused a QuotaFailure before any interaction: its hold frees at once.
+    A bare 429 may still have been accepted, so it stays unknown."""
+    from mux.drivers.gemini.flash import definite_rejection
+
+    error = ProviderError(
+        "rate_limited",
+        retryable=native_code != "quota_zero",
+        native_code=native_code,
+        native_error_code="http_429",
+    )
+    assert definite_rejection(error) == rejected
