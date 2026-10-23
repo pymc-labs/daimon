@@ -40,8 +40,14 @@ DEFAULT_PROJECT = "daimon-deployment"
 # OpenAI sessions from these rows are capped unless the turn brings its own
 # native budget (Astra must never run uncapped).
 OPENAI_SPEND_LIMIT_CENTS = 50
-_GEMINI_HOLD, _GEMINI_CAP = "0.25", "0.50"
-_GEMINI_WORKER_HOLD = _GEMINI_WORKER_CAP = "0.49"
+# Per-attempt holds. A worker's hold also sizes its bounded token envelope (Argon's
+# worst case must fit it), so it stays at $0.49.
+_GEMINI_HOLD, _GEMINI_WORKER_HOLD = "0.25", "0.49"
+# Root turns and workers of one account share one hold ledger (same project), and
+# every attempt checks the ledger's whole total against its own cap. One cap for
+# both, with room for a root turn and three workers at once (0.25 + 3 x 0.49):
+# a cap equal to the worker hold let one open hold block every other Gemini call.
+_GEMINI_CAP = _GEMINI_WORKER_CAP = "1.75"
 
 
 def _grant(profile: str, models: tuple[str, ...]) -> dict[str, JsonValue]:

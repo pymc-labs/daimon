@@ -85,7 +85,7 @@ def test_a_gemini_agent_turn_runs_from_the_code_template(
     assert plan.root_materialization and not plan.worker_materialization
     assert plan.tenant_id == str(TENANT) and plan.channel_id == "never-set-up"
     assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools"
-    assert (plan.hold_usd, plan.cap_usd) == (Decimal("0.25"), Decimal("0.50"))
+    assert (plan.hold_usd, plan.cap_usd) == (Decimal("0.25"), Decimal("1.75"))
 
 
 @pytest.mark.parametrize("model", ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon"])
@@ -259,3 +259,44 @@ def test_the_refusal_copy_names_no_setting() -> None:
     )
     assert "OpenAI isn't set up on this Daimon install yet" in text
     assert "DAIMON_" not in text
+
+
+async def test_default_holds_let_a_root_turn_and_three_gemini_workers_run_at_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from daimon.core.turn.gemini_state import SQLiteFlashAccounting
+    from mux.contracts.ids import ModelRef
+    from mux.drivers.gemini.flash import FlashAttempt
+
+    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
+    flash = "gemini-3.8-flash"
+    root = select_runtime_manifest(request("gemini.inline_reuse", flash), GeminiPlan)
+    worker = select_runtime_manifest(request("gemini.inline_reuse", flash, worker=True), GeminiPlan)
+    # One account's root turns and workers share one ledger (the same project).
+    assert root.project == worker.project
+    path = tmp_path / "holds.sqlite3"
+
+    def owner(plan: GeminiPlan) -> SQLiteFlashAccounting:
+        assert plan.hold_usd is not None and plan.cap_usd is not None
+        return SQLiteFlashAccounting(
+            path, namespace="account", hold_usd=plan.hold_usd, cap_usd=plan.cap_usd
+        )
+
+    async def attempt(plan: GeminiPlan, interaction: str) -> None:
+        model = ModelRef(provider="gemini", id=flash)
+        accounting = owner(plan)
+        await accounting.before_attempt(model=model, attempt=1)
+        await accounting.after_attempt(
+            receipt=FlashAttempt(model, 1, "accepted", interaction_id=interaction)
+        )
+
+    # A Gemini root turn is running while it fans out to three Gemini workers.
+    await attempt(root, "root")
+    for index in range(3):
+        await attempt(worker, f"worker-{index}")
+    # A fourth refuses with its plain reason, at once, before any Gemini call.
+    with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
+        await attempt(worker, "worker-3")
+    # The root's next turn still fits while its workers run, once its own settled.
+    assert await owner(root).settle(interaction_id="root", model=flash, actual_usd=Decimal("0.01"))
+    await attempt(root, "root-next")

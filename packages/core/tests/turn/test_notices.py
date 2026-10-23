@@ -354,3 +354,10 @@ def test_an_unknown_provider_is_named_generically():
         "backend_unsupported", _NOUNS, cause="agent_backend", provider=None
     )
     assert rendered.startswith("This agent runs on a model provider,")
+
+
+def test_a_full_gemini_hold_ledger_reads_as_busy_in_plain_words() -> None:
+    rendered = admission_refusal_text("provider_hold_cap_reached", _NOUNS)
+    assert "Too many replies are already running" in rendered
+    assert "Try again when one finishes." in rendered
+    assert "hold" not in rendered.lower(), "no ledger jargon"
