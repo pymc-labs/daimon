@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The hand-over button on Discord, Slack and Teams now re-sends the clicker's
+  latest readable message to the new agent, or a fixed prompt when none can be
+  read. It uses normal mention intake, including the usual hourglass and queue
+  behind a running turn. Later mentions run after the click; repeated or refused
+  clicks start no extra turn.
+
 - Close recruitment boundaries for unresolved Discord channel forms, lead intake
   and recovery, saved channel routines, persistent wizard controls and channel
   metadata. Require explicit source authority at the core turn driver and gate

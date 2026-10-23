@@ -233,6 +233,11 @@
       "guard": "recruitment_withholds_routine",
       "regression": "packages/core/tests/test_recruitment_stored_routines.py:test_stored_content_readers_follow_settings_restart",
       "note": "Internal mutation/current-creator/execution bookkeeping reads do not serialize content. Raw internal store reads remain available for scheduler state, with adapter projection reads required to pass service settings."
+    },
+    "handover": {
+      "boundary": "packages/adapters/discord/daimon/adapters/discord/thread_handoff.py:_hand_over",
+      "guard": "protected_for_client",
+      "regression": "packages/adapters/discord/tests/test_thread_handoff_button.py:test_a_reserved_thread_click_reads_and_starts_nothing"
     }
   },
   "entries": {
@@ -857,6 +862,10 @@
     "packages/core/daimon/core/workspace_transfer.py:transfer_workspace:run_turn:3690ad321002": {
       "count": 1,
       "boundary": "driver"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/thread_handoff.py:HandOverButton._hand_over:history:b68542a59a86": {
+      "count": 1,
+      "boundary": "handover"
     }
   },
   "limits": [

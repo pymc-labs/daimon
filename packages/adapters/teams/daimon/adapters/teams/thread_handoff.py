@@ -10,8 +10,12 @@ request.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from daimon.adapters.teams.thread_reader import ThreadReader
 
 import structlog
 from daimon.adapters.teams.admin_caller import admin_caller
@@ -25,9 +29,9 @@ from daimon.adapters.teams.card_actions import (
     text_lines,
     toast,
 )
-from daimon.adapters.teams.identity import DENIED, channel_thread_id
+from daimon.adapters.teams.identity import DENIED, TeamsInbound, channel_thread_id
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.thread_handoff import switch_thread_on_request
+from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import AdaptiveCard, ExecuteAction
@@ -47,8 +51,16 @@ def hand_over_button(*, agent_id: str, agent_name: str) -> ExecuteAction:
 class TeamsThreadHandoff:
     """Hand over clicks."""
 
-    def __init__(self, runtime: TeamsRuntime) -> None:
+    def __init__(
+        self,
+        runtime: TeamsRuntime,
+        *,
+        dispatch: Callable[[TeamsInbound], None],
+        reader: ThreadReader,
+    ) -> None:
         self._runtime = runtime
+        self._dispatch = dispatch
+        self._reader = reader
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -60,6 +72,7 @@ class TeamsThreadHandoff:
     ) -> AdaptiveCardInvokeResponse:
         """Switch the clicked conversation to the button's agent, or say privately why not."""
         runtime, activity = self._runtime, ctx.activity
+        clicked_at = datetime.now(UTC)
         actor = await card_actor(runtime, activity)
         if actor is None:
             return toast(DENIED)
@@ -75,6 +88,17 @@ class TeamsThreadHandoff:
             return toast(FAILED)
         if not agent_id:
             return toast(FAILED)
+        data = activity.channel_data
+        team = data.team if data is not None else None
+        seed = await self._reader.latest_user_message(
+            conversation_id=thread_id,
+            channel_id=conversation.split(";", 1)[0],
+            user_id=actor.user_id,
+            team_id=team.id if team is not None else None,
+            team_group_id=team.aad_group_id if team is not None else None,
+            before=notice,
+            kind=activity.conversation.conversation_type or "",
+        )
         outcome = await switch_thread_on_request(
             runtime.anthropic,
             runtime.sessionmaker,
@@ -95,6 +119,30 @@ class TeamsThreadHandoff:
         )
         if not outcome.switched:
             return toast(outcome.text)
+        settings = runtime.settings.teams
+        assert settings is not None
+        self._dispatch(
+            TeamsInbound(
+                kind="dm"
+                if activity.conversation.conversation_type == "personal"
+                else ("group" if personal else "channel"),
+                entra_tenant_id=settings.tenant_id,
+                user_id=actor.user_id,
+                conversation_id=thread_id,
+                channel_id=conversation if personal else conversation.split(";", 1)[0],
+                activity_id=activity.id,
+                text=handover_seed(seed, agent_name=outcome.destination_name or ""),
+                service_url=activity.service_url,
+                bot_name=activity.recipient.name,
+                team_id=team.id if team is not None else None,
+                team_group_id=team.aad_group_id if team is not None else None,
+                user_name=activity.from_.name,
+                timestamp=clicked_at.isoformat(),
+                sender_id=activity.from_.id,
+                handover_agent_id=agent_id,
+                handover_notice_id=notice,
+            )
+        )
         # Everyone sees who handed it over; the button has done its job.
         who = activity.from_.name or "Someone"
         text = f"{who} handed this conversation over. {outcome.text}"

@@ -475,8 +475,12 @@ async def test_production_mutation_fails_the_same_independent_platform_oracle(
     else:
 
         def flatten(
-            pending: list[discord.Message], _author: Callable[[discord.Message], int]
+            pending: list[discord.Message],
+            _author: Callable[[discord.Message], int],
+            *,
+            separate: Callable[[discord.Message], bool] = lambda _: False,
         ) -> list[list[discord.Message]]:
+            del separate  # This mutation deliberately ignores all grouping boundaries.
             return [pending] if pending else []
 
         monkeypatch.setattr(bot_module, "group_by_author", flatten)
