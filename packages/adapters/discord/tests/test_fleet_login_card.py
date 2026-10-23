@@ -1,0 +1,520 @@
+"""The fleet login question's Discord card: view, durable buttons, click, poller (PR B)."""
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
+
+import discord
+import pytest
+from daimon.adapters.discord.posted_controls import fleet_login
+from daimon.adapters.discord.posted_controls.fleet_login import (
+    LoginButton,
+    build_login_view,
+    login_custom_id,
+    poll_login_cards_once,
+)
+from daimon.core.fleet_login_decision import REFUSAL_TEXT, LoginAnswer, LoginCard, LoginCardRow
+from daimon.core.ma_identity import derive_tenant_uuid
+
+NOW = datetime(2026, 10, 23, 14, tzinfo=UTC)
+TENANT = derive_tenant_uuid(platform="discord", workspace_id="60")
+RUN = UUID(int=42)
+DIGEST = "ab" * 32
+
+
+def card(**changes: object) -> LoginCard:
+    base = LoginCard(
+        tenant_id=TENANT,
+        run_id=RUN,
+        platform="discord",
+        channel_id="70",
+        thread_id="71",
+        requester_platform_user_id="9",
+        rows=(
+            LoginCardRow(index=0, label="GITHUB_TOKEN", choice=None),
+            LoginCardRow(index=1, label="Linear", choice=None),
+        ),
+        without=("Notion: can't be shared with workers yet",),
+        expires_at=NOW + timedelta(seconds=60),
+        digest=DIGEST,
+        state="open",
+        card_message_id=None,
+        card_settled=False,
+    )
+    return replace(base, **changes)  # type: ignore[arg-type]
+
+
+def _texts(view: discord.ui.LayoutView) -> str:
+    return "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+
+
+def _buttons(view: discord.ui.LayoutView) -> list[discord.ui.Button[discord.ui.LayoutView]]:
+    return [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
+
+
+def test_an_open_card_has_three_buttons_per_login_and_skip_all():
+    view = build_login_view(card())
+    buttons = _buttons(view)
+    assert [b.label for b in buttons] == [
+        *("Share", "Share this time", "Skip"),
+        *("Share", "Share this time", "Skip"),
+        "Skip all",
+    ]
+    assert buttons[0].custom_id == f"flogin:{RUN.hex}:0:s:{DIGEST[:12]}"
+    assert buttons[4].custom_id == f"flogin:{RUN.hex}:1:o:{DIGEST[:12]}"
+    assert buttons[-1].custom_id == f"flogin:{RUN.hex}:all:k:{DIGEST[:12]}"
+    assert all(len(b.custom_id or "") <= 100 for b in buttons)
+    text = _texts(view)
+    assert "GITHUB_TOKEN" in text and "Linear" in text
+    assert "Workers run without: Notion: can't be shared with workers yet" in text
+    assert f"<t:{int((NOW + timedelta(seconds=60)).timestamp())}:T>" in text
+    assert "Only <@9> can answer." in text
+
+
+def test_an_answered_row_shows_its_answer_and_no_buttons_and_skip_all_needs_two_left():
+    view = build_login_view(
+        card(rows=(LoginCardRow(0, "GITHUB_TOKEN", "share"), LoginCardRow(1, "Linear", None)))
+    )
+    assert [b.label for b in _buttons(view)] == ["Share", "Share this time", "Skip"]
+    assert "GITHUB_TOKEN: shared" in _texts(view)
+
+
+@pytest.mark.parametrize("state", ["decided", "expired", "run_ended"])
+def test_a_final_card_has_no_buttons_only_its_final_words(state):
+    rows = (LoginCardRow(0, "GITHUB_TOKEN", "share"), LoginCardRow(1, "Linear", "no_answer"))
+    view = build_login_view(card(state=state, rows=rows))
+    assert _buttons(view) == []
+    text = _texts(view)
+    assert "Shared with workers: GITHUB_TOKEN" in text
+    assert "Linear" in text
+
+
+@pytest.mark.parametrize(
+    ("row", "choice", "letter"),
+    [(0, "share", "s"), (3, "share_once", "o"), (1, "skip", "k"), ("all", "skip", "k")],
+)
+def test_a_button_is_rebuilt_from_its_custom_id(row, choice, letter):
+    custom_id = login_custom_id(RUN, row, choice, DIGEST)
+    assert custom_id == f"flogin:{RUN.hex}:{row}:{letter}:{DIGEST[:12]}"
+    item = LoginButton(discord.ui.Button(custom_id=custom_id))
+    assert (item.run_id, item.login_row, item.choice, item.digest) == (
+        RUN,
+        row,
+        choice,
+        DIGEST[:12],
+    )
+
+
+@pytest.mark.parametrize(
+    "custom_id",
+    [
+        f"flogin:{RUN.hex}:0:x:{DIGEST[:12]}",
+        f"flogin:{RUN.hex}:-1:s:{DIGEST[:12]}",
+        f"flogin:{RUN.hex}:0:s:{DIGEST[:11]}",
+        f"fleet:{RUN.hex}:0:s:{DIGEST[:12]}",
+    ],
+)
+def test_a_malformed_custom_id_is_refused(custom_id):
+    with pytest.raises(ValueError):
+        LoginButton(discord.ui.Button(custom_id=custom_id))
+
+
+def _interaction(message_id: int = 500):
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.guild = SimpleNamespace(id=60)
+    interaction.user = SimpleNamespace(id=9)
+    interaction.message = SimpleNamespace(id=message_id, edit=AsyncMock())
+    interaction.response = MagicMock(defer=AsyncMock(), send_message=AsyncMock())
+    interaction.followup = MagicMock(send=AsyncMock())
+    interaction.client = SimpleNamespace(
+        runtime=SimpleNamespace(turn_deps=object(), sessionmaker=object()),
+        login_click_limiter=object(),
+    )
+    return interaction
+
+
+async def _click(monkeypatch, answer: LoginAnswer, *, custom_id: str | None = None):
+    from daimon.core import fleet_login_decision
+
+    calls = AsyncMock(return_value=answer)
+    settle = AsyncMock(return_value=True)
+    monkeypatch.setattr(fleet_login_decision, "answer_login_click", calls)
+    monkeypatch.setattr(fleet_login_decision, "settle_login_card", settle)
+    interaction = _interaction()
+    item = LoginButton(
+        discord.ui.Button(custom_id=custom_id or login_custom_id(RUN, 0, "share", DIGEST))
+    )
+    await item.callback(interaction)
+    return interaction, calls, settle
+
+
+async def test_a_click_calls_core_once_as_the_clicker_and_redraws_from_the_db(monkeypatch):
+    answered = card(
+        card_message_id="500",
+        rows=(LoginCardRow(0, "GITHUB_TOKEN", "share"), LoginCardRow(1, "Linear", None)),
+    )
+    interaction, calls, settle = await _click(monkeypatch, LoginAnswer(answered))
+    kwargs = calls.await_args.kwargs
+    assert kwargs["tenant_id"] == TENANT and kwargs["platform"] == "discord"
+    assert (kwargs["run_id"], kwargs["row"], kwargs["choice"]) == (RUN, 0, "share")
+    assert kwargs["digest"] == DIGEST[:12] and kwargs["clicker_platform_user_id"] == "9"
+    assert callable(kwargs["live_subject"]) and "live_admin" not in kwargs
+    view = interaction.message.edit.await_args.kwargs["view"]
+    assert "GITHUB_TOKEN: shared" in _texts(view)
+    interaction.followup.send.assert_not_awaited()
+    settle.assert_not_awaited()
+
+
+async def test_a_deciding_click_settles_the_card(monkeypatch):
+    decided = card(
+        card_message_id="500",
+        state="decided",
+        rows=(LoginCardRow(0, "GITHUB_TOKEN", "skip"), LoginCardRow(1, "Linear", "skip")),
+    )
+    interaction, _, settle = await _click(
+        monkeypatch,
+        LoginAnswer(decided, decided=True),
+        custom_id=login_custom_id(RUN, "all", "skip", DIGEST),
+    )
+    assert _buttons(interaction.message.edit.await_args.kwargs["view"]) == []
+    settle.assert_awaited_once()
+
+
+@pytest.mark.parametrize("refusal", sorted(REFUSAL_TEXT))
+async def test_a_refused_click_says_why_privately_in_plain_words(monkeypatch, refusal):
+    interaction, _, _ = await _click(monkeypatch, LoginAnswer(None, refusal))
+    interaction.followup.send.assert_awaited_once_with(REFUSAL_TEXT[refusal], ephemeral=True)
+    interaction.message.edit.assert_not_awaited()
+
+
+async def test_a_click_on_an_old_copy_never_redraws_it_as_the_live_card(monkeypatch):
+    interaction, _, _ = await _click(monkeypatch, LoginAnswer(card(card_message_id="999")))
+    interaction.message.edit.assert_not_awaited()
+
+
+class _Core:
+    """Stand-ins for the core poller calls, recording what the poller asked for.
+
+    `cards` is what each `login_cards` call returns, in order (the last repeats).
+    """
+
+    def __init__(self, monkeypatch, *cards_per_call, claimed=True, expired=None):
+        from daimon.core import fleet_login_decision
+        from daimon.core.stores import fleet
+
+        self.settled: list[UUID] = []
+        self.expire = AsyncMock(return_value=expired)
+        self.record = AsyncMock(return_value=claimed)
+        calls = list(cards_per_call)
+
+        async def login_cards(_sm, *, platform):
+            assert platform == "discord"
+            return calls.pop(0) if len(calls) > 1 else calls[0]
+
+        async def settle(_sm, *, tenant_id, run_id):
+            self.settled.append(run_id)
+            return True
+
+        monkeypatch.setattr(fleet_login_decision, "login_cards", login_cards)
+        monkeypatch.setattr(fleet_login_decision, "expire_question", self.expire)
+        monkeypatch.setattr(fleet_login_decision, "settle_login_card", settle)
+        monkeypatch.setattr(fleet, "record_login_card", self.record)
+
+
+def _message(message_id: int = 500):
+    return SimpleNamespace(id=message_id, delete=AsyncMock(), edit=AsyncMock())
+
+
+async def _poll(post=None, fetch=None, find=None, now=NOW, state=None):
+    post = post or AsyncMock(return_value=_message())
+    fetch = fetch or AsyncMock(return_value=_message())
+    find = find or AsyncMock(return_value=None)
+    await poll_login_cards_once(
+        object(),  # type: ignore[arg-type]
+        post=post,
+        fetch=fetch,
+        find=find,
+        state=state,
+        now=lambda: now,
+    )
+    return post, fetch
+
+
+def _http(status: int) -> discord.HTTPException:
+    return discord.HTTPException(MagicMock(status=status, reason="x"), "x")
+
+
+async def test_the_poller_posts_an_open_card_once_and_claims_it(monkeypatch):
+    core = _Core(monkeypatch, (card(),))
+    post, _ = await _poll()
+    post.assert_awaited_once()
+    assert core.record.await_args.kwargs["message_id"] == "500"
+    post.return_value.delete.assert_not_awaited()
+    assert core.settled == []
+
+
+async def test_a_copy_already_in_the_thread_is_adopted_not_posted_again(monkeypatch):
+    core = _Core(monkeypatch, (card(),))
+    post, _ = await _poll(find=AsyncMock(return_value=_message(777)))
+    post.assert_not_awaited()
+    assert core.record.await_args.kwargs["message_id"] == "777"
+
+
+async def test_a_poster_that_loses_the_claim_to_another_card_deletes_its_copy(monkeypatch):
+    _Core(monkeypatch, (card(),), (card(card_message_id="999"),), claimed=False)
+    post, _ = await _poll()
+    post.return_value.delete.assert_awaited_once()
+
+
+async def test_a_card_decided_between_post_and_claim_becomes_the_final_card(monkeypatch):
+    decided = card(
+        state="decided",
+        rows=(LoginCardRow(0, "GITHUB_TOKEN", "skip"), LoginCardRow(1, "Linear", "skip")),
+    )
+    core = _Core(monkeypatch, (card(),), (decided,), claimed=False)
+    post, _ = await _poll()
+    mine = post.return_value
+    mine.delete.assert_not_awaited()
+    view = mine.edit.await_args.kwargs["view"]
+    assert _buttons(view) == [] and "Workers run without: GITHUB_TOKEN, Linear" in _texts(view)
+    assert core.settled == [RUN]
+
+
+async def test_a_failed_delete_is_retried_on_the_next_poll(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import LoginPollState
+
+    _Core(monkeypatch, (card(),), (card(card_message_id="999"),), (), claimed=False)
+    state = LoginPollState()
+    copy = _message()
+    copy.delete.side_effect = [_http(503), None]
+    await _poll(post=AsyncMock(return_value=copy), state=state)
+    assert len(state.orphans) == 1
+    await _poll(state=state)
+    assert copy.delete.await_count == 2 and state.orphans == []
+
+
+async def test_a_posted_open_card_is_left_alone_until_its_deadline(monkeypatch):
+    core = _Core(monkeypatch, (card(card_message_id="500"),))
+    post, fetch = await _poll()
+    post.assert_not_awaited()
+    fetch.assert_not_awaited()
+    core.expire.assert_not_awaited()
+
+
+async def test_at_its_deadline_the_card_expires_shows_its_final_words_and_settles(monkeypatch):
+    rows = (LoginCardRow(0, "GITHUB_TOKEN", "no_answer"), LoginCardRow(1, "Linear", "no_answer"))
+    expired = card(card_message_id="500", state="expired", rows=rows)
+    core = _Core(monkeypatch, (card(card_message_id="500"),), expired=expired)
+    _, fetch = await _poll(now=NOW + timedelta(seconds=61))
+    core.expire.assert_awaited_once()
+    view = fetch.return_value.edit.await_args.kwargs["view"]
+    assert "No answer, so workers ran without: GITHUB_TOKEN, Linear" in _texts(view)
+    assert _buttons(view) == []
+    assert core.settled == [RUN]
+
+
+async def test_after_a_restart_an_unsettled_final_card_is_redrawn_and_settled(monkeypatch):
+    core = _Core(monkeypatch, (card(card_message_id="500", state="decided"),))
+    _, fetch = await _poll()
+    fetch.return_value.edit.assert_awaited_once()
+    assert core.settled == [RUN]
+
+
+async def test_a_final_card_retries_a_5xx_a_few_times_then_gives_up(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import (
+        MAX_FINAL_ATTEMPTS,
+        LoginPollState,
+    )
+
+    core = _Core(monkeypatch, (card(card_message_id="500", state="decided"),))
+    state = LoginPollState()
+    for _ in range(MAX_FINAL_ATTEMPTS - 1):
+        await _poll(fetch=AsyncMock(side_effect=_http(503)), state=state)
+    assert core.settled == []
+    await _poll(fetch=AsyncMock(side_effect=_http(503)), state=state)
+    assert core.settled == [RUN]
+
+
+async def test_a_gone_thread_stops_a_final_card_at_once(monkeypatch):
+    core = _Core(monkeypatch, (card(card_message_id="500", state="decided"),))
+    await _poll(fetch=AsyncMock(side_effect=_http(403)))
+    assert core.settled == [RUN]
+
+
+async def test_one_bad_card_never_stops_the_others(monkeypatch):
+    other_run = UUID(int=43)
+    bad, good = card(), card(run_id=other_run)
+    core = _Core(monkeypatch, (bad, good))
+
+    async def post(posting):
+        if posting.run_id == RUN:
+            raise ValueError("this card can't be drawn")
+        return _message(501)
+
+    await _poll(post=post)
+    assert core.record.await_args.kwargs["run_id"] == other_run
+    assert core.settled == []  # The open bad card is retried until it expires.
+
+
+@pytest.mark.parametrize("logins", [7, 20])
+def test_a_card_with_many_logins_fits_discords_component_cap(logins):
+    from daimon.adapters.discord.posted_controls.fleet_login import MAX_ROWS_SHOWN
+
+    rows = tuple(LoginCardRow(i, f"KEY_{i}_" + "x" * 120, None) for i in range(logins))
+    view = build_login_view(card(rows=rows))
+    assert sum(1 for _ in view.walk_children()) < 40
+    labels = [b.label for b in _buttons(view)]
+    assert labels.count("Share") == MAX_ROWS_SHOWN and labels[-1] == "Skip all"
+    assert f"{logins - MAX_ROWS_SHOWN} more logins after these." in _texts(view)
+    # Answering the shown ones brings the next ones up.
+    answered = tuple(
+        replace(row, choice="skip") if row.index < MAX_ROWS_SHOWN else row for row in rows
+    )
+    later = build_login_view(card(rows=answered))
+    assert login_custom_id(RUN, MAX_ROWS_SHOWN, "share", DIGEST) in [
+        b.custom_id for b in _buttons(later)
+    ]
+    assert sum(1 for _ in later.walk_children()) < 40
+
+
+async def test_a_core_error_after_the_defer_replies_with_a_plain_error(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import CLICK_FAILED_TEXT
+    from daimon.core import fleet_login_decision
+
+    monkeypatch.setattr(
+        fleet_login_decision, "answer_login_click", AsyncMock(side_effect=RuntimeError("db"))
+    )
+    interaction = _interaction()
+    await LoginButton(
+        discord.ui.Button(custom_id=login_custom_id(RUN, 0, "share", DIGEST))
+    ).callback(interaction)
+    interaction.followup.send.assert_awaited_once_with(CLICK_FAILED_TEXT, ephemeral=True)
+    interaction.message.edit.assert_not_awaited()
+
+
+class _Thread(discord.Thread):
+    """A real `discord.Thread` subclass (for the isinstance guard) with only a guild."""
+
+    def __init__(self, guild_id: int) -> None:
+        self._fake_guild = SimpleNamespace(id=guild_id)
+
+    @property
+    def guild(self):  # type: ignore[override]
+        return self._fake_guild
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("ok", True),
+        ("no_thread", False),
+        ("not_a_thread", False),
+        ("other_server", False),
+        ("may_not_post", False),
+        ("gone", False),
+    ],
+)
+async def test_the_bot_posts_a_login_card_only_in_the_runs_own_thread(case, expected):
+    from daimon.adapters.discord.bot import DaimonBot
+
+    thread = _Thread(61 if case == "other_server" else 60)
+    channel: object = object() if case == "not_a_thread" else thread
+
+    async def channel_by_id(_id: int) -> object:
+        if case == "gone":
+            raise discord.NotFound(MagicMock(status=404, reason="x"), "x")
+        return channel
+
+    warned: list[str] = []
+    bot = SimpleNamespace(
+        _channel_by_id=channel_by_id,
+        _may_post_in=AsyncMock(return_value=case != "may_not_post"),
+        _warn_login_card=lambda _card, reason: warned.append(reason),
+    )
+    found = await DaimonBot._login_card_thread(  # type: ignore[arg-type]
+        bot, card(thread_id=None if case == "no_thread" else "71")
+    )
+    assert (found is thread) is expected
+    assert warned == ([] if expected else [warned[0]])
+
+
+def test_each_login_card_warning_is_logged_once_per_run():
+    from daimon.adapters.discord.bot import DaimonBot
+    from structlog.testing import capture_logs
+
+    fake = SimpleNamespace(_login_card_warned=set())
+    with capture_logs() as logs:
+        for _ in range(3):
+            DaimonBot._warn_login_card(fake, card(), "no_thread")  # type: ignore[arg-type]
+        DaimonBot._warn_login_card(fake, card(run_id=UUID(int=43)), "no_thread")  # type: ignore[arg-type]
+    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
+    assert events == ["fleet.login_card_no_thread"] * 2
+
+
+async def test_a_claim_write_that_raises_leaves_no_live_copy(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import LoginPollState
+
+    core = _Core(monkeypatch, (card(),))
+    core.record.side_effect = RuntimeError("db down")
+    state = LoginPollState()
+    post, _ = await _poll(state=state)
+    post.return_value.delete.assert_awaited_once()
+    assert state.orphans == []
+
+
+def test_final_words_truncate_long_labels():
+    rows = (LoginCardRow(0, "K" * 300, "share"),)
+    text = _texts(build_login_view(card(state="decided", rows=rows)))
+    assert "K" * 80 not in text and "K" * 79 + "…" in text
+
+
+def test_the_poller_is_fast_enough_for_the_spawn_wait():
+    from daimon.core.fleet_login_decision import LOGIN_WAIT_S
+
+    assert fleet_login.POLL_INTERVAL_S * 5 <= LOGIN_WAIT_S
+
+
+@pytest.mark.parametrize(
+    ("role", "foreign", "admin", "client"),
+    [("ADMIN", None, True, False), ("USER", None, False, False), ("ADMIN", "T_OTHER", False, True)],
+)
+async def test_the_clicker_subject_is_built_live_like_the_turn_path(
+    monkeypatch, role, foreign, admin, client
+):
+    from contextlib import asynccontextmanager
+
+    from daimon.adapters.discord import bot as bot_module
+    from daimon.core.stores import identity
+    from daimon.core.stores.domain import Role
+
+    monkeypatch.setattr(bot_module, "requester_role", AsyncMock(return_value=(Role[role], [])))
+    lookups: list[dict] = []
+
+    async def find(_session, **kwargs):
+        lookups.append(kwargs)
+        return SimpleNamespace(foreign_home_id=foreign)
+
+    monkeypatch.setattr(identity, "find_platform_principal", find)
+
+    @asynccontextmanager
+    async def sessions():
+        yield object()
+
+    answer = LoginAnswer(card(card_message_id="500"))
+    from daimon.core import fleet_login_decision
+
+    calls = AsyncMock(return_value=answer)
+    monkeypatch.setattr(fleet_login_decision, "answer_login_click", calls)
+    interaction = _interaction()
+    interaction.client.runtime.sessionmaker = sessions
+    await LoginButton(
+        discord.ui.Button(custom_id=login_custom_id(RUN, 0, "share", DIGEST))
+    ).callback(interaction)
+    subject = await calls.await_args.kwargs["live_subject"]()
+    assert subject.platform_user_id == "9" and subject.is_admin is admin
+    assert subject.client is client
+    assert lookups == [{"tenant_id": TENANT, "platform": "discord", "external_id": "9"}]
