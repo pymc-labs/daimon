@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -130,7 +131,8 @@ async def run_parent(
         run_id=run.id,
     )
     parent = with_candidates(
-        replace(base, fleet=facts),
+        # The run's limits carry the run's own deadline.
+        replace(base, fleet=facts, limits=base.limits.model_copy(update={"deadline": LATER})),
         candidate("env:ADMIN_KEY"),
         candidate("env:MINE", set_by=str(account.id)),
     )
@@ -152,12 +154,27 @@ async def _click(
         run_id=parent.fleet.run_id,
         digest=question["digest"],
         actor_account_id=actor or parent.fleet.account_id,
+        actor_platform_user_id="clicker" if actor else "person",
         is_admin=admin,
         row=row,
         choice=choice,
         now=datetime.now(UTC),
         save=save,
     )
+
+
+async def _audited(sm) -> list:
+    async with sm() as session:
+        return list(
+            (
+                await session.execute(
+                    text(
+                        "SELECT outcome, operation, reason, account_id, platform_user_id "
+                        "FROM security_audit_events WHERE tool_name = 'fleet_logins'"
+                    )
+                )
+            ).all()
+        )
 
 
 async def _waiting(sm, parent, clock: Clock) -> tuple[asyncio.Task, dict]:
@@ -206,17 +223,15 @@ async def test_the_requesters_answers_decide_the_run_and_end_the_wait(run_parent
         )
         == decision
     )
-    async with sm() as session:
-        audited = (
-            await session.execute(
-                text(
-                    "SELECT operation, reason FROM security_audit_events "
-                    "WHERE tool_name = 'fleet_logins' ORDER BY occurred_at"
-                )
-            )
-        ).all()
-    assert [row.operation for row in audited] == ["share", "skip"]
-    assert all("env:" in row.reason and "role=member" in row.reason for row in audited)
+    audited = await _audited(sm)
+    assert sorted((row.outcome, row.operation) for row in audited) == [
+        ("allowed", "share"),
+        ("allowed", "skip"),
+        ("denied", "share"),
+    ]
+    assert all("login=env:" in row.reason for row in audited if row.outcome == "allowed")
+    denied = next(row for row in audited if row.outcome == "denied")
+    assert "refused=already_decided" in denied.reason and "role=admin" in denied.reason
 
 
 async def test_clicks_are_rechecked_per_row_at_click_time(run_parent):
@@ -231,6 +246,12 @@ async def test_clicks_are_rechecked_per_row_at_click_time(run_parent):
     stale = {**question, "digest": "0" * 64}
     assert (await _click(sm, parent, stale)).refused == "stale_card"
     assert (await _click(sm, parent, question, row=7)).refused == "unknown_row"
+    # Every refusal is audited with its reason, as the CLICKER (not the requester).
+    denied = [row for row in await _audited(sm) if row.outcome == "denied"]
+    assert len(denied) == 5
+    stranger = next(row for row in denied if "refused=not_requester" in row.reason)
+    assert (stranger.account_id, stranger.platform_user_id) == (other, "clicker")
+    assert any("refused=share_not_allowed; login=env:ADMIN_KEY" in row.reason for row in denied)
     # An admin may share it.
     assert (await _click(sm, parent, question, row=0, admin=True)).refused is None
     task.cancel()
@@ -285,6 +306,7 @@ async def test_a_cancelled_spawn_stops_waiting_and_decides_nothing(run_parent):
         run_id=parent.fleet.run_id,
         digest=question["digest"],
         actor_account_id=parent.fleet.account_id,
+        actor_platform_user_id="person",
         is_admin=True,
         row=0,
         choice="share",
@@ -308,3 +330,63 @@ async def test_nothing_to_ask_returns_without_opening_a_question(run_parent):
     saved_only = with_candidates(parent, candidate("env:A", preapproved=True))
     assert await await_run_decision(sm, saved_only) is None
     assert await fleet.open_login_questions(sm, platform="discord") == ()
+
+
+async def test_the_question_never_outlives_the_run_deadline(run_parent):
+    sm, parent, _ = run_parent
+    soon = datetime.now(UTC) + timedelta(seconds=10)
+    short = replace(parent, limits=parent.limits.model_copy(update={"deadline": soon}))
+    task, question = await _waiting(sm, short, Clock())
+    assert datetime.fromisoformat(question["expires_at"]) == soon
+    task.cancel()
+
+
+async def test_a_run_that_ends_during_the_wait_stops_it(run_parent):
+    sm, parent, _ = run_parent
+    task, _ = await _waiting(sm, parent, Clock())
+    tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+    run, _ = await fleet.run_status(sm, tenant_id=tenant_id, run_id=parent.fleet.run_id)
+    await fleet.set_run_status(
+        sm, tenant_id=tenant_id, run_id=run.id, expected_version=run.version, status="cancelled"
+    )
+    assert await asyncio.wait_for(task, 5) is None
+    assert await fleet.run_login_decision(sm, tenant_id=tenant_id, run_id=run.id) is None
+
+
+async def test_truly_concurrent_clicks_decide_exactly_once(run_parent):
+    sm, parent, _ = run_parent
+    task, question = await _waiting(sm, parent, Clock())
+    # Two "skip all" clicks race on separate connections: one decides, one is refused.
+    first, second = await asyncio.gather(
+        _click(sm, parent, question, row="all", choice="skip"),
+        _click(sm, parent, question, row="all", choice="skip"),
+    )
+    assert sorted([first.decided, second.decided]) == [False, True]
+    assert {first.refused, second.refused} == {None, "already_decided"}
+    assert await asyncio.wait_for(task, 5) == {"env:ADMIN_KEY": "skip", "env:MINE": "skip"}
+
+
+async def test_concurrent_clicks_on_different_rows_both_land(run_parent):
+    sm, parent, _ = run_parent
+    task, question = await _waiting(sm, parent, Clock())
+    answers = await asyncio.gather(
+        _click(sm, parent, question, row=0, choice="skip"),
+        _click(sm, parent, question, row=1, choice="share"),
+    )
+    assert [a.refused for a in answers] == [None, None]
+    assert sum(a.decided for a in answers) == 1
+    assert await asyncio.wait_for(task, 5) == {"env:ADMIN_KEY": "skip", "env:MINE": "share"}
+
+
+def test_login_candidates_survive_the_frozen_root_json_round_trip():
+    from daimon.core.turn.runtime_manifest import _FrozenRoot  # pyright: ignore[reportPrivateUsage]
+    from pydantic import TypeAdapter
+
+    field = TypeAdapter(_FrozenRoot.model_fields["permissions"].annotation)
+    parent = with_candidates(
+        permissions(), candidate("env:A", preapproved=True), candidate("env:B", set_by="acct")
+    )
+    stored = json.loads(field.dump_json(parent))
+    restored = field.validate_json(json.dumps(stored))
+    assert restored.login_candidates == parent.login_candidates
+    assert restored == parent

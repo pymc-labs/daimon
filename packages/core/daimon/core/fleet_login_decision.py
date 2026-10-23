@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -120,7 +120,10 @@ def new_question(parent: WorkerPermissions, *, now: datetime) -> dict[str, Any]:
         "rows": rows,
         # The logins the workers run without regardless (for the card's last lines).
         "without": list(parent.workers_run_without),
-        "expires_at": (now + timedelta(seconds=LOGIN_WAIT_S)).isoformat(),
+        # Never past the run's own deadline (the run's limits are its deadline).
+        "expires_at": min(
+            now + timedelta(seconds=LOGIN_WAIT_S), parent.limits.deadline
+        ).isoformat(),
         "digest": question_digest(facts.run_id, rows),
         "choices": {},
         "card_message_id": None,
@@ -196,7 +199,8 @@ async def await_run_decision(
     Nothing to ask returns at once. Otherwise the run's one question is opened (parallel
     spawns share it) and polled from the database (the answer may land in another
     process) until decided or `LOGIN_WAIT_S` passes, which records no_answer. A cancelled
-    spawn stops waiting and dispatches nothing.
+    spawn stops waiting and dispatches nothing; so does a run that ends meanwhile
+    (None, and the caller's re-read of the root refuses it).
     """
     from daimon.core.stores import fleet
 
@@ -217,11 +221,13 @@ async def await_run_decision(
         expires = _expires(question)
         while (left := (expires - now()).total_seconds()) > 0:
             await sleep(min(_POLL_S, left))
-            decision = await fleet.run_login_decision(
+            running, decision = await fleet.run_login_poll(
                 sessionmaker, tenant_id=tenant_id, run_id=run_id
             )
             if decision is not None:
                 return decision
+            if not running:
+                return None  # the run ended (stopped, deadline): nothing to dispatch
         await expire_question(sessionmaker, tenant_id=tenant_id, run_id=run_id, now=now())
     return await fleet.run_login_decision(sessionmaker, tenant_id=tenant_id, run_id=run_id)
 
@@ -243,6 +249,7 @@ async def choose_login(
     run_id: uuid.UUID,
     digest: str,
     actor_account_id: uuid.UUID,
+    actor_platform_user_id: str | None,
     is_admin: bool,
     row: int | Literal["all"],
     choice: LoginChoice,
@@ -255,19 +262,44 @@ async def choose_login(
     Only the run's requester, on the card for these exact rows, before the deadline
     and before the run is decided. "share" needs `may_share_for_run` for every row it
     covers (a member may share only a key they set themselves). "all" answers every
-    row not yet answered. Every applied click is audited by login key (never a
-    value). When every row has an answer, the run is decided (once, from null).
-    An owner's or admin's click is also saved to the agent config through `save`
-    (`set_credential_sharing`); a member's applies to this run only.
+    row not yet answered. Every click is audited as the CLICKER, refusals included
+    with their reason, by login key (never a value). When every row has an answer,
+    the run is decided (once, from null). An owner's or admin's click is also saved
+    to the agent config through `save` (`set_credential_sharing`); a member's applies
+    to this run only.
     """
     from daimon.core.stores import agent_owners, fleet, security_audit
 
     async with sessionmaker.begin() as session:
         state = await fleet.lock_login_state(session, tenant_id=tenant_id, run_id=run_id)
-        if state is None or state[2] is None:
-            return LoginAnswer(None, "no_question")
-        requester, status, question, decision = state
-        assert question is not None
+        question = state[2] if state is not None else None
+        agent_id = question.get("agent_id") if question is not None else None
+        role = "admin" if is_admin else "member"
+
+        async def audit(
+            outcome: Literal["allowed", "denied"], keys: Sequence[str], reason: str
+        ) -> None:
+            for key in keys or ["-"]:
+                await security_audit.append_event(
+                    session,
+                    tenant_id=tenant_id,
+                    account_id=actor_account_id,
+                    agent_id=uuid.UUID(agent_id) if agent_id else None,
+                    platform=question.get("platform") if question is not None else None,
+                    platform_user_id=actor_platform_user_id,
+                    tool_name="fleet_logins",
+                    operation=choice,
+                    outcome=outcome,
+                    reason=f"{reason}; login={key}; role={role}; run={run_id}; row={row}",
+                )
+
+        async def refuse(reason: Refusal, keys: Sequence[str] = ()) -> LoginAnswer:
+            await audit("denied", keys, f"refused={reason}")
+            return LoginAnswer(question, reason)
+
+        if state is None or question is None:
+            return await refuse("no_question")
+        requester, status, _, decision = state
         refused: Refusal | None = (
             "already_decided"
             if decision is not None
@@ -282,7 +314,7 @@ async def choose_login(
             else None
         )
         if refused is not None:
-            return LoginAnswer(question, refused)
+            return await refuse(refused)
         rows = cast(list[dict[str, Any]], question.get("rows") or [])
         choices = cast(dict[str, str], question.setdefault("choices", {}))
         if row == "all":
@@ -290,14 +322,15 @@ async def choose_login(
         elif 0 <= row < len(rows):
             targets = [rows[row]]
         else:
-            return LoginAnswer(question, "unknown_row")
-        agent_id = question.get("agent_id")
+            return await refuse("unknown_row")
+        keys = [str(target["key"]) for target in targets]
         owner = (
             await agent_owners.owner_of(session, tenant_id, uuid.UUID(agent_id))
             if agent_id
             else None
         )
         is_owner = owner is not None and owner == actor_account_id
+        role = "admin" if is_admin else "owner" if is_owner else "member"
         if choice != "skip":
             for target in targets:
                 candidate = LoginCandidate(
@@ -314,22 +347,10 @@ async def choose_login(
                     is_admin=is_admin,
                     is_owner=is_owner,
                 ):
-                    return LoginAnswer(question, "share_not_allowed")
-        role = "admin" if is_admin else "owner" if is_owner else "member"
-        for target in targets:
-            choices[target["key"]] = choice
-            await security_audit.append_event(
-                session,
-                tenant_id=tenant_id,
-                account_id=actor_account_id,
-                agent_id=uuid.UUID(agent_id) if agent_id else None,
-                platform=question.get("platform"),
-                platform_user_id=question.get("requester_platform_user_id"),
-                tool_name="fleet_logins",
-                operation=choice,
-                outcome="allowed",
-                reason=f"login={target['key']}; role={role}; run={run_id}",
-            )
+                    return await refuse("share_not_allowed", [str(target["key"])])
+        for key in keys:
+            choices[key] = choice
+        await audit("allowed", keys, "applied")
         decided = _decided(question, final=False)
         if decided is not None:
             question["state"] = "decided"
@@ -337,9 +358,9 @@ async def choose_login(
             session, tenant_id=tenant_id, run_id=run_id, question=question, decision=decided
         )
     saved = False
-    if save is not None and (is_owner or is_admin) and targets:
+    if save is not None and (is_owner or is_admin) and keys:
         try:
-            await save({target["key"]: _SAVED[choice] for target in targets})
+            await save({key: _SAVED[choice] for key in keys})
             saved = True
         except Exception as error:  # the run's decision stands; only the saved default failed
             log.warning("fleet.login_save_failed", error_type=type(error).__name__)

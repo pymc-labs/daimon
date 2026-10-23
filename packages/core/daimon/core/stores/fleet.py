@@ -44,7 +44,7 @@ from daimon.core.fleet import (
 )
 from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
 from pydantic import JsonValue
-from sqlalchemy import CursorResult, Row, func, or_, select, text, update
+from sqlalchemy import Row, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1088,34 +1088,6 @@ def _decision(raw: object) -> dict[str, str] | None:
     }
 
 
-async def decide_run_logins(
-    sessionmaker: Source,
-    *,
-    tenant_id: uuid.UUID,
-    run_id: uuid.UUID,
-    requester_account_id: uuid.UUID,
-    decision: Mapping[str, Literal["share", "skip", "no_answer"]],
-) -> bool:
-    """Set the run's login decision once, from null, for the run's own requester.
-
-    False when it is already decided (a later click never changes it), the run is
-    another person's, or it already ended.
-    """
-    async with _transaction(sessionmaker) as session:
-        result = await session.execute(
-            update(FleetRunRow)
-            .where(
-                FleetRunRow.tenant_id == tenant_id,
-                FleetRunRow.id == run_id,
-                FleetRunRow.orchestrator_account_id == requester_account_id,
-                FleetRunRow.login_decision.is_(None),
-                FleetRunRow.status.in_(_OPEN),
-            )
-            .values(login_decision=dict(decision))
-        )
-        return cast(CursorResult[Any], result).rowcount == 1
-
-
 async def run_login_decision(
     sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID
 ) -> dict[str, str] | None:
@@ -1127,6 +1099,23 @@ async def run_login_decision(
             )
         )
     return _decision(raw)
+
+
+async def run_login_poll(
+    sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> tuple[bool, dict[str, str] | None]:
+    """(the run is still running, its login decision or None) in one read."""
+    async with _transaction(sessionmaker) as session:
+        row = (
+            await session.execute(
+                select(FleetRunRow.status, FleetRunRow.login_decision).where(
+                    FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id
+                )
+            )
+        ).one_or_none()
+    if row is None:
+        return False, None
+    return row.status in _OPEN, _decision(row.login_decision)
 
 
 async def open_login_question(
