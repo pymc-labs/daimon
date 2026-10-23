@@ -69,6 +69,7 @@ __all__ = [
     "ApprovedConfirmation",
     "ConfirmationHook",
     "ConfirmationPrompt",
+    "ConfirmationRefused",
     "BackendSwitchReference",
     "ToolRuleCardReference",
     "PendingConfirmations",
@@ -148,6 +149,41 @@ class ToolRuleCardReference(BaseModel):
     channel_id: str | None = None
     agent_revision: int = Field(default=0, ge=0)
     channel_revision: int = Field(default=0, ge=0)
+
+
+#: What a click-time refusal on a stale card tells the person.
+STALE_CLICK_MESSAGE: Final[str] = (
+    "This preview changed, so nothing ran. Ask the agent to show the change again."
+)
+#: Refusals no new preview can fix, so they carry no "preview again".
+WRONG_ACCOUNT_REASON: Final[str] = "This confirmation belongs to a different account."
+PIN_ELSEWHERE_REASON: Final[str] = "Clearing a channel's pin has to be confirmed in that channel."
+MALFORMED_CARD_REASON: Final[str] = "This confirmation can't be used for this change."
+#: The clicker's own account changed between the checks.
+ACCESS_CHANGED_CLICK_MESSAGE: Final[str] = (
+    "Your access changed, so nothing ran. Ask the agent to show the change again."
+)
+
+
+class ConfirmationRefused(ValueError):
+    """A card that cannot be shown or answered, with the reason in plain words.
+
+    `stale` means the preview behind the card no longer matches, so running
+    the preview again can succeed. Otherwise the person lacks the authority,
+    and nothing they can ask for in this chat changes that.
+    """
+
+    def __init__(self, reason: str, *, stale: bool = False, click: str | None = None) -> None:
+        super().__init__(reason)
+        self.stale = stale
+        self._click = click
+
+    @property
+    def click_message(self) -> str:
+        """The refusal the clicker sees: a reason they can act on."""
+        if self._click is not None:
+            return self._click
+        return STALE_CLICK_MESSAGE if self.stale else str(self)
 
 
 class ConfirmationPrompt(BaseModel):
@@ -663,7 +699,8 @@ def backend_switch_callbacks(
     ) -> tuple[BackendAgent, CompatibilityPreview]:
         reference = prompt.backend_switch
         if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            # A card that isn't an admin change, or not this person's.
+            raise ConfirmationRefused(MALFORMED_CARD_REASON)
         async with sessionmaker() as session:
             identity = await get_account_with_tenant(session, account_id=account_id)
         if (
@@ -671,7 +708,8 @@ def backend_switch_callbacks(
             or identity.tenant_id != tenant_id
             or identity.platform_user_id != clicker
         ):
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            # A different account or workspace: a new preview can't fix that.
+            raise ConfirmationRefused(WRONG_ACCOUNT_REASON)
         agent = await load_backend_agent(
             anthropic,
             sessionmaker,
@@ -692,16 +730,24 @@ def backend_switch_callbacks(
             or (preview.declared_drops and reference.accepted_drops != preview.declared_drops)
             or (not preview.declared_drops and reference.accepted_drops not in (None, ()))
         ):
-            raise ValueError("This preview changed. Preview and confirm again.")
+            raise ConfirmationRefused(
+                "This preview changed. Preview and confirm again.", stale=True
+            )
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
         # The agent's owner or a current workspace admin, as the write re-checks.
         if not await service.may_edit(agent, BackendActor(tenant_id, account_id, subject)):
-            raise ValueError("This change needs the agent's owner or a current workspace admin.")
+            raise ConfirmationRefused(
+                "This change needs the agent's owner or a current workspace admin."
+            )
         # Recheck the scoped identity after the platform lookup has yielded.
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
-            raise ValueError("This permission changed. Preview and confirm again.")
+            raise ConfirmationRefused(
+                "This permission changed. Preview and confirm again.",
+                stale=True,
+                click=ACCESS_CHANGED_CLICK_MESSAGE,
+            )
         return agent, preview
 
     async def verified_configuration(
@@ -711,7 +757,8 @@ def backend_switch_callbacks(
 
         reference = prompt.configuration
         if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            # A card that isn't an admin change, or not this person's.
+            raise ConfirmationRefused(MALFORMED_CARD_REASON)
         async with sessionmaker() as session:
             identity = await get_account_with_tenant(session, account_id=account_id)
         if (
@@ -719,19 +766,21 @@ def backend_switch_callbacks(
             or identity.tenant_id != tenant_id
             or identity.platform_user_id != clicker
         ):
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            # A different account or workspace: a new preview can't fix that.
+            raise ConfirmationRefused(WRONG_ACCOUNT_REASON)
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
         if (
             reference.operation in ("provider_allowlist", "channel_pin_clear")
             and not subject.is_admin
         ):
-            raise ValueError("This change needs a current workspace admin.")
+            raise ConfirmationRefused("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:
             if reference.operation == "channel_pin_clear":
                 # Only the chat this card is posted in: the reference names no channel.
                 if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
-                    raise ValueError("This confirmation is unavailable. Preview again.")
+                    # A preview from the same place would meet the same refusal.
+                    raise ConfirmationRefused(PIN_ELSEWHERE_REASON)
                 from daimon.core.channel_backend import current_backend
                 from daimon.core.fleet_configuration import channel_pin_digest
                 from daimon.core.stores import mux_state
@@ -750,7 +799,9 @@ def backend_switch_callbacks(
                     or pin.local != reference.expected_revision
                     or channel_pin_digest(pin) != reference.preview_digest
                 ):
-                    raise ValueError("This preview changed. Preview and confirm again.")
+                    raise ConfirmationRefused(
+                        "This preview changed. Preview and confirm again.", stale=True
+                    )
                 model = f" ({pin.model})" if pin.model else ""
                 action = "Clear this channel's provider pin"
                 details = (
@@ -766,7 +817,9 @@ def backend_switch_callbacks(
                     or provider_preview_digest(policy, reference.providers)
                     != reference.preview_digest
                 ):
-                    raise ValueError("This preview changed. Preview and confirm again.")
+                    raise ConfirmationRefused(
+                        "This preview changed. Preview and confirm again.", stale=True
+                    )
                 await service.set_tenant_allowlist(
                     tenant_id, reference.providers, policy.revision, actor, dry_run=True
                 )
@@ -786,7 +839,9 @@ def backend_switch_callbacks(
                     resource_host=resource_host,
                 )
                 if not await service.may_edit(agent, actor):
-                    raise ValueError("This change needs the agent's owner or a current admin.")
+                    raise ConfirmationRefused(
+                        "This change needs the agent's owner or a current admin."
+                    )
                 setting = await service.fleet_setting(
                     tenant_id, agent.agent_id, now=datetime.now(prompt.expires_at.tzinfo)
                 )
@@ -826,7 +881,9 @@ def backend_switch_callbacks(
                     preview.setting_revision != reference.expected_revision
                     or preview.digest != reference.preview_digest
                 ):
-                    raise ValueError("This preview changed. Preview and confirm again.")
+                    raise ConfirmationRefused(
+                        "This preview changed. Preview and confirm again.", stale=True
+                    )
                 action = (
                     "Turn off fleet for "
                     if reference.operation == "fleet_revoke"
@@ -843,12 +900,18 @@ def backend_switch_callbacks(
                 )
         except AgentBackendRefused as exc:
             if exc.reason == "fleet_raise_admin_required":
-                raise ValueError(configuration_refusal(exc.reason)) from exc
-            raise ValueError("This preview changed. Preview and confirm again.") from exc
+                raise ConfirmationRefused(configuration_refusal(exc.reason)) from exc
+            raise ConfirmationRefused(
+                "This preview changed. Preview and confirm again.", stale=True
+            ) from exc
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
-            raise ValueError("This permission changed. Preview and confirm again.")
+            raise ConfirmationRefused(
+                "This permission changed. Preview and confirm again.",
+                stale=True,
+                click=ACCESS_CHANGED_CLICK_MESSAGE,
+            )
         return action, details
 
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
@@ -872,10 +935,17 @@ def backend_switch_callbacks(
                 if preview.target_settings
                 else ()
             ),
-            "Unsupported skills: " + (", ".join(preview.unsupported_skills) or "None"),
-            "Unsupported connections: " + (", ".join(preview.unsupported_mcps) or "None"),
-            "Unsupported capabilities: " + (", ".join(preview.unsupported_capabilities) or "None"),
-            "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
+            # Only rows with something in them: a run of "None" reads as a problem.
+            *(
+                f"{label}: {sep.join(items)}"
+                for label, sep, items in (
+                    ("Unsupported skills", ", ", preview.unsupported_skills),
+                    ("Unsupported connections", ", ", preview.unsupported_mcps),
+                    ("Unsupported capabilities", ", ", preview.unsupported_capabilities),
+                    ("Shared-thread limits", "; ", preview.shared_thread_limits),
+                )
+                if items
+            ),
             preview.cost_line,
         )
         from daimon.core.turn.notices import provider_name
@@ -924,6 +994,8 @@ def backend_switch_callbacks(
                 await verified_configuration(prompt, clicker)
             else:
                 await verified(prompt, clicker)
+        except ConfirmationRefused as exc:
+            return exc.click_message
         except ValueError:
             return "This preview or your permission changed. Preview and confirm again."
         return None

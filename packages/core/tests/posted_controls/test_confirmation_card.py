@@ -14,11 +14,22 @@ from daimon.core.confirmation import (
     prompt_for_tool_call,
 )
 from daimon.core.posted_controls.confirmation import (
+    EXPIRED_MESSAGE,
+    NO_LONGER_ACTIVE_MESSAGE,
+    NO_LONGER_PENDING_MESSAGE,
+    NOTHING_RAN_FOOTER,
+    RULE_REFUSED_FOOTER,
+    STOPPED_MESSAGE,
     build_confirmation_blocks,
     build_confirmation_card,
     confirmation_card_text,
     confirmation_custom_id,
     parse_confirmation_custom_id,
+    refused_after_approval,
+)
+from daimon.core.posted_controls.lifecycle import (
+    PostedConfirmations,
+    settle_local_confirmation,
 )
 from daimon.core.tool_safety import ToolCall
 
@@ -74,6 +85,92 @@ def test_every_state_leads_with_its_mark(state: str, mark: str) -> None:
     card = build_confirmation_card(_prompt(), state=state, token=token)  # type: ignore[arg-type]
     assert card.headline.startswith(mark)
     assert card.detail_lines == (_prompt().detail_lines if state == "pending" else ())
+
+
+@pytest.mark.parametrize("state", ["expired", "stopped"])
+def test_a_card_retired_unanswered_says_nothing_ran(state: str) -> None:
+    card = build_confirmation_card(_prompt(), state=state)  # type: ignore[arg-type]
+    assert card.footer == NOTHING_RAN_FOOTER
+    blocks = build_confirmation_blocks(card, prompt=_prompt())
+    assert blocks[-1]["elements"][0]["text"] == "Nothing ran. Ask again to run it."
+
+
+def test_a_card_the_agents_rule_refused_after_approval_does_not_say_ask_again() -> None:
+    with refused_after_approval():
+        card = build_confirmation_card(_prompt(), state="stopped")
+    assert card.footer == RULE_REFUSED_FOOTER and "Ask again" not in card.footer
+    assert build_confirmation_card(_prompt(), state="stopped").footer == NOTHING_RAN_FOOTER
+
+
+def test_expiry_says_what_to_do_next() -> None:
+    assert EXPIRED_MESSAGE == "This request expired, so nothing ran. Ask again to run it."
+
+
+def test_slack_admin_card_confirms_like_discord_and_teams() -> None:
+    prompt = _prompt().model_copy(update={"admin": True})
+    blocks = build_confirmation_blocks(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt=prompt
+    )
+    labels = [e["text"]["text"] for b in blocks if b["type"] == "actions" for e in b["elements"]]
+    assert labels[:2] == ["Confirm", "Deny"]
+
+
+async def test_only_a_token_settled_here_reads_already_answered() -> None:
+    """After a restart or a stopped turn the token is unknown: nothing ran."""
+    controls: PostedConfirmations[object] = PostedConfirmations()  # type: ignore[type-var]
+    prompt = _prompt().model_copy(update={"expires_at": datetime.now(UTC).replace(year=2099)})
+    token, future = controls.pending.open()
+    controls.cards[token] = type("Card", (), {"prompt": prompt})()
+    assert controls.claim(token, "U1", "approved") is None
+    assert future.result() == "approved"
+    assert controls.claim(token, "U1", "approved") == NO_LONGER_PENDING_MESSAGE
+    unknown = controls.claim("tok_unknown1", "U1", "approved")
+    assert unknown == NO_LONGER_ACTIVE_MESSAGE
+    assert "nothing ran" not in unknown, "an unknown token may have run before a restart"
+
+
+async def test_a_click_after_the_turn_stopped_says_stopped_even_if_a_click_won() -> None:
+    controls: PostedConfirmations[object] = PostedConfirmations()  # type: ignore[type-var]
+    prompt = _prompt().model_copy(update={"expires_at": datetime.now(UTC).replace(year=2099)})
+    retired: list[str] = []
+    clicked = asyncio.Event()
+
+    async def post(token: str) -> object:
+        posted = type("Card", (), {"prompt": prompt, "token": token})()
+        clicked.set()
+        return posted
+
+    async def retire(_card: object, state: str) -> None:
+        retired.append(state)
+
+    waiter = asyncio.create_task(
+        controls.confirm(prompt, post=post, retire=retire, post_errors=())  # type: ignore[arg-type]
+    )
+    await clicked.wait()
+    await asyncio.sleep(0)
+    (token,) = list(controls.cards)
+    assert controls.claim(token, "U1", "approved") is None
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert retired == ["stopped"]
+    assert controls.missing_message(token) == STOPPED_MESSAGE
+
+
+async def test_a_click_on_a_stopped_local_card_says_nothing_ran() -> None:
+    prompt = _prompt().model_copy(update={"expires_at": datetime.now(UTC).replace(year=2099)})
+    future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    future.cancel()
+    assert (
+        settle_local_confirmation(prompt, future, "U1", "approved")  # type: ignore[arg-type]
+        == STOPPED_MESSAGE
+    )
+    answered: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    answered.set_result("denied")
+    assert (
+        settle_local_confirmation(prompt, answered, "U1", "approved")  # type: ignore[arg-type]
+        == NO_LONGER_PENDING_MESSAGE
+    )
 
 
 def test_only_a_pending_card_carries_a_token() -> None:
@@ -487,3 +584,49 @@ def test_a_one_day_notebook_link_reads_singular() -> None:
 
     assert "Link expires: in 1 day" in lines(1)
     assert "Link expires: in 14 days" in lines(14)
+
+
+@pytest.mark.parametrize("read_fails", [False, True])
+async def test_a_rule_refusal_after_approval_names_the_rule_only_for_a_real_deny(
+    read_fails: bool,
+) -> None:
+    """The turn retires the approved card; a failed rule read is not a refusal."""
+    from daimon.core.confirmation import ApprovedConfirmation
+    from daimon.core.tool_safety import ResolvedAgentToolRule, ToolSafetyPolicy
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    footers: list[str | None] = []
+    reads = 0
+
+    async def rules_for(_call: ToolCall) -> ResolvedAgentToolRule | None:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return None
+        if read_fails:
+            raise RuntimeError("rules table unavailable")
+        return ResolvedAgentToolRule(rule="deny")
+
+    async def confirm(prompt: ConfirmationPrompt) -> ApprovedConfirmation:
+        async def retire_unsent() -> None:
+            # Built in a queued task, as Slack and Teams edits are.
+            task = asyncio.ensure_future(
+                asyncio.sleep(0, build_confirmation_card(prompt, state="stopped").footer)
+            )
+            footers.append(await task)
+
+        return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
+
+    posture = chat_tool_confirmation(
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+        requester_platform_user_id="U1",
+        confirm=confirm,
+        rules_for=rules_for,
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(
+        ToolCall(tool_use_id="tu_1", server_name="linear", tool_name="create_issue", input={})
+    )
+    assert result.allow is False
+    assert footers == [NOTHING_RAN_FOOTER if read_fails else RULE_REFUSED_FOOTER]

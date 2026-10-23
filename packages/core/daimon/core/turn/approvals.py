@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -30,10 +31,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationHook,
+    ConfirmationRefused,
     ToolRuleCardReference,
     no_confirmation_surface,
     prompt_for_tool_call,
 )
+from daimon.core.posted_controls.confirmation import refused_after_approval
 from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
@@ -384,6 +387,22 @@ def _card_failed_message(call: ToolCall) -> str:
     )
 
 
+def _card_refused_message(call: ToolCall, refusal: ConfirmationRefused) -> str:
+    shown = (
+        f"{call.key} did not run and no approval card was shown: {refusal} Nothing was "
+        "changed and the person did not refuse it. "
+    )
+    if refusal.stale:
+        return shown + (
+            "The preview it was based on changed. Run the preview again, then call this "
+            "again with the new preview; don't repeat the same call."
+        )
+    return shown + (
+        "Do not retry it until that changes. Tell the person in one line why it could not "
+        "run, in plain words."
+    )
+
+
 def _answer_message(call: ToolCall, answer: str) -> str:
     if answer == "expired":
         return (
@@ -515,6 +534,12 @@ def interactive_decider(
             ):
                 prompt = prompt.model_copy(update={"tool_rule": rule_card_for(call)})
             response = await confirm(prompt)
+        except ConfirmationRefused as err:
+            # The card's own check said why it can't be shown; pass that on.
+            log.info("tool_safety.confirm_refused", tool=call.key, reason=str(err), stale=err.stale)
+            return ToolConfirmationResult(
+                allow=False, deny_message=_card_refused_message(call, err)
+            )
         except Exception as err:
             # Named boundary: prompt validation and the adapter's card must
             # both succeed before the write may run.
@@ -532,7 +557,9 @@ def interactive_decider(
                 )
                 if read_failed or (latest is not None and latest.rule == "deny"):
                     if isinstance(response, ApprovedConfirmation):
-                        await response.retire_unsent()
+                        # Only a real deny names the rule; a failed read may pass next time.
+                        with refused_after_approval() if not read_failed else nullcontext():
+                            await response.retire_unsent()
                     return ToolConfirmationResult(
                         allow=False,
                         deny_message=(

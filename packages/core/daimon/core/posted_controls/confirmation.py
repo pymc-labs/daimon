@@ -11,6 +11,9 @@ Pure module: no I/O or clock reads.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
@@ -26,6 +29,11 @@ __all__ = [
     "NOT_YOURS_MESSAGE",
     "NO_LONGER_PENDING_MESSAGE",
     "EXPIRED_MESSAGE",
+    "NO_LONGER_ACTIVE_MESSAGE",
+    "NOTHING_RAN_FOOTER",
+    "RULE_REFUSED_FOOTER",
+    "STOPPED_MESSAGE",
+    "refused_after_approval",
     "build_confirmation_blocks",
     "build_confirmation_card",
     "confirmation_card_text",
@@ -43,7 +51,35 @@ CONFIRMATION_ACTION_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 NOT_YOURS_MESSAGE: Final[str] = "Only {requester} can approve or deny this request."
 NO_LONGER_PENDING_MESSAGE: Final[str] = "This request was already answered."
-EXPIRED_MESSAGE: Final[str] = "This request expired."
+EXPIRED_MESSAGE: Final[str] = "This request expired, so nothing ran. Ask again to run it."
+#: A click on a card this process knows nothing about (a restart, or a
+#: token long forgotten). It may have run before, so this claims nothing.
+NO_LONGER_ACTIVE_MESSAGE: Final[str] = (
+    "This request is no longer active. Ask again if it still needs doing."
+)
+#: A click on a card whose turn was stopped while it waited.
+STOPPED_MESSAGE: Final[str] = "This request was stopped, so nothing ran. Ask again to run it."
+#: Footer of a card retired without an answer (expired or stopped).
+NOTHING_RAN_FOOTER: Final[str] = "Nothing ran. Ask again to run it."
+#: Footer of an approved card the agent's tool rule then refused: asking
+#: again would meet the same rule.
+RULE_REFUSED_FOOTER: Final[str] = "Nothing ran. This agent's tool rules don't allow it now."
+
+_REFUSED_AFTER_APPROVAL: ContextVar[bool] = ContextVar("refused_after_approval", default=False)
+
+
+@contextmanager
+def refused_after_approval() -> Iterator[None]:
+    """Retire a card as stopped by the agent's rule, not as asking again.
+
+    Set around `ApprovedConfirmation.retire_unsent` when a rule refuses an
+    approved call, so every adapter's Stopped edit gets the rule's footer.
+    """
+    token = _REFUSED_AFTER_APPROVAL.set(True)
+    try:
+        yield
+    finally:
+        _REFUSED_AFTER_APPROVAL.reset(token)
 
 
 class ConfirmationCard(BaseModel):
@@ -121,7 +157,13 @@ def build_confirmation_card(
             else prompt.denied_action or f"{prompt.title.removesuffix('?')} not completed"
         )
         if how is None:
-            footer = "by {requester}" if state in {"approved", "denied"} else None
+            footer = (
+                "by {requester}"
+                if state in {"approved", "denied"}
+                else RULE_REFUSED_FOOTER
+                if state == "stopped" and _REFUSED_AFTER_APPROVAL.get()
+                else NOTHING_RAN_FOOTER
+            )
         elif state == "denied":
             footer = "Denied by {actor}"
         elif how == "always":
@@ -169,7 +211,7 @@ def build_confirmation_blocks(
         buttons = [
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "Approve"},
+                "text": {"type": "plain_text", "text": "Confirm" if prompt.admin else "Approve"},
                 "style": "primary",
                 "action_id": confirmation_custom_id(card.token, "approve"),
                 "value": card.token,

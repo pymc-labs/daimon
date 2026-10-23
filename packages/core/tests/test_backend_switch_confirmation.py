@@ -218,7 +218,10 @@ async def test_server_preview_and_current_admin_are_the_only_card_authority(owne
     preview = await service.preview(agent, "openai")
     assert prepared.detail_lines[-1] == preview.cost_line
     assert "worst case per reply: unknown" in prepared.detail_lines[-1].lower()
-    assert prepared.detail_lines[0].startswith("Unsupported skills: ")
+    assert not any(line.endswith(": None") for line in prepared.detail_lines), (
+        "an empty row reads as a problem, so the card leaves it out"
+    )
+    assert not any(line.startswith("Unsupported skills") for line in prepared.detail_lines)
     trace.queue(reply())
     assert await check(prepared, "requester") is None
     assert admin.await_count == 2
@@ -313,7 +316,14 @@ async def test_card_scope_refuses_before_any_agent_read(owned_preview, bad_scope
         account_id=account_id,
         current_admin=admin,
     )
-    assert await check(prompt, "other" if bad_scope == "requester" else "requester") is not None
+    refusal = await check(prompt, "other" if bad_scope == "requester" else "requester")
+    assert refusal is not None
+    # Neither cause is fixed by a new preview, so neither says to preview again.
+    assert refusal == (
+        "This confirmation can't be used for this change."
+        if bad_scope == "requester"
+        else "This confirmation belongs to a different account."
+    )
     admin.assert_not_awaited()
     assert len(trace.requests) == 1
     assert await service.current(agent) is None
@@ -911,6 +921,90 @@ async def test_card_names_the_model_and_where_the_switch_applies(
     assert await service.current(agent) is None
 
 
+@pytest.mark.parametrize("case", ["not_owner", "stale", "allowlist_not_admin", "pin_elsewhere"])
+async def test_a_refused_prepare_reaches_the_model_with_its_reason(owned_preview, case):
+    """prepare raises a typed refusal, and the turn passes its reason on."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import ConfirmationRefused, backend_switch_callbacks
+    from daimon.core.fleet_configuration import ConfigurationReference
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+    from daimon.core.turn.approvals import chat_tool_confirmation
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=case in ("stale", "pin_elsewhere")),
+    )
+
+    def shaped(card):
+        if case == "pin_elsewhere":
+            # No channel to clear: the card isn't in the channel whose pin it names.
+            return card.model_copy(
+                update={
+                    "backend_switch": None,
+                    "configuration": ConfigurationReference(
+                        operation="channel_pin_clear",
+                        expected_revision=1,
+                        preview_digest="0" * 64,
+                    ),
+                }
+            )
+        if case != "allowlist_not_admin":
+            return card
+        return card.model_copy(
+            update={
+                "backend_switch": None,
+                "configuration": ConfigurationReference(
+                    operation="provider_allowlist",
+                    providers=("anthropic",),
+                    expected_revision="r1",
+                    preview_digest="0" * 64,
+                ),
+            }
+        )
+
+    reason = {
+        "allowlist_not_admin": "This change needs a current workspace admin.",
+        "stale": "This preview changed. Preview and confirm again.",
+        "not_owner": "This change needs the agent's owner or a current workspace admin.",
+        "pin_elsewhere": "Clearing a channel's pin has to be confirmed in that channel.",
+    }[case]
+    if case == "stale":
+        payload["system"] = "Changed after the preview"
+    if case in ("not_owner", "stale"):
+        trace.queue(reply())
+    with pytest.raises(ConfirmationRefused, match=reason) as refused:
+        await prepare(shaped(prompt))
+    assert refused.value.stale is (case == "stale")
+
+    async def confirm(card):
+        return await prepare(shaped(card))
+
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=confirm,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=frozenset({"request_agent_backend_switch"}),
+    )
+    if case in ("not_owner", "stale"):
+        trace.queue(reply())
+    reference = prompt.backend_switch
+    result = await posture.decide(
+        _call(
+            expected_revision=reference.expected_revision,
+            preview_digest=reference.preview_digest,
+        )
+    )
+    assert result.allow is False
+    assert reason in (result.deny_message or ""), "the real reason, not 'could not be shown'"
+
+
 async def test_the_agents_owner_may_confirm_without_being_an_admin(owned_preview):
     from unittest.mock import AsyncMock
 
@@ -1039,3 +1133,23 @@ async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers
     moves = "This conversation moves to OpenAI from your next message"
     assert (moves in prepared.consequence) == (answering == "Researcher")
     assert "other existing threads keep their model" in prepared.consequence
+
+
+def test_each_refusal_gives_the_clicker_its_own_cause() -> None:
+    from daimon.core.confirmation import (
+        ACCESS_CHANGED_CLICK_MESSAGE,
+        STALE_CLICK_MESSAGE,
+        ConfirmationRefused,
+    )
+
+    authority = ConfirmationRefused("This change needs a current workspace admin.")
+    stale = ConfirmationRefused("This preview changed. Preview and confirm again.", stale=True)
+    access = ConfirmationRefused(
+        "This permission changed. Preview and confirm again.",
+        stale=True,
+        click=ACCESS_CHANGED_CLICK_MESSAGE,
+    )
+    assert authority.click_message == "This change needs a current workspace admin."
+    assert stale.click_message == STALE_CLICK_MESSAGE
+    assert access.click_message.startswith("Your access changed")
+    assert not authority.stale and stale.stale and access.stale
