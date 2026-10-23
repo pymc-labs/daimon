@@ -259,6 +259,7 @@ from discord.http import HTTPClient
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+    from daimon.core.fleet_login_decision import LoginCard
     from daimon.core.stores.agent_posts import AgentPostRow
 
 log = structlog.get_logger()
@@ -813,6 +814,10 @@ class DaimonBot(commands.Bot):
         # Drain flag — set by _drain_and_close on SIGTERM/SIGINT.
         # While True, on_message rejects new mentions; existing turns finish.
         self.draining: bool = False
+        from daimon.core.fleet_login_decision import LoginClickLimiter
+
+        # One per process: refused fleet login-card clicks, capped per (run, clicker).
+        self.login_click_limiter = LoginClickLimiter()
         # One-shot guard for the orphaned-turn sweep. on_ready re-fires on every
         # full gateway reconnect, and a second run would reap the turns THIS
         # process is currently rendering.
@@ -1204,6 +1209,20 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
+            if self.runtime.turn_deps.fleet_enabled:
+                from daimon.adapters.discord.posted_controls.fleet_login import (
+                    run_login_card_poller,
+                )
+
+                # A fleet's first spawn waits up to 60 s for its login question.
+                self._spawn(
+                    run_login_card_poller(
+                        self.runtime.sessionmaker,
+                        post=self._post_login_card,
+                        fetch=self._fetch_login_card,
+                        should_stop=lambda: self.draining or self.is_closed(),
+                    )
+                )
             # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
             self._spawn(
@@ -1276,8 +1295,9 @@ class DaimonBot(commands.Bot):
         self.add_dynamic_items(CredentialRequestButton)
         if getattr(getattr(self.runtime.settings, "fleet", None), "enabled", False) is True:
             from daimon.adapters.discord.posted_controls.fleet import FleetControl
+            from daimon.adapters.discord.posted_controls.fleet_login import LoginButton
 
-            self.add_dynamic_items(FleetControl)
+            self.add_dynamic_items(FleetControl, LoginButton)
 
         # Same rationale as CredentialRequestButton above: the wizard's
         # first screen is posted by the MCP process, and every tap on it
@@ -3771,6 +3791,42 @@ class DaimonBot(commands.Bot):
     async def _channel_by_id(self, channel_id: int) -> object:
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+    async def _login_card_thread(self, card: LoginCard) -> discord.Thread | None:
+        """The run's own thread, in the run's own server, or None."""
+        if card.thread_id is None or not card.thread_id.isdigit():
+            return None
+        try:
+            channel = await self._channel_by_id(int(card.thread_id))
+        except (discord.NotFound, discord.Forbidden):
+            return None
+        if (
+            not isinstance(channel, discord.Thread)
+            or derive_tenant_uuid(platform="discord", workspace_id=str(channel.guild.id))
+            != card.tenant_id
+            or not await self._may_post_in(tenant_id=card.tenant_id, channel=channel)
+        ):
+            return None
+        return channel
+
+    async def _post_login_card(self, card: LoginCard) -> discord.Message | None:
+        from daimon.adapters.discord.posted_controls.fleet_login import build_login_view
+
+        thread = await self._login_card_thread(card)
+        if thread is None:
+            return None
+        return await thread.send(
+            view=build_login_view(card), allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    async def _fetch_login_card(self, card: LoginCard) -> discord.Message | None:
+        thread = await self._login_card_thread(card)
+        if thread is None or card.card_message_id is None:
+            return None
+        try:
+            return await thread.fetch_message(int(card.card_message_id))
+        except (discord.NotFound, discord.Forbidden):
+            return None
 
     async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
         try:
