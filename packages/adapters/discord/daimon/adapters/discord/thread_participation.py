@@ -17,7 +17,7 @@ from decimal import Decimal
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig
-from daimon.core.config import RecruitmentSettings, ThreadParticipationSettings
+from daimon.core.config import ThreadParticipationSettings
 from daimon.core.participation_gates import ParticipationGates
 from daimon.core.scope import DeploymentDefault
 from daimon.core.thread_classifier import classify
@@ -44,9 +44,7 @@ class ThreadParticipant:
         markup: Decimal,
         deployment_default: DeploymentDefault,
         application_id: int | None = None,
-        recruitment: RecruitmentSettings | None = None,
     ) -> None:
-        self._recruitment = recruitment or RecruitmentSettings()
         self._settings = settings
         self._bot_user_id = bot_user_id
         self._application_id = application_id
@@ -84,10 +82,6 @@ class ThreadParticipant:
         than read off the end of `candidates`, which the caller filters by
         author and could hand over empty.
         """
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(self._recruitment, thread, str(thread.guild.id)):
-            return False
         exclude_ids = {m.id for m in candidates}
 
         async def recent() -> list[ClassifierMessage]:

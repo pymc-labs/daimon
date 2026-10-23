@@ -22,7 +22,6 @@ from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.ma_models import (
     ma_agent,
     ma_environment,
@@ -161,7 +160,6 @@ async def test_routine_write_is_denied_when_the_policy_is_on(
     client = build_fake_anthropic(_router(creates=creates, sends=sends).dispatch)
 
     tail = await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -197,7 +195,6 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off(
     client = build_fake_anthropic(_router(creates=creates, sends=sends, updates=updates).dispatch)
 
     await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -354,7 +351,6 @@ async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
     client = build_fake_anthropic(router.dispatch)
 
     await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -465,7 +461,7 @@ def test_no_production_signature_defaults_the_policy() -> None:
 async def test_run_turn_without_a_policy_is_a_type_error() -> None:
     with pytest.raises(TypeError, match="tool_safety"):
         await run_turn(
-            privacy=TurnPrivacy("test"),  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+            # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
             anthropic=build_fake_anthropic(MARouter().dispatch),
             agent_id="ag",
             environment_id="env",
@@ -492,7 +488,6 @@ async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(
         ).dispatch
     )
     await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -537,7 +532,6 @@ async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
 
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -563,7 +557,6 @@ async def test_a_routine_disables_its_sandbox_before_sending(
     )
 
     await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -600,7 +593,6 @@ async def test_a_routines_own_daimon_tools_pause_for_the_decider(
     )
 
     await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",

@@ -109,7 +109,6 @@ from daimon.core.turn.posture import (
     ToolConfirmation,
     ToolConfirmationResult,
 )
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.provider_actions import ProviderActionApproval
 from daimon.core.turn.reducers import apply, apply_usage_observation
 from daimon.core.turn.state import TurnState
@@ -619,7 +618,6 @@ async def run_turn(
     stream_read_timeout_s: float = 120.0,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     billing: BillingPosture,
-    privacy: TurnPrivacy,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
@@ -685,7 +683,6 @@ async def run_turn(
 
     Returns the final `TurnState`.
     """
-    privacy.check()
     selected_path = path if path is not None else load_turn_settings().path
     persistence = current_persistence.get() if selected_path == "mux" else None
     io = turn_io(

@@ -98,22 +98,6 @@ async def _load_row(bot: DaimonBot, short_id: str) -> WizardSessionRow | None:
         return None
 
 
-async def _refuse_recruitment(interaction: discord.Interaction, bot: object | None = None) -> bool:
-    from daimon.adapters.discord.recruitment_guard import protected
-    from daimon.core.config import RecruitmentSettings
-
-    owner = bot if bot is not None else interaction.client
-    settings = getattr(
-        getattr(getattr(owner, "runtime", None), "settings", None), "recruitment", None
-    )
-    if isinstance(settings, RecruitmentSettings) and protected(
-        settings, interaction.channel, str(interaction.guild_id)
-    ):
-        await _reply_or_followup(interaction, _NOT_AVAILABLE)
-        return True
-    return False
-
-
 async def _authorize_tap(row: WizardSessionRow | None, interaction: discord.Interaction) -> bool:
     """Shared requester/lifecycle gate for `WizardNavButton` and `WizardSelect`.
 
@@ -124,8 +108,6 @@ async def _authorize_tap(row: WizardSessionRow | None, interaction: discord.Inte
     True only for the requester tapping an open, unexpired row on the message
     the form was posted as.
     """
-    if await _refuse_recruitment(interaction):
-        return False
     if row is None:
         await _reply_or_followup(interaction, _NOT_AVAILABLE)
         return False
@@ -169,8 +151,6 @@ async def _reconstruct_row(
     bot: DaimonBot, short_id: str, interaction: discord.Interaction, *, defer: bool
 ) -> tuple[WizardSessionRow | None, bool]:
     """Acknowledge nonmodal taps first; bound reads needed before a modal."""
-    if await _refuse_recruitment(interaction, bot):
-        return None, True
     if defer:
         await interaction.response.defer()
     try:
@@ -204,8 +184,6 @@ async def _apply_and_render(
     instead of silently erasing the first's answer. Callers must therefore
     pass a freshly read row, never a snapshot held across a user-paced wait.
     """
-    if await _refuse_recruitment(interaction, bot):
-        return
     spec = WizardSpec.model_validate(row.spec)
     state = WizardState(
         short_id=row.id,
@@ -505,8 +483,6 @@ class WizardCustomTextModal(discord.ui.Modal):
         self.add_item(self.answer_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if await _refuse_recruitment(interaction, self._bot):
-            return
         try:
             # For a component-originated modal submit, the deferred update
             # and `edit_original_response` target the wizard message itself.

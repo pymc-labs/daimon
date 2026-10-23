@@ -25,7 +25,6 @@ from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevi
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.testing.discord_surface import DiscordSurfaceCapture, DiscordSurfaceHarness
 from daimon.testing.outcome_oracle import (
@@ -617,7 +616,6 @@ async def execute(native: Native) -> Capture:
                 with persistence.activate():
                     state = await asyncio.wait_for(
                         run_turn(
-                            privacy=TurnPrivacy("test"),
                             anthropic=sentinel,
                             session_id=native.session,
                             session_ref=session,

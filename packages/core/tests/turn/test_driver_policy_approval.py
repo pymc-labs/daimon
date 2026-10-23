@@ -14,7 +14,6 @@ from typing import cast
 
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core.config import RecruitmentSettings
 from daimon.core.confirmation import ApprovedConfirmation, ConfirmationAnswer, ConfirmationPrompt
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
@@ -33,7 +32,6 @@ from daimon.core.turn.posture import (
     PolicyApproval,
     RequireApproval,
 )
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent, run_turn_on_leg
 
 from .conftest import (
@@ -102,7 +100,6 @@ async def test_routine_write_is_denied_and_read_is_allowed() -> None:
     _script(fa, ("tu_read", "linear", "get_issue"), ("tu_write", "linear", "create_issue"))
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="nightly triage",
@@ -132,7 +129,6 @@ async def test_routine_write_runs_when_the_operator_allowed_it_unattended() -> N
     policy = ToolSafetyPolicy(enabled=True, unattended_writes=("linear/create_issue",))
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="nightly triage",
@@ -166,7 +162,6 @@ async def test_chat_write_shows_a_card_and_runs_only_after_confirm() -> None:
     )
     turn = asyncio.create_task(
         run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="file a bug",
@@ -208,7 +203,6 @@ async def test_chat_write_denied_on_the_card_is_refused() -> None:
         return "denied"
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="close the deal",
@@ -234,7 +228,6 @@ async def test_chat_read_runs_without_a_card() -> None:
         raise AssertionError("a read must not post a card")
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="which teams?",
@@ -257,7 +250,6 @@ async def test_a_surface_without_cards_refuses_writes() -> None:
     _script(fa, ("tu_write", "linear", "create_issue"))
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="file a bug",
@@ -282,7 +274,6 @@ async def test_a_card_that_fails_to_post_refuses_the_write() -> None:
         raise RuntimeError("chat API down")
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="file a bug",
@@ -316,7 +307,6 @@ async def test_cancel_while_the_card_is_up_refuses_the_write() -> None:
 
     turn = asyncio.create_task(
         run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="file a bug",
@@ -399,7 +389,6 @@ async def test_replayed_pause_is_decided_through_the_card() -> None:
         return "approved"
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="delete it",
@@ -442,7 +431,6 @@ async def _cancel_replayed_pause(
 
     turn = asyncio.create_task(
         run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="delete it",
@@ -498,7 +486,6 @@ async def test_a_turn_deadline_while_a_card_is_up_leaves_no_decide_task_behind()
         return "approved"
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="file a bug",
@@ -526,7 +513,6 @@ async def test_trusted_daimon_server_is_not_gated_and_an_untrusted_one_is() -> N
     _script(fa, ("tu_daimon", "daimon-mcp", "routine_delete"))
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="tidy",
@@ -563,7 +549,6 @@ async def test_a_blocked_call_nobody_saw_is_refused_without_a_card() -> None:
         return "approved"
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="go",
@@ -608,7 +593,6 @@ async def test_a_stalled_denial_send_cannot_hold_the_turn_past_its_budget(
     started = asyncio.get_running_loop().time()
     final = await asyncio.wait_for(
         run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="file a bug",
@@ -662,7 +646,6 @@ async def test_ma_repeating_the_pause_while_the_card_is_up_does_not_end_the_turn
         return "approved"
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="publish the notebook",
@@ -734,7 +717,6 @@ async def test_ma_taking_three_approvals_one_per_pause_does_not_end_the_turn() -
         return "approved"
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="upload the three files",
@@ -795,7 +777,6 @@ async def test_three_uploads_get_separate_cards_and_answers() -> None:
         return "denied" if "launch_features.csv" in prompt.title else "approved"
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="upload files",
@@ -870,7 +851,6 @@ async def test_stop_retires_an_approved_card_before_its_allow_is_sent() -> None:
 
     turn = asyncio.create_task(
         run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="create two issues",
@@ -979,7 +959,6 @@ async def test_a_denied_daimon_tool_behind_call_tool_is_refused_and_an_unruled_o
         return "approved"
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="update the deal",
@@ -1032,7 +1011,6 @@ async def test_an_ask_rule_on_a_daimon_tool_behind_call_tool_waits_for_the_card(
 
     turn = asyncio.create_task(
         run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="update the deal",
@@ -1077,7 +1055,6 @@ async def test_an_unattended_run_refuses_an_ask_ruled_daimon_tool_behind_call_to
         return ResolvedAgentToolRule(rule="ask")
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="nightly",
@@ -1119,7 +1096,6 @@ async def test_an_agent_without_daimon_rules_runs_a_proxied_call_with_no_lookup_
         return "approved"
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="look",
@@ -1154,7 +1130,6 @@ async def test_an_approval_tool_sent_through_call_tool_is_refused_without_a_card
         return "approved"
 
     await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="publish",
@@ -1189,7 +1164,6 @@ async def test_an_unattended_turn_gates_before_its_message_and_each_confirmation
 
     with unattended_sends(gate):
         final = await run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="nightly",
@@ -1222,7 +1196,6 @@ async def test_a_failed_confirmation_gate_sends_no_confirmation() -> None:
 
     with unattended_sends(gate), pytest.raises(RuntimeError, match="refused"):
         await run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="nightly",
@@ -1279,7 +1252,6 @@ async def test_unattended_stops_leave_calls_paused_and_interrupt(replay: bool, s
     async def run():
         with unattended_sends(gate):
             return await run_turn_on_leg(
-                privacy=TurnPrivacy("discord", RecruitmentSettings()),
                 anthropic=_cast(fa),
                 session_id="sess_1",
                 user_message="nightly",
@@ -1358,7 +1330,6 @@ async def test_ungated_unattended_abort_never_answers_pending_calls(
         # and the normal decision is always the plain refusal above.
         with unattended_sends(None):
             return await run_turn_on_leg(
-                privacy=TurnPrivacy("discord", RecruitmentSettings()),
                 anthropic=_cast(fa),
                 session_id="sess_1",
                 user_message="wake up",
@@ -1452,7 +1423,6 @@ async def test_outside_cancel_during_stop_drain_preserves_decider_cleanup(
     async def run() -> None:
         with driver.unattended_sends(None):
             await run_turn_on_leg(
-                privacy=TurnPrivacy("discord", RecruitmentSettings()),
                 anthropic=_cast(fa),
                 session_id="sess_1",
                 user_message="wake up",
@@ -1548,7 +1518,6 @@ async def test_watch_confirmation_send_rechecks_each_spend_gate(db_session_facto
 
     with unattended_sends(gate), pytest.raises(AdmissionDenied):
         await run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="read and report",

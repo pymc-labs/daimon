@@ -38,7 +38,6 @@ class LeadsCog(commands.Cog):
             origin = interaction.channel
             reads = await discord_lead_reads(
                 sessionmaker=runtime.sessionmaker,
-                recruitment=runtime.settings.recruitment,
                 store=store,
                 resolver=resolver,
                 tenant_id=tenant,

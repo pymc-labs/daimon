@@ -22,7 +22,6 @@ from daimon.core.turn import driver
 from daimon.core.turn.gemini import PROFILE, GeminiTurnIO, GeminiUsageRuntime, gemini_backend
 from daimon.core.turn.io import TurnConnectionLost, TurnIO
 from daimon.core.turn.outcomes import drain_outcomes
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.run import prepared_billing
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -164,7 +163,6 @@ async def test_public_repeated_429_keeps_original_failure_and_durable_unknown(
     else:
         io, billing = await codec(native_host)
         state = await driver.run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=native_host.deps.anthropic,
             session_id=io.session.id,
             user_message="offline question",
@@ -729,7 +727,6 @@ async def test_completed_final_fetch_refuses_failure_only_usage_policy(
         else:
             io, billing = await codec(native_host)
             await driver.run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=native_host.deps.anthropic,
                 session_id=io.session.id,
                 user_message="offline question",

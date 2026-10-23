@@ -14,7 +14,7 @@ import pytest
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core._models import Routine
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import DirectMessagePolicy, RecruitmentSettings
+from daimon.core.config import DirectMessagePolicy
 from daimon.core.routine_delivery import DeliveryOutcome, poll_deliveries_once
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -207,7 +207,6 @@ async def _bound(
 
     post = make_discord_routine_poster(
         sm,
-        recruitment=RecruitmentSettings(),
         fetch_channel=fetch,
         open_dm=dm,
         dm_policy=lambda _: DirectMessagePolicy(),

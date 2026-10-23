@@ -940,9 +940,7 @@ async def test_queued_followup_drains_even_when_originating_turn_fails(
 
     release.set()
     # must not raise -- _handle_mention's own boundary absorbs the failure
-    # The drain includes two failure renderings and database cleanup; bound the
-    # whole operation without making a shared host's SQL latency the assertion.
-    await asyncio.wait_for(task, timeout=10.0)
+    await asyncio.wait_for(task, timeout=2.0)
 
     assert orchestrate_calls == [None, "queued-during-failure"], (
         "the queued follow-up must still run its drain turn after the "

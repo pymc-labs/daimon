@@ -13,7 +13,6 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages as dm_module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
-from daimon.core.config import RecruitmentSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_queue import TurnQueue
@@ -53,7 +52,6 @@ async def test_dm_policy_replies_use_server_words(
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
     runtime = MagicMock()
-    runtime.settings.recruitment = RecruitmentSettings()
     cog = DirectMessageCog(MagicMock(runtime=runtime))
     await cog.dm.callback.__wrapped__(cog, interaction, action)  # pyright: ignore[reportFunctionMemberAccess]
     assert interaction.followup.send.await_args.args[0] == expected
@@ -86,7 +84,6 @@ async def test_dm_from_a_thread_admits_and_records_its_parent_channel(
     monkeypatch.setattr(dm_module, "start_dm", start_dm)
 
     runtime = MagicMock()
-    runtime.settings.recruitment = RecruitmentSettings()
     runtime.sessionmaker = db_session_factory
     dm_channel = MagicMock()
     dm_channel.id = 5

@@ -14,7 +14,6 @@ from daimon.adapters.mcp.tools.channel_rules import (
     _set_channel_rule_impl,
 )
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
-from daimon.core.config import RecruitmentSettings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
@@ -48,7 +47,7 @@ async def _world(
     runtime = McpRuntime(
         session_factory=sessionmaker,
         client=build_fake_anthropic(make_fake_ma_handler(FakeMAState())),
-        settings=MagicMock(recruitment=RecruitmentSettings()),  # type: ignore[arg-type]
+        settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(agent_name="daimon"),
     )
     return tenant.id, account.id, runtime

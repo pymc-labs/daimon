@@ -381,7 +381,7 @@ Routines tools: create / list / get / update / delete, and an admin's sandbox op
 | `create_routine` | all callers | Create a recurring routine; owner DMs run as unattended live-DM turns. |
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
 | `get_routine` | all callers | Get a routine by id. |
-| `list_routines` | all callers | List your routines (admins may see other owners' available routines). |
+| `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |
 | `set_routine_sandbox_tools` | admin only | Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off for one routine's own scheduled runs. |
 | `update_routine` | all callers | PATCH-update a routine, including owner-only DM delivery where supported. |
 

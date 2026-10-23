@@ -6,7 +6,7 @@ from typing import cast
 
 from anthropic import AsyncAnthropic
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import RecruitmentSettings, Settings
+from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, build_stub_anthropic
@@ -25,7 +25,6 @@ class FakeCliSettings:
     """
 
     cli = _FakeCli()
-    recruitment = RecruitmentSettings()
 
 
 def build_cli_runtime(
@@ -48,8 +47,6 @@ def build_cli_runtime(
         anthropic = (
             build_fake_anthropic(router.dispatch) if router is not None else build_stub_anthropic()
         )
-    if settings is not None and not hasattr(settings, "recruitment"):
-        settings.recruitment = RecruitmentSettings()  # type: ignore[attr-defined]
     return CliRuntime(
         settings=cast(Settings, settings if settings is not None else FakeCliSettings()),
         anthropic=anthropic,

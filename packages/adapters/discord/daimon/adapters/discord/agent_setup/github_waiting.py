@@ -348,13 +348,6 @@ class GitHubWaitingView(PanelViewBase):
                     "Only a server admin can connect repos.", ephemeral=True
                 )
                 return False
-            if self.runtime.settings.recruitment.is_recruitment_channel(
-                str(guild.id), row.thread_id, row.parent_channel_id
-            ):
-                await interaction.response.send_message(
-                    "This request is unavailable.", ephemeral=True
-                )
-                return False
             if row.parent_channel_id != row.thread_id:
                 try:
                     channel = guild.get_channel(int(row.parent_channel_id))
@@ -564,20 +557,6 @@ async def load_waiting_view(
         )
         own = await list_asker_requests(session, tenant_id=tenant_id, account_id=state.account_id)
         repos = tuple(await list_authorized_repos(session, tenant_id=tenant_id))
-    requests = [
-        row
-        for row in requests
-        if not runtime.settings.recruitment.is_recruitment_channel(
-            str(state.guild_id), row.thread_id, row.parent_channel_id
-        )
-    ]
-    own = [
-        row
-        for row in own
-        if not runtime.settings.recruitment.is_recruitment_channel(
-            str(state.guild_id), row.thread_id, row.parent_channel_id
-        )
-    ]
     # A server admin may manage an agent without being able to read every
     # private channel where that agent runs. Do not reveal the channel or asker.
     guild = interaction.guild if interaction is not None else None

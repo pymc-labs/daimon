@@ -30,7 +30,6 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.persistence import TurnPersistence, current_persistence
 from daimon.core.turn.prepare import PreparedTurn, bind_session_impl
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.workspace_transfer import FullHandoff
 from daimon.testing.factories import make_account, make_tenant
 from mux.state.memory import MemoryStateStore
@@ -241,7 +240,6 @@ async def test_a_headless_run_started_inside_another_turn_does_not_inherit_its_p
 
     with outer.activate():
         tail = await headless_runner.run_turn(
-            privacy=TurnPrivacy("test"),
             tool_safety=OPEN_TOOL_SAFETY,
             anthropic=_build_client(_idle_events()),
             agent_id="agent_x",

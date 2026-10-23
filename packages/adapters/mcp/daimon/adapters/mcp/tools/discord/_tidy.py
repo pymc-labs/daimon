@@ -47,7 +47,6 @@ from daimon.adapters.mcp.tools.discord._post_transport import (
     edit_own_message,
     own_webhooks,
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
@@ -104,7 +103,6 @@ async def _resolve_target(
     guild_id = _require_guild_id(auth)
     _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
     channel = _require_guild_channel(await _resolve_channel(c, channel_id), guild_id)
-    require_general_channel(runtime, guild_id, channel)
     parent_id: str | None = None
     if isinstance(channel, discord.Thread):
         parent_id = str((await _ensure_thread_parent_cached(channel)).id)

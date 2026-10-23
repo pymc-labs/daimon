@@ -48,7 +48,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import httpx
-from daimon.core.turn.privacy import TurnPrivacy
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
@@ -411,7 +410,6 @@ async def _turn_one(
             return record
 
         await run_turn(
-            privacy=TurnPrivacy("rehearsal"),
             anthropic=client,
             agent_id=agent_id,
             environment_id=environment_id,

@@ -1880,15 +1880,6 @@ private data after the purge. Upgraded readers restrict these rows' previews and
 diagnostics to the identified owner, including when an administrator manages the
 routine. The same owner restriction applies to explicit DM results.
 
-### Optional recruitment settings
-
-Staffing needs only the existing Discord worker, scheduler and Postgres. Set
-`DAIMON_RECRUITMENT__ENABLED` and operator tenant configuration on those trusted
-processes, with existing Discord and encryption keys. Supply
-`DAIMON_RECRUITMENT__BACKENDS` only to Discord and scheduler; never distribute
-recruitment keys to MCP, sidecar or agent environments. Synthetic QA can use
-`DAIMON_RECRUITMENT__SYNTHETIC=true` without a backend key or additional service.
-See [Recruitment threads](recruitment.md) for permissions, retention and recovery.
 Selfhosted Azure metering requires explicit deployment-to-model mappings and
 operator-verified model tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
 `DAIMON_BILLING__SELFHOSTED__MODELS`. See [selfhosted Azure usage](billing.md#selfhosted-azure-usage)

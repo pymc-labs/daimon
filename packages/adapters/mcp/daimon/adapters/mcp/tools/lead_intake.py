@@ -35,7 +35,6 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.config import RecruitmentSettings
 from daimon.core.lead_intake import (
     IntakeConfig,
     IntakeRecord,
@@ -65,20 +64,12 @@ from daimon.core.stores.turn_origins import get_session_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-_NO_RECRUITMENT = RecruitmentSettings()
-
 
 class McpNativeLeadPermissions:
     """Native read facts for one member over the REST client, once per channel."""
 
-    def __init__(
-        self,
-        client: discord.Client,
-        member: discord.Member,
-        recruitment: RecruitmentSettings = _NO_RECRUITMENT,
-    ) -> None:
+    def __init__(self, client: discord.Client, member: discord.Member) -> None:
         self.client, self.member = client, member
-        self.recruitment = recruitment
         self._seen: dict[str, NativeChannel | None] = {}
 
     async def channel(self, channel_id: str) -> NativeChannel | None:
@@ -89,16 +80,6 @@ class McpNativeLeadPermissions:
     async def _fetch(self, channel_id: str) -> NativeChannel | None:
         try:
             channel = await self.client.fetch_channel(int(channel_id))
-            if self.recruitment.is_recruitment_channel(
-                str(self.member.guild.id),
-                str(channel.id),
-                str(channel.parent_id)
-                if isinstance(channel, discord.Thread) and channel.parent_id
-                else ""
-                if isinstance(channel, discord.abc.GuildChannel)
-                else None,
-            ):
-                return None
             if isinstance(channel, discord.Thread):
                 parent = await _ensure_thread_parent_cached(channel)
                 permissions = channel.permissions_for(self.member)
@@ -159,10 +140,7 @@ async def authorize_effect_destination(
 
     Writes only: every read goes through `authorize_lead_read`.
     """
-    from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
-
     parent = await client.fetch_channel(int(config.channel_id))
-    require_general_channel(runtime, config.guild_id, parent)
     if not isinstance(parent, discord.TextChannel) or str(parent.guild.id) != config.guild_id:
         raise ToolError("sales_channel_required")
     if parent.permissions_for(parent.guild.default_role).view_channel:
@@ -172,7 +150,6 @@ async def authorize_effect_destination(
     targets: list[discord.TextChannel | discord.Thread] = [parent]
     if access.thread_id:
         thread = await client.fetch_channel(int(access.thread_id))
-        require_general_channel(runtime, config.guild_id, thread)
         if (
             not isinstance(thread, discord.Thread)
             or str(thread.guild.id) != config.guild_id
@@ -391,10 +368,7 @@ async def service(
                 runtime, auth, client, member, config, live.policy, access, live.origin_ids
             )
             if source_ref is not None and source_ref.kind == "manual":
-                from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
-
                 source = await client.fetch_channel(int(source_ref.channel_id or "0"))
-                require_general_channel(runtime, config.guild_id, source)
                 if (
                     not isinstance(source, discord.TextChannel | discord.Thread)
                     or str(source.guild.id) != config.guild_id
@@ -443,7 +417,7 @@ async def service(
         )
         async with rest_client(token) as client:
             _, member = await _resolve_member(client, config.guild_id, user_id)
-            native = McpNativeLeadPermissions(client, member, runtime.settings.recruitment)
+            native = McpNativeLeadPermissions(client, member)
 
             async def check(target: LeadReadTarget) -> None:
                 await authorize_lead_read(target, reader, native)
@@ -472,7 +446,6 @@ async def service(
             hubspot_token=credentials["hubspot_access_token"],
             discord_token=token,
             gmail_refresh_credentials=refresh,
-            recruitment=runtime.settings.recruitment,
         )
         provenance = (
             (auth.routine_id, auth.execution_id) if auth.routine_id and auth.execution_id else None

@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.discord.agent_setup import github_requests as module
-from daimon.core.config import RecruitmentSettings
 from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.stores.github_access import InstallationLimitError
 
@@ -294,9 +293,7 @@ async def test_requester_link_defers_before_mint_and_card_resolution(
     interaction.followup.send = AsyncMock(side_effect=followup)
     runtime = SimpleNamespace(
         sessionmaker=_Sessions(),
-        settings=SimpleNamespace(
-            recruitment=RecruitmentSettings(), mcp=SimpleNamespace(app_root_url="https://mcp.test")
-        ),
+        settings=SimpleNamespace(mcp=SimpleNamespace(app_root_url="https://mcp.test")),
     )
     assert await module.handle_request_card(interaction, runtime)  # type: ignore[arg-type]
     assert events == ["defer", "mint", "resolve", "followup"]

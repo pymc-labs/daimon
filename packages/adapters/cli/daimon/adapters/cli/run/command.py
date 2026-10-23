@@ -34,7 +34,6 @@ from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.outcomes import current_outcome, observe_turn
 from daimon.core.turn.posture import BillingExempt, RequireApproval, ToolConfirmation
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.unattended import (
     session_gate,
@@ -251,7 +250,6 @@ async def run_conversation_observed(
 
     try:
         state = await run_turn(
-            privacy=TurnPrivacy("cli"),
             anthropic=rt.anthropic,
             session_id=session_id,
             user_message=user_message,

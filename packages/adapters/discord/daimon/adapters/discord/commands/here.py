@@ -10,7 +10,6 @@ from daimon.adapters.discord.checks import (
     resolve_tenant_for_interaction,
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
-from daimon.adapters.discord.recruitment_guard import protected
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
@@ -57,10 +56,6 @@ class HereCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
-            if protected(
-                runtime.settings.recruitment, interaction.channel, str(interaction.guild_id)
-            ):
-                raise UserFacingError("Source unavailable.")
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
             if tenant_id is None or interaction.guild is None or interaction.channel is None:
                 raise UserFacingError("Run /here in a server channel.")
@@ -76,8 +71,7 @@ class HereCog(commands.Cog):
             visible_ids = {
                 str(item.id)
                 for item in interaction.guild.channels
-                if not protected(runtime.settings.recruitment, item, str(interaction.guild_id))
-                and member is not None
+                if member is not None
                 and item.permissions_for(member).view_channel
                 and item.permissions_for(bot_member).view_channel
             }
@@ -97,8 +91,6 @@ class HereCog(commands.Cog):
             category_visible: list[tuple[str, str]] = []
             if channel.category_id is not None:
                 for sibling in interaction.guild.channels:
-                    if protected(runtime.settings.recruitment, sibling, str(interaction.guild_id)):
-                        continue
                     if sibling.id == channel.id or sibling.category_id != channel.category_id:
                         continue
                     if member is None or not sibling.permissions_for(member).view_channel:

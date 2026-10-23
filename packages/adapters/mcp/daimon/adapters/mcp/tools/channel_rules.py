@@ -27,7 +27,6 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_guild_id,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.slack._client import (
     _require_team_id,  # pyright: ignore[reportPrivateUsage]
     slack_web_client,
@@ -100,7 +99,6 @@ async def _channel_label(runtime: McpRuntime, auth: AuthIdentity, channel_id: st
             guild_id = _require_guild_id(auth)
             async with rest_client(_require_bot_token(runtime)) as client:
                 channel = await client.fetch_channel(int(channel_id))
-            require_general_channel(runtime, guild_id, channel)
             if isinstance(channel, discord.abc.GuildChannel) and str(channel.guild.id) == guild_id:
                 return channel.name
             return None
@@ -133,10 +131,6 @@ async def _set_channel_rule_impl(
 ) -> SetChannelRuleResult:
     require_scope(auth, "channels:write")
     channel = _channel(auth, channel_id)
-    if auth.platform == "discord" and runtime.settings.recruitment.tenants:
-        async with rest_client(_require_bot_token(runtime)) as client:
-            resolved = await client.fetch_channel(int(channel))
-            require_general_channel(runtime, _require_guild_id(auth), resolved)
     if readers is None and writers is None and not release_agents:
         raise ToolError("Pass readers, writers or release_agents. Nothing was changed.")
     label = await _channel_label(runtime, auth, channel) if copy_from is not None else None

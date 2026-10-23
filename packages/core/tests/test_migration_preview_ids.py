@@ -73,7 +73,7 @@ LEAD_HEAD = "0141_lead_intake"
 WATCH_HEAD = "0142_watches"
 WATCH_POLLING = "0143_watch_polling"
 SANDBOX_HEAD = "0144_routine_sandbox_tools"
-HEAD = "0145_recruitment"
+HEAD = "0146_remove_recruitment"
 CHAIN = [
     MAIN,
     *MAIN_SUCCESSORS,
@@ -88,6 +88,7 @@ CHAIN = [
     WATCH_HEAD,
     WATCH_POLLING,
     SANDBOX_HEAD,
+    "0145_recruitment",
     HEAD,
 ]
 # Added by SANDBOX_HEAD, so absent from every older revision the chain is checked at.
@@ -156,9 +157,6 @@ TABLES = {
     "lead_mailbox_messages",
     # Added by SANDBOX_HEAD, with its index and via check; compared from there on.
     "routine_sandbox_history",
-    "recruitment_threads",
-    "recruitment_messages",
-    "recruitment_outbox",
 }
 
 
@@ -213,8 +211,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         if expected in (LEAD_HEAD, WATCH_HEAD, WATCH_POLLING, SANDBOX_HEAD, HEAD)
         else {name for name in TABLES if not name.startswith("lead_")}
     )
-    if expected != HEAD:
-        compared_tables = {name for name in compared_tables if not name.startswith("recruitment_")}
     if expected not in (SANDBOX_HEAD, HEAD):
         compared_tables = compared_tables - {"routine_sandbox_history"}
 
@@ -1119,5 +1115,125 @@ async def test_legacy_multihead_is_refused_before_any_repair_ddl(
                 MAIN,
             }
             sync.commit()
+
+        await connection.run_sync(exercise)
+
+
+RECRUITMENT_TABLES = {
+    "recruitment_threads",
+    "recruitment_messages",
+    "recruitment_outbox",
+}
+
+
+def _recruitment_catalog(connection: Connection) -> dict[str, object]:
+    inspector = inspect(connection)
+    return {
+        table: {
+            "columns": [
+                (column["name"], str(column["type"]), column["nullable"], column["default"])
+                for column in inspector.get_columns(table)
+            ],
+            "primary_key": inspector.get_pk_constraint(table),
+            "foreign_keys": inspector.get_foreign_keys(table),
+            "unique_constraints": inspector.get_unique_constraints(table),
+            "indexes": inspector.get_indexes(table),
+            "acl": connection.scalar(
+                text("SELECT relacl::text FROM pg_class WHERE oid = to_regclass(:table)"),
+                {"table": table},
+            ),
+        }
+        for table in sorted(RECRUITMENT_TABLES)
+    }
+
+
+def _assert_recruitment_removed(connection: Connection) -> None:
+    assert not RECRUITMENT_TABLES & set(inspect(connection).get_table_names())
+    # No child indexes, constraints or ACL-bearing relations may survive.
+    assert not connection.scalar(
+        text(
+            "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace "
+            "AND (relname LIKE 'recruitment_%' OR relname LIKE 'uq_recruitment_%')"
+        )
+    )
+    assert not connection.scalar(
+        text("SELECT count(*) FROM pg_constraint WHERE conname LIKE '%recruitment%'")
+    )
+
+
+@pytest.mark.parametrize("populated", [False, True], ids=["fresh", "populated-0145"])
+async def test_remove_recruitment_roundtrip(
+    migration_database: AsyncEngine, populated: bool
+) -> None:
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            config = _config(SCRIPTS, sync)
+            if populated:
+                command.upgrade(config, "0145_recruitment")
+                before = _recruitment_catalog(sync)
+                sync.execute(
+                    text(
+                        "INSERT INTO tenants (platform, external_id) VALUES ('discord', 'staffing')"
+                    )
+                )
+                sync.execute(
+                    text(
+                        "INSERT INTO recruitment_threads "
+                        "(tenant_id, thread_id, parent_id, phase, revision, encrypted_state, "
+                        "raw_expires_at, expires_at) "
+                        "SELECT id, 'thread', 'parent', 'open', 'v1', decode('cafe', 'hex'), "
+                        "now(), now() FROM tenants"
+                    )
+                )
+                sync.execute(
+                    text(
+                        "INSERT INTO recruitment_messages "
+                        "(tenant_id, thread_id, message_id, raw_expires_at, observed_at, "
+                        "source_channel_id, needs_enrichment, deleted, revision, encrypted_source) "
+                        "SELECT id, 'thread', 'message', now(), now(), 'parent', false, false, "
+                        "'v1', decode('cafe', 'hex') FROM tenants"
+                    )
+                )
+                sync.execute(
+                    text(
+                        "INSERT INTO recruitment_outbox "
+                        "(tenant_id, id, thread_id, revision, stable_key, state, encrypted_request) "
+                        "SELECT id, 'intent', 'thread', 'v1', 'key', 'pending', "
+                        "decode('cafe', 'hex') FROM tenants"
+                    )
+                )
+                for table in RECRUITMENT_TABLES:
+                    assert sync.scalar(text(f"SELECT count(*) FROM {table}")) == 1
+                sync.commit()
+            command.upgrade(config, "head")
+            _assert_head(sync)
+            _assert_recruitment_removed(sync)
+            command.downgrade(config, "0145_recruitment")
+            assert (
+                sync.scalar(text("SELECT version_num FROM alembic_version")) == "0145_recruitment"
+            )
+            if populated:
+                assert _recruitment_catalog(sync) == before
+                assert (
+                    sync.scalar(text("SELECT count(*) FROM tenants WHERE external_id = 'staffing'"))
+                    == 1
+                )
+            for table in RECRUITMENT_TABLES:
+                assert sync.scalar(text(f"SELECT count(*) FROM {table}")) == 0
+                # PUBLIC and detector roles remain unable to read restored evidence.
+                assert not sync.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_class c, aclexplode(c.relacl) a "
+                        "LEFT JOIN pg_roles r ON r.oid = a.grantee "
+                        "WHERE c.oid = to_regclass(:table) "
+                        "AND (a.grantee = 0 OR r.rolname IN "
+                        "('daimon_sidecar', 'daimon_watch_ingress_owner'))"
+                    ),
+                    {"table": table},
+                )
+            sync.commit()
+            command.upgrade(config, "head")
+            _assert_recruitment_removed(sync)
 
         await connection.run_sync(exercise)

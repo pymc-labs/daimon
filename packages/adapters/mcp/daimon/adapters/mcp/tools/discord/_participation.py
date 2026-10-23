@@ -19,7 +19,6 @@ from daimon.adapters.mcp.tools.discord._client import (
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
@@ -50,7 +49,6 @@ async def verify_participation_scope(
     async with rest_client(_require_bot_token(runtime)) as client:
         _, member = await _resolve_member(client, guild_id, user_id)
         target = _require_guild_channel(await _resolve_channel(client, scope_id), guild_id)
-        require_general_channel(runtime, guild_id, target)
         if scope is ParticipationScope.THREAD:
             if not isinstance(target, discord.Thread):
                 raise ToolError("thread_id does not name a thread — pass a channel as channel_id")
@@ -74,7 +72,6 @@ async def resolve_visible_channel(runtime: McpRuntime, auth: AuthIdentity, chann
     async with rest_client(_require_bot_token(runtime)) as client:
         _, member = await _resolve_member(client, guild_id, user_id)
         target = _require_guild_channel(await _resolve_channel(client, channel_id), guild_id)
-        require_general_channel(runtime, guild_id, target)
         if isinstance(target, discord.Thread):
             await _check_thread_view(client, target, member, user_id)
             return str(target.parent_id)

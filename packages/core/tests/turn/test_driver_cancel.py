@@ -16,9 +16,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 from anthropic import AsyncAnthropic
-from daimon.core.config import RecruitmentSettings
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
@@ -81,7 +79,6 @@ async def test_cancel_during_stream_open_interrupts_before_any_event() -> None:
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
         final = await run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -127,7 +124,6 @@ async def test_cancel_during_send_initial_interrupts_and_closes_the_opened_strea
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
         final = await run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -161,7 +157,6 @@ async def test_cancel_already_set_before_run_turn_stays_pre_stream() -> None:
 
     lc = RecordingLifecycle()
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -204,7 +199,6 @@ async def test_cancel_during_stream_open_leaves_no_waiter_task_pending() -> None
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
         await run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -240,7 +234,6 @@ async def test_interrupt_mid_consume_still_posts_user_interrupt_regression() -> 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
         final = await run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",

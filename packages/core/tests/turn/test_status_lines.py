@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Literal
 
 import pytest
-from daimon.core.config import RecruitmentSettings
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock
 from daimon.core.turn.status_lines import (
@@ -330,7 +329,6 @@ async def test_prepared_turn_activates_only_its_admitted_footer(
         SimpleNamespace(
             sessionmaker=async_sessionmaker(),
             backend_selection_enabled=enabled,
-            recruitment=RecruitmentSettings(),
             running_turns=RunningTurns(),
         ),
         prepared,

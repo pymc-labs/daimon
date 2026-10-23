@@ -31,7 +31,6 @@ from daimon.adapters.mcp.tools.discord._client import (
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
     rest_client,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
@@ -79,7 +78,6 @@ async def _post_app_install_button_impl(  # pyright: ignore[reportUnusedFunction
         _, member = await _resolve_member(c, guild_id, requester_id)
         raw_channel = await _resolve_channel(c, channel_id)
         channel = _require_guild_channel(raw_channel, guild_id)
-        require_general_channel(runtime, guild_id, channel)
         if isinstance(channel, discord.Thread):
             # Thread.permissions_for needs the parent in the guild cache;
             # the per-call REST client starts with an empty one.

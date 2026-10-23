@@ -9,7 +9,6 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
-from daimon.core.config import RecruitmentSettings
 
 
 def _sealed_admission() -> MagicMock:
@@ -58,7 +57,6 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     interaction.followup.send = AsyncMock()
 
     cog = DirectMessageCog(MagicMock())
-    cog.bot.runtime.settings.recruitment = RecruitmentSettings()
     await DirectMessageCog.dm.callback.__wrapped__(cog, interaction, "move")  # pyright: ignore[reportFunctionMemberAccess]
 
     channel.history.assert_not_called()
@@ -126,7 +124,6 @@ async def test_dm_move_drops_system_notices_such_as_a_sealed_threads_created_not
     interaction.followup.send = AsyncMock()
     bot = MagicMock()
     bot.user = None
-    bot.runtime.settings.recruitment = RecruitmentSettings()
     cog = DirectMessageCog(bot)
 
     await DirectMessageCog.dm.callback.__wrapped__(cog, interaction, "move")  # pyright: ignore[reportFunctionMemberAccess]

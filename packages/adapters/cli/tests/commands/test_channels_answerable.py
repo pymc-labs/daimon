@@ -315,25 +315,3 @@ def test_the_expect_file_takes_one_id_per_line_with_comments(tmp_path: Path) -> 
     listed.write_text("# channels the other bot does not answer\n101\n\n104  # forum\n")
 
     assert module.read_expect_file(listed) == {"101", "104"}
-
-
-async def test_answerability_omits_reserved_channel_names_and_bindings(db_session_factory):
-    from daimon.core.config import RecruitmentSettings
-
-    await _seed(db_session_factory, bound_parents=("102", "105"))
-    settings = _settings()
-    settings.recruitment = RecruitmentSettings(
-        tenants={GUILD: {"channel_ids": ["102", "105"], "recruiter_user_ids": ["7"]}}
-    )
-    output = _console()
-    await channels_answerable(
-        rt=build_cli_runtime(db_session_factory, settings=settings),
-        console=output,
-        platform="discord",
-        guild_id=GUILD,
-        as_json=True,
-        discord_transport=_guild(CHANNELS),
-    )
-    payload = json.loads(output.file.getvalue())
-    assert not {"102", "105"} & {row["channel_id"] for row in payload["channels"]}
-    assert all(row["parent_channel_id"] not in {"102", "105"} for row in payload["thread_bindings"])

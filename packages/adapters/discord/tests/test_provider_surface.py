@@ -34,7 +34,6 @@ from daimon.core.posted_controls.confirmation import (
 from daimon.core.turn import driver
 from daimon.core.turn.io import TurnEvent, TurnStream
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.run import _DeferredFailureLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
@@ -350,7 +349,6 @@ async def test_driver_and_recovery_wrapper_optional_neutral_tap_preserve_native_
     monkeypatch.setattr(driver, "turn_io", factory)
     lifecycle = HookLifecycle() if has_hook else RecordingLifecycle()
     final = await driver.run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=cast(AsyncAnthropic, FakeAnthropic()),
         session_id="session",
         user_message="hello",
@@ -405,7 +403,6 @@ async def test_actual_driver_to_discord_surface_finalizes_without_synthetic_mete
     posts = Posts()
     lifecycle = posts.lifecycle()
     final = await driver.run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=cast(AsyncAnthropic, FakeAnthropic()),
         session_id="session",
         user_message="hello",

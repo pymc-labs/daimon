@@ -31,7 +31,6 @@ from daimon.adapters.mcp.tools.discord._post_transport import (
     send_agent_message,
     split_message_content,
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
@@ -135,33 +134,26 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
     if total_attachments > _MAX_ATTACHMENTS_PER_MESSAGE:
         raise ToolError("max 10 attachments per message")
 
-    async def source_files() -> list[discord.File]:
-        files: list[discord.File] = []
-        if attachments:
-            if session is not None:
-                files.extend(await _build_files(attachments, session=session))
-            else:
-                async with aiohttp.ClientSession() as http_session:
-                    files.extend(await _build_files(attachments, session=http_session))
-        if file_handles:
-            files.extend(
-                await _build_files_from_handles(
-                    file_handles, session_factory=runtime.session_factory, tenant_id=auth.tenant_id
-                )
+    files: list[discord.File] = []
+    if attachments:
+        if session is not None:
+            files.extend(await _build_files(attachments, session=session))
+        else:
+            async with aiohttp.ClientSession() as http_session:
+                files.extend(await _build_files(attachments, session=http_session))
+    if file_handles:
+        files.extend(
+            await _build_files_from_handles(
+                file_handles,
+                session_factory=runtime.session_factory,
+                tenant_id=auth.tenant_id,
             )
-        return files
-
-    files = (
-        None
-        if runtime.settings.recruitment.is_recruitment_channel(guild_id, channel_id, None)
-        else await source_files()
-    )
+        )
 
     async with rest_client(token) as c:
         _, member = await _resolve_member(c, guild_id, user_id)
         raw_channel = await _resolve_channel(c, channel_id)
         channel = _require_guild_channel(raw_channel, guild_id)
-        require_general_channel(runtime, guild_id, channel)
         if isinstance(channel, discord.Thread):
             # Thread.permissions_for needs the parent in the guild cache;
             # the per-call REST client starts with an empty one.
@@ -172,8 +164,6 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
         parent_id = str(channel.parent_id) if isinstance(channel, discord.Thread) else None
         if not isinstance(channel, discord.abc.Messageable):
             raise ToolError("channel does not support sending messages")
-        if files is None:
-            files = await source_files()
         actor_id = executing_agent_id(auth)
         identity = None
         if actor_id is not None and identity_enabled_for(runtime.settings, "discord", guild_id):

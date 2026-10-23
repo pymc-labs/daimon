@@ -23,7 +23,6 @@ from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import BillingExempt, PolicyApproval, ToolConfirmationResult
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.unattended import gate_session_snapshot, session_gate, unattended_posture
 from daimon.core.turn.unattended_capabilities import (
     ENTRY_POINT_POLICY,
@@ -275,7 +274,6 @@ async def _drive(
             )
         ):
             result = await run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=provider.client,
                 session_id=snapshot.id,
                 user_message="nightly work",

@@ -36,13 +36,12 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.discord.membership import GatewayMembershipResolver
 from daimon.adapters.discord.output_delivery import upload_limit, upload_output_file
 from daimon.adapters.discord.post_transport import DiscordPostTransport
-from daimon.adapters.discord.recruitment_guard import protected
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
-from daimon.core.config import DirectMessagePolicy, RecruitmentSettings
+from daimon.core.config import DirectMessagePolicy
 from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
 from daimon.core.output_delivery import DeliverableFile
@@ -168,7 +167,6 @@ def make_discord_routine_poster(
     fetch_channel: ChannelFetcher,
     open_dm: DmOpener,
     dm_policy: DmPolicyLookup,
-    recruitment: RecruitmentSettings,
     client: discord.Client | None = None,
     output_client: AsyncAnthropic | None = None,
     resolve_identity: IdentityResolver | None = None,
@@ -364,23 +362,6 @@ def make_discord_routine_poster(
             tenant = await get_tenant(session, row.tenant_id)
         if tenant is None or tenant.archived_at is not None:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
-        if recruitment.is_recruitment_channel(
-            tenant.external_id,
-            row.source_thread_id or row.source_channel_id or row.channel_id or "",
-            row.source_channel_id or row.channel_id,
-        ):
-            return DeliveryOutcome(status="skipped", note="Source unavailable.")
-        # Resolve destination privacy before any possible fallback or result access.
-        target = delivery_target(row, platform="discord")
-        if row.destination_kind != "dm" and target is not None and recruitment.tenants:
-            try:
-                resolved = await fetch_channel(int(target.channel_id))
-            except (discord.HTTPException, LookupError, ValueError):
-                if recruitment.is_recruitment_channel(tenant.external_id, target.channel_id, None):
-                    return DeliveryOutcome(status="skipped", note="Source unavailable.")
-            else:
-                if protected(recruitment, resolved, tenant.external_id):
-                    return DeliveryOutcome(status="skipped", note="Source unavailable.")
         # Creator first, before resolving or sending anything: a creator who
         # may no longer invoke the agent, or an unreadable policy, gets
         # nothing — no destination post and no direct message.
@@ -452,8 +433,6 @@ def make_discord_routine_poster(
             channel = await fetch_channel(int(target.channel_id))
         except discord.HTTPException:
             return await fallback("destination_unavailable")
-        if protected(recruitment, channel, tenant.external_id):
-            return DeliveryOutcome(status="skipped", note="Source unavailable.")
         placement = await _placement(channel, fetch_channel)
         if placement is None or str(placement[2]) != tenant.external_id:
             # Not a text channel or thread, its parent is unknown, or it is in

@@ -35,7 +35,6 @@ from daimon.adapters.mcp.tools.discord._client import (
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
@@ -210,7 +209,6 @@ async def _resolve_discord_destination(
         async with rest_client(_require_bot_token(runtime)) as client:
             _, member = await _resolve_member(client, guild_id, caller)
             channel = await client.fetch_channel(int(destination_id))
-            require_general_channel(runtime, guild_id, channel)
             if isinstance(channel, discord.Thread):
                 if kind != "thread":
                     raise ToolError(f"{destination_id} is a thread: use destination_kind=thread")
@@ -652,10 +650,6 @@ async def _create_routine_impl(
             raise ToolError(str(exc)) from exc
     if destination_kind in (None, "dm"):
         budget_channel_id = source_channel_id
-    if auth.platform == "discord" and runtime.settings.recruitment.is_recruitment_channel(
-        _require_guild_id(auth), source_thread_id or source_channel_id or "", source_channel_id
-    ):
-        raise ToolError("Source unavailable.")
     caller = await load_isolation_view(runtime, auth, location_channel_id=origin_channel_id(origin))
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -714,9 +708,7 @@ async def _list_routines_impl(
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
-        rows = await routines_store.list_routines_for_tenant(
-            session, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
-        )
+        rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
     return [
         _routine_for_reader(auth, row)
         for row in rows
@@ -733,9 +725,7 @@ async def _get_routine_impl(
     _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
-        row = await routines_store.get_routine(
-            session, routine_id, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
-        )
+        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
     if (
         row is None
         or not _may_read(auth, row)
@@ -769,9 +759,7 @@ async def _update_routine_impl(
     )
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(
-            session, routine_id, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
-        )
+        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
@@ -895,9 +883,7 @@ async def _delete_routine_impl(
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(
-            session, routine_id, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
-        )
+        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
@@ -970,9 +956,7 @@ async def _set_routine_sandbox_tools_impl(
     actor = await _sandbox_admin(runtime, auth)
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
-        row = await routines_store.get_routine(
-            session, routine_id, tenant_id=auth.tenant_id, recruitment=runtime.settings.recruitment
-        )
+        row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
     if row is None or not _sees_routine(caller, row):
         raise ToolError("routine not found")
     # The opt-in covers the agent version and environment the routine would
@@ -1088,18 +1072,13 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def list_routines(ctx: Context) -> list[RoutineRow]:  # pyright: ignore[reportUnusedFunction]
-        """List your routines (admins may see other owners' available routines).
-
-        Recruitment-reserved sources/destinations are omitted for everyone.
-        Unknown legacy provenance is withheld in recruitment-configured tenants.
-        """
+        """List the routines you created (an admin sees every routine in the workspace)."""
         return await _list_routines_impl(runtime, await _auth(ctx))
 
     @mcp.tool
     async def get_routine(ctx: Context, routine_id: UUID) -> RoutineRow:  # pyright: ignore[reportUnusedFunction]
         """Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
-        are not an admin. Recruitment-reserved or unresolved legacy sources and
-        destinations also return the same not-found response, including for admins."""
+        are not an admin."""
         return await _get_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
 
     @mcp.tool
@@ -1118,8 +1097,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> RoutineRow:
         """PATCH-update a routine, including owner-only DM delivery where supported.
 
-        Only provided fields are changed. Recruitment-reserved sources/destinations
-        and unknown legacy provenance in configured tenants return not-found.
+        Only provided fields are changed.
 
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the

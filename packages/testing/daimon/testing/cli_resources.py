@@ -25,7 +25,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
-from daimon.core.config import RecruitmentSettings
 from daimon.testing.admin_bindings import AdminBindings, AdminCommand, AdminReceipt, ResourceEdge
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -100,7 +99,6 @@ class CliResourceEdge:
 
         settings = SimpleNamespace(
             cli=SimpleNamespace(local_user="qa-operator"),
-            recruitment=RecruitmentSettings(),
             discord=None,  # the copy is named from the channel id; no platform call
             mcp=SimpleNamespace(public_url=None),
             crypto=SimpleNamespace(keys=()),

@@ -12,7 +12,6 @@ from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.errors import TurnError
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import ChannelRef, ThreadRef
@@ -64,7 +63,6 @@ async def run_headless(
 ) -> str:
     async with transport.client(max_retries=max_retries) as client:
         return await headless_runner.run_turn(
-            privacy=TurnPrivacy("test"),
             tool_safety=OPEN_TOOL_SAFETY,
             anthropic=client,
             agent_id="agent-headless-retry",

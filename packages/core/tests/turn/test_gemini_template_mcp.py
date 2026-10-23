@@ -17,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import jwt
 import pytest
-from daimon.core.config import RecruitmentSettings
 from daimon.core.mcp_auth import token_jti
 from daimon.core.stores import mux_state
 from daimon.core.stores.mcp_tokens import get_mcp_token
@@ -574,7 +573,6 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
         _finalize=finalize,
     )
     deps = SimpleNamespace(
-        recruitment=RecruitmentSettings(),
         backend_selection_enabled=False,
         running_turns=SimpleNamespace(track=lambda: __import__("contextlib").nullcontext()),
     )
@@ -643,7 +641,6 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         _finalize=slow_failing_finalize,
     )
     deps = SimpleNamespace(
-        recruitment=RecruitmentSettings(),
         backend_selection_enabled=False,
         running_turns=SimpleNamespace(track=lambda: __import__("contextlib").nullcontext()),
     )

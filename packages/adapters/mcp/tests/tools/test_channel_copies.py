@@ -20,7 +20,6 @@ from daimon.adapters.mcp.tools.channel_rules import (
     _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import AgentRule, ChannelRule
-from daimon.core.config import RecruitmentSettings
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy
@@ -97,7 +96,6 @@ async def _own_copy(
         agent = ma_agent(id=agent_id, name=name, tenant_id=tenant.id)
         state.agents[agent.id] = agent.model_dump(mode="json")
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.mcp.public_url = None
     runtime = McpRuntime(
         session_factory=sessionmaker,

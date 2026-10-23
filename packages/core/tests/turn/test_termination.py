@@ -29,7 +29,6 @@ from anthropic.types.beta.sessions.beta_managed_agents_retry_status_exhausted im
 from anthropic.types.beta.sessions.beta_managed_agents_retry_status_retrying import (
     BetaManagedAgentsRetryStatusRetrying,
 )
-from daimon.core.config import RecruitmentSettings
 from daimon.core.errors import TurnError, TurnKind
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.turn import TerminationReason, termination_reason
@@ -42,7 +41,6 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import denial_termination_reason, normalized_termination_reason
 from daimon.testing.turn_fakes import (
@@ -199,7 +197,6 @@ async def test_every_driver_exit_sets_its_reason(case: _Case) -> None:
             tg.create_task(_cancel_later(case.cancel_after_s))
         final = await asyncio.wait_for(
             run_turn_on_leg(
-                privacy=TurnPrivacy("discord", RecruitmentSettings()),
                 anthropic=cast(AsyncAnthropic, fa),
                 session_id="sess_1",
                 user_message="hi",
@@ -230,7 +227,6 @@ async def test_interrupt_before_the_stream_opens_is_interrupted() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="hi",
@@ -251,7 +247,6 @@ async def test_driver_ceiling_is_ceiling() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="hi",
@@ -407,7 +402,6 @@ async def test_a_terminated_session_with_no_terminal_event_is_not_completed() ->
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="hi",

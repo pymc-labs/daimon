@@ -37,7 +37,6 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
 
@@ -134,16 +133,8 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
         selected = self.view.state.selected.routine
         try:
             async with self.view.runtime.sessionmaker.begin() as session:
-                row = await get_routine(
-                    session,
-                    selected.id,
-                    tenant_id=selected.tenant_id,
-                    recruitment=self.view.runtime.settings.recruitment,
-                )
-                if row is None:
-                    await interaction.response.send_message("Routine not found.", ephemeral=True)
-                    return
-                if row.created_by_user_id != str(interaction.user.id):
+                row = await get_routine(session, selected.id, tenant_id=selected.tenant_id)
+                if row is None or row.created_by_user_id != str(interaction.user.id):
                     await interaction.response.send_message(
                         "Only the routine owner can change private delivery.", ephemeral=True
                     )
@@ -215,16 +206,6 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
         try:
             async with runtime.sessionmaker() as session, session.begin():
 
-                async def load(
-                    session: AsyncSession, routine_id: uuid.UUID, *, tenant_id: uuid.UUID
-                ) -> RoutineRow | None:
-                    return await get_routine(
-                        session,
-                        routine_id,
-                        tenant_id=tenant_id,
-                        recruitment=runtime.settings.recruitment,
-                    )
-
                 async def allowed(row: RoutineRow) -> bool:
                     member = interaction.user
                     is_admin = (
@@ -242,7 +223,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     tenant_id=tenant_id,
                     op="toggle",
                     allowed=allowed,
-                    load=load,
+                    load=get_routine,
                     pause=pause_routine_via_panel,
                     resume=resume_routine_via_panel,
                     now=lambda: datetime.now(UTC),
@@ -283,16 +264,10 @@ class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
 
             row = self.view.state.selected.routine
             async with self.view.runtime.sessionmaker() as session:
-                current = await get_routine(
-                    session,
-                    row.id,
-                    tenant_id=row.tenant_id,
-                    recruitment=self.view.runtime.settings.recruitment,
-                )
-            if current is None:
-                await interaction.response.send_message("Routine not found.", ephemeral=True)
-                return
-            if not can_read_routine_output(current, user_id=str(interaction.user.id)):
+                current = await get_routine(session, row.id, tenant_id=row.tenant_id)
+            if current is None or (
+                not can_read_routine_output(current, user_id=str(interaction.user.id))
+            ):
                 await interaction.response.send_message(
                     "Only the owner can read a private routine result.", ephemeral=True
                 )
@@ -404,7 +379,6 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
             runtime.anthropic,
             tenant_id=tenant_id,
             viewer_user_id=str(view.allowed_user_id),
-            recruitment=runtime.settings.recruitment,
         )
     new_state = RoutinesPanelState.initial(
         rows=entries,

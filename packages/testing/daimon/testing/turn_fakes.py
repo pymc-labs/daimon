@@ -353,9 +353,7 @@ class FakeAnthropic:
 
 async def run_turn_on_leg(**kwargs: Any) -> TurnState:  # noqa: ANN401 - forwards run_turn's keywords
     """`run_turn` with the selected leg's path and authorized scope, for direct driver tests."""
-    from daimon.core.turn.privacy import TurnPrivacy
 
-    kwargs.setdefault("privacy", TurnPrivacy("test"))
     kwargs.setdefault("path", turn_leg().path)
     kwargs.setdefault("scope", leg_scope())
     return await run_turn(**kwargs)

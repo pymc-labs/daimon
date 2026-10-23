@@ -26,14 +26,13 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.slack.app import SlackApp
-from daimon.core.config import McpSettings, RecruitmentSettings, TurnQueueSettings
+from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.membership import Membership
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.turn import driver as turn_driver
 from daimon.core.turn.ceiling import CEILING_MESSAGE
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.effect_recorder import FakeClock
 from daimon.testing.factories import make_ledger_entry, make_tenant
@@ -99,7 +98,6 @@ async def test_ceiling_after_http_setup_closes_stream(monkeypatch: pytest.Monkey
     monkeypatch.setattr(turn_driver, "asyncio", DeadlineClock())
     final = await asyncio.wait_for(
         turn_driver.run_turn(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=cast(AsyncAnthropic, fake),
             session_id="sess_ceiling",
             user_message="hi",
@@ -237,7 +235,6 @@ async def test_dm_reply_delivery_and_deduplication(
     )
     await existing._start(tenant, deps, admission)
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.discord.max_concurrent_turns = 10
     settings.turn_queue = TurnQueueSettings()
     runtime = DiscordRuntime(

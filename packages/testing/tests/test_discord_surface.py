@@ -11,10 +11,8 @@ from typing import Any, cast
 import discord
 import pytest
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
-from daimon.core.config import RecruitmentSettings
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.discord_surface import DiscordSurfaceCapture, DiscordSurfaceHarness
@@ -268,7 +266,6 @@ async def test_real_host_driver_pumps_scripted_provider_into_real_discord_posts(
         async def invoke(lc: DiscordTurnLifecycle) -> TurnState:
             await lc.post_initial()
             return await run_turn(
-                privacy=TurnPrivacy("discord", RecruitmentSettings()),
                 anthropic=provider,
                 session_id="sess:1",
                 user_message="qa input",

@@ -56,7 +56,6 @@ from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import Platform
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.usage_recording import record_turn_usage
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -193,7 +192,6 @@ async def run_smoke_check(
     try:
         async with asyncio.timeout(timeout_s):
             tail = await run_turn(
-                privacy=TurnPrivacy("smoke"),
                 anthropic=anthropic,
                 agent_id=resolved_agent_id,
                 environment_id=resolved_environment_id,

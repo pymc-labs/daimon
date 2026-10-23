@@ -27,7 +27,6 @@ from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevi
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing import pytest_plugin as database_plugin
@@ -336,7 +335,6 @@ async def test_c17_actual_sdk_host_codec_durable_wake_and_journal(
 
     async def run_host(persistence: TurnPersistence) -> None:
         result = await driver.run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=request.deps.anthropic,
             session_id=native.ref.id,
             user_message="wake",

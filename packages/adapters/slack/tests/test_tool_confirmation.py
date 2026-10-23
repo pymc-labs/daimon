@@ -13,7 +13,7 @@ import pytest
 from daimon.adapters.slack import tool_confirmation as confirmation_module
 from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
 from daimon.core.authz import Subject
-from daimon.core.config import RecruitmentSettings, TurnSettings
+from daimon.core.config import TurnSettings
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationPrompt,
@@ -28,7 +28,6 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
-from daimon.core.turn.privacy import TurnPrivacy
 from slack_sdk.web.async_client import AsyncWebClient
 
 
@@ -509,7 +508,6 @@ async def _run_turn_with_stalled_card_retire(
     started = asyncio.get_running_loop().time()
     final = await asyncio.wait_for(
         run_turn_on_leg(
-            privacy=TurnPrivacy("slack", RecruitmentSettings()),
             anthropic=fa,  # type: ignore[arg-type]
             session_id="sess_1",
             user_message="file a bug",

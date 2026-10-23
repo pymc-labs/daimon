@@ -22,7 +22,6 @@ from baselines.replay import Evidence
 from daimon.core.config import load_turn_settings
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.normalize import EventNormalizer, object_json
@@ -112,7 +111,6 @@ class TurnReplayAdapter:
             selected = load_turn_settings(_env_file=None).path
             async with transport.client() as client:
                 state = await run_turn(
-                    privacy=TurnPrivacy("test"),
                     anthropic=client,
                     session_id="session",
                     user_message="offline question",

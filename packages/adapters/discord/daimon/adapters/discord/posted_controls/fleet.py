@@ -569,10 +569,7 @@ class DiscordFleetCardFactory:
             interaction: Presser | None,
         ) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
             from daimon.adapters.discord.checks import admin_caller
-            from daimon.adapters.discord.recruitment_guard import protected
 
-            if protected(deps.recruitment, thread, str(thread.guild.id)):
-                raise FleetRefused("prerequisites_unavailable")
             if intent_id is None or (interaction is not None and run_id is None):
                 raise FleetRefused("prerequisites_unavailable")
             tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))

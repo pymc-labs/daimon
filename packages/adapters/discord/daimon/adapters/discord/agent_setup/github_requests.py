@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin
-from daimon.adapters.discord.recruitment_guard import protected
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -62,12 +61,6 @@ async def update_requester_card(
         return
     try:
         thread = await client.fetch_channel(int(request.thread_id))
-        if protected(
-            runtime.settings.recruitment,
-            thread,
-            str(getattr(getattr(thread, "guild", None), "id", "")),
-        ):
-            return
         if not isinstance(thread, discord.Thread):
             return
         view = discord.ui.View(timeout=None) if can_cancel or link_url else None

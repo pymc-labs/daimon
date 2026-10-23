@@ -7,7 +7,6 @@ import uuid
 import discord
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._client import rest_client
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.github_request_cards import RequestCard, slack_mrkdwn_escape
 from daimon.core.stores.github_access_requests import (
@@ -107,7 +106,6 @@ async def deliver_shared_admin_card(
                     runtime.settings.discord.bot_token.get_secret_value()
                 ) as client:
                     channel = await client.fetch_channel(int(request.thread_id))
-                    require_general_channel(runtime, workspace_id, channel)
                     if not isinstance(channel, discord.Thread):
                         return False
                     if request.admin_card_message_id:
@@ -251,7 +249,6 @@ async def deliver_private_request_card(
                 token = runtime.settings.discord.bot_token.get_secret_value()
                 async with rest_client(token) as client:
                     channel = await client.fetch_channel(int(request.thread_id))
-                    require_general_channel(runtime, workspace_id, channel)
                     if not isinstance(channel, discord.Thread):
                         return False
                     view = _discord_view(card, request_id=request_id, link_url=link_url)

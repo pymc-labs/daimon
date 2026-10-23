@@ -18,7 +18,6 @@ from daimon.core.errors import TurnError
 from daimon.core.session_snapshot import SessionSnapshot, snapshot_from_retrieved_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import PolicyApproval
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.core.workspace_ports_compat import restore_transfer_records
 from mux.contracts.ids import Scope
@@ -93,7 +92,6 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
         result = await workspace_transfer.transfer_workspace(
             client,
             factory(),
-            privacy=TurnPrivacy("test"),
             old_session_id="sess_old",
             old_snapshot=snapshot(),
             tenant_id=TENANT,
@@ -148,7 +146,6 @@ async def test_runner_carries_the_authorized_account_to_transfer_and_restore(
     async with transport.client() as client:
         current = snapshot()
         runner = workspace_transfer.WorkspaceTransferRunner(
-            privacy=TurnPrivacy("test"),
             anthropic=client,
             sessionmaker=factory(),
             tenant_id=TENANT,

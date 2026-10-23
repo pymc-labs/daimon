@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Literal
 
-from daimon.core.config import RecruitmentSettings
-from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 
 PANEL_CAP = 25
@@ -79,32 +77,3 @@ def routine_for_reader(row: RoutineRow, *, user_id: str | None) -> RoutineRow:
             "delivery_note": None,
         }
     )
-
-
-def recruitment_withholds_routine(settings: RecruitmentSettings, row: RoutineRow) -> bool:
-    """Current static settings govern saved content as well as live channel reads.
-
-    A known source-free origin is safe. Legacy unknown provenance or a thread
-    destination without its recorded parent fails closed in configured tenants.
-    No content, title, cache or remote lookup participates in this decision.
-    """
-    for guild_id in settings.tenants:
-        if derive_tenant_uuid(platform="discord", workspace_id=guild_id) != row.tenant_id:
-            continue
-        if not row.source_provenance_known:
-            return True
-        if (row.source_channel_id or row.source_thread_id) and settings.is_recruitment_channel(
-            guild_id,
-            row.source_thread_id or row.source_channel_id or "",
-            row.source_channel_id if row.source_thread_id else "",
-        ):
-            return True
-        if row.destination_kind in {"channel", "thread"}:
-            return settings.is_recruitment_channel(
-                guild_id,
-                row.destination_id or "",
-                (row.channel_id if row.channel_id != row.destination_id else None)
-                if row.destination_kind == "thread"
-                else "",
-            )
-    return False

@@ -29,7 +29,7 @@ from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.turn_card_recovery import UnrecoverableTurnCardError
-from daimon.core.config import McpSettings, RecruitmentSettings
+from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
@@ -65,7 +65,6 @@ def _make_bot(
     if isinstance(bind, AsyncConnection):
         sessionmaker = async_sessionmaker(bind.engine, expire_on_commit=False)
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 3

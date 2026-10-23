@@ -31,7 +31,7 @@ from daimon.adapters.discord import theme
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_post_identity import fallback_name_prefix
-from daimon.core.config import McpSettings, RecruitmentSettings
+from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
@@ -64,7 +64,6 @@ def _make_runtime(
     which uses AsyncMock — here run_turn is exercised for real.
     """
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.agent_identity.enabled = True
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")

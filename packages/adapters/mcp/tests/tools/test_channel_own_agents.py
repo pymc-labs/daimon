@@ -81,7 +81,7 @@ from daimon.adapters.mcp.tools.timers import (
 )
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_environments import save_scope_environment
-from daimon.core.config import McpSettings, RecruitmentSettings
+from daimon.core.config import McpSettings
 from daimon.core.continuity.timers import schedule_timer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
@@ -120,11 +120,8 @@ OWN = ChannelRule(readers="own", writers="own")
 
 
 class _World:
-    def __init__(
-        self, tenant_id: uuid.UUID, account_id: uuid.UUID, state: FakeMAState, guild_id: str
-    ) -> None:
+    def __init__(self, tenant_id: uuid.UUID, account_id: uuid.UUID, state: FakeMAState) -> None:
         self.tenant_id, self.account_id, self.state = tenant_id, account_id, state
-        self.guild_id = guild_id
         self.sessions: dict[str, dict[str, Any]] = {}
 
     def auth(self, *, admin: bool = True, executing: str | None = None) -> AuthIdentity:
@@ -133,7 +130,6 @@ class _World:
             tenant_id=self.tenant_id,
             role=Role.ADMIN if admin else Role.USER,
             platform="discord",
-            external_id=self.guild_id,
             platform_user_id="444444444444444444",
             is_admin=admin,
             chat_agent_id=None
@@ -145,8 +141,6 @@ class _World:
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession], client: AsyncAnthropic) -> McpRuntime:
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
-    settings.discord = None  # These policy/store fixtures have no native Discord transport.
     settings.mcp = McpSettings()
     settings.github.oauth_scopes = ()
     return McpRuntime(
@@ -227,7 +221,7 @@ async def _world(
             return list_response(skills)
         raise NotHandled
 
-    world = _World(tenant.id, account.id, state, tenant.external_id)
+    world = _World(tenant.id, account.id, state)
 
     def sessions_handler(request: httpx.Request) -> httpx.Response:
         found = re.fullmatch(r"/v1/sessions/(?P<id>[^/]+)", request.url.path)

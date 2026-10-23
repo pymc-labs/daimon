@@ -841,24 +841,3 @@ manage their metadata but cannot read those private previews, errors, delivery
 payloads, or delivery notes. Upgrade migration `0140_clear_legacy_routine_output`
 erases previously retained output for these legacy rows; see the
 [self-hosting rollout instructions](self-hosting.md#clearing-retained-legacy-routine-output).
-
-The existing scheduler also reconciles opt-in [recruitment threads](recruitment.md).
-This is a core workflow with explicit recruiter approval of every backend write,
-not an unattended agent routine. Its retention sweep runs even when recruitment
-is disabled; failed or inaccessible threads retain opaque recovery status and
-never deliver candidate data elsewhere.
-
-
-Configured recruitment channels and their threads cannot host general routines.
-Creation refuses reserved sources and destinations. Existing channel routines
-stop at fire after the coordinated settings restart, before using their stored
-trigger, and delivery never redirects their result to a DM or another channel.
-
-
-Recruitment reservations also govern saved content after a settings restart.
-MCP list/get and mutation returns, Discord panels/output controls and CLI
-previews withhold routines whose source or destination is reserved. Direct IDs
-receive a generic not-found response. Unknown legacy source provenance and
-thread destinations without a recorded parent fail closed for configured
-tenants. Owner/admin access does not reveal their saved trigger or result.
-Internal scheduler bookkeeping may still read rows to settle refused runs.

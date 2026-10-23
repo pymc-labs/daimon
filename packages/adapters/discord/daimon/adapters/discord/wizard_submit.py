@@ -103,7 +103,6 @@ from daimon.adapters.discord.wizard import (
     _authorize_tap,  # pyright: ignore[reportPrivateUsage]  # shared requester-only gate the sibling dispatch classes use -- reused verbatim so authorization logic exists in exactly one place
     _load_row,  # pyright: ignore[reportPrivateUsage]  # shared row loader the sibling dispatch classes use -- reused verbatim
     _reconstruct_row,  # pyright: ignore[reportPrivateUsage]
-    _refuse_recruitment,  # pyright: ignore[reportPrivateUsage]
     _reply_or_followup,  # pyright: ignore[reportPrivateUsage]  # shared is_done()-gated reply helper the sibling dispatch classes use -- reused verbatim
 )
 from daimon.adapters.discord.wizard_render import build_wizard_view
@@ -218,8 +217,6 @@ class WizardSubmitButton(
         self, interaction: discord.Interaction[commands.Bot]
     ) -> None:
         try:
-            if await _refuse_recruitment(interaction):
-                return
             row = self.wizard_row
             if row is None:
                 return
@@ -366,8 +363,6 @@ async def run_wizard_submit_turn(
     spec: WizardSpec,
     state: WizardState,
 ) -> None:
-    if await _refuse_recruitment(interaction, bot):
-        return
     # The whole accepted operation -- slot wait, preparation, the turn and its
     # cleanup -- is in progress for the shutdown drain, not only the turn.
     with (

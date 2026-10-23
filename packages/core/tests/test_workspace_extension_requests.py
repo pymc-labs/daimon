@@ -9,7 +9,6 @@ import pytest
 from daimon.core import workspace_transfer
 from daimon.core.session_snapshot import snapshot_from_retrieved_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.workspace_transfer import (
     FullHandoff,
     HistoryOnly,
@@ -79,7 +78,6 @@ async def test_runner_declares_and_accepts_losses_without_changing_prepared_inpu
     before_send = AsyncMock()
     async with transport.client() as client:
         runner = WorkspaceTransferRunner(
-            privacy=TurnPrivacy("test"),
             anthropic=client,
             sessionmaker=AsyncMock(),
             tenant_id=uuid.UUID(int=1),

@@ -5489,8 +5489,7 @@
     'get_routine': dict({
       'description': '''
         Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
-        are not an admin. Recruitment-reserved or unresolved legacy sources and
-        destinations also return the same not-found response, including for admins.
+        are not an admin.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6580,12 +6579,7 @@
       }),
     }),
     'list_routines': dict({
-      'description': '''
-        List your routines (admins may see other owners' available routines).
-        <blank line>
-        Recruitment-reserved sources/destinations are omitted for everyone.
-        Unknown legacy provenance is withheld in recruitment-configured tenants.
-      ''',
+      'description': 'List the routines you created (an admin sees every routine in the workspace).',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -10862,8 +10856,7 @@
       'description': '''
         PATCH-update a routine, including owner-only DM delivery where supported.
         <blank line>
-        Only provided fields are changed. Recruitment-reserved sources/destinations
-        and unknown legacy provenance in configured tenants return not-found.
+        Only provided fields are changed.
         <blank line>
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the
