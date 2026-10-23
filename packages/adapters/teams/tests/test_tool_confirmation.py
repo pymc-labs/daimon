@@ -775,3 +775,30 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
         tenant_id=str(tenant), platform="teams", channel_id="19:origin@thread.tacv2"
     )
     assert hook(None) is None, "no admitted channel, no pin card"
+
+
+async def test_a_card_still_open_reminds_with_an_at_mention_of_its_requester(monkeypatch) -> None:
+    """ROOT 2: a long card pings its requester once, as an @mention Teams delivers."""
+    from daimon.core.posted_controls import lifecycle
+
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    hook = cards.hook(conversation_id=CONVERSATION_ID, service_url=SERVICE_URL)
+    assert await hook(_prompt(expires_in=timedelta(seconds=0.3))) == "expired"
+    reminders = [
+        activity
+        for _conversation, activity, _url in sender.sent
+        if "still waiting" in (activity.text or "")
+    ]
+    (reminder,) = reminders
+    assert reminder.text is not None and reminder.text.endswith(
+        "This is still waiting for your click."
+    )
+    mentions = [
+        entity for entity in reminder.entities or [] if getattr(entity, "type", None) == "mention"
+    ]
+    (mention,) = mentions
+    assert mention.mentioned.id == AAD_OBJECT_ID
+    assert mention.text in reminder.text

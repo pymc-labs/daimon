@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.teams.activity_feed import ActivityFeed
+from daimon.adapters.teams.card import answer_message
 from daimon.adapters.teams.card_actions import (
     button,
     submitted_fields,
@@ -58,6 +59,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     snapshot_tool_rule,
 )
 from microsoft_teams.api import (
+    Account,
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivityInput,
@@ -362,9 +364,14 @@ class TeamsConfirmationCards:
             async def remind() -> None:
                 # Once, after a while: a line in the conversation, and the
                 # requester's activity feed (what reaches them in Teams).
+                # An @mention of the requester, as the completion ping does.
+                requester = Account(
+                    id=prompt.requester_platform_user_id,
+                    name=prompt.requester_display_name or "you",
+                )
                 sent = await self._sender.send(
                     conversation_id,
-                    MessageActivityInput(text=STILL_WAITING_MESSAGE),
+                    answer_message(STILL_WAITING_MESSAGE, mention=requester),
                     service_url=service_url,
                 )
                 if self._feed is not None:

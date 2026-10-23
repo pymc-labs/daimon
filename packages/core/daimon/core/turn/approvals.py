@@ -444,6 +444,10 @@ def unattended_decider(
 
 
 CARD_TURN_MARGIN = timedelta(seconds=5)
+#: Too little time left to show a card someone could answer: refuse instead.
+NO_TIME_TO_ASK_MESSAGE = (
+    "There isn't enough time left to ask for approval here. Ask again to redo it."
+)
 
 
 def card_timeout(policy: ToolSafetyPolicy, *, now: datetime) -> timedelta:
@@ -515,12 +519,18 @@ def interactive_decider(
             return ToolConfirmationResult(allow=True)
         if verdict.outcome == "deny":
             return ToolConfirmationResult(allow=False, deny_message=refusal_message(call, verdict))
+        asked = now()
+        timeout = card_timeout(policy, now=asked)
+        if timeout < CARD_TURN_MARGIN:
+            # Never post a card that is already as good as expired.
+            log.info("tool_safety.no_time_to_ask", tool=call.key)
+            return ToolConfirmationResult(allow=False, deny_message=NO_TIME_TO_ASK_MESSAGE)
         try:
             prompt = prompt_for_tool_call(
                 call,
                 requester_platform_user_id=requester_platform_user_id,
-                now=(asked := now()),
-                timeout=card_timeout(policy, now=asked),
+                now=asked,
+                timeout=timeout,
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})

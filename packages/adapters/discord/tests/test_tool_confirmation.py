@@ -872,6 +872,7 @@ async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monk
     from daimon.core.posted_controls import lifecycle
 
     monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
     prompt = _prompt(expires_in=timedelta(seconds=0.3))
     message = SimpleNamespace(id=7, edit=AsyncMock(), reply=AsyncMock())
     channel = MagicMock()
