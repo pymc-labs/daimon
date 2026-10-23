@@ -761,6 +761,16 @@ async def set_run_status(
         else {}
     )
     async with _transaction(sessionmaker) as session:
+        if finished:
+            # Take the run's lock first, in its own statement: a first spawn holds it
+            # (`add_worker`) while it inserts the worker, and an UPDATE that only waited
+            # for it would recheck its `spawned` subquery against its old snapshot, so a
+            # Stop racing the first spawn would end the run owing no terminal card.
+            await session.execute(
+                select(FleetRunRow.id)
+                .where(FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id)
+                .with_for_update()
+            )
         row = (
             await session.execute(
                 update(FleetRunRow)
