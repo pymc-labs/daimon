@@ -57,7 +57,7 @@ from mux.drivers.openai import (
     Transport,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.openai import NATIVE_MODELS, SPEND_CAPPED_MODELS
+from mux.profiles.openai import NATIVE_MODELS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
@@ -105,9 +105,6 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     if (
         not runtime.account_scope_id.strip()
         or runtime.controls.model != revision.model
-        or (
-            revision.model in SPEND_CAPPED_MODELS and runtime.controls.spend_limit_usd_cents is None
-        )
         or runtime.controls.multi_agent_enabled is not False
         or runtime.controls.container_size != ("small" if revision.profile == PROFILE else None)
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
@@ -369,6 +366,56 @@ async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         raise AdmissionDenied(reason="backend_unsupported") from error
 
 
+async def _check_daily_model_cap(
+    request: ProviderPreparationRequest, runtime: OpenAIHostRuntime, revision: ConfigRevision
+) -> None:
+    """Refuse once the tenant's daily spend on this model reaches its cap.
+
+    OpenAI sessions carry no native spend limit on this project, so this is the
+    guard, checked before any native call of an agent turn or a fleet worker. A
+    worker's own reservation already counts toward today's spend, so it may use
+    the cap up exactly; an agent turn starts only while some of it remains.
+    """
+    from daimon.core.stores.openai_spend import SpendUnpriced, openai_spend_today
+
+    cap = request.deps.openai_daily_model_cap_usd
+    if cap is None or revision.model is None:
+        return
+    price = runtime.price
+    try:
+        async with request.deps.sessionmaker() as session:
+            spent = await openai_spend_today(
+                session,
+                tenant_id=request.tenant_id,
+                provider=revision.backend,
+                model=revision.model,
+                now=request.now(),
+                rates=price,
+                markup=request.deps.markup,
+            )
+    except SpendUnpriced:
+        # No current tariff: today's spend can't be known, so the cap can't be honoured.
+        import structlog
+
+        structlog.get_logger(__name__).warning(
+            "turn.daily_model_cap_unpriced", tenant_id=str(request.tenant_id), model=revision.model
+        )
+        raise AdmissionDenied(
+            reason="provider_daily_cap_reached", provider=revision.model
+        ) from None
+    over = spent > cap if request.worker is not None else spent >= cap
+    if over:
+        import structlog
+
+        structlog.get_logger(__name__).warning(
+            "turn.daily_model_cap_reached",
+            tenant_id=str(request.tenant_id),
+            model=revision.model,
+            cap_usd=str(cap),
+        )
+        raise AdmissionDenied(reason="provider_daily_cap_reached", provider=revision.model)
+
+
 async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     revision = request.admission.backend_revision
     runtime = runtime_for(
@@ -415,6 +462,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             ("daimon_tool_rules",), revision.profile
         )
     request = replace(request, admission=current)
+    await _check_daily_model_cap(request, runtime, revision)
     # Resolve a host-authorized native plan before creating a private transport.
     spec = await runtime.session_plan(request)
     _check_spec(spec, runtime, request.scope, revision)

@@ -260,6 +260,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "backend_unsupported": "turn.skipped.backend_unsupported",
     "provider_hold_cap_reached": "turn.skipped.provider_hold_cap_reached",
     "provider_setup_pending": "turn.skipped.provider_setup_pending",
+    "provider_daily_cap_reached": "turn.skipped.provider_daily_cap_reached",
 }
 
 

@@ -122,3 +122,48 @@ def test_a_gpt_root_spawns_gpt_task_workers_without_its_workspace(model: str | N
     )
     assert resolved.backend.profile == CONVERSATION_ONLY.profile_id
     assert resolved.environment is None and resolved.resources == ()
+
+
+def test_a_default_fork_across_opus_astra_and_argon_admits_the_astra_worker() -> None:
+    """J10: the default fleet gives no OpenAI worker a native budget, so Astra is admitted
+    (under the daily model cap) rather than refused for a cap this project can't honour."""
+    from dataclasses import replace
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from daimon.core.neutral_resources import WorkerLimits, resolve_worker_spec, task_worker_spec
+    from mux.contracts.config import BackendConfig
+
+    from ..test_fleet_orchestration import NOW, POLICY, permissions
+
+    grant = default_fleet_grant(
+        TenantBackendPolicy(
+            tenant_id=TENANT, revision="r", enabled_backends=("anthropic", "openai", "gemini")
+        )
+    )
+    assert grant is not None and grant.limits.native_budget_usd is None
+    root = permissions("anthropic")
+    parent = replace(
+        root,
+        backend_grants=tuple(backend for backend, _ in grant.choices),
+        models=tuple(model for _, model in grant.choices),
+        limits=grant.limits.model_copy(update={"deadline": NOW + timedelta(minutes=10)}),
+    )
+    for model in ("claude-opus-5-5", "gpt-6-astra", "gemini-4-argon"):
+        spec = task_worker_spec(parent, role="researcher", task="Answer X.", model=model)
+        # As fleet_spawn does: the grant choice for this model names the backend.
+        chosen = next(backend for backend, granted in grant.choices if granted.id == model)
+        resolved = resolve_worker_spec(
+            parent,
+            spec,
+            policy=POLICY,
+            now=NOW,
+            backend=BackendConfig.model_validate(chosen.model_dump(mode="json")),
+            limits=WorkerLimits(
+                budget_usd=Decimal("0.4"), deadline=NOW + timedelta(minutes=2), max_turns=1
+            ),
+        )
+        assert resolved.spec.model.id == model
+        assert resolved.limits.native_budget_usd is None, "no native budget for any worker"
+        if model == "gpt-6-astra":
+            assert resolved.backend.profile == CONVERSATION_ONLY.profile_id

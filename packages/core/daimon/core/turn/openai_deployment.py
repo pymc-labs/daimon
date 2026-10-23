@@ -54,7 +54,7 @@ from mux.drivers.openai.mcp_auth import KEY as MCP_METADATA_KEY
 from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile, selectable_models
-from mux.profiles.openai import NATIVE_MODELS, SPEND_CAPPED_MODELS
+from mux.profiles.openai import NATIVE_MODELS
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -418,9 +418,6 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         if spend_limit is not None and spend_limit != requested:
             raise AdmissionDenied(reason="backend_unsupported")
         spend_limit = requested
-    if revision.model in SPEND_CAPPED_MODELS and (spend_limit is None or not native_cap):
-        # Astra's tariff tops out at $50/M output (x1.5 above 272k): never run it uncapped.
-        raise AdmissionDenied(reason="backend_unsupported")
     scope = request.scope
     worker_agent: ResourceRef | None = None
     # A template's counterpart for this agent version, once its catalog entry is known.
@@ -651,7 +648,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         return row
 
     # A row's limit compiles to `spend_control` only where the project honours it. Without
-    # it, a turn is bounded by admission (balance, user and channel caps) and its deadline.
+    # it, a turn is bounded by admission (balance, user and channel caps), the per-model
+    # daily cap (`openai_host._check_daily_model_cap`) and its deadline. Astra included.
     native_limit = spend_limit if native_cap else None
     runtime = OpenAIHostRuntime(
         transport_factory=transport,

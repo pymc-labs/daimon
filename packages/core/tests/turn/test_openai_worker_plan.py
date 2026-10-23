@@ -1393,25 +1393,24 @@ async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
 ) -> None:
     request, _, plan, _, owned = target
     _with_astra(plan, owned, monkeypatch, spend_limit=5)
-    # Our project has no native session cap, so Astra never runs uncapped here.
-    with pytest.raises(AdmissionDenied):
-        build_openai_runtime(_astra(request))
-    openai_native_spend_cap(monkeypatch)
+    # ROOT: on our project (no native session cap) Astra runs at its own price, bounded
+    # by admission and the daily model cap; the row's limit is never sent.
     runtime = build_openai_runtime(_astra(request))
     assert runtime.controls.model == "gpt-6-astra"
     assert runtime.price is not None and runtime.price.model == "gpt-6-astra"
     assert (runtime.price.input, runtime.price.output) == (Decimal("10.00"), Decimal("50.00"))
-    # The row's spend limit becomes the session's native spend control.
-    assert runtime.controls.spend_limit_usd_cents == 5
+    assert runtime.controls.spend_limit_usd_cents is None
+    # Where a project honours native caps, the row's limit becomes `spend_control`.
+    openai_native_spend_cap(monkeypatch)
+    assert build_openai_runtime(_astra(request)).controls.spend_limit_usd_cents == 5
 
 
-async def test_astra_without_a_spend_limit_is_refused(
+async def test_astra_runs_without_a_native_spend_limit(
     target: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """ROOT: Astra runs under the host guard and the daily model cap, not a native cap."""
     request, _, plan, _, owned = target
     _with_astra(plan, owned, monkeypatch)
     assert request.worker.limits.native_budget_usd is None and plan.spend_limit_usd_cents is None
-    with pytest.raises(AdmissionDenied):
-        build_openai_runtime(_astra(request))
-    # Luna, with the same row and no spend limit, still builds.
+    assert build_openai_runtime(_astra(request)).controls.spend_limit_usd_cents is None
     assert build_openai_runtime(request).controls.spend_limit_usd_cents is None

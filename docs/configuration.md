@@ -1226,6 +1226,15 @@ USD credit automatically seeded when a guild/workspace is provisioned, so a fres
 installed tenant can chat immediately on trial credit before paying. Set to 0 to require
 payment before use.
 
+### `DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`
+
+`Decimal` · optional · default `20`
+
+Most a tenant may spend each UTC day on any one OpenAI model, in provider USD at list
+price, counted across every agent turn and fleet worker. OpenAI sessions carry no native
+spend limit on this project, so this is the guard. A turn or worker that would start
+past it is refused until midnight UTC. 0 allows no OpenAI turns.
+
 ## Support
 
 Read from `daimon.core.config.SupportSettings`. Prefix `DAIMON_SUPPORT__`.

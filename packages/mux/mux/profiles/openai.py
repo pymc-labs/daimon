@@ -15,8 +15,6 @@ LUNA_MODEL = "gpt-6-luna"
 ASTRA_MODEL = "gpt-6-astra"
 # Every model the native OpenAI host runs; the admitted revision selects one.
 NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL)
-# Models a session may run only under a native spend limit (none on our project yet).
-SPEND_CAPPED_MODELS = (ASTRA_MODEL,)
 
 PERSISTENT_WORKSPACE = Profile(
     provider="openai",
