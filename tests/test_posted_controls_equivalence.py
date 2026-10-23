@@ -375,9 +375,11 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             member = MagicMock(spec=discord.Member)
             member.id = USER
             member.guild_permissions.manage_guild = scenario == "admin"
+            member.guild_permissions.administrator = False
             interaction = SimpleNamespace(
                 user=member,
                 guild_id="1",
+                guild=SimpleNamespace(owner_id=None),
                 response=SimpleNamespace(send_message=client.chat_postEphemeral),
             )
             view = SimpleNamespace(
