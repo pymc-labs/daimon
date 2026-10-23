@@ -1219,6 +1219,7 @@ async def _capture_backend_source(
         is_dm=False,
         slack_turn_context_id=None,
         private_dm_id=None,
+        responder_ma_agent_id=origin.responder_ma_agent_id if origin is not None else None,
     )
 
 
@@ -1589,6 +1590,7 @@ async def _request_agent_backend_switch_impl(
         reference_settings,
         settings_line,
         stated_settings,
+        switch_preview_digest,
     )
     from pydantic import ValidationError
 
@@ -1689,8 +1691,17 @@ async def _request_agent_backend_switch_impl(
                     "accepted_drops": accepted_drops,
                     "thread_mode": thread_mode,
                     "required_capabilities": required_capabilities,
+                    "unsaved_work": unsaved_work,
                 }
             )
+            if (
+                unsaved_work is not None
+                and switch_preview_digest(preview.digest, unsaved_work) != reference.preview_digest
+            ):
+                # The answer is bound into the digest the card showed: a changed or
+                # invented one is a different request. (Omitting a bound answer fails
+                # the switch's own digest check.)
+                raise channel_backend.AgentBackendRefused("stale_preview")
             # The card check awaited provider I/O; reread configuration at the write edge.
             agent = await load_backend_agent(
                 runtime.client,
@@ -1723,7 +1734,10 @@ async def _request_agent_backend_switch_impl(
                     target_backend,
                     reference.expected_revision,
                     actor,
-                    expected_preview_digest=reference.preview_digest,
+                    # A bound digest was checked above; this one is the switch's own.
+                    expected_preview_digest=preview.digest
+                    if unsaved_work is not None
+                    else reference.preview_digest,
                     model=reference.model,
                     settings=reference_settings(reference),
                     **(
@@ -1750,11 +1764,21 @@ async def _request_agent_backend_switch_impl(
                         unsaved_work=unsaved_work,
                         switch="commit",
                     )
-                except ToolError as exc:
+                except Exception as exc:
+                    # The switch landed: say so, whatever stopped the hand-off.
+                    log.warning(
+                        "backend_switch.handoff_failed",
+                        agent=agent_name,
+                        error_type=type(exc).__name__,
+                    )
+                    why = (
+                        str(exc).removesuffix(" Nothing was changed.")
+                        if isinstance(exc, ToolError)
+                        else "something went wrong on our side."
+                    )
                     raise ToolError(
                         f"{agent_name} now uses {provider_name(target_backend)}, but this "
-                        "conversation couldn't be handed to it: "
-                        f"{str(exc).removesuffix(' Nothing was changed.')} Ask {agent_name} "
+                        f"conversation couldn't be handed to it: {why} Ask {agent_name} "
                         "in a new conversation."
                     ) from exc
             status = "changed"
@@ -1780,7 +1804,7 @@ async def _request_agent_backend_switch_impl(
             model=preview.target_model,
             models=selectable_models(preview.target_backend),
             expected_revision=preview.setting_revision,
-            preview_digest=preview.digest,
+            preview_digest=switch_preview_digest(preview.digest, unsaved_work),
             unsupported_skills=preview.unsupported_skills,
             unsupported_mcps=preview.unsupported_mcps,
             unsupported_capabilities=preview.unsupported_capabilities,

@@ -1503,22 +1503,47 @@ def _memory_read_only(policy: TenantAccessPolicy, grant: AdmissionGrant, sealed:
     )
 
 
-def _forked_here(source: BackendAgent, config: ResolvedConfig, context: ScopeContext) -> bool:
-    """`source` is a copy fork_agent made of this place's responder, in this place."""
+async def _awaits_its_switch_here(
+    deps: TurnDeps,
+    source: BackendAgent,
+    context: ScopeContext,
+    *,
+    responder_ma_agent_id: str | None,
+) -> bool:
+    """`source` is a copy fork_agent made of this place's responder, in this place, still
+    on the responder's provider: its confirmed switch hands it this place (J1). The MCP
+    tool decides the same (`copy_awaiting_its_switch`); a hand-off to it already made
+    reads it as this place's responder before this is asked."""
     from daimon.core.defaults.metadata import (
         MA_METADATA_KEY_FORKED_FROM,
         MA_METADATA_KEY_FORKED_IN,
         forked_in,
     )
+    from daimon.core.ma_identity import derive_agent_uuid
+    from mux.contracts.config import DEFAULT_BACKEND
 
     stamp = (source.source.spec.metadata if source.source is not None else None) or {}
-    made_from = stamp.get(MA_METADATA_KEY_FORKED_FROM)
-    return (
-        made_from is not None
-        and config.responder_ma_agent_id in (None, made_from)
-        and stamp.get(MA_METADATA_KEY_FORKED_IN)
-        == forked_in(context.platform, context.channel_id, context.thread_id)
-    )
+    if (
+        responder_ma_agent_id is None
+        or stamp.get(MA_METADATA_KEY_FORKED_FROM) != responder_ma_agent_id
+        or stamp.get(MA_METADATA_KEY_FORKED_IN)
+        != forked_in(context.platform, context.channel_id, context.thread_id)
+    ):
+        return False
+    async with deps.sessionmaker() as db:
+        copy, responder = (
+            (revision.backend if revision is not None else None) or DEFAULT_BACKEND
+            for revision in [
+                await agent_backends.current(db, context.tenant_id, agent)
+                for agent in (
+                    source.agent_id,
+                    derive_agent_uuid(
+                        tenant_id=context.tenant_id, ma_agent_id=responder_ma_agent_id
+                    ),
+                )
+            ]
+        )
+    return copy == responder
 
 
 async def capture_backend_source(
@@ -1533,8 +1558,12 @@ async def capture_backend_source(
     private_dm_id: str | None,
     external_user_id: str | None = None,
     explicit_target_name: str | None = None,
+    responder_ma_agent_id: str | None = None,
 ) -> BackendAgent:
-    """Read the actual target's source in a verified host context, without admitting a turn."""
+    """Read the actual target's source in a verified host context, without admitting a turn.
+
+    `responder_ma_agent_id` is the verified turn's responder, for a copy of it made here.
+    """
     from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
     from daimon.core.mux_backend import resource_scope
     from daimon.core.mux_compat import retrieve_agent
@@ -1595,7 +1624,12 @@ async def capture_backend_source(
                 not target_matches
                 and explicit_target_name is None
                 and config.configuration_target_name is None
-                and _forked_here(source, config, context)
+                and await _awaits_its_switch_here(
+                    deps,
+                    source,
+                    context,
+                    responder_ma_agent_id=config.responder_ma_agent_id or responder_ma_agent_id,
+                )
             ):
                 # J1/J2: a new copy of this place's responder, made here. Its confirmed
                 # switch hands it this place too, so it reads as it will answer here:
@@ -1889,4 +1923,5 @@ async def capture_admitted_backend_source(
         is_dm=False,
         slack_turn_context_id=None,
         private_dm_id=None,
+        responder_ma_agent_id=admission.agent.id,
     )

@@ -20,6 +20,7 @@ futures, which is fine — the turn waiting on them died with the process.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import secrets
@@ -126,6 +127,11 @@ class BackendSwitchReference(BaseModel):
     )
     # The person said the switch is for everyone: needed for the server's default agent.
     for_everyone: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    # The person's answer to the uncommitted-work question, when the switch also hands
+    # this conversation to the switched copy (J1). Bound into `preview_digest`.
+    unsaved_work: Literal["copy", "leave"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @field_validator("accepted_drops", mode="before")
     @classmethod
@@ -135,6 +141,21 @@ class BackendSwitchReference(BaseModel):
         return TypeAdapter(
             AgentSpec.model_fields["declared_drops"].rebuild_annotation()
         ).validate_python(value)
+
+
+def switch_preview_digest(digest: str, unsaved_work: Literal["copy", "leave"] | None) -> str:
+    """A switch preview's digest as the tool returns it and its card checks it: bound to
+    the uncommitted-work answer the switch carries, so neither can change in between."""
+    if unsaved_work is None:
+        return digest
+    return hashlib.sha256(f"{digest}\nunsaved_work={unsaved_work}".encode()).hexdigest()
+
+
+#: What the card says each uncommitted-work answer does.
+_UNSAVED_WORK_WORDS: Final[Mapping[str, str]] = {
+    "copy": "copied into the working files first",
+    "leave": "left where they are",
+}
 
 
 class ToolRuleCardReference(BaseModel):
@@ -438,6 +459,7 @@ def prompt_for_tool_call(
                 "thread_mode": data.get("thread_mode"),
                 "required_capabilities": data.get("required_capabilities"),
                 "for_everyone": data.get("for_everyone") or False,
+                "unsaved_work": data.get("unsaved_work"),
             }
         )
         # No model-supplied compatibility text is accepted. The host hook must
@@ -750,7 +772,8 @@ def backend_switch_callbacks(
             or preview.agent_id != agent.agent_id
             or preview.target_backend != reference.target_backend
             or not preview.allowed
-            or preview.digest != reference.preview_digest
+            or switch_preview_digest(preview.digest, reference.unsaved_work)
+            != reference.preview_digest
             or (preview.declared_drops and reference.accepted_drops != preview.declared_drops)
             or (not preview.declared_drops and reference.accepted_drops not in (None, ()))
         ):
@@ -965,6 +988,12 @@ def backend_switch_callbacks(
             "Unsupported capabilities: " + (", ".join(preview.unsupported_capabilities) or "None"),
             "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
             preview.cost_line,
+            *(
+                ("Uncommitted changes: " + _UNSAVED_WORK_WORDS[prompt.backend_switch.unsaved_work],)
+                if prompt.backend_switch is not None
+                and prompt.backend_switch.unsaved_work is not None
+                else ()
+            ),
         )
         from daimon.core.turn.notices import provider_name
 
@@ -1003,6 +1032,14 @@ def backend_switch_callbacks(
                     + (
                         f"\n{unavailable}. Nothing is deleted; switch back any time."
                         if unavailable
+                        else ""
+                    )
+                    + (
+                        "\nUncommitted changes in the repo are "
+                        + _UNSAVED_WORK_WORDS[prompt.backend_switch.unsaved_work]
+                        + "; nothing is committed or pushed."
+                        if prompt.backend_switch is not None
+                        and prompt.backend_switch.unsaved_work is not None
                         else ""
                     )
                 ),
