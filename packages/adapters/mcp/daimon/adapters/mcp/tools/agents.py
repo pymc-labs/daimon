@@ -416,6 +416,7 @@ async def _get_agent_impl(
         expected_ma_agent_id=expected_ma_agent_id,
         require_identity=False,
         discovery=True,
+        by_name=True,
         location_channel_id=origin_channel_id(origin),
         location_thread_id=origin.thread_id if origin is not None else None,
     )
@@ -1703,7 +1704,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         admin: setup details are
         for admins, capabilities (name, description, model, skills) are not. Members
         see the channel/thread responders and agents explicitly allowed to run
-        here; unrouted agents and other channels' agents are hidden.
+        here; unrouted agents and other channels' agents are hidden. get_agent
+        finds a hidden agent the user names exactly, if it may run here.
         Pass this turn's ``origin_context_id`` to verify its location. Without
         a verified location a member cannot list unrestricted agents. Admins
         retain their existing visibility. ``page`` is reserved for pagination.

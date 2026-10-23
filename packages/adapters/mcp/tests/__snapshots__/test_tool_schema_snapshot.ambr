@@ -3253,7 +3253,8 @@
         admin: setup details are
         for admins, capabilities (name, description, model, skills) are not. Members
         see the channel/thread responders and agents explicitly allowed to run
-        here; unrouted agents and other channels' agents are hidden.
+        here; unrouted agents and other channels' agents are hidden. get_agent
+        finds a hidden agent the user names exactly, if it may run here.
         Pass this turn's ``origin_context_id`` to verify its location. Without
         a verified location a member cannot list unrestricted agents. Admins
         retain their existing visibility. ``page`` is reserved for pagination.

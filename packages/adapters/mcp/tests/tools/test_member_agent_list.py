@@ -14,7 +14,7 @@ from daimon.adapters.mcp.tools.agent_removal import _list_agent_keys_impl
 from daimon.adapters.mcp.tools.agents import _get_agent_impl, _list_agents_impl
 from daimon.adapters.mcp.tools.propagation import _explain_agent_resolution_impl
 from daimon.adapters.mcp.tools.skills import _get_impl, _list_impl
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
@@ -140,7 +140,20 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             await _explain_agent_resolution_impl(
                 runtime, auth, "CLOCAL", origin_context_id=origin_id
             )
+    # An unrouted agent stays off the roster, but naming it exactly finds it
+    # wherever the caller stands somewhere verified that it may run.
+    if caller in {"admin", "bound-key"} or (caller == "member" and origin_kind == "valid"):
+        draft = await _get_agent_impl(runtime, auth, "draft", origin_context_id=origin_id)
+        assert draft.name == "draft"
+        assert (draft.mcp_servers is None) is (caller != "admin")
+    else:
+        with pytest.raises(ToolError, match="not found"):
+            await _get_agent_impl(runtime, auth, "draft", origin_context_id=origin_id)
     if caller != "admin":
+        with pytest.raises(ToolError, match="not found"):
+            await _list_agent_keys_impl(
+                runtime, auth, agent_name="draft", origin_context_id=origin_id
+            )
         with pytest.raises(ToolError, match="not found"):
             await _get_impl(runtime, auth, "draft/notes", origin_id)
         with pytest.raises(ToolError, match="verified channel/thread"):
@@ -157,6 +170,78 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             await _list_agent_keys_impl(
                 runtime, auth, agent_name="renamed", origin_context_id=origin_id
             )
+
+
+@pytest.mark.parametrize(
+    "name", ["pinned", "keeper", "Draft", "DRAFT", "dra", "draft ", " draft", "draft-x"]
+)
+async def test_member_naming_an_agent_finds_only_its_exact_name_where_it_may_run(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], name: str
+) -> None:
+    """A member at CLOCAL names agents: only an exact name it may run here resolves."""
+    now = dt.datetime.now(dt.UTC)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                channel_rules={"CROOM": ChannelRule(readers="own", writers="own")},
+                agent_rules={
+                    "pinned": AgentRule(runs_in=("COTHER",)),
+                    "keeper": AgentRule(runs_in=("CROOM",)),
+                },
+            ),
+        )
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="CLOCAL",
+            thread_id="123456",
+            responder_ma_agent_id="ag_shared",
+            responder_name="shared",
+            configuration_target_ma_agent_id="ag_shared",
+            configuration_target_name="shared",
+            role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
+            now=now,
+            expires_at=now + dt.timedelta(minutes=10),
+        )
+    router = MARouter()
+    router.add_agent_list(
+        *(
+            ma_agent(id=f"ag_{agent}", name=agent, tenant_id=tenant.id)
+            for agent in ("shared", "draft", "pinned", "keeper")
+        )
+    )
+    router.add("GET", r"/v1/skills", lambda _r, _m: list_response([]))
+    runtime = McpRuntime(
+        session_factory=committing_sessionmaker,
+        client=build_fake_anthropic(router.dispatch),
+        settings=MagicMock(),
+        deployment_default=DeploymentDefault(agent_name="shared"),
+    )
+    auth = AuthIdentity(
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role=Role.USER,
+        platform="discord",
+        is_admin=False,
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared"),
+    )
+    origin_id = str(origin.id)
+
+    listed = await _list_agents_impl(runtime, auth, None, origin_id)
+    found = await _get_agent_impl(runtime, auth, "draft", origin_context_id=origin_id)
+
+    assert [info.name for info in listed] == ["shared"], "the roster stays this place's"
+    assert found.name == "draft", "the exact name of an unrouted agent resolves"
+    with pytest.raises(ToolError, match="not found"):
+        await _get_agent_impl(runtime, auth, name, origin_context_id=origin_id)
 
 
 @pytest.mark.parametrize("admin", [False, True])
