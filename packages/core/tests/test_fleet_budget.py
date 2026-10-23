@@ -2319,6 +2319,8 @@ async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeyp
                 finished=finished,
                 poll_interval=0.01,
                 read_timeout=READ_TIMEOUT_S,
+                # Every poll takes the lock, so each busy poll is a contended one.
+                locked_refresh_s=0,
             )
         )
     )
@@ -2344,6 +2346,85 @@ async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeyp
         watch.cancel()
         await asyncio.gather(watch, return_exceptions=True)
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
+
+
+async def test_an_overrun_between_locked_refreshes_is_cancelled_from_the_snapshot(sm, monkeypatch):
+    """With the locked refresh every BUDGET_LOCKED_REFRESH_S, an overrun in between is
+    still cancelled at poll speed, from the lock-free snapshot."""
+    parent, run = await setup(sm)
+    worker = await add(sm, parent, budget=".01")
+    assert (await reserve(sm, parent, worker)).admitted
+    cancelled = {worker.id: asyncio.Event()}
+    finished = asyncio.Event()
+    probe = _WatchProbe(sm, monkeypatch, _VirtualClock())
+    watch = probe.watching(
+        asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=probe.sessionmaker,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=READ_TIMEOUT_S,
+            )
+        )
+    )
+    try:
+        await probe.until(lambda: probe.reads >= 1, "the first locked refresh")
+        reads = probe.reads
+        await usage(sm, parent, run, worker, inputs=10_000, outputs=None)
+        await asyncio.wait_for(cancelled[worker.id].wait(), 5)
+        # The virtual clock never reached the next locked refresh: the snapshot decided.
+        assert probe.reads == reads
+    finally:
+        finished.set()
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
+
+
+async def test_run_watch_takes_the_tenant_lock_only_every_locked_refresh(sm, monkeypatch):
+    """SMOKE J4: each run's watch took the tenant fleet lock four times a second and held it
+    for its whole producer read, so the tenant's admissions kept waiting on it. Between
+    locked refreshes the watch decides from the lock-free snapshot."""
+    from daimon.core import channel_budget
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    clock = _VirtualClock()
+    probe = _WatchProbe(sm, monkeypatch, clock)
+    watch = probe.watching(
+        asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=probe.sessionmaker,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=READ_TIMEOUT_S,
+            )
+        )
+    )
+    try:
+        await probe.until(lambda: probe.reads >= 1, "the first locked refresh")
+        reads = probe.reads
+        await probe.polls_since(probe.polls, 5)
+        assert probe.reads == reads
+        clock.advance(channel_budget.BUDGET_LOCKED_REFRESH_S)
+        await probe.until(lambda: probe.reads > reads, "the next locked refresh")
+        finished.set()
+        assert await asyncio.wait_for(watch, 5) == "finished"
+        assert not cancelled[a.id].is_set()
+    finally:
+        finished.set()
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
 
 
 async def test_run_watch_fails_closed_when_the_tenant_lock_stays_busy(sm, monkeypatch):

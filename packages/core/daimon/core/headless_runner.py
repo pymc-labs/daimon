@@ -677,8 +677,11 @@ async def commit_worker_transition(
     action: Callable[[AsyncSession, FleetWorker], Awaitable[FleetWorker]] | None = None,
     *,
     failure_code: WorkerFailureCode = "preparation_refused",
+    lock_timeout: str | None = None,
 ) -> FleetWorker:
     async with request.deps.sessionmaker.begin() as db:
+        if lock_timeout is not None:
+            await db.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
         graph, _ = await fleet_store.lock_budget(
             db,
             tenant_id=request.tenant_id,
@@ -728,6 +731,56 @@ async def commit_worker_transition(
         return updated
 
 
+#: How long one attempt to record a worker's failure waits for the tenant's fleet lock,
+#: and how many attempts it makes before leaving the row to the deadline sweep.
+WORKER_FAILURE_COMMIT_LOCK_TIMEOUT = "5s"
+WORKER_FAILURE_COMMIT_ATTEMPTS = 3
+#: The most one such attempt may take, statements included.
+WORKER_FAILURE_COMMIT_ATTEMPT_S = 8.0
+#: Set on an error whose worker failure `run_worker` already recorded (or deferred).
+FAILURE_RECORDED = "_daimon_worker_failure_recorded"
+
+
+async def commit_worker_failure(
+    request: ProviderPreparationRequest,
+    parent: WorkerPermissions,
+    worker: FleetWorker,
+    *,
+    failure_code: WorkerFailureCode,
+) -> None:
+    """Record a failed worker without waiting out a busy fleet lock.
+
+    A lock held elsewhere kept J4's failed worker running 49 s past its deadline. After
+    the bounded attempts the row stays `starting` and the deadline sweep ends it.
+    """
+    for _ in range(WORKER_FAILURE_COMMIT_ATTEMPTS):
+        try:
+            # Bounded as a whole too: this runs shielded, so a slow statement must end.
+            async with asyncio.timeout(WORKER_FAILURE_COMMIT_ATTEMPT_S):
+                await commit_worker_transition(
+                    request,
+                    parent,
+                    worker,
+                    failure_code=failure_code,
+                    lock_timeout=WORKER_FAILURE_COMMIT_LOCK_TIMEOUT,
+                )
+            return
+        except FleetConflict:
+            return
+        except TimeoutError:
+            continue
+        except DBAPIError as error:
+            if not fleet_store.lock_timed_out(error):
+                raise
+    log.warning(
+        "fleet.worker_failure_commit_deferred",
+        run_id=str(worker.run_id),
+        worker_id=str(worker.id),
+        failure_code=failure_code,
+        attempts=WORKER_FAILURE_COMMIT_ATTEMPTS,
+    )
+
+
 #: The longest a fleet worker spends on its own setup (policy, source capture, financial
 #: admission, backend resolution) before its native session. A stuck step fails the worker
 #: in plain words instead of holding it at "starting" until the run's deadline (SMOKE J4).
@@ -775,6 +828,30 @@ async def _worker_stage(
 
 
 @contextlib.asynccontextmanager
+async def _bounded_locks(db: AsyncSession) -> AsyncIterator[AsyncSession]:
+    """The same short lock wait inside a caller's transaction (the send claim's input check).
+
+    The caller's own lock wait is restored afterwards, so the rest of its transaction
+    keeps the setting it had.
+    """
+    prior = await db.scalar(text("SELECT current_setting('lock_timeout')"))
+    await db.execute(
+        text("SELECT set_config('lock_timeout', :value, true)"),
+        {"value": WORKER_SETUP_LOCK_TIMEOUT},
+    )
+    try:
+        yield db
+    except DBAPIError as error:
+        if not fleet_store.lock_timed_out(error):
+            raise
+        raise FleetConflict(
+            "the tenant's fleet lock stayed busy before the worker's input",
+            reason="worker_setup_busy",
+        ) from error
+    await db.execute(text("SELECT set_config('lock_timeout', :value, true)"), {"value": prior})
+
+
+@contextlib.asynccontextmanager
 async def _setup_transaction(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AsyncSession]:
@@ -784,14 +861,11 @@ async def _setup_transaction(
             await db.execute(text(f"SET LOCAL lock_timeout = '{WORKER_SETUP_LOCK_TIMEOUT}'"))
             yield db
     except DBAPIError as error:
-        if (
-            getattr(error.orig, "sqlstate", None) != "55P03"
-            and "lock timeout" not in str(error.orig).lower()
-        ):
+        if not fleet_store.lock_timed_out(error):
             raise
         raise FleetConflict(
             "the tenant's fleet lock stayed busy during worker setup", reason="worker_setup_busy"
-        ) from None
+        ) from error
 
 
 async def run_worker(
@@ -944,9 +1018,7 @@ async def run_worker(
             async def recapture(db: AsyncSession | None = None):
                 source = await capture_preparation_source(source_request)
                 async with (
-                    _setup_transaction(deps.sessionmaker)
-                    if db is None
-                    else contextlib.nullcontext(db)
+                    _setup_transaction(deps.sessionmaker) if db is None else _bounded_locks(db)
                 ) as db:
                     policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
                     if (
@@ -1201,15 +1273,14 @@ async def run_worker(
             from daimon.core.fleet_orchestration import worker_failure_code
 
             # A bug before native start is ours, never "couldn't be set up on that model".
-            failure_code = (
-                "preparation_deadline_exceeded"
-                if isinstance(error, FleetConflict) and error.reason == "worker_setup_busy"
-                else worker_failure_code(error, "preparation_refused")
+            failure_code = worker_failure_code(error, "preparation_refused")
+            await asyncio.shield(
+                commit_worker_failure(request, parent, claim, failure_code=failure_code)
             )
-            with contextlib.suppress(FleetConflict):
-                await asyncio.shield(
-                    commit_worker_transition(request, parent, claim, failure_code=failure_code)
-                )
+            setattr(error, FAILURE_RECORDED, True)
         if isinstance(error, TimeoutError):
-            raise ceiling_error() from error
+            ceiling = ceiling_error()
+            if not native_started:
+                setattr(ceiling, FAILURE_RECORDED, True)
+            raise ceiling from error
         raise

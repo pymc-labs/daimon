@@ -11,7 +11,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager, nullcontext, suppress
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -174,6 +174,9 @@ def worker_failure_code(
     from daimon.core.neutral_resources import WorkerSpecRefused
     from mux.errors import MuxError
 
+    if isinstance(error, FleetConflict) and error.reason == "worker_setup_busy":
+        # Our own setup or a busy fleet lock, in either phase: never the model's fault.
+        return "preparation_deadline_exceeded"
     refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
     if not isinstance(error, Exception) or isinstance(error, refusal):
         return _admission_cause(error) or phase
@@ -1400,8 +1403,11 @@ class HostFleetPorts:
             cancel_workers,
             watch_fleet_budget,
         )
-        from daimon.core.fleet import FleetConflict
-        from daimon.core.headless_runner import commit_worker_transition, run_worker
+        from daimon.core.headless_runner import (
+            FAILURE_RECORDED,
+            commit_worker_failure,
+            run_worker,
+        )
         from daimon.core.stores import fleet
         from daimon.core.turn.ceiling import remaining_s
 
@@ -1491,9 +1497,11 @@ class HostFleetPorts:
                                             cancel=cancel,
                                         )
                                     except BaseException as error:
-                                        with suppress(FleetConflict):
+                                        # run_worker records its own pre-native failures;
+                                        # a second commit would only wait on the lock again.
+                                        if not getattr(error, FAILURE_RECORDED, False):
                                             await asyncio.shield(
-                                                commit_worker_transition(
+                                                commit_worker_failure(
                                                     request,
                                                     parent,
                                                     claimed,

@@ -1302,3 +1302,52 @@ async def test_a_bug_while_running_a_worker_is_recorded_as_a_setup_error(worker_
         assert not calls
     finally:
         await ports.close()
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+async def test_dispatch_skips_a_second_failure_commit_run_worker_already_recorded(
+    worker_root, monkeypatch, recorded
+):
+    """#1416: run_worker records its own pre-native failure; a second commit from the
+    dispatcher would only wait on the tenant fleet lock again."""
+    from daimon.core import headless_runner
+    from structlog.testing import capture_logs
+
+    request, root, _, resolved, prices, _, _, _, _ = worker_root
+    commits: list[str] = []
+
+    async def fail(*args, **kwargs):
+        error = RuntimeError("worker failed")
+        if recorded:
+            setattr(error, headless_runner.FAILURE_RECORDED, True)
+        raise error
+
+    async def counted(*args, failure_code, **kwargs):
+        commits.append(failure_code)
+
+    async def preparation(parent):
+        return request
+
+    monkeypatch.setattr(headless_runner, "run_worker", fail)
+    monkeypatch.setattr(headless_runner, "commit_worker_failure", counted)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2),
+        deps=replace(request.deps, fleet_enabled=True),
+    )
+    try:
+        with capture_logs() as logs:
+            await FleetOrchestrator(ports).spawn(
+                root,
+                await _policy(request),
+                **_spawn_terms(request, root, resolved, f"recorded-{recorded}"),
+            )
+            async with asyncio.timeout(10):
+                while not any(row.get("event") == "fleet.worker_task_failed" for row in logs):
+                    await asyncio.sleep(0.01)
+        assert commits == ([] if recorded else ["setup_error"])
+    finally:
+        await ports.close()
