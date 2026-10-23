@@ -90,42 +90,80 @@ type FleetConflictReason = Literal[
 ]
 
 
-#: What a worker's closed error code means, for the fleet card. Unknown codes stay codes.
+#: What a worker's closed error code means for the fleet card: the cause, then what a
+#: person can do about it. Unknown codes stay codes.
 WORKER_ERROR_TEXT: Mapping[str, str] = {
-    "dispatch_refused": "it couldn't start on that model here",
-    "preparation_refused": "it couldn't be set up on that model here",
-    "financial_admission_refused": "it would have gone over the fleet or server budget",
-    "not_admitted": "it would have gone over the fleet or server budget",
-    "budget_exceeded": "it ran out of its budget",
-    "worker_budget_exceeded": "it ran out of its budget",
-    "run_budget_exceeded": "the fleet's budget for this run ran out",
-    "provider_budget_exceeded": "the fleet's budget for that provider ran out",
-    "tenant_budget_exceeded": "this server's spending limit was reached",
-    "channel_budget_exceeded": "this channel's spending limit was reached",
-    "admission_channel_budget_exceeded": "this channel's spending limit was reached",
-    "cap_exceeded": "a spending limit was reached",
-    "admission_cap_exceeded": "a spending limit was reached",
-    "timed_out": "it ran out of time",
-    "deadline_expired": "it ran out of time",
-    "preparation_deadline_exceeded": "it took too long to start",
-    "run_deadline": "the fleet ran out of time",
-    "worker_lost": "it was lost during a restart",
+    # A refusal with no more specific cause: the reference finds it in the logs.
+    "dispatch_refused": "Daimon refused to start it; try again, or give an admin the reference",
+    "preparation_refused": "Daimon refused to set it up; try again, or give an admin the reference",
+    "financial_admission_refused": (
+        "it would have gone over the fleet or server budget; ask for fewer or cheaper workers"
+    ),
+    "not_admitted": (
+        "it would have gone over the fleet or server budget; ask for fewer or cheaper workers"
+    ),
+    "budget_exceeded": "it used up its budget; ask for a bigger budget or a shorter task",
+    "worker_budget_exceeded": "it used up its budget; ask for a bigger budget or a shorter task",
+    "run_budget_exceeded": "the fleet's budget for this run ran out; ask for a bigger budget",
+    "provider_budget_exceeded": (
+        "the fleet's budget for that provider ran out; ask for a bigger budget or another model"
+    ),
+    "tenant_budget_exceeded": "this server's spending limit was reached; an admin can raise it",
+    "channel_budget_exceeded": "this channel's spending limit was reached; an admin can raise it",
+    "admission_channel_budget_exceeded": (
+        "this channel's spending limit was reached; an admin can raise it"
+    ),
+    "cap_exceeded": "a spending limit was reached; an admin can raise it",
+    "admission_cap_exceeded": "a spending limit was reached; an admin can raise it",
+    "balance_depleted": "this server is out of credit; an admin can top it up",
+    "provider_hold_cap_reached": (
+        "the prepaid limit for that model provider is used up; an admin can raise it, "
+        "or ask for another model"
+    ),
+    "provider_setup_pending": "that model provider is still being set up; try again in a minute",
+    "timed_out": "it ran out of time; ask again with a smaller task",
+    "deadline_expired": "it ran out of time; ask again with a smaller task",
+    "preparation_deadline_exceeded": "it took too long to start; try again",
+    "run_deadline": "the fleet ran out of time; ask again with a smaller task",
+    "worker_lost": "it was lost when Daimon restarted; ask again",
     "stop_requested": "it was stopped",
-    "watch_ended": "the fleet ended before it finished",
-    "shutdown": "Daimon restarted before it finished",
-    "usage_unavailable": "its spending couldn't be measured, so it was stopped",
+    "watch_ended": "the fleet ended before it finished; ask again",
+    "shutdown": "Daimon restarted before it finished; ask again",
+    "usage_unavailable": "its spending couldn't be measured, so it was stopped; try again",
     # A bug on our side, never a model limit: the card adds a reference to the logs.
-    "setup_error": "a setup error on our side",
-    "provider_error": "the model provider returned an error or didn't respond",
-    "provider_not_configured": "that model provider isn't set up on this server yet",
-    "worker_runtime_missing": "this server isn't set up to run that model's workers yet",
+    "setup_error": "a setup error on our side; give an admin the reference",
+    "provider_error": (
+        "the model provider returned an error or didn't respond; try again or ask for another model"
+    ),
+    "provider_not_configured": (
+        "that model provider isn't set up on this server yet; an admin can add its key, "
+        "or ask for another model"
+    ),
+    "provider_not_allowed": (
+        "this server doesn't allow that model provider; an admin can allow it, "
+        "or ask for another model"
+    ),
+    "channel_backend_pinned": (
+        "this channel is set to run on one model provider only; ask for a model from it, "
+        "or an admin can change the channel's setting"
+    ),
+    "worker_runtime_missing": (
+        "this server isn't set up to run that model's workers yet; ask for another model, "
+        "or give an admin the reference"
+    ),
 }
+
+#: Codes whose fix is "give an admin the reference": the card adds the worker id prefix
+#: the host logs (fleet.worker_task_failed).
+_REFERENCED_CODES: Final = frozenset(
+    {"setup_error", "dispatch_refused", "preparation_refused", "worker_runtime_missing"}
+)
 
 
 def worker_error_text(code: str | None, *, ref: str | None = None) -> str | None:
-    """The card's reason for a worker's error code; a setup error carries a log reference."""
+    """The card's reason for a worker's error code: its cause, its fix and any log reference."""
     text = WORKER_ERROR_TEXT.get(code) if code else None
-    if text is not None and code == "setup_error" and ref:
+    if text is not None and code in _REFERENCED_CODES and ref:
         return f"{text} (ref {ref})"
     return text
 

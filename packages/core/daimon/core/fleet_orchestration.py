@@ -125,28 +125,54 @@ WorkerFailureCode = Literal[
     "dispatch_refused",
     "provider_error",
     "provider_not_configured",
+    "provider_not_allowed",
+    "channel_backend_pinned",
     "worker_runtime_missing",
     "setup_error",
+    "balance_depleted",
+    "cap_exceeded",
+    "channel_budget_exceeded",
+    "provider_hold_cap_reached",
+    "provider_setup_pending",
     "preparation_deadline_exceeded",
+    "timed_out",
 ]
 
+# Admission refusals a person can act on, by their closed reason.
+_ADMISSION_REASON_CODES: dict[str, WorkerFailureCode] = {
+    "balance_depleted": "balance_depleted",
+    "cap_exceeded": "cap_exceeded",
+    "channel_budget_exceeded": "channel_budget_exceeded",
+    "provider_hold_cap_reached": "provider_hold_cap_reached",
+    "provider_setup_pending": "provider_setup_pending",
+}
+_BACKEND_CAUSE_CODES: dict[str, WorkerFailureCode] = {
+    "provider_not_configured": "provider_not_configured",
+    "provider_not_allowed": "provider_not_allowed",
+    "channel_pin": "channel_backend_pinned",
+    "agent_backend": "worker_runtime_missing",
+}
 
-def _admission_cause(
-    error: BaseException,
-) -> Literal["provider_not_configured", "worker_runtime_missing"] | None:
-    """A plain cause for a backend refusal, from its closed cause or its raise site."""
+
+def _admission_cause(error: BaseException) -> WorkerFailureCode | None:
+    """A plain cause for an admission refusal, from its closed reason, cause or raise site."""
     from daimon.core.turn.errors import AdmissionDenied
 
     seen: set[int] = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, AdmissionDenied) and current.reason == "backend_unsupported":
-            if current.cause == "provider_not_configured":
-                return "provider_not_configured"
-            # No installed or default runtime row serves this worker's model/profile.
-            if (current.site or "").startswith("turn.runtime_manifest.select_runtime_manifest:"):
-                return "worker_runtime_missing"
+        if isinstance(current, AdmissionDenied):
+            if (code := _ADMISSION_REASON_CODES.get(current.reason)) is not None:
+                return code
+            if current.reason == "backend_unsupported":
+                if (code := _BACKEND_CAUSE_CODES.get(current.cause or "")) is not None:
+                    return code
+                # No installed or default runtime row serves this worker's model/profile.
+                if (current.site or "").startswith(
+                    "turn.runtime_manifest.select_runtime_manifest:"
+                ):
+                    return "worker_runtime_missing"
         # The chain a traceback shows: an explicit cause, else an implicit context
         # unless `raise ... from None` suppressed it (that refusal was replaced).
         current = (
@@ -178,6 +204,8 @@ def worker_failure_code(
         # Our own setup or a busy fleet lock, in either phase: never the model's fault.
         return "preparation_deadline_exceeded"
     refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
+    if isinstance(error, TimeoutError):
+        return "preparation_deadline_exceeded" if phase == "preparation_refused" else "timed_out"
     if not isinstance(error, Exception) or isinstance(error, refusal):
         return _admission_cause(error) or phase
     if isinstance(error, _provider_failures()):

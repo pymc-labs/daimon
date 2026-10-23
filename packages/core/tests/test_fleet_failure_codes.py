@@ -31,7 +31,6 @@ def validation_error() -> ValidationError:
         FleetConflict("claim changed", reason="claim_changed"),
         UnsupportedCapability(("x",), "anthropic.managed_agents"),
         ProviderError("invalid_request", retryable=False),
-        TimeoutError(),
         asyncio.CancelledError(),
     ],
 )
@@ -65,10 +64,10 @@ def test_a_raw_provider_or_transport_error_is_the_providers_not_ours(phase):
 
 def test_the_card_never_calls_a_setup_error_a_model_limit():
     text = worker_error_text("setup_error", ref="8d427e0b")
-    assert text == "a setup error on our side (ref 8d427e0b)"
+    assert text == "a setup error on our side; give an admin the reference (ref 8d427e0b)"
     assert "model" not in text
     assert worker_error_text("preparation_refused", ref="8d427e0b") == (
-        "it couldn't be set up on that model here"
+        "Daimon refused to set it up; try again, or give an admin the reference (ref 8d427e0b)"
     )
 
 
@@ -113,11 +112,13 @@ def test_a_missing_worker_runtime_or_provider_key_reads_as_that(phase):
         reason="backend_unsupported", cause="provider_not_configured", provider="openai"
     )
     assert worker_failure_code(unconfigured, phase) == "provider_not_configured"
-    assert worker_error_text("worker_runtime_missing") == (
-        "this server isn't set up to run that model's workers yet"
+    assert worker_error_text("worker_runtime_missing", ref="8d427e0b") == (
+        "this server isn't set up to run that model's workers yet; ask for another model, "
+        "or give an admin the reference (ref 8d427e0b)"
     )
     assert worker_error_text("provider_not_configured") == (
-        "that model provider isn't set up on this server yet"
+        "that model provider isn't set up on this server yet; an admin can add its key, "
+        "or ask for another model"
     )
     # Any other backend refusal keeps its phase.
     other = AdmissionDenied(reason="backend_unsupported")
@@ -147,3 +148,53 @@ def test_a_suppressed_context_never_names_the_cause(phase):
             raise AdmissionDenied(reason="backend_unsupported")  # noqa: B904
     except AdmissionDenied as implicit:
         assert worker_failure_code(implicit, phase) == "worker_runtime_missing"
+
+
+@pytest.mark.parametrize(
+    ("phase", "code"),
+    [("preparation_refused", "preparation_deadline_exceeded"), ("dispatch_refused", "timed_out")],
+)
+def test_a_timeout_reads_as_running_out_of_time(phase, code):
+    assert worker_failure_code(TimeoutError(), phase) == code
+
+
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+@pytest.mark.parametrize(
+    ("refused", "code"),
+    [
+        (AdmissionDenied(reason="balance_depleted"), "balance_depleted"),
+        (AdmissionDenied(reason="cap_exceeded"), "cap_exceeded"),
+        (AdmissionDenied(reason="channel_budget_exceeded"), "channel_budget_exceeded"),
+        (AdmissionDenied(reason="provider_hold_cap_reached"), "provider_hold_cap_reached"),
+        (AdmissionDenied(reason="provider_setup_pending"), "provider_setup_pending"),
+        (
+            AdmissionDenied(reason="backend_unsupported", cause="provider_not_allowed"),
+            "provider_not_allowed",
+        ),
+        (
+            AdmissionDenied(reason="backend_unsupported", cause="channel_pin"),
+            "channel_backend_pinned",
+        ),
+        (
+            AdmissionDenied(reason="backend_unsupported", cause="agent_backend"),
+            "worker_runtime_missing",
+        ),
+    ],
+)
+def test_an_admission_refusal_records_its_own_cause(refused, code, phase):
+    assert worker_failure_code(refused, phase) == code
+    assert worker_error_text(code) is not None
+
+
+def test_every_failure_reason_names_a_cause_and_a_fix():
+    """SMOKE-1: 'it couldn't start on that model here' named neither."""
+    from typing import get_args
+
+    from daimon.core.fleet import WORKER_ERROR_TEXT
+    from daimon.core.fleet_orchestration import WorkerFailureCode
+
+    assert set(get_args(WorkerFailureCode)) <= set(WORKER_ERROR_TEXT)
+    for code, text in WORKER_ERROR_TEXT.items():
+        assert "on that model here" not in text, code
+        if code != "stop_requested":
+            assert "; " in text, f"{code} names no fix: {text}"
