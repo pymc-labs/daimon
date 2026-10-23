@@ -1145,6 +1145,12 @@ def _fork_router(tenant_id: uuid.UUID, created: list[dict[str, Any]]) -> MARoute
         return httpx.Response(200, json=agents[current.id].model_dump(mode="json"))
 
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
+
+    def on_archive(req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        created.append({"archived": m.group(1)})
+        return httpx.Response(200, json=agents[m.group(1)].model_dump(mode="json"))
+
+    router.add("POST", r"/v1/agents/([^/]+)/archive", on_archive)
     return router
 
 
@@ -1339,6 +1345,59 @@ async def test_a_member_may_own_only_so_many_copies(
         runtime, admin, source_name="src", new_name="by-admin", expected_ma_agent_id="ag_src"
     )
     assert len(created) == 2
+
+
+async def test_a_copy_of_a_members_hidden_copy_stays_hidden_and_counts(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.authz import Subject
+
+    tenant_id, auth, created, runtime = await _member_copy(db_session_factory, monkeypatch)
+    runtime.settings.mcp.member_copy_limit = 2
+    await _fork_agent_impl(
+        runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+    )
+    # An admin's channel copy of it (owned like its source: by the member).
+    await agent_fork.fork_agent(
+        runtime.client,
+        db_session_factory,
+        tenant_id=tenant_id,
+        source_name="mycopy",
+        new_name="mycopy-channel",
+        public_url=None,
+        subject=Subject(is_admin=True, platform_user_id="admin-1"),
+        default_agent_name=None,
+        owner="source",
+    )
+    assert created[1]["metadata"]["daimon_setup_hidden"] == "true", "the flag is inherited"
+    # Both count toward the member's own copies.
+    with pytest.raises(ToolError, match="most is 2"):
+        await _fork_agent_impl(
+            runtime, auth, source_name="src", new_name="third", expected_ma_agent_id="ag_src"
+        )
+
+
+async def test_a_copy_that_cant_take_its_sources_rules_is_never_kept(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.stores import agent_owners, agent_tool_rules
+
+    tenant_id, auth, created, runtime = await _member_copy(db_session_factory, monkeypatch)
+
+    async def broken(*args: Any, **kwargs: Any) -> int:
+        raise RuntimeError("rules store down")
+
+    monkeypatch.setattr(agent_tool_rules, "copy_rules", broken)
+    with pytest.raises(ToolError, match="tool rules"):
+        await _fork_agent_impl(
+            runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+        )
+    assert created[-1] == {"archived": "ag_new1"}, "the new copy is archived"
+    async with db_session_factory() as session:
+        owner = await agent_owners.owner_of(
+            session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_new1")
+        )
+    assert owner is None, "and nobody owns it"
 
 
 async def test_in_a_handed_off_thread_a_member_copies_the_agent_now_answering(
