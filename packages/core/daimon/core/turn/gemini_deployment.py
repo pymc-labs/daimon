@@ -347,6 +347,19 @@ class GeminiPlan(BaseModel):
             max_output_tokens=worker.limits.max_output_tokens,
         )
 
+    def serves_template_mcp(self, target: AgentSpec) -> bool:
+        """Whether this agent template gives `target` its Daimon MCP.
+
+        Only to a target that carries an MCP server and kept it; one with none
+        (its switch dropped it, or it never had any) runs with no MCP at all. The
+        compile (`deployment`) and the runtime's read decide it here, together.
+        """
+        return (
+            self.template_capabilities == "mcp"
+            and bool(target.mcp_servers)
+            and "mcp" not in target.declared_drops
+        )
+
     def deployment(self, request: ProviderPreparationRequest) -> GeminiDeployment:
         """Compile the prepared source target without borrowing worker authority."""
         revision = request.admission.backend_revision
@@ -362,12 +375,7 @@ class GeminiPlan(BaseModel):
         # (its switch dropped it, or it never had any) with no MCP at all; a
         # target carrying MCP must match its representation. Never more than
         # the template allows.
-        mcp = (
-            self.template_capabilities == "mcp"
-            and target is not None
-            and bool(target.mcp_servers)
-            and "mcp" not in target.declared_drops
-        )
+        mcp = target is not None and self.serves_template_mcp(target)
         represented = (
             represented_source(source, target) if source is not None and (full or mcp) else None
         )
@@ -780,10 +788,10 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         )
         await verify_storage()
         target = preparation.target_spec
-        # As the template compiles it (`deployment`): a target whose confirmed switch
-        # dropped its MCP is served with none, so no catalogue is captured and this
-        # turn never gets an MCP credential.
-        if mcp_template and (target is None or "mcp" not in target.declared_drops):
+        # As the template compiles it (`serves_template_mcp`): a target with no MCP
+        # (dropped, or never had any) is served with none, so no catalogue is
+        # captured and this turn never gets an MCP credential.
+        if mcp_template and (target is None or plan.serves_template_mcp(target)):
             from daimon.core.turn.runtime_manifest import represented_source
 
             represented = represented_source(source, preparation.target_spec)
