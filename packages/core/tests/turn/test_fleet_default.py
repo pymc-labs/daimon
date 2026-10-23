@@ -673,3 +673,42 @@ async def test_discord_keeps_the_default_and_a_custom_grant_still_applies_on_sla
     # With no custom grant, Discord gets the default.
     grant = await unconfigured(root_turn)
     assert is_default_fleet(grant)
+
+
+@pytest.mark.parametrize("platform", ["slack", "discord"])
+async def test_a_slack_turns_preparation_never_captures_a_default_fleet_source(
+    root_turn, monkeypatch, platform
+):
+    """Under the platform gate a Slack turn has no default fleet, so no capture (no API call)."""
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.prepare import bind_session_impl
+    from daimon.core.turn_origin import current_origin_id
+
+    deps, prepared, _, intent, origin, _, _, _ = root_turn
+    await unconfigured(root_turn)
+    captured: list[object] = []
+
+    async def capture(request, **kwargs):
+        captured.append(request)
+        raise WorkerSpecRefused("origin", "unbound")  # degrades to fleet off either way
+
+    monkeypatch.setattr(runtime_manifest, "capture_preparation_source", capture)
+    admission = replace(
+        prepared.admission, grant=replace(prepared.admission.grant, platform=platform)
+    )
+    token = current_origin_id.set(origin.id)
+    try:
+        result = await bind_session_impl(
+            deps,
+            admission,
+            tenant_id=admission.grant.tenant_id,
+            platform=platform,
+            external_user_id="requester",
+            thread_id=origin.thread_id,
+            session_account_id=admission.account_id,
+            reuse_existing=True,
+        )
+    finally:
+        current_origin_id.reset(token)
+    assert result._source is None
+    assert len(captured) == (1 if platform == "discord" else 0)

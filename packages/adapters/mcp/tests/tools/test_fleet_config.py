@@ -503,3 +503,14 @@ async def test_fleet_preview_checks_the_target_agent_not_the_channel_default(
     assert preview.status == "preview"
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id="agent_owned")
     assert captured == [("Researcher", agent_id)]
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams", None])
+def test_the_status_says_plainly_where_the_default_fleet_cant_start(platform):
+    from daimon.adapters.mcp.tools.fleet_config import fleet_status_summary
+
+    line = fleet_status_summary("default", platform)
+    assert line.startswith("Fleets aren't available here yet.")
+    assert "Discord" not in line and "Slack" not in line and "Teams" not in line
+    assert fleet_status_summary("default", "discord").startswith("Fleet is on with the default")
+    assert fleet_status_summary("custom", platform) == "Current fleet limits (custom)."

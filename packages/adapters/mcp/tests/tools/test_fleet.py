@@ -1563,11 +1563,21 @@ async def test_the_local_opus_fast_preset_is_never_a_fleet_worker_model() -> Non
     assert call.kwargs["agent"].model == ModelRef(provider="anthropic", id="claude-opus-5-5")
 
 
-async def test_a_slack_root_with_no_fleet_is_told_fleets_run_in_discord(root_turn):
-    """No default fleet where no adapter settles and delivers workers (Slack, Teams)."""
+@pytest.mark.parametrize("custom", [False, True])
+async def test_a_slack_root_with_no_fleet_is_told_fleets_arent_available_here(root_turn, custom):
+    """No default fleet where no adapter settles and delivers workers (Slack, Teams).
+
+    It never names another chat app. A custom grant's root that went stale is still
+    just unavailable, not "not available here".
+    """
     from daimon.core.turn_origin import turn_origin
+    from sqlalchemy import text
 
     deps, prepared, _, _, seed, _, _, _ = root_turn
+    if not custom:
+        # No stored fleet setting at all: the agent has only the computed default.
+        async with deps.sessionmaker.begin() as db:
+            await db.execute(text("DELETE FROM agent_backend_revision"))
     bridge = HostFleetToolService(
         FleetOrchestrator(
             HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal(1), deps=deps)
@@ -1600,5 +1610,11 @@ async def test_a_slack_root_with_no_fleet_is_told_fleets_run_in_discord(root_tur
                 tenant_id=slack_origin.tenant_id, ma_agent_id=prepared.admission.agent.id
             ),
         )
-        with pytest.raises(ToolError, match="Fleets run in Discord for now"):
+        with pytest.raises(ToolError) as refused:
             await bridge.status(caller, run_id=None, origin_context_id=slack_origin.id)
+        message = str(refused.value)
+        assert "Discord" not in message
+        if custom:
+            assert "root_unavailable" in message
+        else:
+            assert message == "Fleets aren't available here yet."

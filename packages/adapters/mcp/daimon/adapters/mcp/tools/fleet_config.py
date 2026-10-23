@@ -21,6 +21,8 @@ from daimon.core.channel_backend import (
     make_backend_service,
 )
 from daimon.core.fleet_configuration import (
+    FLEET_LIFECYCLE_PLATFORMS,
+    FLEET_UNAVAILABLE_HERE,
     ConfigurationReference,
     FleetConfigInput,
     complete_fleet_config,
@@ -112,6 +114,21 @@ async def _capture_fleet_target(
     )
 
 
+def fleet_status_summary(kind: str, platform: str | None) -> str:
+    """The current-settings line; it says plainly where the default fleet can't start."""
+    if kind != "default":
+        return "Current fleet limits (custom)."
+    if platform not in FLEET_LIFECYCLE_PLATFORMS:
+        return (
+            FLEET_UNAVAILABLE_HERE + " These are the default limits this agent would use; "
+            "an admin can still set a custom fleet."
+        )
+    return (
+        "Fleet is on with the default limits; nobody has changed them. The agent's owner "
+        "or an admin can tighten them or turn fleet off."
+    )
+
+
 async def _request_fleet_config_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -177,12 +194,7 @@ async def _request_fleet_config_impl(
                 expected_revision=preview.setting_revision,
                 preview_digest=preview.digest,
                 details=fleet_detail_lines(preview, worker_names=saved.worker_agents),
-                summary=(
-                    "Fleet is on with the default limits; nobody has changed them. The "
-                    "agent's owner or an admin can tighten them or turn fleet off."
-                    if setting.kind == "default"
-                    else "Current fleet limits (custom)."
-                ),
+                summary=fleet_status_summary(setting.kind, auth.platform),
             )
         if config is not None:
             config = await complete_fleet_config(

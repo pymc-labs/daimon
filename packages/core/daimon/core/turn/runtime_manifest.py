@@ -120,6 +120,30 @@ async def read_agent_fleet_grant(
     return setting.grant
 
 
+async def default_fleet_unavailable_here(
+    deps: TurnDeps,
+    *,
+    tenant_id: UUID,
+    agent_id: UUID,
+    platform: str | None,
+    now: datetime,
+) -> bool:
+    """Whether this agent has only the default fleet and this platform doesn't run it.
+
+    A custom grant is a different story (its root may just have gone stale), so it is
+    never reported as "not available here".
+    """
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
+
+    if platform in FLEET_LIFECYCLE_PLATFORMS:
+        return False
+    setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
+        tenant_id, agent_id, now=now
+    )
+    return setting.kind == "default"
+
+
 async def read_agent_fleet_grant_or_off(
     deps: TurnDeps, admission: Admission, *, now: datetime
 ) -> AgentFleetGrant | None:

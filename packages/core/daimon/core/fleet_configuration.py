@@ -121,6 +121,10 @@ class FleetConfigInput(BaseModel):
 #: would be paid for and never delivered. Slack and Teams join once their adapters do.
 FLEET_LIFECYCLE_PLATFORMS: frozenset[str] = frozenset({"discord"})
 
+#: What a person asking for a fleet is told where the default doesn't run. It never
+#: names another chat app (`platform_words.one_platform_rule`).
+FLEET_UNAVAILABLE_HERE = "Fleets aren't available here yet."
+
 #: The fleet every agent has until its owner or an admin sets one or turns it off.
 DEFAULT_FLEET_MAX_WORKERS = 4
 DEFAULT_FLEET_BUDGET_USD = Decimal("2")
