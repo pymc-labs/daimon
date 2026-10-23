@@ -645,11 +645,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         return row
 
     # Our OpenAI project rejects `spend_control` on every session create (docs/mux.md),
-    # so an agent's own turn asks for it only on a model that must never run uncapped;
-    # the host's own budget guard applies either way. Workers keep their native budget.
-    native_limit = (
-        spend_limit if request.worker is not None or revision.model in SPEND_CAPPED_MODELS else None
-    )
+    # so a root or worker asks for it only on a model that must never run uncapped.
+    # The host's budget guard and a worker's own caps (one turn, deadline) apply either way.
+    native_limit = spend_limit if revision.model in SPEND_CAPPED_MODELS else None
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,

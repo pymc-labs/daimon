@@ -42,7 +42,7 @@ DROPS = ("mcp", "memory", "sandbox", "skills", "tools")
 class ConversationWire(Wire):
     def __init__(self):
         super().__init__()
-        self.expected_spend_limit = 1
+        self.expected_spend_limit = None
         self.agent = {}
         self.posts = []
         self.lose_ack = False
@@ -72,7 +72,8 @@ class ConversationWire(Wire):
             self.requests.append(call)
             body = json.loads(call.content)
             assert body["environment"] == {"type": "none"}
-            assert body["spend_control"] == {"limit": 1}
+            # Our project rejects `spend_control`: a Luna worker's budget stays host-side.
+            assert "spend_control" not in body
             assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
             assert "vault_ids" not in body
             text = body["input"][0]["content"][0]["text"]

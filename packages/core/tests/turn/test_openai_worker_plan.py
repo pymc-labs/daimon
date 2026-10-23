@@ -56,6 +56,19 @@ from .test_openai_deployment import manifest
 from .test_openai_host import Wire as SessionWire
 
 
+def _luna_stands_in_for_a_capped_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Native-cap tests: Luna plays a model that must carry `spend_control` (Astra).
+
+    Our project rejects the field, so real Luna workers never send it
+    (`test_a_luna_worker_with_a_native_budget_sends_no_spend_control`).
+    """
+    from daimon.core.turn import openai_deployment, openai_host
+
+    capped = ("gpt-6-luna", "gpt-6-astra")
+    monkeypatch.setattr(openai_deployment, "SPEND_CAPPED_MODELS", capped)
+    monkeypatch.setattr(openai_host, "SPEND_CAPPED_MODELS", capped)
+
+
 @pytest.fixture
 def provider() -> str:
     return "openai"
@@ -557,6 +570,7 @@ async def claimed_openai_worker(
         limits=root.limits.model_copy(update={"deadline": selected.now() + timedelta(minutes=2)}),
     )
     if native_budget is not None:
+        _luna_stands_in_for_a_capped_model(monkeypatch)
         root = replace(
             root,
             limits=type(root.limits).model_validate(
@@ -1143,8 +1157,10 @@ async def test_native_worker_budget_conflict_refuses_before_transport(
     assert calls == []
 
 
-async def test_native_budget_compiler_is_decimal_context_independent(target):
+async def test_native_budget_compiler_is_decimal_context_independent(target, monkeypatch):
     from decimal import localcontext
+
+    _luna_stands_in_for_a_capped_model(monkeypatch)
 
     from daimon.core.neutral_resources import WorkerLimits
 
@@ -1169,6 +1185,36 @@ async def test_native_budget_compiler_is_decimal_context_independent(target):
         runtime = build_openai_runtime(candidate)
     assert runtime.controls.spend_limit_usd_cents == 123456789
     assert runtime.controls.require_spend_control_echo is True
+
+
+async def test_a_luna_worker_with_a_native_budget_sends_no_spend_control(target):
+    """Our OpenAI project rejects `spend_control` on every create (Ref Y7D94P).
+
+    A Luna worker runs under the host's budget guard and its own one-turn,
+    two-minute caps; nothing asks for or checks a native echo.
+    """
+    from daimon.core.neutral_resources import WorkerLimits
+
+    request, worker, _, _, _ = target
+    limits = WorkerLimits.model_validate(
+        worker.limits.model_dump()
+        | {
+            "native_budget_usd": Decimal("0.01"),
+            "budget_usd": Decimal("1"),
+            "max_turns": 1,
+            "deadline": request.now() + timedelta(seconds=120),
+        }
+    )
+    candidate = replace(
+        request,
+        worker=replace(
+            worker, limits=limits, permissions=replace(worker.permissions, limits=limits)
+        ),
+    )
+    runtime = build_openai_runtime(candidate)
+    assert runtime.controls.model == "gpt-6-luna"
+    assert runtime.controls.spend_limit_usd_cents is None
+    assert runtime.controls.require_spend_control_echo is False
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
