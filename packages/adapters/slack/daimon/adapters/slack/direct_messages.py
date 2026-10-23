@@ -1,4 +1,4 @@
-"""Opt-in Slack IM conversations and /dm-me workspace selection."""
+"""Slack IM conversations (on unless an admin turns them off) and /dm-me workspace selection."""
 
 from __future__ import annotations
 
@@ -70,8 +70,8 @@ def is_direct_message_event(event: dict[str, Any]) -> bool:
 
 
 _REAUTHORIZE = (
-    "Daimon can't use DMs in this workspace yet.\n\n"
-    "Ask a workspace admin to finish Daimon's DM setup."
+    "Daimon needs to be reinstalled in this workspace before it can use DMs.\n\n"
+    "Ask a workspace admin to reinstall the Daimon app."
 )
 #: What an operator does about `_REAUTHORIZE`; logged, never posted.
 DM_SETUP_STEPS = (

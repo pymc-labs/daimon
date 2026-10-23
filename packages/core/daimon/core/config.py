@@ -615,7 +615,18 @@ class DiscordSettings(BaseModel):
         default_factory=list[int],
         description=(
             "Guilds allowed to receive commands and events when the environment name is set. "
-            "An empty list disables all Discord ingress, including DMs, in non-production."
+            "A DM is accepted only from a member of one of these guilds. Elsewhere an @mention "
+            "or a new install gets one line naming staging_contact, at most once per channel "
+            "per hour, and nothing else. An empty list disables all Discord ingress in "
+            "non-production."
+        ),
+    )
+    staging_contact: str = Field(
+        default="the team running Daimon",
+        min_length=1,
+        description=(
+            "Who to ask, named in the one-line reply a non-production bot gives in a guild "
+            "or DM it is not enabled for. Ignored in production."
         ),
     )
     startup_replay_minutes: int = Field(

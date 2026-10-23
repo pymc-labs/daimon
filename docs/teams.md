@@ -44,8 +44,8 @@ is supported; government and China clouds use other Bot Framework hosts.
   post is its own thread and session; replies that address it continue that
   thread. A bare @mention asks about the thread; if the thread cannot be
   read, the bot says so instead of starting a turn. A followed thread also
-  gets unprompted replies (below). When an admin turned on plain-text
-  mentions (`set_plain_text_mentions`), a person's post or reply that types
+  gets unprompted replies (below). With plain-text mentions on (the default
+  for new workspaces; `set_plain_text_mentions`), a person's post or reply that types
   `@` and the bot's name without picking it from the list counts as a
   mention too, the name dropped from the text as an @mention is. A name
   followed by "(" or by a dot and a letter is ignored ("@Daimon (urgent)",

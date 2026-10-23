@@ -84,7 +84,8 @@ async def test_typed_name_is_ignored_when_the_switch_is_off(
     tenant_id: uuid.UUID,
     classifier: _FakeClassifier,
 ) -> None:
-    """Off (the default) keeps today's behaviour: text is not a mention."""
+    """Off (an admin's choice) keeps the old behaviour: text is not a mention."""
+    await _switch(db_session_factory, tenant_id, on=False)
     bot = _bot(db_session_factory)
     turns = _stub_turn(bot)
 

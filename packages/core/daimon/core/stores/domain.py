@@ -166,7 +166,7 @@ class TenantRow(BaseModel):
     provision_status: str  # "ready" | "pending" | "failed"
     funding_mode: FundingMode = "prepaid"
     turn_cap: int | None = None
-    plain_text_mentions: bool = False
+    plain_text_mentions: bool = True
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime

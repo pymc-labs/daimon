@@ -19,8 +19,8 @@ _OFF = (
     "Mention me in a channel, or ask a workspace admin to run `/dm-me enable`."
 )
 _ON = (
-    "I answer in channels first.\n"
-    "Mention me in a channel, or run `/dm-me` in one to continue privately here."
+    "To talk here, run `/dm-me` in a channel first and I'll continue with you here.\n"
+    "Or mention me in the channel."
 )
 
 
@@ -53,9 +53,25 @@ def _event(*, team_user: str = "U1", channel: str = "D_COLD", ts: str = "1.1") -
     }
 
 
+async def test_cold_dm_where_no_admin_chose_points_to_dm_me(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Private chats are on unless an admin turned them off."""
+    client = _client(monkeypatch)
+
+    await dm_module.handle_direct_message(
+        _runtime(db_session_factory), _event(), team_id="T_COLD_DEFAULT"
+    )
+
+    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", text=_ON)
+
+
 async def test_cold_dm_with_private_chats_off_gets_the_two_line_answer(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id="T_COLD_OFF")
+    async with db_session_factory.begin() as session:
+        await set_dm_enabled(session, tenant_id=tenant.tenant_id, enabled=False)
     client = _client(monkeypatch)
 
     await dm_module.handle_direct_message(

@@ -70,6 +70,12 @@ from daimon.adapters.discord.provider_actions import (
 from daimon.adapters.discord.queue_card import queue_card_ticket, tenant_slot_waiter
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.staging_gate import (
+    NoticeLimiter,
+    dm_not_enabled_text,
+    guild_not_enabled_text,
+    is_member_of_any,
+)
 from daimon.adapters.discord.startup_replay import completed_orphan_text
 from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.thread_gone import (
@@ -738,6 +744,10 @@ class DaimonBot(commands.Bot):
                 parse_interaction(data)
 
         self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction
+        # Non-production only: who was told this bot isn't enabled for them,
+        # per channel (a guild mention or install) and per person (a DM).
+        self._not_enabled_channels = NoticeLimiter()
+        self._not_enabled_people = NoticeLimiter()
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
@@ -2110,7 +2120,9 @@ class DaimonBot(commands.Bot):
         return isinstance(name, str) and bool(name)  # pyright: ignore[reportUnnecessaryIsInstance]
 
     def _allows_guild(self, guild_id: int | None) -> bool:
-        """Non-production accepts only configured guilds; DMs have no guild to allow."""
+        """Non-production accepts only configured guilds.
+
+        A DM has no guild to allow; `_admit_staging_dm` lets a member's DM through."""
         if not self._non_production:
             return True
         settings = self.runtime.settings.discord
@@ -2130,8 +2142,57 @@ class DaimonBot(commands.Bot):
                 guild_id = getattr(guild, "id", None)
             guild_event = event in {"message", "interaction"} or guild_id is not None
             if guild_event and not self._allows_guild(guild_id):
+                self._outside_allowlist(event, subject)
                 return
         super().dispatch(event, *args, **kwargs)
+
+    def _outside_allowlist(self, event: str, subject: object) -> None:
+        """Non-production: let a member's DM through; tell a mention or install once."""
+        if event == "guild_join" and isinstance(subject, discord.Guild):
+            channel = _pick_post_channel(subject)
+            if channel is not None:
+                self._spawn(self._tell_not_enabled(channel, key=subject.id, guild=True))
+            return
+        if event != "message" or not isinstance(subject, discord.Message):
+            return
+        if subject.author.bot or isinstance(subject.webhook_id, int) or self.user is None:
+            return
+        if subject.guild is None:
+            if isinstance(subject.channel, discord.DMChannel):
+                self._spawn(self._admit_staging_dm(subject))
+            return
+        if any(user.id == self.user.id for user in subject.mentions):
+            self._spawn(self._tell_not_enabled(subject.channel, key=subject.channel.id, guild=True))
+
+    async def _admit_staging_dm(self, message: discord.Message) -> None:
+        """Dispatch a DM whose author is in an allowed guild; unknown fails closed."""
+        settings = self.runtime.settings.discord
+        allowed = [
+            guild
+            for guild_id in (settings.command_guild_ids if settings is not None else [])
+            if (guild := self.get_guild(guild_id)) is not None
+        ]
+        member = await is_member_of_any(allowed, message.author.id)
+        if member:
+            super().dispatch("message", message)
+        elif member is False:
+            await self._tell_not_enabled(message.channel, key=message.author.id, guild=False)
+
+    async def _tell_not_enabled(
+        self, channel: discord.abc.Messageable, *, key: int, guild: bool
+    ) -> None:
+        """One plain line, at most once per channel (or person) per hour."""
+        limiter = self._not_enabled_channels if guild else self._not_enabled_people
+        if not limiter.allow(key):
+            return
+        settings = self.runtime.settings.discord
+        contact = settings.staging_contact if settings is not None else "the team running Daimon"
+        text = guild_not_enabled_text(contact) if guild else dm_not_enabled_text(contact)
+        try:
+            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException as exc:
+            limiter.forget(key)
+            log.warning("discord.staging_gate.notice_failed", error_type=type(exc).__name__)
 
     async def on_ready(self) -> None:
         """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,

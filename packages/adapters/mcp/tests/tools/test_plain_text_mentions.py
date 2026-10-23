@@ -82,11 +82,11 @@ async def test_non_admin_is_refused_and_nothing_is_written(
 
     with pytest.raises(ToolError, match="requires an admin"):
         await _set_plain_text_mentions_impl(
-            _runtime(committing_sessionmaker), _auth(tenant_id, admin=False), True
+            _runtime(committing_sessionmaker), _auth(tenant_id, admin=False), False
         )
 
-    assert not await get_plain_text_mentions(committing_sessionmaker, tenant_id=tenant_id), (
-        "the refused call must leave the flag off"
+    assert await get_plain_text_mentions(committing_sessionmaker, tenant_id=tenant_id), (
+        "the refused call must leave the flag on"
     )
 
 
@@ -110,11 +110,11 @@ async def test_member_reads_the_current_value(
     runtime = _runtime(committing_sessionmaker)
 
     before = await _get_plain_text_mentions_impl(runtime, _auth(tenant_id, admin=False))
-    assert before.enabled is False, "a new tenant must read as off"
-    assert "does not" in before.note, "the off note must say plain text does not trigger"
+    assert before.enabled is True, "a new tenant must read as on"
 
     await _set_plain_text_mentions_impl(
-        runtime, _auth(tenant_id, admin=True, platform="slack"), True
+        runtime, _auth(tenant_id, admin=True, platform="slack"), False
     )
     after = await _get_plain_text_mentions_impl(runtime, _auth(tenant_id, admin=False))
-    assert after.enabled is True, "a member must see the admin's change"
+    assert after.enabled is False, "a member must see the admin's change"
+    assert "does not" in after.note, "the off note must say plain text does not trigger"

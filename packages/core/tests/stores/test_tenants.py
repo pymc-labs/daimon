@@ -296,23 +296,25 @@ async def test_set_provision_status_truncates_reason_longer_than_cap(
     )
 
 
-async def test_plain_text_mentions_defaults_off_and_round_trips_when_set(
+async def test_plain_text_mentions_defaults_on_and_round_trips_when_set(
     db_session_factory: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
 ) -> None:
-    """A new tenant has the flag off; set_plain_text_mentions turns it on and off again."""
+    """A new tenant has the flag on; set_plain_text_mentions turns it off and on again."""
     tenant = await make_tenant(db_session, workspace_id="guild-plain-mentions")
-    assert tenant.plain_text_mentions is False, "the flag must default to off"
+    db_session.expire_all()
+    fresh = await get_tenant(db_session, tenant.id)
+    assert fresh is not None and fresh.plain_text_mentions is True, "the flag must default to on"
 
-    row = await set_plain_text_mentions(db_session, tenant_id=tenant.id, enabled=True)
-    assert row.plain_text_mentions is True, "the returned row must carry the new value"
-    assert await get_plain_text_mentions(db_session_factory, tenant_id=tenant.id) is True, (
-        "the hot-path read must see the flag turned on"
+    row = await set_plain_text_mentions(db_session, tenant_id=tenant.id, enabled=False)
+    assert row.plain_text_mentions is False, "the returned row must carry the new value"
+    assert await get_plain_text_mentions(db_session_factory, tenant_id=tenant.id) is False, (
+        "the hot-path read must see the flag turned off"
     )
 
-    await set_plain_text_mentions(db_session, tenant_id=tenant.id, enabled=False)
-    assert await get_plain_text_mentions(db_session_factory, tenant_id=tenant.id) is False, (
-        "the hot-path read must see the flag turned off again"
+    await set_plain_text_mentions(db_session, tenant_id=tenant.id, enabled=True)
+    assert await get_plain_text_mentions(db_session_factory, tenant_id=tenant.id) is True, (
+        "the hot-path read must see the flag turned on again"
     )
 
 

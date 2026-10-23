@@ -97,14 +97,15 @@ def cold_dm_text(platform: ChatPlatform, *, dms_on: bool | None) -> str:
     command = words.commands["dm_me"].word
     if dms_on:
         return (
-            "I answer in channels first.\n"
-            f"Mention me in a channel, or run `{command}` in one to continue privately here."
+            f"To talk here, run `{command}` in a channel first and I'll continue with you here.\n"
+            "Or mention me in the channel."
         )
     if dms_on is None:
         return (
-            "I can't start a private chat from here.\n"
-            f"Mention me in a {words.space} channel, or run `{command}` there. "
-            f"If it says private chats are off, ask {words.admin} to run `{command} enable`."
+            f"To talk here, run `{command}` in a {words.space} channel first "
+            "and I'll continue with you here.\n"
+            "Or mention me in the channel. If private chats are off there, "
+            f"ask {words.admin} to run `{command} enable`."
         )
     return (
         "Private chats with Daimon are off here.\n"
