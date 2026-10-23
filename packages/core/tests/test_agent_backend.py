@@ -996,16 +996,11 @@ async def test_an_unselectable_model_is_refused_before_any_write(owned, backend,
 
 
 async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overrides(
-    owned, tmp_path, monkeypatch
+    owned, monkeypatch
 ) -> None:
     service, agent, actor, sessions = owned
-    manifest = tmp_path / "runtime.json"
-    manifest.write_text(
-        '[{"tenant_id": "t", "profile": "openai.persistent_workspace", '
-        '"api_key_env": "NC_TEST_ALLOWLIST_OAI"}]'
-    )
-    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
-    monkeypatch.setenv("NC_TEST_ALLOWLIST_OAI", "set")
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
+    monkeypatch.delenv("DAIMON_CHANNEL_GEMINI_KEY", raising=False)
     default = await service.tenant_policy(agent.tenant_id)
     assert default.enabled_backends == ("anthropic", "openai"), "keyed, never configured"
 
@@ -1014,4 +1009,12 @@ async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overr
     async with sessions() as session:
         stored = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
     assert stored.enabled_backends == ("anthropic",) and stored.backends_explicit is True
-    assert (await service.tenant_policy(agent.tenant_id)).enabled_backends == ("anthropic",)
+    chosen = await service.tenant_policy(agent.tenant_id)
+    assert chosen.enabled_backends == ("anthropic",)
+
+    await service.set_tenant_allowlist(agent.tenant_id, None, chosen.revision, actor)
+
+    async with sessions() as session:
+        followed = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
+    assert followed.backends_explicit is False, "None goes back to the deployment default"
+    assert followed.enabled_backends == ("anthropic", "openai")

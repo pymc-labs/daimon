@@ -77,7 +77,13 @@ def tenants_backend_policy_command(
     ],
     snapshot: Annotated[Path | None, typer.Option("--snapshot")] = None,
     output: Annotated[Path | None, typer.Option("--output")] = None,
-    backends: Annotated[str | None, typer.Option("--backends")] = None,
+    backends: Annotated[
+        str | None,
+        typer.Option(
+            "--backends",
+            help="Comma-separated providers, or 'default' to follow the keyed providers.",
+        ),
+    ] = None,
     expected_revision: Annotated[str | None, typer.Option("--expected-revision")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     yes: Annotated[bool, YES_OPTION] = False,
@@ -185,11 +191,18 @@ async def tenants_backend_policy(
     revision = saved.revision if operation == "apply" else expected_revision
     assert revision is not None
     try:
-        proposed = (
-            TypeAdapter(tuple[Provider, ...]).validate_python(tuple((backends or "").split(",")))
-            if operation == "apply"
-            else saved.enabled_backends
-        )
+        # `--backends default` and a snapshot taken while defaulted both go back to
+        # following the deployment's keyed providers.
+        if operation == "apply":
+            proposed: tuple[Provider, ...] | None = (
+                None
+                if (backends or "").strip() == "default"
+                else TypeAdapter(tuple[Provider, ...]).validate_python(
+                    tuple((backends or "").split(","))
+                )
+            )
+        else:
+            proposed = saved.enabled_backends if saved.explicit else None
         if not dry_run:
             confirm_or_abort(
                 console, f"{operation} backend policy for {platform}:{external_id}?", yes=yes
@@ -788,6 +801,7 @@ async def tenants_access_policy_set(
     label = f"{platform}:{external_id}"
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
     dropped: list[str] = []
+    lifted = False
     async with policy_write_transaction(rt.sessionmaker, tenant_id=tenant_id) as session:
         await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
         await lock_access_policy(session, tenant_id=tenant_id)
@@ -811,6 +825,10 @@ async def tenants_access_policy_set(
                     "running anywhere. Pass --drop-agent-rules to clear them too. Nothing "
                     "was changed."
                 )
+            try:
+                lifted = (await load_access_policy(session, tenant_id=tenant_id)).backends_explicit
+            except AccessPolicyUnreadable:
+                lifted = False  # --clear is the way out of an unreadable row
             await clear_access_policy(session, tenant_id=tenant_id)
             policy = OPEN_ACCESS_POLICY
         else:
@@ -825,5 +843,10 @@ async def tenants_access_policy_set(
             await set_access_policy(session, tenant_id=tenant_id, policy=policy)
     _print_policy(console, label=label, policy=policy, as_json=as_json)
     if not as_json:
+        if lifted:
+            console.print(
+                "  its saved provider list was cleared too: it now uses every provider "
+                "this install has a key for"
+            )
         for name in dropped:
             console.print(f"  {name} has no rule now (runs anywhere)")

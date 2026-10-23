@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0121_tenant_backends_explicit.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0123_tenant_backends_explicit.py"
     spec = importlib.util.spec_from_file_location("tenant_backends_explicit_migration", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -20,7 +20,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0121_tenant_backends_explicit"
+revision: str = "0123_tenant_backends_explicit"
 down_revision: str | None = "0120_mcp_token_surface"
 branch_labels: str | None = None
 depends_on: str | None = None

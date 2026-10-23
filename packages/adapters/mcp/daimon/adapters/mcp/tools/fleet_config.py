@@ -299,7 +299,9 @@ async def _request_provider_allowlist_impl(
         status = "preview"
         summary = (
             "Allowed providers will be: " + (", ".join(providers) or "none") + ". "
-            "This applies across this server. Keys do not enable providers automatically. "
+            "This applies across this server. Saving makes this list the server's own choice; "
+            "until an admin saves one, the server uses every provider this Daimon install has "
+            "a key for. "
             "Call request_provider_allowlist again with the same providers, expected_revision "
             "and preview_digest; the admin must Confirm on the card. Nothing changed yet."
         )
@@ -462,8 +464,9 @@ def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ProviderAllowlistInfo:
         """Preview and confirm the server's allowed model providers. Admin-only.
 
-        providers is the complete replacement list, not an addition. Having an API
-        key does not consent to provider use; nothing is enabled automatically.
+        providers is the complete replacement list, not an addition. A server no
+        admin configured uses every provider this Daimon install holds a key for;
+        saving a list makes it the server's own choice, which always wins.
         Preview first, explain the server-wide scope and full list, then call with
         the same providers and returned expected_revision and preview_digest for
         the admin's Confirm card. Pass this active turn's origin_context_id.
