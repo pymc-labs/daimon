@@ -268,6 +268,8 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
         accepted_drops=preview.declared_drops,
     )
     assert changed.status == "changed"
+    # The thread is the copy's now, so the switch moves this very conversation.
+    assert "This conversation moves to OpenAI from the next message" in changed.summary
     service = AgentBackendService(chat.runtime.session_factory, enabled=True)
     switched = await load_backend_agent(
         chat.runtime.client,
