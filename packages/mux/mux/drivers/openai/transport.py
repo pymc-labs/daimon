@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import contextmanager
-from typing import IO, Literal, Protocol, cast
+from typing import IO, Literal, Protocol, TypedDict, cast
 from urllib.parse import quote
 
 import httpx
@@ -79,7 +79,15 @@ def error_category(code: object) -> ProviderErrorCategory:
     return NATIVE_ERROR_CATEGORIES.get(code, "upstream") if isinstance(code, str) else "upstream"
 
 
-def _native_error_details(error: APIStatusError) -> dict[str, str | None]:
+class _NativeErrorDetails(TypedDict, total=False):
+    """The `ProviderError` keyword fields an OpenAI error body may fill."""
+
+    native_message: str | None
+    native_error_code: str | None
+    native_param: str | None
+
+
+def _native_error_details(error: APIStatusError) -> _NativeErrorDetails:
     """Bounded diagnostics; raw bodies, bearer values and URLs never become facts."""
     body = error.body
     if not isinstance(body, dict):

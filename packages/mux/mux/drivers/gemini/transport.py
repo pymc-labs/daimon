@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import hmac
@@ -394,40 +395,72 @@ def high_demand(error: Exception) -> bool:
     return any(isinstance(m, str) and "high demand" in m.lower() for m in messages)
 
 
+class CreateNeverSent(asyncio.CancelledError):
+    """A create cancelled while it waited out a rate limit: nothing was created.
+
+    Still a cancellation; the driver also records the send as failed, not
+    outcome_unknown, so the thread's next send isn't refused.
+    """
+
+
 _QUOTA_FAILURE = "type.googleapis.com/google.rpc.QuotaFailure"
-# "limit: 0" wherever the line ends: before ", model:", a newline or the end.
-_ZERO_LIMIT = re.compile(r"limit: 0\b")
+_RETRY_INFO = "type.googleapis.com/google.rpc.RetryInfo"
+# "limit: 0" wherever the line ends, but never "limit: 0.5" or "limit: 05".
+_ZERO_LIMIT = re.compile(r"limit: 0(?![.\d])")
+_DURATION = re.compile(r"^(\d+(?:\.\d+)?)s$")
+
+
+def _error_payload(error: Exception) -> dict[str, object] | None:
+    body: object = getattr(error, "body", None) or getattr(error, "details", None)
+    if not isinstance(body, dict):
+        return None
+    outer = cast(dict[str, object], body)
+    nested: object = outer.get("error", outer)
+    return cast(dict[str, object], nested) if isinstance(nested, dict) else None
+
+
+def _details(payload: dict[str, object], kind: str) -> list[dict[str, object]]:
+    details = payload.get("details")
+    return [
+        cast(dict[str, object], item)
+        for item in (cast(list[object], details) if isinstance(details, list) else [])
+        if isinstance(item, dict) and cast(dict[str, object], item).get("@type") == kind
+    ]
+
+
+def retry_delay_s(error: Exception) -> float | None:
+    """Google's RetryInfo `retryDelay` ("62776s") in seconds, when the error names one."""
+    payload = _error_payload(error)
+    for detail in _details(payload, _RETRY_INFO) if payload is not None else []:
+        delay = detail.get("retryDelay")
+        found = _DURATION.match(delay) if isinstance(delay, str) else None
+        if found is not None:
+            return float(found.group(1))
+    return None
 
 
 def quota_failure(error: Exception) -> tuple[str, str | None] | None:
-    """A 429's quota cause: ("quota_zero" | "quota_exhausted", model) or None.
+    """A 429's quota cause: (code, model) or None.
+
+    Codes: "quota_zero", "free_quota_exhausted" (a FreeTier quota that
+    refills) or "quota_exhausted" (a paid plan's rate limit).
 
     `quota_zero` is a quota of 0 for the model on this project's plan (the
     free tier gives some models none): retrying never helps. Any other spent
     quota is a rate limit that refills. Only Google's own structured fields are
     read; the message is checked for its "limit: 0" line alone.
     """
-    body: object = getattr(error, "body", None) or getattr(error, "details", None)
-    if not isinstance(body, dict):
+    payload = _error_payload(error)
+    if payload is None:
         return None
-    outer = cast(dict[str, object], body)
-    nested: object = outer.get("error", outer)
-    if not isinstance(nested, dict):
-        return None
-    payload = cast(dict[str, object], nested)
-    details = payload.get("details")
     violations: list[dict[str, object]] = []
-    for item in cast(list[object], details) if isinstance(details, list) else []:
-        if not isinstance(item, dict):
-            continue
-        detail = cast(dict[str, object], item)
-        if detail.get("@type") == _QUOTA_FAILURE:
-            found = detail.get("violations")
-            violations += [
-                cast(dict[str, object], v)
-                for v in (cast(list[object], found) if isinstance(found, list) else [])
-                if isinstance(v, dict)
-            ]
+    for detail in _details(payload, _QUOTA_FAILURE):
+        found = detail.get("violations")
+        violations += [
+            cast(dict[str, object], v)
+            for v in (cast(list[object], found) if isinstance(found, list) else [])
+            if isinstance(v, dict)
+        ]
     if not violations:
         return None
     models = {
@@ -439,7 +472,10 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
     model = next(iter(models)) if len(models) == 1 else None
     message = payload.get("message")
     zero = isinstance(message, str) and _ZERO_LIMIT.search(message) is not None
-    return ("quota_zero" if zero else "quota_exhausted"), model
+    if zero:
+        return "quota_zero", model
+    free = any("FreeTier" in str(v.get("quotaId") or "") for v in violations)
+    return ("free_quota_exhausted" if free else "quota_exhausted"), model
 
 
 def connect_failure(error: BaseException) -> bool:
@@ -498,6 +534,7 @@ def normalize_error(error: Exception) -> ProviderError:
             native_code=code,
             native_error_code=http,
             native_param=model,
+            retry_after_s=retry_delay_s(error),
         )
     category = categories.get(status or 0, "upstream")
     return ProviderError(
@@ -505,6 +542,7 @@ def normalize_error(error: Exception) -> ProviderError:
         retryable=status == 429 or (status is not None and status >= 500),
         native_code="503" if status == 503 else None,
         native_error_code=http,
+        retry_after_s=retry_delay_s(error) if status == 429 else None,
     )
 
 

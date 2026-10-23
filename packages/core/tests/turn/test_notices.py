@@ -370,22 +370,43 @@ def test_a_full_gemini_hold_ledger_reads_as_busy_in_plain_words() -> None:
 
 
 @pytest.mark.parametrize(
-    ("code", "title", "action"),
+    ("code", "retry_after_s", "title", "action"),
     [
         (
             "quota_zero",
+            62776.0,
             "Gemini 4 Argon isn't available on this server's Google plan.",
             "Pick another model or ask an admin to upgrade it.",
         ),
         (
+            "free_quota_exhausted",
+            None,
+            "Google's free quota is used up.",
+            "Try again in a few minutes.",
+        ),
+        ("free_quota_exhausted", 125.0, "Google's free quota is used up.", "Try again in 3 min."),
+        (
             "quota_exhausted",
+            125.0,
             "Google is rate-limiting Gemini 4 Argon right now.",
-            "Try again in a minute.",
+            "Try again in 3 min.",
+        ),
+        (
+            "quota_exhausted",
+            7260.0,
+            "Google is rate-limiting Gemini 4 Argon right now.",
+            "Try again in about 2 hours.",
+        ),
+        (
+            "quota_exhausted",
+            62776.0,
+            "Google is rate-limiting Gemini 4 Argon right now.",
+            "Try again in about 17 hours.",
         ),
     ],
 )
 def test_a_provider_quota_refusal_names_the_model_and_the_fix(
-    code: str, title: str, action: str
+    code: str, retry_after_s: float | None, title: str, action: str
 ) -> None:
     """J2 smoke: Argon on a free-tier key is a quota of 0, never a stall or a
     generic failure; even Google's "retry in 17h" doesn't replace the words."""
@@ -397,6 +418,7 @@ def test_a_provider_quota_refusal_names_the_model_and_the_fix(
         retryable=code != "quota_zero",
         native_code=code,
         native_param="gemini-4-argon",
+        retry_after_s=retry_after_s,
     )
     error = TurnError(kind="upstream", message=str(cause), cause=cause)
     until = datetime(2026, 10, 24, 7, 0, tzinfo=UTC)

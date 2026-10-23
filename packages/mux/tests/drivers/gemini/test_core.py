@@ -1137,3 +1137,33 @@ async def test_usage_reconcile_retries_a_high_demand_read(setup: Setup) -> None:
     t.reads["i1"] = [high_demand(), native()]
     assert await ma.usage.reconcile(SCOPE, s.ref)
     assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_send_stopped_while_waiting_out_a_rate_limit_lets_the_next_send_run(
+    setup: Setup,
+) -> None:
+    """Stopped during a rate-limit wait, nothing was created: the send failed
+    (not outcome_unknown), so the thread's next send isn't refused unreconciled."""
+    from mux.drivers.gemini.transport import CreateNeverSent
+
+    _, _, storage, state, s, _ = setup
+
+    class StoppedOnce(FakeTransport):
+        stopped = False
+
+        async def create(self, request: Mapping[str, JsonValue]) -> Object:
+            if not self.stopped:
+                self.stopped = True
+                raise CreateNeverSent
+            return await super().create(request)
+
+    transport = StoppedOnce()
+    transport.responses.append(native())
+    ma = GeminiManagedAgents(
+        transport, storage=storage, state_store=state, account_scope_id="project"
+    )
+    with pytest.raises(CreateNeverSent):
+        await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="stopped")
+    receipt = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="next")
+    assert receipt.status == "queued" and len(transport.requests) == 1

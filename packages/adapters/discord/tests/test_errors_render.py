@@ -290,7 +290,7 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
         ),
         (
             ("rate_limited", True, "quota_exhausted"),
-            "Google is rate-limiting this model right now.\n\nTry again in a minute.",
+            "Google is rate-limiting this model right now.\n\nTry again in a few minutes.",
         ),
         (
             ("transient_network", True, None),

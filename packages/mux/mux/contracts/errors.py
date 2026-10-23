@@ -138,6 +138,7 @@ class ProviderError(MuxError):
         native_message: str | None = None,
         native_error_code: str | None = None,
         native_param: str | None = None,
+        retry_after_s: float | None = None,
     ) -> None:
         super().__init__(
             f"provider error: {category}" + (f" ({native_code})" if native_code else "")
@@ -149,6 +150,8 @@ class ProviderError(MuxError):
         self.native_message = native_message
         self.native_error_code = native_error_code
         self.native_param = native_param
+        # The provider's own "retry after" hint, in seconds, when it gave one.
+        self.retry_after_s = retry_after_s
 
 
 __all__ = [

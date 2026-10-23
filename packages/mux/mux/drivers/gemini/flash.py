@@ -1,11 +1,18 @@
-"""Explicit host Flash policy; no client creation, retry or implicit selection."""
+"""Explicit host Flash policy: no client creation or implicit selection.
 
+The one retry is a create Google rate-limited, within the turn's deadline.
+"""
+
+import asyncio
 import logging
+import random
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 
 from pydantic import JsonValue
@@ -14,6 +21,7 @@ from mux.contracts.ids import ModelRef
 from mux.contracts.resources import Agent
 from mux.drivers.gemini.mcp_auth import model_request
 from mux.drivers.gemini.transport import (
+    CreateNeverSent,
     Object,
     TokenCountingTransport,
     Transport,
@@ -66,13 +74,13 @@ def definite_rejection(error: ProviderError) -> int | None:
     """The 4xx status of a create Google rejected outright, else None.
 
     Needs the provider's own HTTP status: a local refusal (no status), e.g. a
-    response check after a 200, may follow an accepted request. Timeouts, a bare
-    429, 5xx and network failures may have been accepted too; a 429 naming its
-    QuotaFailure was not.
+    response check after a 200, may follow an accepted request. Timeouts, 5xx and
+    network failures may have been accepted too. A 429, with or without its
+    QuotaFailure, is Google refusing to create anything.
     """
     code = error.native_error_code or ""
-    if code == "http_429" and error.native_code in ("quota_zero", "quota_exhausted"):
-        return 429  # Google's QuotaFailure: refused before any interaction existed
+    if code == "http_429":
+        return 429  # rate-limited: refused before any interaction existed
     if error.category not in _DEFINITE or not code.startswith("http_4"):
         return None
     status = code.removeprefix("http_")
@@ -89,6 +97,43 @@ def only_input_steps(steps: object) -> bool:
         isinstance(step, dict) and cast(dict[str, object], step).get("type") == "user_input"
         for step in cast(list[object], steps)
     )
+
+
+# The turn's (or worker's) deadline, set by the host around each turn: a
+# rate-limited create waits only while an answer can still come before it.
+CREATE_DEADLINE: ContextVar[datetime | None] = ContextVar("gemini_create_deadline", default=None)
+# Kept back from the deadline for the turn itself to run once created.
+CREATE_DEADLINE_MARGIN_S = 20.0
+CREATE_RETRIES = 4
+_BACKOFF_BASE_S = 2.0
+_sleep = asyncio.sleep  # the one wait, replaceable in tests without touching asyncio
+
+
+def _rate_limited(error: ProviderError) -> bool:
+    """A 429 Google would serve later: never a quota of 0 for the model."""
+    return (
+        error.category == "rate_limited"
+        and error.native_error_code == "http_429"
+        and error.native_code != "quota_zero"
+    )
+
+
+def _room_s() -> float | None:
+    """Seconds a retry may still wait, or None with no deadline set (no retry)."""
+    deadline = CREATE_DEADLINE.get()
+    if deadline is None:
+        return None
+    return (deadline - datetime.now(UTC)).total_seconds() - CREATE_DEADLINE_MARGIN_S
+
+
+def _wait_s(error: ProviderError, retries: int, room: float | None) -> float | None:
+    """How long to wait before the next try, or None when no retry fits."""
+    if retries >= CREATE_RETRIES or room is None or room <= 0:
+        return None
+    if error.retry_after_s is not None:
+        # Google's own delay is the earliest it will serve: never shortened.
+        return error.retry_after_s if error.retry_after_s <= room else None
+    return min(_BACKOFF_BASE_S * 2**retries * random.uniform(0.8, 1.2), room)
 
 
 class FlashTransport:
@@ -186,7 +231,7 @@ class FlashTransport:
         """
         receipt = FlashAttempt(model=model, attempt=attempt, outcome="unknown")
         try:
-            reply = await self.source.create(request)
+            reply = await self._create_within_rate_limits(request, model)
             # No fallback on malformed/lost acceptance or persistence failure.
             interaction = string(reply["id"])
             string(reply["status"])
@@ -207,6 +252,12 @@ class FlashTransport:
                 sent=not unsent,
             )
             raise
+        except CreateNeverSent:
+            # Stopped while waiting out a rate limit: only 429s, nothing created.
+            receipt = FlashAttempt(
+                model=model, attempt=attempt, outcome="refused", http_status=429, sent=False
+            )
+            raise
         finally:
             # Awaited in this task, never shielded: the owner's per-attempt marker is
             # context-local, and a shielded task would clear only its own copy. A
@@ -225,6 +276,57 @@ class FlashTransport:
                     attempt,
                     receipt.outcome,
                 )
+
+    async def _create_within_rate_limits(
+        self, request: Mapping[str, JsonValue], model: ModelRef
+    ) -> Object:
+        """One attempt's create, retried while Google only rate-limits it.
+
+        A 429 created nothing, so the same attempt (and its one hold) retries:
+        after Google's own retryDelay when it fits before the turn's deadline
+        (`CREATE_DEADLINE`), else after an exponential backoff with jitter capped
+        by the time left. A quota of 0, a delay past the deadline, or spent
+        retries ends it with the cause and the delay to report. A cancel while
+        waiting is `CreateNeverSent`.
+        """
+        retries = 0
+        while True:
+            try:
+                return await self.source.create(request)
+            except ProviderError as error:
+                if not _rate_limited(error):
+                    raise
+                wait = _wait_s(error, retries, _room_s())
+                if wait is None:
+                    log.warning(
+                        "gemini create rate limited: model=%s retries=%d retry_after_s=%s",
+                        model.id,
+                        retries,
+                        error.retry_after_s,
+                    )
+                    raise ProviderError(
+                        "rate_limited",
+                        retryable=False,
+                        native_code=(
+                            "free_quota_exhausted"
+                            if error.native_code == "free_quota_exhausted"
+                            else "quota_exhausted"
+                        ),
+                        native_error_code=error.native_error_code,
+                        native_param=error.native_param or model.id,
+                        retry_after_s=error.retry_after_s,
+                    ) from error
+                log.info(
+                    "gemini create rate limited, retrying: model=%s retry=%d wait_s=%.1f",
+                    model.id,
+                    retries + 1,
+                    wait,
+                )
+                try:
+                    await _sleep(wait)
+                except asyncio.CancelledError:
+                    raise CreateNeverSent() from None
+                retries += 1
 
     def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
         digests = getattr(self.source, "mount_echo_digests", None)
