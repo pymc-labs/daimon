@@ -136,6 +136,9 @@ WorkerFailureCode = Literal[
     "provider_setup_pending",
     "preparation_deadline_exceeded",
     "timed_out",
+    "provider_busy",
+    "provider_quota_zero",
+    "provider_rate_limited",
 ]
 
 # Admission refusals a person can act on, by their closed reason.
@@ -152,6 +155,23 @@ _BACKEND_CAUSE_CODES: dict[str, WorkerFailureCode] = {
     "channel_pin": "channel_backend_pinned",
     "agent_backend": "worker_runtime_missing",
 }
+
+
+def _quota_cause(error: BaseException) -> WorkerFailureCode | None:
+    """A provider quota refusal in `error`'s chain (the codes `provider_quota_copy` reads)."""
+    from mux.errors import ProviderError
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ProviderError) and current.category == "rate_limited":
+            if current.native_code == "quota_zero":
+                return "provider_quota_zero"
+            if current.native_code == "quota_exhausted":
+                return "provider_rate_limited"
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _admission_cause(error: BaseException) -> WorkerFailureCode | None:
@@ -186,7 +206,10 @@ def _admission_cause(error: BaseException) -> WorkerFailureCode | None:
 
 
 def worker_failure_code(
-    error: BaseException, phase: Literal["preparation_refused", "dispatch_refused"]
+    error: BaseException,
+    phase: Literal["preparation_refused", "dispatch_refused"],
+    *,
+    backend: str | None = None,
 ) -> WorkerFailureCode:
     """The closed code a failed worker records: a refusal keeps its phase; a bug is ours.
 
@@ -204,8 +227,14 @@ def worker_failure_code(
         # Our own setup or a busy fleet lock, in either phase: never the model's fault.
         return "preparation_deadline_exceeded"
     refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
+    if (quota := _quota_cause(error)) is not None:
+        return quota
     if isinstance(error, TimeoutError):
-        return "preparation_deadline_exceeded" if phase == "preparation_refused" else "timed_out"
+        if phase == "preparation_refused":
+            return "preparation_deadline_exceeded"
+        # Gemini can accept a turn and never start it; at the deadline that can't be
+        # told from a slow answer (usage arrives only at the end), so say both.
+        return "provider_busy" if backend == "gemini" else "timed_out"
     if not isinstance(error, Exception) or isinstance(error, refusal):
         return _admission_cause(error) or phase
     if isinstance(error, _provider_failures()):
@@ -1534,7 +1563,7 @@ class HostFleetPorts:
                                                     parent,
                                                     claimed,
                                                     failure_code=worker_failure_code(
-                                                        error, failure_code
+                                                        error, failure_code, backend=claimed.backend
                                                     ),
                                                 )
                                             )

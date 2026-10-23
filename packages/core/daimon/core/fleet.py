@@ -117,9 +117,19 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
     "admission_cap_exceeded": "a spending limit was reached; an admin can raise it",
     "balance_depleted": "this server is out of credit; an admin can top it up",
     "provider_hold_cap_reached": (
-        "the prepaid limit for that model provider is used up; an admin can raise it, "
-        "or ask for another model"
+        "too many replies were already running on that model for this account; "
+        "try again when one finishes"
     ),
+    "provider_busy": (
+        "the model provider didn't answer in time (it may be busy); try again in a minute"
+    ),
+    # The same cause and fix as `provider_quota_copy` (a turn's notice); the card line
+    # already names the model.
+    "provider_quota_zero": (
+        "this server's Google plan doesn't include that model; "
+        "pick another model or ask an admin to upgrade it"
+    ),
+    "provider_rate_limited": "Google is rate-limiting that model right now; try again in a minute",
     "provider_setup_pending": "that model provider is still being set up; try again in a minute",
     "timed_out": "it ran out of time; ask again with a smaller task",
     "deadline_expired": "it ran out of time; ask again with a smaller task",

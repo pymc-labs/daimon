@@ -151,11 +151,55 @@ def test_a_suppressed_context_never_names_the_cause(phase):
 
 
 @pytest.mark.parametrize(
-    ("phase", "code"),
-    [("preparation_refused", "preparation_deadline_exceeded"), ("dispatch_refused", "timed_out")],
+    ("phase", "backend", "code"),
+    [
+        ("preparation_refused", None, "preparation_deadline_exceeded"),
+        ("preparation_refused", "gemini", "preparation_deadline_exceeded"),
+        ("dispatch_refused", None, "timed_out"),
+        ("dispatch_refused", "openai", "timed_out"),
+        ("dispatch_refused", "anthropic", "timed_out"),
+        # Gemini can accept a turn and never start it: at the deadline that is
+        # indistinguishable from slow, so the words say both.
+        ("dispatch_refused", "gemini", "provider_busy"),
+    ],
 )
-def test_a_timeout_reads_as_running_out_of_time(phase, code):
-    assert worker_failure_code(TimeoutError(), phase) == code
+def test_a_timeout_reads_as_running_out_of_time_or_the_provider_not_answering(phase, backend, code):
+    assert worker_failure_code(TimeoutError(), phase, backend=backend) == code
+
+
+def test_provider_busy_never_claims_it_was_busy():
+    text = worker_error_text("provider_busy") or ""
+    assert text.startswith("the model provider didn't answer in time (it may be busy)")
+    assert text.endswith("try again in a minute")
+
+
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+@pytest.mark.parametrize(
+    ("native_code", "code", "words"),
+    [
+        ("quota_zero", "provider_quota_zero", "Google plan doesn't include that model"),
+        ("quota_exhausted", "provider_rate_limited", "Google is rate-limiting that model"),
+    ],
+)
+def test_a_provider_quota_refusal_names_the_plan_or_the_rate_limit(phase, native_code, code, words):
+    quota = ProviderError(
+        "rate_limited", retryable=True, native_code=native_code, native_param="gemini-4-argon"
+    )
+    assert worker_failure_code(quota, phase, backend="gemini") == code
+    wrapped = RuntimeError("worker failed")
+    wrapped.__cause__ = quota
+    assert worker_failure_code(wrapped, phase) == code
+    assert words in (worker_error_text(code) or "")
+    # Any other rate limit keeps its phase (a refusal), as before.
+    other = ProviderError("rate_limited", retryable=True, native_code="other")
+    assert worker_failure_code(other, phase) == phase
+
+
+def test_the_hold_cap_line_uses_the_root_turns_words():
+    assert worker_error_text("provider_hold_cap_reached") == (
+        "too many replies were already running on that model for this account; "
+        "try again when one finishes"
+    )
 
 
 @pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
