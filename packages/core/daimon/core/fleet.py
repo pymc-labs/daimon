@@ -86,6 +86,7 @@ type FleetConflictReason = Literal[
     "retained_revision_changed",
     "result_not_successful",
     "wake_pending",
+    "worker_setup_busy",
 ]
 
 
