@@ -175,6 +175,109 @@ async def checkpoint_probe(home: Path) -> None:
     print(f"checkpoint_restore_verified service_uid={os.geteuid()} workspace_uid={uid}", flush=True)
 
 
+async def uid_lease_probe(home: Path, mode: str) -> None:
+    import threading
+    from contextlib import suppress
+
+    from daimon_harness import runtime
+    from daimon_harness.errors import HarnessError
+    from daimon_harness.service import Supervisor
+
+    entered, thread_release = threading.Event(), threading.Event()
+    owner_release, owner_started = asyncio.Event(), asyncio.Event()
+    original_stop = TurnContext._stop_processes
+    original_wait = runtime.VERIFY_WAIT_TIMEOUT
+    signals = []
+
+    def held(context):
+        signals.append(context.request.turn_id)
+        if len(signals) == 1:
+            entered.set()
+            assert thread_release.wait(10)
+        original_stop(context)
+
+    class Model:
+        async def run(self, context, history):
+            await context.emit(
+                "usage",
+                {
+                    "request_id": context.request.turn_id,
+                    "model": "gpt-6-luna",
+                    "input_tokens": 1,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1,
+                    "reasoning_tokens": 0,
+                },
+            )
+            if context.request.turn_id == "lease-one":
+                owner_started.set()
+                while not owner_release.is_set():
+                    with suppress(asyncio.CancelledError):
+                        await owner_release.wait()
+            else:
+                result = await context.tool(
+                    "survive", "bash", {}, lambda: context.bash("sleep 0.2; echo survived")
+                )
+                assert "exit_code=0" in result and "survived" in result, (
+                    "old cleanup killed next turn"
+                )
+            return []
+
+    isolated = Supervisor(home / "lease-probe", Model(), mode)
+    request = TurnRequest(
+        session_id="lease",
+        turn_id="lease-one",
+        idempotency_key="lease-one",
+        model="gpt-6-luna",
+        instructions="",
+        input=[],
+        mcp_servers=[],
+        skills=[],
+        limits={"deadline_s": 60, "max_tool_calls": 10},
+    )
+    TurnContext._stop_processes = held
+    try:
+        await isolated.submit(request)
+        await owner_started.wait()
+        runtime.VERIFY_WAIT_TIMEOUT = 0.05
+        old = asyncio.create_task(isolated.contexts[request.turn_id].verify_processes())
+        assert await asyncio.to_thread(entered.wait, 2)
+        try:
+            await old
+            raise AssertionError("held verifier did not time out")
+        except TimeoutError:
+            pass
+        runtime.VERIFY_WAIT_TIMEOUT = original_wait
+        owner = isolated.tasks[request.turn_id]
+        owner.cancel()
+        done, _ = await asyncio.wait({owner}, timeout=0.05)
+        assert not done
+        isolated.start_cleanup(request.turn_id)  # Same timeout transition as /cancel.
+        owner_release.set()
+        await asyncio.sleep(0)
+        second = request.model_copy(
+            update={"turn_id": "lease-two", "idempotency_key": "lease-two"}, deep=True
+        )
+        try:
+            await isolated.submit(second)
+            raise AssertionError("admitted next turn with old verifier live")
+        except HarnessError as exc:
+            assert exc.kind == "workers_active"
+        thread_release.set()
+        await owner
+        await isolated.cleanups[request.turn_id]
+        await isolated.submit(second)
+        await isolated.tasks[second.turn_id]
+        assert await isolated.io(isolated.journal.terminal_outcome, second.turn_id) == "completed"
+        print("uid_lease_next_turn_survives_verified", flush=True)
+    finally:
+        thread_release.set()
+        owner_release.set()
+        TurnContext._stop_processes = original_stop
+        runtime.VERIFY_WAIT_TIMEOUT = original_wait
+        await isolated.close()
+
+
 async def main() -> None:
     assert os.geteuid() == 0
     home = Path(os.environ.get("HARNESS_PROBE_HOME", "/home/harness"))
@@ -217,7 +320,21 @@ async def main() -> None:
                 assert str(scratch) in str(exc), str(exc)
             finally:
                 scratch.chmod(0o755)
+    orphan = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)"],
+        user=10001,
+        group=10001,
+        extra_groups=[],
+        env={},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     app = create_app(home=home)
+    lifecycle = app.router.lifespan_context(app)
+    await lifecycle.__aenter__()
+    assert await asyncio.to_thread(orphan.wait, timeout=2) == -signal.SIGKILL
+    print("startup_orphan_sweep_verified", flush=True)
     mode = app.state.supervisor.session_mode
     assert os.geteuid() == 10000
     journal: Journal = app.state.supervisor.journal
@@ -241,7 +358,103 @@ async def main() -> None:
         await context.skills()
         context.write("file.txt", name)
         contexts.append(context)
+    await uid_lease_probe(home, mode)
     first = contexts[0]
+    # Real service/tool UID regression: the same UID's verifiers must never
+    # overlap, including cleanup initiated by independent tool workers.
+    original_run = subprocess.run
+
+    def held_verifier(command, **kwargs):
+        if len(command) == 4 and str(command[2]).endswith("/kill_uid.py"):
+            # Hold AFTER UID drop: without serialization both protected helpers
+            # coexist as the tool's real UID and kill(-1) kills the other helper.
+            program = (
+                "import runpy,sys,time; n=runpy.run_path(sys.argv[1]); "
+                "n['isolate_verifier'](int(sys.argv[2])); time.sleep(0.1); "
+                "sys.exit(n['kill_uid']())"
+            )
+            command = [command[0], "-I", "-c", program, command[2], command[3]]
+        return original_run(command, **kwargs)
+
+    subprocess.run = held_verifier
+    try:
+        for _ in range(20):
+            pair = await asyncio.gather(first.bash("true"), first.bash("true"))
+            assert all("exit_code=0" in result for result in pair), "paired cleanup failed"
+    finally:
+        subprocess.run = original_run
+    print("paired_cleanup_20_pairs_verified", flush=True)
+    if mode == "multi":
+        # Use the service regression with production UID switching and procfs.
+        # Only inject the adapter: retain the real TurnContext cleanup path.
+        from daimon_harness import service
+        from daimon_harness.service import Supervisor
+
+        class ProbeAdapter:
+            async def run(self, context, history):
+                if context.request.session_id == "wedged":
+                    await context.tool("busy", "bash", {}, lambda: context.bash("sleep 120"))
+                await context.emit(
+                    "usage",
+                    {
+                        "request_id": context.request.turn_id,
+                        "model": "gpt-6-luna",
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "reasoning_tokens": 0,
+                    },
+                )
+                return []
+
+        old_timeout, old_delay = service.CLEANUP_TIMEOUT, service.CLEANUP_RETRY_DELAY
+        service.CLEANUP_TIMEOUT, service.CLEANUP_RETRY_DELAY = 0.05, 0.01
+        isolated = Supervisor(home / "isolation-probe", ProbeAdapter(), "multi")
+        blocked = asyncio.Event()
+        original_stop = TurnContext.stop_workers
+
+        async def blocked_stop(context):
+            if context.request.session_id == "wedged" and not blocked.is_set():
+                raise TimeoutError("injected persistent verifier failure")
+            await original_stop(context)
+
+        TurnContext.stop_workers = blocked_stop
+        try:
+            request = first.request.model_copy(
+                update={"session_id": "wedged", "turn_id": "wedged", "idempotency_key": "wedged"},
+                deep=True,
+            )
+            request.limits.deadline_s = 0.1
+            await isolated.submit(request)
+            async with asyncio.timeout(5):
+                while "wedged" not in isolated.sealed_sessions:
+                    await asyncio.sleep(0.01)
+            assert not isolated.unhealthy, "multi mode killed unrelated sessions"
+            service.CLEANUP_TIMEOUT = old_timeout
+            await asyncio.gather(isolated.tasks["wedged"], return_exceptions=True)
+            other = request.model_copy(
+                update={
+                    "session_id": "serving",
+                    "turn_id": "serving",
+                    "idempotency_key": "serving",
+                },
+                deep=True,
+            )
+            other.limits.deadline_s = 5
+            await isolated.submit(other)
+            await isolated.tasks["serving"]
+            assert await isolated.io(isolated.journal.terminal_outcome, "serving") == "completed"
+            print("multi_mode_isolation_verified", flush=True)
+        finally:
+            blocked.set()
+            TurnContext.stop_workers = original_stop
+            service.CLEANUP_TIMEOUT, service.CLEANUP_RETRY_DELAY = old_timeout, old_delay
+            await isolated.cleanups["wedged"]
+            assert "wedged" not in isolated.contexts
+            assert await isolated.io(isolated.journal.terminal_outcome, "wedged") == "errored"
+            print("sealed_multi_reclamation_verified", flush=True)
+            await isolated.close()
+
     if os.environ.get("HARNESS_PROBE_PID_BURN") == "1":
         await asyncio.to_thread(
             subprocess.run,
@@ -538,7 +751,7 @@ async def main() -> None:
                     await asyncio.sleep(0.01)
     if mode == "single":
         await checkpoint_probe(home)
-    await app.state.supervisor.close()
+    await lifecycle.__aexit__(None, None, None)
 
 
 if __name__ == "__main__":

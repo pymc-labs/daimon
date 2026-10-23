@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -31,6 +32,11 @@ from .credentials import redact
 from .errors import HarnessError
 from .isolation import can_switch_uid, tool_identity
 from .journal import identifier
+
+CLEANUP_WAIT_TIMEOUT = 2.0
+VERIFY_WAIT_TIMEOUT = 9.0
+_uid_locks: dict[int, threading.Lock] = {}
+_uid_locks_guard = threading.Lock()
 
 
 async def discard_event(kind: EventType, data: dict[str, JsonValue]) -> None:
@@ -57,7 +63,24 @@ class TurnContext:
     workers: set[asyncio.Task[JsonValue]] = field(
         default_factory=set[asyncio.Task[JsonValue]], repr=False
     )
+    spawns: set[asyncio.Task[asyncio.subprocess.Process]] = field(
+        default_factory=set[asyncio.Task[asyncio.subprocess.Process]], repr=False
+    )
     stopping: bool = False
+    verifiers: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]], repr=False)
+
+    async def verify_processes(self) -> None:
+        # Shield the actual thread future: timeout/cancellation is not evidence
+        # that the thread stopped signalling this UID.
+        task = asyncio.create_task(asyncio.to_thread(self.stop_processes))
+        self.verifiers.add(task)
+        task.add_done_callback(self.verifiers.discard)
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        await asyncio.wait_for(asyncio.shield(task), timeout=VERIFY_WAIT_TIMEOUT)
+
+    async def join_verifiers(self) -> None:
+        while self.verifiers:
+            await asyncio.shield(asyncio.gather(*self.verifiers, return_exceptions=True))
 
     def __post_init__(self) -> None:
         tool_identity(self.home, self.tool_uid)
@@ -96,15 +119,21 @@ class TurnContext:
     async def stop_workers(self) -> None:
         """Drain workers before publishing a terminal event or reusing a session."""
         self.stopping = True
+        if self.spawns:
+            _, spawning = await asyncio.wait(self.spawns, timeout=CLEANUP_WAIT_TIMEOUT)
+            if spawning:
+                raise HarnessError(
+                    "workers_active", "Tool spawn incomplete; session remains sealed"
+                )
         workers = set(self.workers)
         for worker in workers:
             worker.cancel()
         pending: set[asyncio.Task[JsonValue]]
         if workers:
-            _, pending = await asyncio.wait(workers, timeout=2)
+            _, pending = await asyncio.wait(workers, timeout=CLEANUP_WAIT_TIMEOUT)
         else:
             pending = set()
-        self.stop_processes()
+        await self.verify_processes()
         if pending:
             _, pending = await asyncio.wait(pending, timeout=5)
         if pending:
@@ -223,6 +252,8 @@ class TurnContext:
                 },
             )
         )
+        self.spawns.add(spawn)
+        spawn.add_done_callback(self.spawns.discard)
         process: asyncio.subprocess.Process | None = None
         reader: asyncio.Task[None] | None = None
         tail = bytearray()
@@ -240,10 +271,10 @@ class TurnContext:
         async def cleanup() -> None:
             # Creation may already have launched children when cancellation is
             # delivered. Resolve the shielded spawn before killing the tool UID.
-            child = await spawn
+            child = await asyncio.wait_for(asyncio.shield(spawn), timeout=CLEANUP_WAIT_TIMEOUT)
             self.process_groups.add(child.pid)
             try:
-                self.stop_processes()
+                await self.verify_processes()
             finally:
                 transport = cast(
                     asyncio.SubprocessTransport,
@@ -251,7 +282,7 @@ class TurnContext:
                 )
                 try:
                     if reader is not None:
-                        async with asyncio.timeout(2):
+                        async with asyncio.timeout(CLEANUP_WAIT_TIMEOUT):
                             await reader
                 except TimeoutError:
                     pass
@@ -259,10 +290,12 @@ class TurnContext:
                     transport.close()
                     if reader is not None:
                         reader.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await reader
+                        with suppress(asyncio.CancelledError, TimeoutError):
+                            await asyncio.wait_for(
+                                asyncio.shield(reader), timeout=CLEANUP_WAIT_TIMEOUT
+                            )
                     with suppress(TimeoutError):
-                        await asyncio.wait_for(child.communicate(), timeout=2)
+                        await asyncio.wait_for(child.communicate(), timeout=CLEANUP_WAIT_TIMEOUT)
                     self.process_groups.discard(child.pid)
 
         try:
@@ -291,6 +324,18 @@ class TurnContext:
         return f"exit_code={process.returncode}\n{marker}{tail.decode(errors='replace')}"
 
     def stop_processes(self) -> None:
+        # Timed-out to_thread callers may still own a verifier. Serialize the
+        # actual thread operation, not just its cancellable async caller.
+        with _uid_locks_guard:
+            lock = _uid_locks.setdefault(self.tool_uid, threading.Lock())
+        if not lock.acquire(timeout=4):
+            raise TimeoutError("tool UID cleanup busy")
+        try:
+            self._stop_processes()
+        finally:
+            lock.release()
+
+    def _stop_processes(self) -> None:
         if can_switch_uid():
             # Trusted bootstrap drops all root UIDs/caps before broadcasting as
             # the session's real UID; protected effective UID prevents ptrace.
@@ -309,7 +354,7 @@ class TurnContext:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=2,
+                timeout=4,
                 check=True,
             )
         else:
@@ -346,16 +391,18 @@ class TurnContext:
                 },
             )
         )
+        self.spawns.add(spawn)
+        spawn.add_done_callback(self.spawns.discard)
         reader: asyncio.Task[tuple[bytes, bytes]] | None = None
 
         async def cleanup() -> None:
-            child = await spawn
+            child = await asyncio.wait_for(asyncio.shield(spawn), timeout=CLEANUP_WAIT_TIMEOUT)
             try:
                 with suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGKILL)
                 if reader is not None:
-                    await reader
-                await child.wait()
+                    await asyncio.wait_for(asyncio.shield(reader), timeout=CLEANUP_WAIT_TIMEOUT)
+                await asyncio.wait_for(child.wait(), timeout=CLEANUP_WAIT_TIMEOUT)
             finally:
                 self.process_groups.discard(child.pid)
 

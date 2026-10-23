@@ -155,7 +155,7 @@ def validate_credential_files(
 
 def proc_hides_other_users(mountinfo: Path = Path("/proc/self/mountinfo")) -> bool:
     """Inspect the actual proc mount, including its superblock options."""
-    for line in mountinfo.read_text().splitlines():
+    for line in reversed(mountinfo.read_text().splitlines()):
         mount, separator, filesystem = line.partition(" - ")
         fields, backing = mount.split(), filesystem.split()
         if separator and fields[4] == "/proc" and backing[0] == "proc":
@@ -170,6 +170,26 @@ def validate_session_mode(
     mode = os.environ.get("HARNESS_SESSION_MODE", "single")
     if mode not in {"single", "multi"}:
         raise RuntimeError("HARNESS_SESSION_MODE must be single or multi")
+    if os.environ.get("HARNESS_TEST_MODE") != "1":
+        # Validate using the trusted helper's reserved exemption, in single
+        # mode too. Plain procfs remains valid for a single-session sandbox.
+        for line in reversed(mountinfo.read_text().splitlines()):
+            mount, separator, filesystem = line.partition(" - ")
+            fields, backing = mount.split(), filesystem.split()
+            if separator and fields[4] == "/proc" and backing[0] == "proc":
+                options = set(fields[5].split(",")) | set(backing[2].split(","))
+                modes = {o for o in options if o.startswith("hidepid=")}
+                if (
+                    modes
+                    and modes != {"hidepid=0"}
+                    and (
+                        not modes
+                        <= {"hidepid=1", "hidepid=2", "hidepid=noaccess", "hidepid=invisible"}
+                        or "gid=60002" not in options
+                    )
+                ):
+                    raise RuntimeError("tool cleanup requires hidepid gid=60002")
+                break
     if mode == "multi" and os.environ.get("HARNESS_TEST_MODE") != "1":
         if not can_switch_uid() or not proc_hides_other_users(mountinfo):
             raise RuntimeError(

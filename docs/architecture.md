@@ -2255,7 +2255,26 @@ A degraded snapshot or upload failure queues `checkpoint_warning` for the next
 new turn. The mux driver preserves it as a native event, and core converts it to
 a non-terminal thread notice about possible message/file loss, emitted once per
 session. A local pending marker retains late failures across process restarts;
-a notice not captured in a snapshot can still be lost with a destroyed sandbox.
+restoring a degraded snapshot rebuilds its notice from the workspace manifest.
+A warning about an entirely failed upload can still be lost if its local marker
+was not captured before sandbox destruction.
+
+One cleanup coordinator owns each turn's worker termination and verifier joins.
+A timed-out async caller does not release a verifier thread or the session's tool
+UID. Admission remains blocked until every cleanup operation finishes. The
+watchdog starts after write-ahead at the adapter deadline boundary; its grace
+includes bounded bash cleanup, worker cleanup, pending remote WAL commits and a
+scheduling margin. A healthy owner doing durable commits is not a cleanup failure.
+
+Three failed bounded rounds request replacement in single mode, with retryable
+errors and a final check before process exit. In multi mode only the affected
+conversation is sealed; reclamation continues with capped backoff. Once workers
+stop, the turn commits an errored `cleanup_exhausted` terminal and the driver
+stops polling. Core displays “Tool cleanup failed. Start a new conversation.”
+Other sessions remain available. A never-dying process retains its UID and
+context until pod restart. Verifier priority requires CAP_SYS_NICE, which the AKS
+security context may not grant. Per-session cgroup CPU limits (G3) and per-call
+process isolation for parallel bash commands (F78) remain the resource limits.
 
 Recovery authenticates and persists the client cursor, loads remote reservations
 and WAL inventory, restores an empty sandbox, and merges original event identities

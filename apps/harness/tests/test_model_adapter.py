@@ -618,6 +618,7 @@ async def test_sdk_cancel_joins_tool_workers_before_terminal_and_session_reuse(
 ):
     import asyncio
 
+    from daimon_harness.errors import HarnessError
     from daimon_harness.journal import ConflictError
     from daimon_harness.service import Supervisor
 
@@ -711,8 +712,9 @@ async def test_sdk_cancel_joins_tool_workers_before_terminal_and_session_reuse(
         supervisor.tasks[first.turn_id].cancel()
         await asyncio.sleep(0.05)
         assert not supervisor.journal.ended(first.turn_id)
-        with pytest.raises(ConflictError, match="active turn"):
+        with pytest.raises(HarnessError) as sealed:
             await supervisor.submit(second)
+        assert sealed.value.kind == "workers_active"
         # Repeated cancellation cannot cut cleanup short.
         supervisor.tasks[first.turn_id].cancel()
         release.set()
