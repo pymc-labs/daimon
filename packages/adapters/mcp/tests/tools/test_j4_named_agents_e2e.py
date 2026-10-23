@@ -12,6 +12,7 @@ Any refusal on this path is a product bug, not a test detail.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -20,6 +21,7 @@ from uuid import uuid4
 
 import discord
 import httpx
+import pytest
 from daimon.adapters.mcp.tools.fleet import HostFleetToolService
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import AgentBackendService, BackendActor, load_backend_agent
@@ -380,3 +382,67 @@ async def test_j4_slow_budget_reads_and_full_slots_never_stop_or_strand_a_worker
     ]
     # One-sentence workers, two at a time, every budget read 4 s: inside the worker deadline.
     assert elapsed < 240
+
+
+from packages.core.tests.turn.test_openai_host import Stream as _HostStream  # noqa: E402
+
+
+class _EndMissedStream(_HostStream):
+    """Live acb5cd66: the answer arrives, the turn's end never does; keep-alives only."""
+
+    async def __aiter__(self):
+        await self.wire.sent.wait()
+        root = self.wire.turns[-1]
+        for event in (
+            {
+                "type": "agent.session.turn.in_progress",
+                "event_id": root["id"] + ":running",
+                "turn": {**root, "status": "in_progress"},
+            },
+            {
+                "type": "agent.session.turn.item.done",
+                "event_id": root["id"] + ":answer",
+                "turn_id": root["id"],
+                "item": self.wire.items[-1],
+            },
+        ):
+            event["session_id"] = self.wire.session_id
+            yield ("data: " + json.dumps(event) + "\n\n").encode()
+        while True:
+            await asyncio.sleep(0.05)
+            yield b": keepalive\n\n"
+
+
+class _EndedBeforeConnectStream(_EndMissedStream):
+    """The turn ended before the stream connected: OpenAI replays nothing (probe)."""
+
+    async def __aiter__(self):
+        while True:
+            await asyncio.sleep(0.05)
+            yield b": keepalive\n\n"
+
+
+@pytest.mark.parametrize("stream", ["end_missed", "ended_before_connect"])
+async def test_j4_a_gpt_worker_whose_stream_never_reports_the_end_still_succeeds(
+    j10_root, monkeypatch, stream
+):
+    """J4 acb5cd66: OpenAI's stream replays nothing and keep-alives hide the silence.
+
+    The worker answered, so it must finish from the saved turn (with its usage)
+    promptly, never at its 10-minute deadline. On main these time out.
+    """
+    from daimon.core.turn.openai_io import OpenAITurnIO
+
+    from packages.core.tests.turn import test_openai_host
+
+    # The status check runs after this much silence (15 s live).
+    monkeypatch.setattr(OpenAITurnIO, "idle_check_s", 0.2, raising=False)
+    variant = _EndMissedStream if stream == "end_missed" else _EndedBeforeConnectStream
+    monkeypatch.setattr(test_openai_host, "Stream", variant)
+    _, settled, collected, *_ = await _run_named_fleet(j10_root, monkeypatch)
+    assert [(row.role, row.backend, row.status) for row in settled] == [
+        ("fleet-claude", "anthropic", "succeeded"),
+        ("fleet-openai", "openai", "succeeded"),
+        ("fleet-gemini", "gemini", "succeeded"),
+    ]
+    assert collected["status"] == "ready" and len(collected["results"]) == 3

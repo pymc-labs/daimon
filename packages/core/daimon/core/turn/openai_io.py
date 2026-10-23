@@ -186,6 +186,12 @@ class _OpenAIStream(AsyncIterator[TurnEvent]):
 
 
 class OpenAITurnIO:
+    #: OpenAI's event stream replays nothing: a turn that ended before it connected,
+    #: or between a reconcile and it, is never reported there, and keep-alive frames
+    #: hide the silence (probe 2026-10-23). The driver asks for the session status
+    #: whenever the stream yields nothing for this long (J4 acb5cd66).
+    idle_check_s: float = 15.0
+
     def __init__(
         self,
         backend: ManagedAgents,
@@ -222,6 +228,9 @@ class OpenAITurnIO:
         self._displayed: dict[str, str] = {}
         self._terminal: str | None = None
         self._terminated = False
+        # The turn's input went with the session create (conversation-only), so
+        # the turn may already have ended before any stream opened.
+        self.input_sent_before_stream = False
 
     def _validate(self, event: Event) -> None:
         if event.session_id != self._session.id or event.native.provider != "openai":
@@ -368,6 +377,7 @@ class OpenAITurnIO:
             if await self._initial_input_loader(self._session, message):
                 if len(inputs) != 1:
                     raise UnsupportedCapability(("host_initial_input_batch",), PROFILE)
+                self.input_sent_before_stream = True
                 return
 
         async def deliver(key: str) -> SendReceipt:
