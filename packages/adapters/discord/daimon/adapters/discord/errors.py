@@ -24,7 +24,7 @@ from daimon.core.platform_words import words_for
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
-from daimon.core.turn.notices import short_ref
+from daimon.core.turn.notices import provider_quota_copy, short_ref
 from mux.errors import ProviderError
 from ulid import ULID
 
@@ -129,6 +129,8 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
         # Connection failures, timeouts and errors with no status.
         return _AI_UNREACHABLE
     if isinstance(exc, ProviderError):
+        if (quota := provider_quota_copy(exc)) is not None:
+            return quota  # a model the plan gives no quota names that, not "busy"
         # Any provider behind the neutral driver layer (Gemini, OpenAI...).
         if exc.category in {"rate_limited", "overloaded"}:
             return _AI_BUSY

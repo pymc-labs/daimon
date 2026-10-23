@@ -16,6 +16,7 @@ from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.errors import ProviderError
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
@@ -369,12 +370,15 @@ def render_termination_notice(
         return None
     copy = _COPY.get(reason, _FALLBACK)
     failure = error or (state.error if state is not None else None)
+    quota = provider_quota_copy(failure)
     if any(isinstance(cause, GitHubTokenMintUnavailable) for cause in _error_chain(failure)):
         copy = _Copy(
             "GitHub access is temporarily unavailable.",
             "@mention Daimon to try again.",
             "Send your message again.",
         )
+    elif quota is not None:
+        copy = _Copy(*quota)
     elif spend_limit_error(failure) is not None:
         copy = _Copy(
             "Daimon has reached its usage limit.",
@@ -411,7 +415,12 @@ def render_termination_notice(
                 )
             else:
                 title = f"The connections to {names} failed, so there's no reply."
-        if reason is TerminationReason.RATE_LIMITED and state.rate_limit_until is not None:
+        # A quota's own words already say when to retry, or that waiting won't help.
+        if (
+            reason is TerminationReason.RATE_LIMITED
+            and state.rate_limit_until is not None
+            and quota is None
+        ):
             next_step = f"Try again after {_clock(state.rate_limit_until)}."
     return TerminationNotice(
         reason=reason,
@@ -421,6 +430,40 @@ def render_termination_notice(
         finished_tools=finished,
         request_id=request_id,
     )
+
+
+def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
+    """Plain words for a provider quota refusal anywhere in `error`'s chain, else None.
+
+    A model this deployment's provider plan gives no quota at all, or one that
+    is only rate-limited for now. Shared by a turn's notice and a fleet
+    worker's failure line, so both name the same cause and fix.
+    """
+    for cause in _error_chain(error):
+        if isinstance(cause, ProviderError) and cause.category == "rate_limited":
+            if cause.native_code not in ("quota_zero", "quota_exhausted"):
+                continue
+            model = _model_words(cause.native_param)
+            if cause.native_code == "quota_zero":
+                return (
+                    f"{_capitalised(model)} isn't available on this server's Google plan.",
+                    "Pick another model or ask an admin to upgrade it.",
+                )
+            return (
+                f"Google is rate-limiting {model} right now.",
+                "Try again in a minute.",
+            )
+    return None
+
+
+def _model_words(model_id: str | None) -> str:
+    """ "Gemini 4 Argon" for a known id, else "this model"."""
+    if not model_id:
+        return "this model"
+    from daimon.core.agent_model_names import model_name
+    from mux.contracts.ids import ModelRef
+
+    return model_name(ModelRef(provider=INLINE_REUSE.provider, id=model_id))
 
 
 def _capitalised(text: str) -> str:

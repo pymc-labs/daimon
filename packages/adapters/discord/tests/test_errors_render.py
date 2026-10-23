@@ -284,6 +284,15 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
         ),
         (("overloaded", True, "503"), "Daimon's AI service is busy.\n\nTry again in a minute."),
         (
+            ("rate_limited", False, "quota_zero"),
+            "This model isn't available on this server's Google plan.\n\n"
+            "Pick another model or ask an admin to upgrade it.",
+        ),
+        (
+            ("rate_limited", True, "quota_exhausted"),
+            "Google is rate-limiting this model right now.\n\nTry again in a minute.",
+        ),
+        (
             ("transient_network", True, None),
             "Daimon couldn't reach its AI service.\n\nTry again in a minute.",
         ),

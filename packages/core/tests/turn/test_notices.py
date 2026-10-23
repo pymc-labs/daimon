@@ -361,3 +361,54 @@ def test_a_full_gemini_hold_ledger_reads_as_busy_in_plain_words() -> None:
     assert "Too many replies are already running" in rendered
     assert "Try again when one finishes." in rendered
     assert "hold" not in rendered.lower(), "no ledger jargon"
+
+
+@pytest.mark.parametrize(
+    ("code", "title", "action"),
+    [
+        (
+            "quota_zero",
+            "Gemini 4 Argon isn't available on this server's Google plan.",
+            "Pick another model or ask an admin to upgrade it.",
+        ),
+        (
+            "quota_exhausted",
+            "Google is rate-limiting Gemini 4 Argon right now.",
+            "Try again in a minute.",
+        ),
+    ],
+)
+def test_a_provider_quota_refusal_names_the_model_and_the_fix(
+    code: str, title: str, action: str
+) -> None:
+    """J2 smoke: Argon on a free-tier key is a quota of 0, never a stall or a
+    generic failure; even Google's "retry in 17h" doesn't replace the words."""
+    from daimon.core.errors import TurnError
+    from mux.errors import ProviderError
+
+    cause = ProviderError(
+        "rate_limited",
+        retryable=code != "quota_zero",
+        native_code=code,
+        native_param="gemini-4-argon",
+    )
+    error = TurnError(kind="upstream", message=str(cause), cause=cause)
+    until = datetime(2026, 10, 24, 7, 0, tzinfo=UTC)
+    notice = render_termination_notice(
+        TerminationReason.RATE_LIMITED,
+        state=TurnState(rate_limit_until=until, error=error),
+    )
+    assert notice is not None
+    assert (notice.title, notice.next_step) == (title, action)
+
+
+def test_an_unnamed_quota_model_and_a_plain_rate_limit_keep_their_words() -> None:
+    from daimon.core.turn.notices import provider_quota_copy
+    from mux.errors import ProviderError
+
+    unnamed = ProviderError("rate_limited", retryable=False, native_code="quota_zero")
+    assert provider_quota_copy(unnamed) == (
+        "This model isn't available on this server's Google plan.",
+        "Pick another model or ask an admin to upgrade it.",
+    )
+    assert provider_quota_copy(ProviderError("rate_limited", retryable=True)) is None
