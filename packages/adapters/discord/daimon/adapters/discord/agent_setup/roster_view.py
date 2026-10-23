@@ -301,9 +301,9 @@ class RosterView(PanelViewBase):
 
     async def _on_connect_github(self, interaction: discord.Interaction) -> None:
         from daimon.adapters.discord.agent_setup.github_home import load_home
-        from daimon.adapters.discord.checks import is_guild_admin
+        from daimon.adapters.discord.checks import is_platform_admin
 
-        if interaction.guild_id != self.state.guild_id or not await is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if interaction.guild_id != self.state.guild_id or not is_platform_admin(interaction):  # pyright: ignore[reportArgumentType]
             await interaction.response.send_message(
                 "Only a server admin can connect GitHub.", ephemeral=True
             )

@@ -99,13 +99,13 @@ def register_promo_code_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         code: str,
     ) -> RedeemPromoCodeResult:
-        """Redeem a promo code for credit on this server or workspace.
+        """Redeem credit with a direct personal platform-admin CLI/OAuth credential.
         For example, apply the code someone was given to add credit to the balance.
 
         Case, spaces and dashes in ``code`` do not matter. Each code works once
         per server or workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
         end. Repeated wrong codes pause redemption for a few minutes. Requires
-        Manage Server (Discord) or workspace admin (Slack).
+        a live platform admin acting directly; chat and routines are refused.
         """
         return await _redeem_promo_code_impl(runtime, await _auth(ctx), code)

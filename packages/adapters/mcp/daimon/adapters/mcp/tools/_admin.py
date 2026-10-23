@@ -1,13 +1,16 @@
 """Recheck delegated authority after awaits, without elevating a stored account role."""
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.stores.daimon_admins import has_grant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-async def current_admin(session: AsyncSession, auth: AuthIdentity) -> bool:
+async def current_admin(
+    session: AsyncSession, auth: AuthIdentity, *, action: DelegatedAction | None = None
+) -> bool:
     """A live platform attestation or a still-present grant from this request's verified roles."""
-    if not auth.is_admin or auth.is_external_agent:
+    if not auth.admin_for(action):
         return False
     if auth.platform not in {"discord", "slack", "teams"}:
         return True  # Local operator identities have no platform delegation.

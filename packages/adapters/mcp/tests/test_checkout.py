@@ -431,7 +431,7 @@ async def test_checkout_refuses_delegated_admin_before_stripe(
 @pytest.mark.parametrize(
     ("chat", "platform", "external", "expected"),
     [
-        (True, True, False, 200),
+        (True, True, False, 403),
         (True, False, False, 403),
         (False, True, False, 403),
         (True, True, True, 403),

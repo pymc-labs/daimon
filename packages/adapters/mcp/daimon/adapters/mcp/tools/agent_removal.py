@@ -39,6 +39,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.adapters.mcp.tools.skill_uploads import require_skill_change
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.skills import resolve_custom_skill_titles
@@ -117,7 +118,9 @@ async def _detach_mcp_server_impl(
         ma_agent_id=str(agent.id),
         is_daimon_managed=is_daimon_managed,
     )
-    outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
+    outcome = decide_operation(
+        "mcp_remove", is_admin=auth.admin_for(DelegatedAction.CREDENTIALS), target=facts
+    )
     if outcome != "allow":
         raise ToolError(
             f"Disconnecting '{server_name}' from '{agent_name}' needs a workspace or server "
@@ -327,7 +330,9 @@ async def _remove_agent_key_impl(
         ma_agent_id=str(agent.id),
         is_daimon_managed=is_daimon_managed,
     )
-    outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
+    outcome = decide_operation(
+        "key_remove", is_admin=auth.admin_for(DelegatedAction.CREDENTIALS), target=facts
+    )
     if outcome != "allow":
         raise ToolError(
             f"Removing {key} from '{agent_name}' needs a workspace or server admin, and the "

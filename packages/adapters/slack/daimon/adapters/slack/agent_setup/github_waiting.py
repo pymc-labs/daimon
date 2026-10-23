@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.agent_policy import gather_target_facts
 from daimon.adapters.slack.agent_setup import panel_views
@@ -319,7 +319,7 @@ async def handle(
     if action_id not in ACTIONS:
         return False
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_platform_admin(client, user_id=user_id)
     async with runtime.sessionmaker.begin() as session:
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
@@ -432,7 +432,7 @@ async def handle(
                         tenant_id=tenant_id,
                         platform="slack",
                         platform_user_id=user_id,
-                        verified_tenant_admin=is_admin,
+                        is_platform_admin=is_admin,
                     )
                     url = await connect_link(
                         session,

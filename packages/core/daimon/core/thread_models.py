@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Final
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.constants import ALLOWED_MODEL_IDS, MODEL_DISPLAY_NAMES
 from daimon.core.errors import UserFacingError
@@ -157,7 +158,11 @@ async def may_choose_thread_model(
     subject = build_subject(is_admin=is_admin, platform_user_id=user_id)
     if platform == "discord" and (policy.invoker_role_ids or resolver is not None):
         subject = await resolve_subject(
-            sessionmaker, resolver, tenant_id=tenant_id, user_id=user_id
+            sessionmaker,
+            resolver,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action=DelegatedAction.MODEL,
         )
         if subject.verified_membership is not True:
             return False

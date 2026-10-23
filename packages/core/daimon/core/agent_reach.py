@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection, Iterable, Sequence
 
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.operation_policy import OperationKind, TargetFacts
 from daimon.core.scope import (
@@ -172,7 +173,13 @@ async def may_bind_as_channel_default(
 ) -> bool:
     """A Daimon admin may bind an agent once its channel rule passes."""
     return (
-        await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+        await load_live_subject(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            caller=caller,
+            action=DelegatedAction.ROUTING,
+        )
     ).is_admin
 
 

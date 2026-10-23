@@ -18,6 +18,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.continuity import timers
 from daimon.core.continuity.timers import TimerError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
@@ -120,7 +121,7 @@ async def _cancel_timer_impl(
         tenant_id=auth.tenant_id,
         timer_id=key,
         account_id=auth.account_id,
-        is_admin=auth.is_admin,
+        is_admin=auth.admin_for(DelegatedAction.ROUTINES),
     )
     if not cancelled:
         raise ToolError("timer not found, already fired, or already cancelled")

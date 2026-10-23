@@ -187,7 +187,7 @@ class HostFleetToolService:
                 )
             except (WorkerSpecRefused, ScopeViolation):
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
-            parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_admin))
+            parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_platform_admin))
         else:
             parent, policy = (
                 await self._parent_loader(caller)
@@ -212,7 +212,7 @@ class HostFleetToolService:
             or caller.chat_agent_id is None
             or parent.agent_id != caller.chat_agent_id
             or parent.subject.via_agent_key
-            or (parent.subject.is_admin and not caller.is_admin)
+            or (parent.subject.is_admin and not caller.is_platform_admin)
             or caller.agent_id is not None
         ):
             raise ToolError("Fleet orchestration refused: caller_root_mismatch.")

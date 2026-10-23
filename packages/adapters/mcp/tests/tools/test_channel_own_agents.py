@@ -982,12 +982,24 @@ async def test_an_own_agents_channel_environment_name_shows_only_inside_it(
         )
 
     async def summary_row(auth: AuthIdentity) -> tuple[str | None, str | None]:
-        summary = await _get_tenant_summary_impl(runtime, auth)
+        summary = await _get_tenant_summary_impl(
+            runtime,
+            replace(
+                auth,
+                is_platform_admin=True,
+                token_kind="cli",
+                agent_id=None,
+                chat_session_id=None,
+                chat_agent_id=None,
+            ),
+        )
         row = next(row for row in summary.channels if row.channel_id == ROOM)
         return row.agent_name, row.environment_name
 
     assert await summary_row(world.auth()) == (None, None), "the summary hides C's names outside"
-    assert await summary_row(operator) == ("local", "acme-env"), "an operator token sees them"
+    assert await summary_row(operator) == (None, None), (
+        "a personal credential retains location redaction"
+    )
     cleared = await _clear_channel_environment_impl(
         runtime, world.auth(), channel_id=ROOM, confirm_open_network=True
     )
@@ -1073,11 +1085,12 @@ async def test_a_running_held_turn_holds_calls_that_name_no_origin(
 
     monkeypatch.setattr(channel_target, "resolve_visible_channel", visible)
     monkeypatch.setattr(participation_mod, "verify_participation_scope", verified)
-    with pytest.raises(ToolError, match="nothing outside it is read"):
+    with pytest.raises(ToolError, match="personal user credential"):
         await _get_channel_budget_impl(runtime, builtin, OTHER)
     with pytest.raises(ToolError, match="nothing outside it is read"):
         await _get_thread_participation_impl(runtime, builtin, None, OTHER)
-    await _get_channel_budget_impl(runtime, builtin, ROOM, origin_id)
+    with pytest.raises(ToolError, match="personal user credential"):
+        await _get_channel_budget_impl(runtime, builtin, ROOM, origin_id)
     other_account = replace(builtin, account_id=uuid.uuid4())
     (await load_read_policy(runtime, other_account, origin_context_id=None)).require(OTHER)
 

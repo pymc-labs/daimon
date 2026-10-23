@@ -69,7 +69,7 @@ async def test_review_requires_card_ts_and_live_admin(monkeypatch: pytest.Monkey
             )
         ),
     )
-    monkeypatch.setattr(module, "resolve_is_admin", admin)
+    monkeypatch.setattr(module, "resolve_is_platform_admin", admin)
     monkeypatch.setattr(module, "post_ephemeral", ephemeral)
     payload = {
         "team": {"id": "T1"},
@@ -144,7 +144,7 @@ async def test_ephemeral_requester_buttons_use_container_ts(
         AsyncMock(return_value=SimpleNamespace(account_id=account_id)),
     )
     monkeypatch.setattr(module, "get_delivery", AsyncMock(return_value=delivery))
-    monkeypatch.setattr(module, "resolve_is_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "resolve_is_platform_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "cancel_request", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "approve_connected_request", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "lock_delivery_slot", AsyncMock())

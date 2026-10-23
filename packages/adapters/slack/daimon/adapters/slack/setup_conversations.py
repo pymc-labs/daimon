@@ -9,6 +9,7 @@ import aiohttp
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -91,7 +92,9 @@ async def create_setup_conversation(
     opener = build_setup_opener(
         target_display=escape_mrkdwn(target_name) if target_name else None,
         bot_mention=f"<@{bot_user_id}>",
-        is_admin=await resolve_is_admin(client, user_id=user_id),
+        is_admin=await resolve_is_admin(
+            client, user_id=user_id, action=DelegatedAction.AGENT_SETTINGS
+        ),
         admin_noun=ADMIN_NOUN,
     )
     posted = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs

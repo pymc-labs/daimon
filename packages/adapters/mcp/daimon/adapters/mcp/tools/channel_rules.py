@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools.slack._client import (
 )
 from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
@@ -150,7 +151,7 @@ async def _set_channel_rule_impl(
             channel_id=channel,
             readers=readers,
             writers=writers,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
             default=runtime.deployment_default,
             actor_account_id=auth.account_id,
             copy=copy_from is not None,
@@ -202,7 +203,7 @@ async def _set_agent_rule_impl(
             platform=_platform(auth),
             agent_name=agent_name.strip(),
             runs_in=channels,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)),
             default=runtime.deployment_default,
         )
     except AccessPolicyUnreadable as exc:

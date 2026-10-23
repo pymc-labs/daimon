@@ -206,6 +206,7 @@ async def turn_origin(
 def render_turn_origin(
     origin: TurnOriginRow,
     *,
+    effective_is_admin: bool | None = None,
     responder_handle: str | None = None,
     responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
@@ -261,6 +262,9 @@ def render_turn_origin(
             else None
         ),
     }
+    controls["effective_role"] = (
+        origin.role if effective_is_admin is None else ("admin" if effective_is_admin else "user")
+    )
     if session_state is not None:
         controls["session_state"] = {
             "state": session_state.state,

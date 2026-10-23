@@ -21,6 +21,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
 from daimon.core.errors import DaimonError
 from daimon.core.stores.tenants import get_tenant
@@ -87,7 +88,7 @@ class AgentSetupCog(commands.Cog):
         try:
             runtime = _get_runtime(interaction)
             assert interaction.guild_id is not None, "require_registered_guild guarantees guild"
-            is_admin = await is_guild_admin(interaction)
+            is_admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
             assert tenant_id is not None, "require_registered_guild guarantees a tenant"
             async with runtime.sessionmaker() as session:

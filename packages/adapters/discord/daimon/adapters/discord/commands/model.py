@@ -21,6 +21,7 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.thread_models import (
     FLEET_ROOT_NOTE,
@@ -86,7 +87,7 @@ class ModelCog(commands.Cog):
                     tenant_id=tenant_id,
                     platform="discord",
                     user_id=str(interaction.user.id),
-                    is_admin=await is_guild_admin(interaction),
+                    is_admin=await is_guild_admin(interaction, action=DelegatedAction.MODEL),
                     channel_id=str(thread.parent_id),
                     thread_id=str(thread.id),
                     category_id=str(category_id) if category_id is not None else None,

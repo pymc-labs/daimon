@@ -19,6 +19,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_environments import (
     archive_needs_confirm,
     build_archive_environment_note,
@@ -154,7 +155,7 @@ async def _update_environment_impl(
     description: str | None,
     confirm_open_network: bool = False,
 ) -> EnvironmentInfo:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.ENVIRONMENTS)
     maybe_fields: dict[str, Any] = {"config": config, "description": description}
     patch: dict[str, Any] = {k: v for k, v in maybe_fields.items() if v is not None}
     if not patch:
@@ -207,7 +208,7 @@ async def _archive_environment_impl(
     confirm_open_network: bool = False,
 ) -> ArchiveEnvironmentResult:
     """Archive the environment, then clear every pick of it so those channels fall through."""
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.ENVIRONMENTS)
     env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")

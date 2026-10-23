@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
-from daimon.adapters.discord.checks import admin_caller, is_member_daimon_admin
+from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin
 from daimon.adapters.discord.recruitment_guard import protected
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
@@ -211,7 +211,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
             except discord.HTTPException:
                 await reply("This request is unavailable.")
                 return True
-        if not await is_member_daimon_admin(member, runtime=runtime):
+        if not is_member_guild_admin(member, guild_owner_id=guild.owner_id):
             await reply("Only a server admin can review GitHub requests.")
             return True
         async with runtime.sessionmaker.begin() as session:
@@ -220,7 +220,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 tenant_id=request.tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
             principal = await find_platform_principal(
                 session,
@@ -342,7 +342,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         except discord.HTTPException:
             await reply("This request is unavailable.")
             return True
-    is_admin = await is_member_daimon_admin(member, runtime=runtime)
+    is_admin = is_member_guild_admin(member, guild_owner_id=guild.owner_id)
     if action == "hide":
         async with runtime.sessionmaker.begin() as session:
             hidden = await dismiss_delivery(
@@ -447,7 +447,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 tenant_id=request.tenant_id,
                 platform="discord",
                 platform_user_id=str(member.id),
-                verified_tenant_admin=await is_member_daimon_admin(member, runtime=runtime),
+                is_platform_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
             )
             url = await connect_link(
                 session,
@@ -455,7 +455,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 tenant_id=request.tenant_id,
                 platform="discord",
                 platform_user_id=str(member.id),
-                verified_tenant_admin=await is_member_daimon_admin(member, runtime=runtime),
+                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
                 workspace_label=guild.name,
                 requester_label=member.display_name,
                 origin_parent_channel_id=request.parent_channel_id,

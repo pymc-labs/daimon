@@ -21,6 +21,7 @@ from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
 from daimon.core.channel_rules import (
     READERS_LABELS,
@@ -161,7 +162,7 @@ class PermissionsView(PanelViewBase):
             platform_user_id=str(interaction.user.id),
             op="channel_rule",
         )
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.CHANNEL_PERMISSIONS):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await audit(outcome="denied", reason="needs_admin")
             return
         await interaction.response.defer()

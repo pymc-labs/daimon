@@ -51,6 +51,7 @@ from daimon.adapters.slack.agent_setup.state import (
 )
 from daimon.adapters.slack.errors import generate_request_id, render_error_text
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import identity_enabled_for, queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.constants import DEFAULT_AGENT_MODEL
@@ -308,7 +309,9 @@ async def run_new_agent_submission(
         )
 
         async with runtime.sessionmaker() as session:
-            is_admin = await resolve_is_admin(web_client, user_id=user_id)
+            is_admin = await resolve_is_admin(
+                web_client, user_id=user_id, action=DelegatedAction.AGENT_SETTINGS
+            )
             roster = await load_panel_roster(
                 session,
                 runtime.anthropic,

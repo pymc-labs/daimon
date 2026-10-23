@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.native_admins import (
     AdminCaller,
     is_daimon_admin,
@@ -39,6 +40,7 @@ async def test_user_grant_revoke_is_scoped_and_atomic(
         tenant_id=tenant.id,
         platform=platform,
         caller=AdminCaller(platform_user_id="member"),
+        action=DelegatedAction.AGENT_SETTINGS,
     )
     assert subject.is_admin
     assert not await is_daimon_admin(
@@ -65,6 +67,7 @@ async def test_user_grant_revoke_is_scoped_and_atomic(
             tenant_id=tenant.id,
             platform=platform,
             caller=AdminCaller(platform_user_id="member"),
+            action=DelegatedAction.AGENT_SETTINGS,
         )
     ).is_admin
     assert not (
@@ -280,7 +283,7 @@ async def test_shared_configuration_helpers_recheck_delegation(
     for revoke in (False, True):
         await change_grant(db_session, **key, revoke=revoke)
         await db_session.commit()
-        assert await can_manage_agent_github(db_session, **common) is not revoke
+        assert not await can_manage_agent_github(db_session, **common), "GitHub is platform-only"
         assert (
             await may_bind_as_channel_default(db_session, **common, channel_id="channel")
             is not revoke

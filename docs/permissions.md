@@ -10,13 +10,40 @@ platform authority cannot be revoked inside Daimon.
 
 Platform admins can grant Daimon admin to a user ID, or on Discord to a role
 ID. A role grant applies while the member holds that role. Delegated admins
-can configure agents, shared credentials and channel permissions. Only
-platform admins can grant or revoke; delegated admins cannot delegate.
-Billing, promo redemption, turn and spending caps, and operator-token minting
-remain platform-only. Delegated admin is never cached in account roles or turn
-origins. Delegated admins do not get the hub exception for reading other
-people’s sessions or sealed channel transcripts; that exception stays limited
-to the stored platform-admin role.
+can administer only the actions in `DelegatedAction` in
+`packages/core/daimon/core/admin_actions.py`:
+
+- `agent_settings`: agent instructions, identity, backend and settings.
+- `channel_permissions`: channel/agent rules and participation settings.
+- `routines`: routine configuration and management.
+- `skills`: agent/channel skills and skill environments’ attachments.
+- `environments`: agent/channel environments.
+- `model`: model selection.
+- `routing`: who answers where, channel defaults and handoff configuration.
+- `mcp_connections`: third-party MCP connections and coding-tool access.
+- `credentials`: agent keys and shared credentials, excluding GitHub repo binding.
+- `tool_rules`: agent/channel tool rules and their approval panels.
+- `agent_lifecycle`: agent copies and archiving.
+- `hub_pin_exemption`: the hub’s agent-pin exemption when starting a turn.
+
+Every other admin action is platform-only. In particular, GitHub connect,
+request approval and repository binding require platform admins at both the
+adapter and store boundaries. Delegates do not get the hub exception for
+reading other people’s sessions or sealed channel transcripts; that exception
+uses only the stored platform-admin role. The hub pin exemption above grants
+no transcript access.
+
+Authority changes and all money controls require a human acting directly:
+a platform panel/button rechecks live platform authority, and MCP requires a
+personal CLI/OAuth user credential re-attested live as a platform admin.
+Chat execution (even an admin’s attended chat), routines, continuations,
+watches and external agent keys cannot grant/revoke admins, read or change
+billing/budgets/caps, redeem promos or create checkout sessions. Operator
+tokens cannot exercise these controls either. Deployment-wide promo issuing
+remains available through the local operator CLI; MCP issuing is refused.
+Delegated admin is never cached in account roles or turn origins. The model
+receives `effective_role` separately from the platform `current_role`; these
+controls describe the current turn and grant no additional authority.
 
 Open **Who answers where → Permissions → Admins** in Discord, or
 **Who answers where → Admins** in Slack. Each change checks platform
@@ -26,8 +53,9 @@ panels and existing credentials. Platform authority and any remaining grants
 still apply. Erasing a user removes their grants and scrubs their attribution.
 
 MCP provides `list_admins` for members and `grant_admin` / `revoke_admin` for
-authenticated platform admins. It rechecks platform authority live; an agent
-key or operator token cannot change grants. Teams uses MCP or the CLI.
+platform admins acting directly with personal CLI/OAuth user credentials. It
+rechecks platform authority live; every agent-run credential and operator
+token is refused. Teams uses MCP or the CLI.
 The CLI commands `daimon admins list`, `daimon admins grant USER_ID`, and
 `daimon admins revoke USER_ID` call these same authenticated tools. Set
 `DAIMON_ADMINS_URL` to the MCP endpoint and `DAIMON_ADMINS_TOKEN` to your

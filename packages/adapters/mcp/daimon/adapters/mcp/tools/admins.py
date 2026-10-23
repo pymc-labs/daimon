@@ -23,19 +23,22 @@ async def change_admin(
 ) -> None:
     """A fresh attestation; claims, an agent key and delegated authority cannot grant."""
     if (
-        auth.is_external_agent
+        not auth.is_personal_user
         or auth.is_operator
         or auth.platform_user_id is None
         or auth.platform not in {"discord", "slack", "teams"}
     ):
-        raise ToolError("Only an authenticated platform admin may change Daimon admins.")
+        raise ToolError(
+            "Only a platform admin acting directly with a personal user credential "
+            "may change Daimon admins."
+        )
     authority = await resolve_authority(
         runtime.session_factory,
         runtime.settings,
         tenant_id=auth.tenant_id,
         platform_user_id=auth.platform_user_id,
     )
-    if not authority.platform_admin:
+    if authority.platform_admin is not True:
         raise ToolError("Only platform admins may grant or revoke Daimon admins.")
     async with runtime.session_factory.begin() as session:
         await change_grant(
@@ -71,7 +74,8 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Grant Daimon admin to a user or Discord role (platform admins only).
 
-        Only live platform admins may grant. Delegated admins cannot delegate.
+        Only live platform admins using a personal CLI/OAuth credential may grant.
+        Chat, routines and all agent-run credentials are refused. Delegates cannot delegate.
         This grants configuration access; billing and spend caps remain platform-only.
         """
         await change_admin(
@@ -87,6 +91,7 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Revoke an explicit Daimon admin grant immediately (platform admins only).
 
+        Requires a personal CLI/OAuth credential; chat and routines are refused.
         Deletes the grant and records its audit atomically; delegated authority is never cached.
         Platform authority cannot be revoked; remaining grants still apply.
         """

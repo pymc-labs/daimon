@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from uuid import UUID
 
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.authz import Subject, build_subject
 from daimon.core.membership import MembershipResolver
 from daimon.core.native_admins import is_daimon_admin
@@ -74,9 +76,10 @@ async def resolve_subject(
     user_id: str,
     require_fresh: bool = False,
     session: AsyncSession | None = None,
+    action: DelegatedAction | None = None,
 ) -> Subject:
-    """Resolve effective authority without persisting delegated admin status."""
-    subject, _ = await resolve_subject_authority(
+    """Resolve current authority; delegated rights require an explicit allowed action."""
+    subject, platform_admin = await resolve_subject_authority(
         sessionmaker,
         resolver,
         tenant_id=tenant_id,
@@ -84,4 +87,9 @@ async def resolve_subject(
         require_fresh=require_fresh,
         session=session,
     )
-    return subject
+    return replace(
+        subject,
+        is_admin=admin_for_action(
+            platform_admin=platform_admin, daimon_admin=subject.is_admin, action=action
+        ),
+    )

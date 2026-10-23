@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Require direct human platform-admin authority for admin delegation and money
+  controls; refuse agent-run credentials, keep GitHub platform-only, and apply
+  delegated configuration through an explicit action allow-list.
 - Platform admins can delegate tenant-wide Daimon admin to users, or Discord roles,
   from the Discord and Slack Admins screens, authenticated MCP tools, or
   `daimon admins list|grant|revoke`. Delegated admins can configure Daimon but

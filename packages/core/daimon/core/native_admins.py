@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Final
 
 import httpx
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.authz import Subject, build_subject
 from daimon.core.errors import DaimonError
 from daimon.core.membership import Membership
@@ -334,7 +335,12 @@ class AdminCaller(BaseModel):
 
 
 async def load_live_subject(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: AdminCaller
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    caller: AdminCaller,
+    action: DelegatedAction | None = None,
 ) -> Subject:
     """Build a subject from current platform evidence and uncached tenant grants."""
     admin = await is_daimon_admin(
@@ -345,7 +351,12 @@ async def load_live_subject(
         is_platform_admin=caller.is_server_admin,
         role_ids=caller.role_ids,
     )
-    return build_subject(is_admin=admin, platform_user_id=caller.platform_user_id)
+    return build_subject(
+        is_admin=admin_for_action(
+            platform_admin=caller.is_server_admin and admin, daimon_admin=admin, action=action
+        ),
+        platform_user_id=caller.platform_user_id,
+    )
 
 
 class StoredAdmin(BaseModel):

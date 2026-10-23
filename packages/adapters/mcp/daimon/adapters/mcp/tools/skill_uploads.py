@@ -64,6 +64,7 @@ from daimon.adapters.mcp.tools.skills import (
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.adapters.mcp.tools.slack._files import require_file_source, resolve_file_link
 from daimon.adapters.mcp.tools.slack._leak_policy import get_destination, is_dm_destination
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
@@ -271,7 +272,10 @@ async def require_skill_change(
         ma_agent_id=agent.id,
         is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
-    if decide_operation(operation, is_admin=auth.is_admin, target=facts) == "allow":
+    if (
+        decide_operation(operation, is_admin=auth.admin_for(DelegatedAction.SKILLS), target=facts)
+        == "allow"
+    ):
         return
     raise ToolError(
         f"Changing '{agent_name}'s skills needs a workspace or server admin. "

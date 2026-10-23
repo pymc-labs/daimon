@@ -1,5 +1,13 @@
 # Billing and credits
 
+Billing, budget reads/writes, caps, promo redemption and checkout require a
+platform admin acting directly through a live-checked platform panel or a
+personal CLI/OAuth user credential. Chat execution, routines, continuations,
+watches, external agent keys and operator tokens are refused, including when
+their owner is a platform admin. Use the local operator CLI for deployment-wide
+promo issuing; it is unavailable through MCP credentials.
+
+
 Page-watch wakes recheck balance, member monthly caps and their attributed channel
 budget before each model or confirmation send and each report write. Admission
 during preparation alone does not authorize later spending or delivery.
@@ -614,14 +622,11 @@ another member's, or an admin's, are unaffected. One person's attempts are
 serialized so parallel guesses cannot slip past. Revoking stops new redemptions only: redeemed credit,
 including timed credit not yet started, stays.
 
-An integration can issue codes over MCP with an operator token holding
-`promo:create` (see [architecture](architecture.md#operator-tokens)):
-`create_promo_code`, `list_promo_codes` and `revoke_promo_code` take the same
-terms as `daimon promo`, and no server admin sees them. A token minted with
-`--max-issued-usd` (whole cents) may issue at most that much credit in total,
-counted as `amount_usd × max_redemptions` per code (so `max_redemptions` is
-required); `mcp_tokens.issued_usd` tracks the total, and revoking a code gives
-none back. No operator token can open a top-up: `/billing/checkout` answers 403.
+Deployment-wide promo issuing, listing and revoking use the local human
+operator CLI (`daimon promo`). MCP credentials cannot exercise issuer authority;
+a tenant platform-admin credential does not establish deployment-wide issuer
+permission. Operator tokens cannot redeem codes, change budgets, read billing
+summaries or open a checkout session.
 
 ## The tables
 

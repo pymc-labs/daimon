@@ -26,6 +26,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_panel_metadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_skills import REFUSALS, ChannelSkillRefusal, add_skill_to_channel
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -88,7 +89,7 @@ async def run_channel_skills_submission(
     async def refuse(text: str) -> None:
         await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=text)
 
-    if not await resolve_is_admin(client, user_id=user_id):
+    if not await resolve_is_admin(client, user_id=user_id, action=DelegatedAction.SKILLS):
         await audit(outcome="denied", reason="needs_admin")
         await refuse(CHANNEL_SKILLS_NEED_ADMIN_MESSAGE)
         return

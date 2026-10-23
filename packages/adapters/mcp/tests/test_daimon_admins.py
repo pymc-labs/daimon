@@ -11,6 +11,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.admins import change_admin
 from daimon.adapters.mcp.tools.channel_budgets import require_budget_write
 from daimon.adapters.mcp.tools.promo_codes import _redeem_promo_code_impl
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import DiscordSettings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.membership import Membership
@@ -175,8 +176,8 @@ async def test_in_flight_delegation_recheck_does_not_reuse_an_admin_snapshot(
         is_admin=True,
         verified_role_ids=("role",),
     )
-    assert await current_admin(db_session, auth)
+    assert await current_admin(db_session, auth, action=DelegatedAction.AGENT_SETTINGS)
     await change_grant(db_session, **key, revoke=True)
-    assert not await current_admin(db_session, auth), (
+    assert not await current_admin(db_session, auth, action=DelegatedAction.AGENT_SETTINGS), (
         "a request-local admin bit cannot resurrect a revoked grant"
     )

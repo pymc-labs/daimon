@@ -2298,7 +2298,8 @@ async def test_explicit_grant_does_not_promote_stored_role_when_platform_is_unav
         now=_NOW,
         role=None,
     )
-    assert admission.grant.subject.is_admin
+    assert admission.is_admin
+    assert not admission.grant.subject.is_admin, "delegation does not exempt turn admission"
     account = await get_account(db_session, admission.account_id)
     assert account is not None and account.role is Role.USER
 

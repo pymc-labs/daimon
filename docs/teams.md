@@ -153,7 +153,7 @@ A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
 usual session resumes when `new` or **End** closes it. Opening one runs no turn.
 
-Daimon's admins are the owners of one team, and nobody else. The team is named
+Daimon’s platform admins are the owners of one team. The team is named
 by its Entra group ID in `DAIMON_TEAMS__ADMIN_TEAM_ID` (the team's ⋯ → **Get link to team** → the
 `groupId` parameter). The app must be installed in that team: its
 `TeamMember.Read.Group` consent is what lets Daimon read the owners. Making

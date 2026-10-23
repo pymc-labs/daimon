@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import structlog
 from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.web_shell import render_page
+from daimon.core.admin_actions import is_personal_user_credential
 from daimon.core.admin_authority import resolve_authority
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
@@ -57,14 +58,22 @@ def build_checkout_route(
         access: AccessToken | None = await auth.verify_token(token)
         if access is None:
             return Response(status_code=401)
-        # An operator token reaches only its scopes' tools; buying credit is not one.
-        if (
-            access.claims.get(TOKEN_KIND_CLAIM) == "operator"
-            or (
-                access.claims.get(TOKEN_KIND_CLAIM) == "agent"
-                and access.claims.get(CHAT_EXECUTION_CLAIM) is not True
-            )
-            or access.claims.get("agent_id") is not None
+        # Authority and money require a human-held user credential. Every
+        # execution binding is refused, including an attended admin chat.
+        if not is_personal_user_credential(
+            token_kind=access.claims.get(TOKEN_KIND_CLAIM),
+            is_chat_execution=access.claims.get(CHAT_EXECUTION_CLAIM) is True,
+            execution_bindings=tuple(
+                access.claims.get(key)
+                for key in (
+                    "agent_id",
+                    "chat_agent_id",
+                    "routine_id",
+                    "execution_id",
+                    "chat_session_id",
+                    "slack_turn_context_id",
+                )
+            ),
         ):
             return Response(status_code=403)
 
@@ -98,7 +107,7 @@ def build_checkout_route(
         authority = await resolve_authority(
             sessionmaker, settings, tenant_id=tenant_id, platform_user_id=identity.platform_user_id
         )
-        if not authority.platform_admin:
+        if authority.platform_admin is not True:
             return Response(status_code=403)
 
         try:

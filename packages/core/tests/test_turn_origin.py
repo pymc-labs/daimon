@@ -488,3 +488,9 @@ def test_controls_omit_the_account_and_its_instruction_when_none_is_supplied() -
     assert "responder.mention" not in rendered, (
         "the account sentence points at fields that are not rendered"
     )
+
+
+def test_effective_role_is_separate_from_the_platform_snapshot() -> None:
+    controls = render_turn_origin(_origin(), effective_is_admin=True)
+    assert '"current_role": "user"' in controls
+    assert '"effective_role": "admin"' in controls

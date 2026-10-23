@@ -11,7 +11,11 @@ import structlog
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import admin_caller, is_member_daimon_admin
+from daimon.adapters.discord.checks import (
+    admin_caller,
+    is_member_guild_admin,
+    refuse_if_not_platform_admin,
+)
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import (
@@ -80,6 +84,8 @@ class GitHubConnectButton(
                 )
 
     async def _reveal(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        if await refuse_if_not_platform_admin(interaction):
+            return
         if interaction.guild_id is None or interaction.channel_id is None:
             await interaction.response.send_message(
                 "This connection is no longer available.", ephemeral=True
@@ -103,10 +109,12 @@ class GitHubConnectButton(
         bot = cast(DaimonBot, interaction.client)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         manages = False
-        if not await is_member_daimon_admin(requester, runtime=bot.runtime):
+        if not is_member_guild_admin(requester, guild_owner_id=guild.owner_id):
             refusal = await _manager_refusal(bot, requester, tenant_id, self.intent_id)
             if refusal is not None:
-                await interaction.followup.send(refusal, ephemeral=True)
+                await interaction.followup.send(
+                    "Only a platform admin can connect GitHub.", ephemeral=True
+                )
                 return
             manages = True
         settings = bot.runtime.settings

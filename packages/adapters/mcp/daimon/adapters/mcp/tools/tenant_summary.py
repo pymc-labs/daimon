@@ -1,11 +1,7 @@
-"""Tenant summary: the balance, funding mode and every configured channel in one read.
+"""Billing and tenant configuration summaries for direct personal platform admins.
 
-For server admins and operator tokens holding ``tenant:read``, so an
-integration can show a workspace's state without one call per channel. The
-read lives in ``daimon.core.tenant_summary``. A chat turn held to a channel
-kept to its own agents doesn't see other such channels' agent and environment
-names, as in
-``list_agents`` and ``list_environments``.
+Execution credentials and operator tokens cannot read this money surface.
+The read lives in ``daimon.core.tenant_summary``; location privacy still applies.
 """
 
 from __future__ import annotations
@@ -17,7 +13,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
-    _require_admin,  # pyright: ignore[reportPrivateUsage]
+    _require_platform_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
@@ -56,7 +52,7 @@ async def _hide_across_homes(
 
 async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> TenantSummary:
     require_scope(auth, "tenant:read")
-    _require_admin(auth)
+    _require_platform_admin(auth)
     async with runtime.session_factory() as session:
         try:
             summary = await load_tenant_summary(
@@ -75,7 +71,7 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
 def register_tenant_summary_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def get_tenant_summary(ctx: Context) -> TenantSummary:  # pyright: ignore[reportUnusedFunction]
-        """Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
+        """Read billing and configuration with a personal platform-admin CLI/OAuth credential.
 
         Lists every channel with its own agent or environment setting, a
         apply there, the roles and members administering it, and the budget's

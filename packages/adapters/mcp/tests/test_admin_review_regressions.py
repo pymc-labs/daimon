@@ -30,6 +30,7 @@ from daimon.adapters.mcp.tools._session_access import (
     session_belongs_to_caller,
 )
 from daimon.adapters.mcp.tools.admins import change_admin
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.admin_authority import resolve_authority
 from daimon.core.config import DiscordSettings
 from daimon.core.defaults.metadata import (
@@ -39,7 +40,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_panel import sync_connect_admin
-from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token
+from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token, mint_cli_mcp_token
 from daimon.core.membership import Membership
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_operator_tokens import mint_panel_operator_token
@@ -58,11 +59,13 @@ SECRET = b"chat-integration-secret-at-least-32-bytes"
 
 
 @pytest.mark.parametrize("kind", ["member", "delegate", "platform"])
-async def test_real_chat_mint_verifier_middleware_preserves_human_authority(
+@pytest.mark.parametrize("execution", [True, False])
+async def test_real_chat_mint_verifier_middleware_preserves_config_but_refuses_human_operations(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
+    execution: bool,
 ) -> None:
     tenant = await make_tenant(db_session, workspace_id="123456789012345678")
     principal = await make_platform_principal(
@@ -81,17 +84,27 @@ async def test_real_chat_mint_verifier_middleware_preserves_human_authority(
             is_platform_admin=True,
         )
     agent_id = uuid.uuid4()
-    token, _, _ = await mint_chat_mcp_token(
-        db_session,
-        account_id=principal.account_id,
-        agent_id=agent_id,
-        secret=SECRET,
-        now=datetime.now(UTC),
-    )
+    if execution:
+        token, _, _ = await mint_chat_mcp_token(
+            db_session,
+            account_id=principal.account_id,
+            agent_id=agent_id,
+            secret=SECRET,
+            now=datetime.now(UTC),
+        )
+    else:
+        token = await mint_cli_mcp_token(
+            db_session,
+            account_id=principal.account_id,
+            tenant_id=tenant.id,
+            secret=SECRET,
+            now=datetime.now(UTC),
+            ttl_days=1,
+        )
     await db_session.commit()
     verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=db_session_factory)
     access = await verifier.verify_token(token)
-    assert access is not None and access.claims[CHAT_EXECUTION_CLAIM] is True
+    assert access is not None and access.claims[CHAT_EXECUTION_CLAIM] is execution
     assert "agent_id" not in access.claims
     monkeypatch.setattr(
         DiscordRestMembershipResolver,
@@ -119,20 +132,27 @@ async def test_real_chat_mint_verifier_middleware_preserves_human_authority(
         auth = await ctx.get_state("auth")
         assert isinstance(auth, AuthIdentity)
         observed.append(auth)
-        assert auth.is_chat_execution and auth.chat_agent_id == agent_id
+        assert auth.is_chat_execution is execution
+        assert auth.chat_agent_id == (agent_id if execution else None)
+        assert auth.is_personal_user is (not execution)
         assert auth.agent_id is None and not auth.is_external_agent
         assert not mcp_subject(auth).via_agent_key
         async with db_session_factory() as db:
-            assert await current_admin(db, auth) is (kind != "member")
+            assert await current_admin(db, auth, action=DelegatedAction.AGENT_SETTINGS) is (
+                kind != "member"
+            )
         runtime = SimpleNamespace(session_factory=db_session_factory, settings=settings)
-        if kind == "platform":
-            await change_admin(runtime, auth, subject_id="new-admin")
-            _require_platform_admin(auth)
-        else:
-            with pytest.raises(ToolError, match="Only platform admins"):
-                await change_admin(runtime, auth, subject_id="new-admin")
+        for revoke in (False, True):
+            if execution or kind != "platform":
+                with pytest.raises(ToolError):
+                    await change_admin(runtime, auth, subject_id="new-admin", revoke=revoke)
+            else:
+                await change_admin(runtime, auth, subject_id="new-admin", revoke=revoke)
+        if execution or kind != "platform":
             with pytest.raises(ToolError):
                 _require_platform_admin(auth)
+        else:
+            _require_platform_admin(auth)
         return auth.is_admin
 
     result = await call_mcp_tool(mcp.http_app(), token=token, name="inspect_chat")
@@ -230,13 +250,14 @@ async def test_panel_role_delegate_never_acquires_hub_sealed_transcript_exceptio
         )
         assert authority.daimon_admin is (stage == "panel")
         if stage == "panel":
-            await sync_connect_admin(
-                db_session,
-                tenant_id=tenant.id,
-                platform="discord",
-                platform_user_id=principal.external_id,
-                verified_tenant_admin=authority.daimon_admin,
-            )
+            with pytest.raises(ValueError, match="platform admin"):
+                await sync_connect_admin(
+                    db_session,
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    platform_user_id=principal.external_id,
+                    is_platform_admin=authority.platform_admin,
+                )
             with pytest.raises(OperatorTokenError, match="platform admin"):
                 await mint_panel_operator_token(
                     db_session,
@@ -257,3 +278,54 @@ async def test_panel_role_delegate_never_acquires_hub_sealed_transcript_exceptio
         assert not _hub_reads_as_anyone(subject, sealed.metadata)
         with hub_session_access(subject, "read"):
             assert not session_belongs_to_caller(sealed, auth)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    ["chat_agent_id", "routine_id", "execution_id", "slack_turn_context_id", "chat_session_id"],
+)
+async def test_malformed_execution_binding_never_becomes_a_personal_credential(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    binding: str,
+) -> None:
+    tenant = await make_tenant(db_session)
+    principal = await make_platform_principal(
+        db_session, tenant=tenant, platform="discord", external_id="member"
+    )
+    token = await mint_cli_mcp_token(
+        db_session,
+        account_id=principal.account_id,
+        tenant_id=tenant.id,
+        secret=SECRET,
+        now=datetime.now(UTC),
+        ttl_days=1,
+    )
+    await db_session.commit()
+    claims = jwt.decode(token, SECRET, algorithms=["HS256"])
+    claims[binding] = 42
+    malformed = jwt.encode(claims, SECRET, algorithm="HS256")
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=db_session_factory)
+    mcp = FastMCP(name="malformed-user-execution", auth=verifier)
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=production_subject_resolver,
+            tenant_resolver=production_tenant_resolver,
+            role_resolver=production_role_resolver,
+            agent_id_resolver=production_agent_id_resolver,
+            is_admin_resolver=production_is_admin_resolver,
+            internal_resolver=production_internal_resolver,
+            sessionmaker=db_session_factory,
+        )
+    )
+    invoked = False
+
+    @mcp.tool
+    async def human_operation() -> bool:
+        nonlocal invoked
+        invoked = True
+        return True
+
+    result = await call_mcp_tool(mcp.http_app(), token=malformed, name="human_operation")
+    assert "error" in result
+    assert not invoked

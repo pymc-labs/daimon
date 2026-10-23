@@ -2149,13 +2149,13 @@ registered and expire too, while older jti-less ones keep working.
 
 | Scope | Tools |
 | --- | --- |
-| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
+| `tenant:read` | `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
+| `channels:write` | `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
 | `agents:archive` | `archive_channel_copy` |
-| `promo:redeem` | `redeem_promo_code` |
-| `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
+| `promo:redeem` | Refused: promo redemption requires a direct personal user credential |
+| `promo:create` | Refused: deployment-wide issuing remains on the local operator CLI |
 
-`get_tenant_summary` lists every channel with a default, a budget, admins or
+`get_tenant_summary` requires a direct personal platform-admin credential and lists every channel with a default, a budget, admins or
 a rule, and `channels[].own_agents_only` says whether its readers are `own`.
 Its read is `daimon.core.tenant_summary`, which `daimon channels list
 PLATFORM WORKSPACE_ID [--json]` prints too, with the same JSON plus each
@@ -2586,8 +2586,27 @@ mutation checks current platform authority. Teams uses CLI/MCP. The CLI's admins
 commands use authenticated MCP calls. MCP middleware independently attests live
 platform authority and delegation for platform principals on each request, ignoring
 stale internal admin claims. The token verifier distinguishes validated chat
-execution bindings from external agent keys; ordinary chat retains the caller’s
-live authority. Delegation, money and operator-token minting use the platform authority
-signal; agent keys and operator tokens cannot change admin grants. Grant/revoke
+execution bindings from external agent keys; ordinary chat retains live
+configuration authority only for the delegated action allow-list. Authority
+changes and money require direct human platform authority; every agent-run
+credential and operator token is refused. Operator-token minting uses the live
+platform-admin signal. Grant/revoke
 audit events include the actor, subject kind, subject ID and timestamp. Privacy
 erasure removes user grants and scrubs grantor and audit identifiers.
+
+
+Admin authority uses the single `DelegatedAction` allow-list in core. Adapter
+boundaries pass current platform facts and grants into configuration services;
+stores with authorization checks consume that live verdict. An unnamed action
+is platform-only, including GitHub connect/approval/repo binding. Account roles
+and stored origin roles record only platform authority. `effective_role` is
+rendered separately for the model. Hub transcript access still uses the
+platform snapshot; its agent-pin exemption accepts live Daimon admins.
+
+MCP distinguishes verified chat execution from external keys for configuration.
+A separate shared credential predicate excludes every execution binding from
+authority changes and money operations; this includes an attended admin chat
+and a routine running with an admin creator’s credential. Those operations
+require either a directly clicked platform panel or a personal CLI/OAuth user
+credential with live platform attestation. Scoped operator tokens cannot pass
+the human money gate.

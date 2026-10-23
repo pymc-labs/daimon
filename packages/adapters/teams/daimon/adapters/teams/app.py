@@ -1574,6 +1574,7 @@ class TeamsApp:
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
+                effective_is_admin=admission.is_admin,
             )
             render = functools.partial(
                 render_user_message,

@@ -22,6 +22,7 @@ from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_card import ENDED, welcome_card
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.setup_conversations import build_setup_opener, resolve_setup_agents
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -85,7 +86,10 @@ async def open_setup_conversation(
             creator_account_id=principal.account_id,
         )
     opener = build_setup_opener(
-        target_display=target_name, bot_mention=None, is_admin=actor.is_admin, admin_noun="an admin"
+        target_display=target_name,
+        bot_mention=None,
+        is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+        admin_noun="an admin",
     )
     card = welcome_card(target_name=target_name, opener=opener, thread_id=thread_id)
     try:

@@ -34,6 +34,7 @@ from daimon.adapters.slack.agent_setup.read import (
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import AgentRef, Decision, build_agent_ref
 from daimon.core.ma_identity import derive_agent_uuid
@@ -172,7 +173,7 @@ async def handle_coding_tools_click(
         )
         return
 
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, action=DelegatedAction.TOOL_RULES)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -372,7 +373,11 @@ async def _authorize_mint(
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
         subject = await load_live_subject(
-            session, tenant_id=tenant_id, platform="slack", caller=caller
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            caller=caller,
+            action=DelegatedAction.TOOL_RULES,
         )
     agent = AgentRef.of(target.name)
     if channel_id is not None and any_agent_rules(policy):

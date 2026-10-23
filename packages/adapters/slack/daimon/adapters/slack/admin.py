@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, cast
 
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import is_daimon_admin
 
@@ -160,12 +161,14 @@ class WorkspaceWebClient(AsyncWebClient):
         return self
 
 
-async def resolve_is_admin(client: AsyncWebClient, *, user_id: str) -> bool:
+async def resolve_is_admin(
+    client: AsyncWebClient, *, user_id: str, action: DelegatedAction | None = None
+) -> bool:
     """Live platform authority or an uncached grant in this client's workspace."""
     status = await resolve_admin_status(client, user_id=user_id)
     if status is None:
         return False
-    if not isinstance(client, WorkspaceWebClient):
+    if not isinstance(action, DelegatedAction) or not isinstance(client, WorkspaceWebClient):
         return status
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=client.team_id)
     async with client.runtime.sessionmaker() as session:

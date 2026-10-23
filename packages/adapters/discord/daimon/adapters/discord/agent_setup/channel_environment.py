@@ -17,6 +17,7 @@ import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
@@ -88,7 +89,11 @@ async def load_picker_subject(
     caller = admin_caller(interaction.user)
     async with runtime.sessionmaker() as session:
         return await load_live_subject(
-            session, tenant_id=panel_tenant_id(state), platform="discord", caller=caller
+            session,
+            tenant_id=panel_tenant_id(state),
+            platform="discord",
+            caller=caller,
+            action=DelegatedAction.ENVIRONMENTS,
         )
 
 

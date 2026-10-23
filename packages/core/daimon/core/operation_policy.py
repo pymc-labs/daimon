@@ -98,7 +98,7 @@ def _decide_operation(
     the three families described above; `authorize` decides each family's
     fixed order (`Action.CHANGE_SHARED_AGENT`).
     """
-    if operation in ("github_connect", "github_grant"):
+    if operation in ("github_connect", "github_grant", "repo_bind"):
         return "allow" if is_admin else "needs_admin"
     decision = authorize(
         _NO_POLICY,

@@ -53,6 +53,7 @@ from daimon.adapters.mcp.tools.teams._directory import (
     split_thread,
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -131,7 +132,7 @@ def _require_routine_owner(auth: AuthIdentity, row: RoutineRow) -> None:
     admin may mutate an ownerless routine. Note that a non-admin caller without
     a platform user id therefore cannot mutate any routine.
     """
-    if auth.is_admin:
+    if auth.admin_for(DelegatedAction.ROUTINES):
         return
     if auth.platform_user_id is None or row.created_by_user_id is None:
         raise ToolError("routine not found")
@@ -146,7 +147,7 @@ def _may_read(auth: AuthIdentity, row: RoutineRow) -> bool:
     was asked and answered, which for a client project agent is that
     client's work. Other members see neither, nor that the routine exists.
     """
-    if auth.is_admin:
+    if auth.admin_for(DelegatedAction.ROUTINES):
         return True
     return auth.platform_user_id is not None and auth.platform_user_id == row.created_by_user_id
 
@@ -492,7 +493,7 @@ async def _require_agent_in_scope(
     or the agent the destination channel itself answers with. Anything else
     is an admin's call.
     """
-    if auth.is_admin:
+    if auth.admin_for(DelegatedAction.ROUTINES):
         return
     executing = auth.agent_id or auth.chat_agent_id
     if executing is not None and executing == derive_agent_uuid(
@@ -909,13 +910,18 @@ async def _sandbox_admin(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
         record_authz_denial(Action.SET_ROUTINE_SANDBOX_TOOLS, "person_only")
         raise ToolError(_SANDBOX_PERSON_ONLY)
     admin = False
-    if auth.is_admin and auth.platform == "discord" and auth.platform_user_id is not None:
+    if (
+        auth.admin_for(DelegatedAction.ROUTINES)
+        and auth.platform == "discord"
+        and auth.platform_user_id is not None
+    ):
         live = await resolve_subject(
             runtime.session_factory,
             runtime.membership_resolver,
             tenant_id=auth.tenant_id,
             user_id=auth.platform_user_id,
             require_fresh=True,
+            action=DelegatedAction.ROUTINES,
         )
         admin = live.is_admin and live.verified_membership is True
     subject = build_subject(is_admin=admin, platform_user_id=auth.platform_user_id)

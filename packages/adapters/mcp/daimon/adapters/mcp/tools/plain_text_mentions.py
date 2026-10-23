@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import StoreError
 from daimon.core.stores.tenants import get_plain_text_mentions, set_plain_text_mentions
 from fastmcp import Context, FastMCP
@@ -56,7 +57,7 @@ def _note(enabled: bool) -> str:
 async def _set_plain_text_mentions_impl(
     runtime: McpRuntime, auth: AuthIdentity, enabled: bool
 ) -> PlainTextMentionsStatus:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.CHANNEL_PERMISSIONS)
     if auth.platform not in _CHAT_PLATFORMS:
         raise ToolError(_WRONG_PLATFORM)
     async with runtime.session_factory.begin() as session:

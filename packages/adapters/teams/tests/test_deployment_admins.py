@@ -25,6 +25,7 @@ from daimon.adapters.teams.deployment_admins import (
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.team_owners import team_owner_lookup
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import TeamsSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.native_admins import GroupLookupFailed, GroupMembersCache
@@ -276,7 +277,11 @@ async def test_delegated_user_admin_gate_rechecks_revoke(
     runtime = _runtime(_Owners(AAD_OBJECT_ID))
     runtime.sessionmaker = db_session_factory
     assert await is_deployment_admin(
-        settings, admin_team_owners(runtime), user_id=OTHER_AAD_OBJECT_ID, runtime=runtime
+        settings,
+        admin_team_owners(runtime),
+        user_id=OTHER_AAD_OBJECT_ID,
+        runtime=runtime,
+        action=DelegatedAction.AGENT_SETTINGS,
     )
     assert not await is_deployment_admin(
         settings, admin_team_owners(runtime), user_id=OTHER_AAD_OBJECT_ID
@@ -284,5 +289,9 @@ async def test_delegated_user_admin_gate_rechecks_revoke(
     await change_grant(db_session, **key, revoke=True)
     await db_session.commit()
     assert not await is_deployment_admin(
-        settings, admin_team_owners(runtime), user_id=OTHER_AAD_OBJECT_ID, runtime=runtime
+        settings,
+        admin_team_owners(runtime),
+        user_id=OTHER_AAD_OBJECT_ID,
+        runtime=runtime,
+        action=DelegatedAction.AGENT_SETTINGS,
     )

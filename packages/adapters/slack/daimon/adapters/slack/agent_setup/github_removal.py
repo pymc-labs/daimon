@@ -34,7 +34,7 @@ async def send_pending_notice(
                 tenant_id=tenant_id,
                 platform="slack",
                 platform_user_id=user_id,
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
             url = await connect_link(
                 session,

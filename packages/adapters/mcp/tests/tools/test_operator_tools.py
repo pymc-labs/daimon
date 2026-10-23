@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -58,7 +59,7 @@ from daimon.core.stores import promo_codes
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
 from daimon.core.stores.domain import Role, TenantRow
-from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token, revoke_mcp_token
+from daimon.core.stores.mcp_tokens import create_mcp_token_row
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.asgi import call_mcp_tool
@@ -180,6 +181,7 @@ async def test_tenant_summary_leaves_out_dm_channels(
             now=datetime.now(UTC),
         )
 
+    auth = replace(auth, token_kind="cli", is_platform_admin=True)
     summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
 
     assert [c.channel_id for c in summary.channels] == ["c1"], "DM channels are not listed"
@@ -199,6 +201,7 @@ async def test_tenant_summary_marks_channels_kept_to_their_own_agents(
             ),
         )
 
+    auth = replace(auth, token_kind="cli", is_platform_admin=True)
     summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
 
     assert [(c.channel_id, c.own_agents_only) for c in summary.channels] == [("c3", True)], (
@@ -240,6 +243,7 @@ async def test_tenant_summary_omits_readers_and_writers_and_lists_timed_credit(
     )
     assert isinstance(redeemed, PromoRedeemed), redeemed
 
+    auth = replace(auth, token_kind="cli", is_platform_admin=True)
     summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
 
     wire = pydantic_core.to_jsonable_python(summary)
@@ -310,89 +314,11 @@ async def test_server_admin_cannot_create_promo_codes(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, operator = await _operator(committing_sessionmaker, "promo:create")
-    admin = _identity(tenant.id, operator.account_id)
+    admin = replace(_identity(tenant.id, operator.account_id), is_platform_admin=True)
     with pytest.raises(ToolError, match="Only an operator token with the promo:create scope"):
         await _create_promo_code_impl(
             _runtime(committing_sessionmaker), admin, amount_usd="5", kind="credit"
         )
-
-
-async def test_create_promo_code_counts_against_the_ceiling(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    _tenant, auth = await _operator(
-        committing_sessionmaker, "promo:create", max_issued_usd=Decimal(100)
-    )
-    runtime = _runtime(committing_sessionmaker)
-
-    created = await _create_promo_code_impl(
-        runtime, auth, amount_usd="20", kind="credit", max_redemptions=3, note="launch"
-    )
-    with pytest.raises(ToolError, match=r"could grant \$60.00, more than the \$40.00 left"):
-        await _create_promo_code_impl(
-            runtime, auth, amount_usd="20", kind="credit", max_redemptions=3
-        )
-    with pytest.raises(ToolError, match="max_redemptions is required"):
-        await _create_promo_code_impl(runtime, auth, amount_usd="1", kind="credit")
-
-    assert (created.amount_usd, created.max_redemptions, created.ceiling_remaining_usd) == (
-        "20.00",
-        3,
-        "40.00",
-    ), "the result reports what the token may still issue"
-    assert created.code, "the code is returned once"
-    async with committing_sessionmaker() as session:
-        token = await get_mcp_token(session, jti=auth.token_jti or uuid.uuid4())
-        codes = await promo_codes.list_promo_codes(session)
-    assert token is not None and token.issued_usd == Decimal(60), "issued credit is tracked"
-    assert [str(code.id) for code in codes] == [created.promo_code_id], (
-        "a refused code is never stored"
-    )
-
-
-async def test_create_promo_code_refuses_a_token_revoked_after_it_was_verified(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    _tenant, auth = await _operator(committing_sessionmaker, "promo:create")
-    async with committing_sessionmaker.begin() as session:
-        await revoke_mcp_token(session, jti=auth.token_jti or uuid.uuid4(), now=datetime.now(UTC))
-
-    with pytest.raises(ToolError, match="was revoked. Nothing was created"):
-        await _create_promo_code_impl(
-            _runtime(committing_sessionmaker), auth, amount_usd="5", kind="credit"
-        )
-
-    async with committing_sessionmaker() as session:
-        codes = await promo_codes.list_promo_codes(session)
-    assert codes == [], "a revoked token issues nothing"
-
-
-async def test_create_promo_code_without_a_ceiling_is_untracked(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    _tenant, auth = await _operator(committing_sessionmaker, "promo:create")
-    created = await _create_promo_code_impl(
-        _runtime(committing_sessionmaker), auth, amount_usd="5", kind="credit"
-    )
-    assert created.ceiling_remaining_usd is None, "no ceiling, nothing to report"
-
-
-async def test_list_and_revoke_promo_codes(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    _tenant, auth = await _operator(committing_sessionmaker, "promo:create")
-    runtime = _runtime(committing_sessionmaker)
-    created = await _create_promo_code_impl(runtime, auth, amount_usd="5", kind="credit")
-
-    revoked = await _revoke_promo_code_impl(runtime, auth, created.promo_code_id)
-    listed = await _list_promo_codes_impl(runtime, auth)
-
-    assert revoked.revoked_at is not None, "revoking stamps the code"
-    assert [(code.promo_code_id, code.revoked_at) for code in listed] == [
-        (created.promo_code_id, revoked.revoked_at)
-    ], "the list shows the revoked code"
-    with pytest.raises(ToolError, match="no promo code"):
-        await _revoke_promo_code_impl(runtime, auth, str(uuid.uuid4()))
 
 
 async def _verified_operator_identity(
@@ -480,6 +406,7 @@ async def test_tenant_summary_lists_configured_and_budgeted_channels(
         )
         await make_channel_budget(session, tenant=tenant, channel_id="c2", limit_usd=Decimal(5))
 
+    auth = replace(auth, token_kind="cli", is_platform_admin=True)
     summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
     assert (summary.balance_usd, summary.funding_mode, summary.default_agent) == (
         "12.50",
@@ -493,3 +420,22 @@ async def test_tenant_summary_lists_configured_and_budgeted_channels(
     assert summary.channels[0].budget is None
     budget = summary.channels[1].budget
     assert budget is not None and (budget.limit_usd, budget.window) == ("5.00", "monthly")
+
+
+@pytest.mark.parametrize("operation", ["create", "list", "revoke", "summary"])
+async def test_scoped_operator_token_cannot_exercise_human_money_authority(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], operation: str
+) -> None:
+    _tenant, auth = await _operator(committing_sessionmaker, "promo:create", "tenant:read")
+    runtime = _runtime(committing_sessionmaker)
+    with pytest.raises(ToolError, match="personal user credential"):
+        if operation == "create":
+            await _create_promo_code_impl(runtime, auth, amount_usd="5", kind="credit")
+        elif operation == "list":
+            await _list_promo_codes_impl(runtime, auth)
+        elif operation == "revoke":
+            await _revoke_promo_code_impl(runtime, auth, str(uuid.uuid4()))
+        else:
+            await _get_tenant_summary_impl(runtime, auth)
+    async with committing_sessionmaker() as session:
+        assert await promo_codes.list_promo_codes(session) == []

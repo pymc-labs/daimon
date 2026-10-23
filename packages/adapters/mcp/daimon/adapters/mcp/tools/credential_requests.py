@@ -52,6 +52,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     edit_teams_card_state,
 )
 from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
@@ -106,7 +107,8 @@ _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def _caller_is_admin(auth: AuthIdentity) -> bool:
     """Whether this caller may REQUEST a key outside the member allowlist.
 
-    `auth.is_admin` is the middleware's gate: the account's live DB role is
+    The live configuration verdict is the middleware’s gate; account roles
+    never cache delegated authority. The verified platform principal is
     ADMIN, or the token is an internal CLI/scheduler/headless token carrying
     the admin claim. An agent-scoped key (`auth.agent_id` set) re-derives its
     role from the account that owns it, which may be an admin — so it is
@@ -118,7 +120,7 @@ def _caller_is_admin(auth: AuthIdentity) -> bool:
     policy, so a mint by an admin-capable token never lets a member store an
     admin-only name.
     """
-    return auth.is_admin and auth.agent_id is None
+    return auth.admin_for(DelegatedAction.CREDENTIALS) and auth.agent_id is None
 
 
 _PENDING_TASK_DESCRIPTION = (
@@ -285,7 +287,15 @@ async def _decide_attachment_write(
         ma_agent_id=str(ma_agent.id),
         is_daimon_managed=ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
-    return decide_operation(operation, is_admin=auth.is_admin, target=facts), facts
+    return decide_operation(
+        operation,
+        is_admin=(
+            auth.admin_for()
+            if operation == "repo_bind"
+            else auth.admin_for(DelegatedAction.CREDENTIALS)
+        ),
+        target=facts,
+    ), facts
 
 
 async def _require_key_replacement_allowed(

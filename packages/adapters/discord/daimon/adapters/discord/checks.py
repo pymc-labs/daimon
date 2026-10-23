@@ -17,6 +17,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Concatenate, ParamSpec, cast
 
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import AdminCaller, is_daimon_admin, is_guild_admin_by_permissions
 from daimon.core.stores.tenants import get_tenant
@@ -78,12 +79,16 @@ def is_platform_admin(interaction: discord.Interaction) -> bool:
     return is_member_guild_admin(user, guild_owner_id=owner_id)
 
 
-async def is_guild_admin(interaction: Interaction[commands.Bot]) -> bool:
+async def is_guild_admin(
+    interaction: discord.Interaction, *, action: DelegatedAction | None = None
+) -> bool:
     """Daimon authority, re-read from this interaction and uncached tenant grants."""
     if interaction.guild_id is None or not isinstance(interaction.user, discord.Member):
         return False
     if is_platform_admin(interaction):
         return True
+    if not isinstance(action, DelegatedAction):
+        return False
     runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
     try:
@@ -100,7 +105,9 @@ async def is_guild_admin(interaction: Interaction[commands.Bot]) -> bool:
         return False  # unavailable grants never confer authority
 
 
-async def refuse_if_not_admin(interaction: Interaction[commands.Bot]) -> bool:
+async def refuse_if_not_admin(
+    interaction: discord.Interaction, *, action: DelegatedAction | None = None
+) -> bool:
     """Click-time admin re-check for a callback whose blast radius exceeds the clicker's own agent.
 
     Returns True when the caller must return immediately (the action is
@@ -114,7 +121,7 @@ async def refuse_if_not_admin(interaction: Interaction[commands.Bot]) -> bool:
     Call it before any ``defer()`` or response in the callback, so the refusal
     owns the interaction's first response.
     """
-    if await is_guild_admin(interaction):
+    if await is_guild_admin(interaction, action=action):
         return False
     if interaction.response.is_done():
         await interaction.followup.send(_ADMIN_ONLY_MESSAGE, ephemeral=True)
@@ -187,7 +194,7 @@ def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generi
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> None:
-        if not await is_guild_admin(interaction):
+        if not await is_guild_admin(interaction, action=DelegatedAction.ROUTINES):
             await interaction.response.send_message(
                 "🛡️ Viewing scheduled routines needs a Daimon admin. "
                 "Ask one: “Please open `/routines` to review this server’s scheduled routines.”",
@@ -203,10 +210,13 @@ async def is_member_daimon_admin(
     member: discord.Member,
     *,
     runtime: DiscordRuntime,
+    action: DelegatedAction | None = None,
 ) -> bool:
     """Current member permissions/roles plus fresh tenant delegation."""
     if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id):
         return True
+    if not isinstance(action, DelegatedAction):
+        return False
     async with runtime.sessionmaker() as session:
         return await is_daimon_admin(
             session,

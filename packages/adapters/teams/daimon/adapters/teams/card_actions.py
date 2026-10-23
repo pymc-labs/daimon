@@ -19,6 +19,7 @@ from daimon.adapters.teams.deployment_admins import admin_team_owners, is_platfo
 from daimon.adapters.teams.identity import canonical_uuid, foreign_tenant, live_tenant_id
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
@@ -67,6 +68,11 @@ class Actor:
     is_admin: bool
     conversation_id: str
     is_platform_admin: bool = False
+
+    def admin_for(self, action: DelegatedAction | None = None) -> bool:
+        return admin_for_action(
+            platform_admin=self.is_platform_admin, daimon_admin=self.is_admin, action=action
+        )
 
 
 async def card_actor(runtime: TeamsRuntime, activity: InvokeActivity) -> Actor | None:

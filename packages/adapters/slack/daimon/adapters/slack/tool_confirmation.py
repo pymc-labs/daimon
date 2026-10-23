@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
@@ -152,7 +153,9 @@ class SlackConfirmationCards:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
 
                 async def current_admin(clicker: str) -> bool:
-                    return await resolve_is_admin(client, user_id=clicker)
+                    return await resolve_is_admin(
+                        client, user_id=clicker, action=DelegatedAction.TOOL_RULES
+                    )
 
                 from functools import partial
 
@@ -186,13 +189,19 @@ class SlackConfirmationCards:
 
             if runtime is None or tenant_id is None:
                 return Subject()
-            admin = await resolve_is_admin(client, user_id=clicker)
+            admin = await resolve_is_admin(
+                client, user_id=clicker, action=DelegatedAction.TOOL_RULES
+            )
             caller = await admin_caller(
                 runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
             )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
-                    session, tenant_id=tenant_id, platform="slack", caller=caller
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    caller=caller,
+                    action=DelegatedAction.TOOL_RULES,
                 )
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:

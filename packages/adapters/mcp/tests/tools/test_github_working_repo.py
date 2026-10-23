@@ -96,13 +96,13 @@ async def test_set_working_repo_admin_none_and_member_refusal(
     async with committing_sessionmaker.begin() as session:
         await change_grant(session, **key)
     delegated = replace(member, is_admin=True)
-    allowed = await working_tool.set_working_repo_impl(
-        runtime,  # type: ignore[arg-type]
-        delegated,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="none",
-    )
-    assert allowed.working_repo is None
+    with pytest.raises(ToolError, match="Ask a server admin"):
+        await working_tool.set_working_repo_impl(
+            runtime,
+            delegated,
+            origin_context_id=str(uuid.uuid4()),
+            repo_name="none",
+        )
     async with committing_sessionmaker.begin() as session:
         await change_grant(session, **key, revoke=True)
     with pytest.raises(ToolError, match="Ask a server admin"):

@@ -18,6 +18,7 @@ import structlog
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.provisioning import demote_former_admins
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import (
@@ -160,10 +161,11 @@ async def is_deployment_admin(
     *,
     user_id: str,
     runtime: TeamsRuntime | None = None,
+    action: DelegatedAction | None = None,
 ) -> bool:
     """Whether `user_id` has live platform authority or a tenant user grant."""
     role = await deployment_role(settings, owners, user_id=user_id)
-    if runtime is None:
+    if runtime is None or not isinstance(action, DelegatedAction):
         return role is Role.ADMIN
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=settings.tenant_id)
     async with runtime.sessionmaker() as session:
@@ -190,7 +192,11 @@ async def inbound_is_admin(
 ) -> bool:
     """Whether a message's sender administers the deployment."""
     return await is_deployment_admin(
-        settings, admin_team_owners(runtime, fresh=True), user_id=inbound.user_id, runtime=runtime
+        settings,
+        admin_team_owners(runtime, fresh=True),
+        user_id=inbound.user_id,
+        runtime=runtime,
+        action=DelegatedAction.AGENT_SETTINGS,
     )
 
 

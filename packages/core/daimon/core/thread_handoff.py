@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -265,7 +266,9 @@ async def _subject(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: HandoffCaller
 ) -> Subject:
     who = caller.admin
-    live = await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=who)
+    live = await load_live_subject(
+        session, tenant_id=tenant_id, platform=platform, caller=who, action=DelegatedAction.ROUTING
+    )
     return build_subject(
         is_admin=live.is_admin,
         platform_user_id=who.platform_user_id,

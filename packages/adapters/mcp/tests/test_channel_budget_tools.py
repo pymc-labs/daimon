@@ -88,11 +88,10 @@ def _auth(
         platform=platform,
         is_admin=admin,
         is_platform_admin=admin,
-        chat_session_id="test-session",
     )
 
 
-async def test_admin_sets_a_budget_on_a_threads_parent_and_members_read_it(
+async def test_platform_admin_sets_and_reads_a_budget_on_a_threads_parent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
@@ -115,9 +114,7 @@ async def test_admin_sets_a_budget_on_a_threads_parent_and_members_read_it(
     assert (result.channel_id, result.limit_usd) == (_PARENT, "5.00")
     assert Decimal(result.spent_usd) == Decimal("1.25"), "exact ledger precision, as a string"
     assert result.summary == "$1.25 of $5.00 (monthly)"
-    lookup = await _get_channel_budget_impl(
-        runtime, _auth(tenant, account_id, admin=False), _THREAD
-    )
+    lookup = await _get_channel_budget_impl(runtime, _auth(tenant, account_id, admin=True), _THREAD)
     assert lookup.channel_id == _PARENT
     assert lookup.budget is not None and Decimal(lookup.budget.remaining_usd) == Decimal("3.75")
     async with committing_sessionmaker() as session:
@@ -132,7 +129,7 @@ async def test_a_channel_without_a_budget_reads_as_none(
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
     lookup = await _get_channel_budget_impl(
-        _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=False), "333"
+        _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=True), "333"
     )
     assert lookup.budget is None
 
@@ -185,39 +182,15 @@ async def _dm(
         )
 
 
-async def test_get_without_a_channel_reads_the_calling_turns_channel(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], visible: list[str]
+async def test_chat_origin_budget_read_requires_a_direct_personal_credential(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant, account_id = await _seed(committing_sessionmaker)
-    async with committing_sessionmaker.begin() as session:
-        await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
-    runtime = _runtime(committing_sessionmaker)
-    member = _auth(tenant, account_id, admin=False)
-    here = await _origin(
-        committing_sessionmaker, tenant, account_id, parent_channel_id=_PARENT, thread_id=_THREAD
-    )
-    dm = await _origin(
-        committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:x"
-    )
-    await _dm(committing_sessionmaker, tenant, account_id, scope_id="dm:x", source_channel_id=None)
-    moved = await _origin(
-        committing_sessionmaker, tenant, account_id, parent_channel_id="dm-chan", thread_id="dm:m"
-    )
-    await _dm(
-        committing_sessionmaker, tenant, account_id, scope_id="dm:m", source_channel_id=_PARENT
-    )
+    from dataclasses import replace
 
-    lookup = await _get_channel_budget_impl(runtime, member, None, here)
-    assert lookup.channel_id == _PARENT and lookup.budget is not None
-    assert visible == [], "the origin already places the caller in the channel"
-    from_dm = await _get_channel_budget_impl(runtime, member, None, moved)
-    assert from_dm.channel_id == _PARENT and from_dm.budget is not None, (
-        "a moved DM reads the budget of the channel it came from"
-    )
-    with pytest.raises(ToolError, match="direct message belongs to no channel"):
-        await _get_channel_budget_impl(runtime, member, None, dm)
-    with pytest.raises(ToolError, match="unavailable or expired"):
-        await _get_channel_budget_impl(runtime, member, None, str(uuid.uuid4()))
+    tenant, account_id = await _seed(committing_sessionmaker)
+    auth = replace(_auth(tenant, account_id, admin=True), chat_session_id="test-session")
+    with pytest.raises(ToolError, match="personal user credential"):
+        await _get_channel_budget_impl(_runtime(committing_sessionmaker), auth, _PARENT)
 
 
 async def test_get_without_a_channel_asks_for_one(
@@ -226,11 +199,11 @@ async def test_get_without_a_channel_asks_for_one(
     tenant, account_id = await _seed(committing_sessionmaker)
     with pytest.raises(ToolError, match="channel_id is required"):
         await _get_channel_budget_impl(
-            _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=False), None
+            _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=True), None
         )
 
 
-@pytest.mark.parametrize("call", ["list", "set", "clear"])
+@pytest.mark.parametrize("call", ["get", "list", "set", "clear"])
 async def test_mutations_and_listing_are_admin_only(
     committing_sessionmaker: async_sessionmaker[AsyncSession], call: str
 ) -> None:
@@ -243,7 +216,9 @@ async def test_mutations_and_listing_are_admin_only(
     with pytest.raises(
         ToolError, match="(requires|needs) a (workspace or server admin|live platform admin)"
     ):
-        if call == "list":
+        if call == "get":
+            await _get_channel_budget_impl(runtime, member, _PARENT)
+        elif call == "list":
             await _list_channel_budgets_impl(runtime, member)
         elif call == "set":
             await _set_channel_budget_impl(
@@ -336,7 +311,9 @@ async def test_origin_budget_channel_is_the_turns_channel_or_none(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
-    member = _auth(tenant, account_id, admin=False)
+    from dataclasses import replace
+
+    member = replace(_auth(tenant, account_id, admin=False), chat_session_id="test-session")
     here = await _origin(
         committing_sessionmaker, tenant, account_id, parent_channel_id=_PARENT, thread_id=_THREAD
     )

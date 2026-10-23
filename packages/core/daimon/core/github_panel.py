@@ -9,6 +9,8 @@ from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.native_admins import AdminCaller, load_live_subject, read_stored_admin
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
 from daimon.core.stores.github_connect import (
     PINNED_AGENT_MESSAGE,
@@ -60,7 +62,7 @@ async def can_manage_agent_github(
     is_daimon_managed: bool,
     default: DeploymentDefault,
 ) -> bool:
-    """Only a Daimon admin can connect, grant and remove repos for an agent."""
+    """Only a platform admin can connect, grant and remove repos for an agent."""
     return (
         await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
     ).is_admin
@@ -98,14 +100,15 @@ async def sync_connect_admin(
     tenant_id: uuid.UUID,
     platform: str,
     platform_user_id: str,
-    verified_tenant_admin: bool,
+    is_platform_admin: bool,
 ) -> None:
-    """Ensure a verified configuration caller has a principal, without caching authority."""
-    if not verified_tenant_admin:
-        raise ValueError("Only a workspace admin can connect GitHub.")
-    await get_or_create_platform_principal(
+    """Synchronize only freshly attested platform authority for native-only stores."""
+    if is_platform_admin is not True:
+        raise ValueError("Only a platform admin can connect GitHub.")
+    principal = await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
+    await set_role(session, principal.account_id, Role.ADMIN)
 
 
 _PUBLIC_ERRORS = frozenset(
@@ -216,6 +219,14 @@ async def connect_link(
     if root is None:
         raise ValueError("GitHub connection is not configured for this workspace.")
     for_agent = agent_id is not None and agent_name is not None
+    if verified_tenant_admin:
+        await sync_connect_admin(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            platform_user_id=platform_user_id,
+            is_platform_admin=True,
+        )
     if verified_tenant_admin or (for_agent and verified_agent_manager):
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id

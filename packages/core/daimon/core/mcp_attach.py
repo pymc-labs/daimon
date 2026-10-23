@@ -33,6 +33,7 @@ from anthropic.types.beta.beta_managed_agents_agent import Tool as MATool
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -100,7 +101,13 @@ async def decide_mcp_replacement(
     """
     async with session_factory() as session:
         is_admin = (
-            await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+            await load_live_subject(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                caller=caller,
+                action=DelegatedAction.MCP_CONNECTIONS,
+            )
         ).is_admin
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     facts = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)

@@ -318,6 +318,16 @@ class IdentityMiddleware(Middleware):
             except ValueError:
                 return None
 
+        # Dropping a malformed execution marker would make it look like a
+        # personal credential. Reject its shape before constructing identity.
+        if _token is not None:
+            for binding in ("chat_agent_id", "routine_id", "execution_id", "slack_turn_context_id"):
+                if _token.claims.get(binding) is not None and signed_uuid(binding) is None:
+                    raise AuthorizationError("malformed execution binding")
+            raw_session = _token.claims.get("chat_session_id")
+            if raw_session is not None and (not isinstance(raw_session, str) or not raw_session):
+                raise AuthorizationError("malformed chat session binding")
+
         # Keep chat execution identity separate from external agent credentials:
         # agent_id controls tool visibility and several authorization gates.
         chat_agent_id = signed_uuid("chat_agent_id")

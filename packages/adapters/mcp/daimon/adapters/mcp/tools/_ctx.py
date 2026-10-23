@@ -9,6 +9,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
@@ -44,13 +45,13 @@ async def _auth(ctx: Context) -> AuthIdentity:  # pyright: ignore[reportUnusedFu
     return identity
 
 
-def _require_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedFunction]
+def _require_admin(auth: AuthIdentity, *, action: DelegatedAction | None = None) -> None:  # pyright: ignore[reportUnusedFunction]
     """Raise ToolError if the caller is not an admin.
 
     Call at the top of every mutating _*_impl to enforce admin chat gating.
     Reads (list_*/get_*/self_read*/self_list*) stay ungated.
     """
-    if not auth.is_admin:
+    if not auth.admin_for(action):
         raise ToolError(
             "This operation requires a workspace or server admin. Tell the caller who can "
             "make the change and give them a sentence the admin can say, preserving "
@@ -105,7 +106,7 @@ async def _policy_gate(
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
             account = await get_account(session, auth.account_id)
-            admin_now = await current_admin(session, auth)
+            admin_now = await current_admin(session, auth, action=DelegatedAction.HUB_PIN_EXEMPTION)
     except AccessPolicyUnreadable as exc:
         refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
@@ -124,6 +125,7 @@ async def _policy_gate(
             tenant_id=auth.tenant_id,
             user_id=auth.platform_user_id,
             require_fresh=require_fresh,
+            action=DelegatedAction.HUB_PIN_EXEMPTION,
         )
     hub_admin = (
         pin_exempt and auth.platform_user_id is not None and account is not None and admin_now
@@ -143,7 +145,9 @@ async def _policy_gate(
             async with sessionmaker() as session:
                 policy = await load_access_policy(session, tenant_id=auth.tenant_id)
                 account = await get_account(session, auth.account_id)
-                admin_now = await current_admin(session, auth)
+                admin_now = await current_admin(
+                    session, auth, action=DelegatedAction.HUB_PIN_EXEMPTION
+                )
         except AccessPolicyUnreadable as exc:
             refused(TerminationReason.ADMISSION_DENIED)
             raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
@@ -166,6 +170,7 @@ async def _policy_gate(
                 tenant_id=auth.tenant_id,
                 user_id=auth.platform_user_id,
                 require_fresh=require_fresh,
+                action=DelegatedAction.HUB_PIN_EXEMPTION,
             )
         )
     if live_subject is not None:
@@ -414,5 +419,8 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
 
 def _require_platform_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedFunction]
     """Money and delegation require live platform authority, never a delegated role."""
-    if not auth.is_platform_admin or auth.is_external_agent:
-        raise ToolError("This operation requires a live platform admin.")
+    if auth.is_platform_admin is not True or not auth.is_personal_user:
+        raise ToolError(
+            "This operation requires a live platform admin acting directly "
+            "with a personal user credential."
+        )

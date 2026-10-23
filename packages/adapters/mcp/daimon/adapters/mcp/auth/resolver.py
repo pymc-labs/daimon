@@ -35,6 +35,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from daimon.core.admin_actions import DelegatedAction, admin_for_action, is_personal_user_credential
 from daimon.core.stores.domain import McpTokenKind, Role
 
 
@@ -72,6 +73,32 @@ class AuthIdentity:
     # The channel the agent key was minted in, from its mcp_tokens row; read
     # through `token_channel_id`.
     bound_channel_id: str | None = None
+
+    def admin_for(self, action: DelegatedAction | None = None) -> bool:
+        return (
+            admin_for_action(
+                platform_admin=self.is_platform_admin,
+                daimon_admin=self.is_admin,
+                action=action,
+            )
+            and not self.is_external_agent
+        )
+
+    @property
+    def is_personal_user(self) -> bool:
+        """Human-held user credentials only; execution shape never confers human intent."""
+        return is_personal_user_credential(
+            token_kind=self.token_kind,
+            is_chat_execution=self.is_chat_execution,
+            execution_bindings=(
+                self.agent_id,
+                self.chat_agent_id,
+                self.routine_id,
+                self.execution_id,
+                self.chat_session_id,
+                self.slack_turn_context_id,
+            ),
+        )
 
     @property
     def is_external_agent(self) -> bool:

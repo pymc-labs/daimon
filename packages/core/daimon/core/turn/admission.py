@@ -214,6 +214,7 @@ class Admission:
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
     is_platform_admin: bool = False
+    effective_is_admin: bool | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
     # The channel's backend configuration and its admission, when the channel
     # has one and `DAIMON_TURN__CHANNEL_BACKENDS` is on; None otherwise.
@@ -248,6 +249,8 @@ class Admission:
     @property
     def is_admin(self) -> bool:
         """The effective authority admitted for this turn; absent evidence denies."""
+        if self.effective_is_admin is not None:
+            return self.effective_is_admin
         return self.grant is not None and self.grant.subject.is_admin
 
     def authored(self) -> Admission:
@@ -493,6 +496,10 @@ async def admit_impl(
                 require_fresh=is_dm,
                 session=session,
             )
+        effective_admin = subject.is_admin
+        # Turn admission is not a delegated configuration action. Preserve the
+        # effective verdict for the UI without granting runtime exemptions.
+        subject = replace(subject, is_admin=platform_admin)
         # Stored authority belongs only to live platform admins. A grant affects
         # this subject, never the hub's account/transcript admin exception.
         if role is not None:
@@ -844,6 +851,7 @@ async def admit_impl(
 
         provisional = Admission(
             is_platform_admin=platform_admin,
+            effective_is_admin=effective_admin,
             account_id=principal.account_id,
             agent=agent,
             environment=environment,
@@ -1064,6 +1072,7 @@ async def admit_impl(
 
     result = Admission(
         is_platform_admin=platform_admin,
+        effective_is_admin=effective_admin,
         backend_revision=backend_revision,
         backend_revision_origin=backend_revision_origin,
         backend_counterpart=backend_counterpart,

@@ -10,6 +10,7 @@ from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.agent_setup.panel_views import build_avatar_status_view
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_panel_metadata
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import CUSTOM_PICTURES_OFF, identity_enabled_for, is_builtin_agent
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -44,7 +45,7 @@ async def may_edit_avatar(
 ) -> bool:
     if not identity_enabled_for(runtime.settings, "slack", team_id):
         return False
-    if not await resolve_is_admin(client, user_id=user_id):
+    if not await resolve_is_admin(client, user_id=user_id, action=DelegatedAction.AGENT_SETTINGS):
         return False
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)
     return agent is not None and not is_builtin_agent(

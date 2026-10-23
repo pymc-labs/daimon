@@ -38,6 +38,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     resolve_setup_agent,
 )
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_environments import build_environment_resolution_note
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -105,7 +106,7 @@ async def _require_scope_admin(
     if channel_id is None:
         if auth.is_operator:
             raise ToolError("An operator token changes only a channel's default; pass channel_id.")
-        _require_admin(auth)
+        _require_admin(auth, action=DelegatedAction.AGENT_SETTINGS)
     else:
         await require_admin(runtime, auth, channel_id=channel_id)
 
@@ -174,7 +175,7 @@ async def _set_agent_default_impl(
             agent_name=agent_name,
             mode="agent",
             actor_account_id=auth.account_id,
-            set_by_admin=auth.is_admin and auth.agent_id is None,
+            set_by_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS) and auth.agent_id is None,
         )
 
     return SetDefaultResult(

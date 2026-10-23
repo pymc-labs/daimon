@@ -12,6 +12,7 @@ from daimon.adapters.discord.checks import (
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.recruitment_guard import protected
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card
@@ -129,7 +130,7 @@ class HereCog(commands.Cog):
                     public_mcp_url=str(runtime.settings.mcp.public_url)
                     if runtime.settings.mcp.public_url is not None
                     else None,
-                    is_admin=await is_guild_admin(interaction),
+                    is_admin=await is_guild_admin(interaction, action=DelegatedAction.ROUTING),
                     caller_account_id=principal.account_id if principal else None,
                     visible_channel_ids=visible_ids,
                     bot_can_view=bot_view,

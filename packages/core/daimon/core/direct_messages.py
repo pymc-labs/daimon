@@ -530,7 +530,10 @@ async def _run_admitted_dm_turn(
             attended=origin != "routine",
         ) as turn_origin_row,
     ):
-        user_message = f"{render_turn_origin(turn_origin_row)}\n{prompt}"
+        controls = render_turn_origin(
+            turn_origin_row, effective_is_admin=prepared.admission.is_admin
+        )
+        user_message = f"{controls}\n{prompt}"
 
         async def reseed() -> str:
             return user_message

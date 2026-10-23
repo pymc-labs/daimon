@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
@@ -417,6 +418,7 @@ def discord_confirmation_hook(
                             is_server_admin=role is Role.ADMIN,
                             role_ids=tuple(_roles),
                         ),
+                        action=DelegatedAction.TOOL_RULES,
                     )
                 return subject.is_admin
 
@@ -492,6 +494,7 @@ def discord_confirmation_hook(
                     is_server_admin=role is Role.ADMIN,
                     role_ids=tuple(_roles),
                 ),
+                action=DelegatedAction.TOOL_RULES,
             )
 
     async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:

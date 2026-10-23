@@ -46,6 +46,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.core import channel_backend
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
@@ -223,7 +224,9 @@ async def _with_answering_note(
     return info.model_copy(
         update={
             "answering": build_unrouted_note(
-                agent_name=info.name, channel_label=None, is_admin=auth.is_admin
+                agent_name=info.name,
+                channel_label=None,
+                is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS),
             )
         }
     )
@@ -345,7 +348,7 @@ async def _may_see_setup(
     runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
 ) -> bool:
     """Members see capabilities; native admins see setup details."""
-    return auth.is_admin
+    return auth.admin_for(DelegatedAction.AGENT_SETTINGS)
 
 
 async def _reject_guild_name_collision(
@@ -385,7 +388,7 @@ async def _list_agents_impl(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
     )
     infos = [AgentInfo.from_ma(a, skill_titles=skill_titles) for a in rows]
-    if auth.is_admin:
+    if auth.admin_for(DelegatedAction.AGENT_SETTINGS):
         return infos
     return [
         info if await _may_see_setup(runtime, auth, row) else info.for_member()
@@ -416,7 +419,9 @@ async def _get_agent_impl(
     # tools may edit at all. A defaults-managed or system
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
-    sees_setup = auth.is_admin or await _may_see_setup(runtime, auth, agent)
+    sees_setup = auth.admin_for(DelegatedAction.AGENT_SETTINGS) or await _may_see_setup(
+        runtime, auth, agent
+    )
     if sees_setup and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
@@ -910,7 +915,7 @@ async def _fork_agent_impl(
 ) -> AgentInfo:
     # Forking is an admin's call: a fork routes nowhere and has no channel
     # pin of its own, so it is free to run anywhere the source can't.
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.AGENT_LIFECYCLE)
     await _reject_guild_name_collision(runtime, auth, new_name)
     source = await resolve_setup_agent(
         runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
@@ -924,7 +929,7 @@ async def _fork_agent_impl(
             source=source,
             new_name=new_name,
             public_url=str(public_url) if public_url is not None else None,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_LIFECYCLE)),
             default_agent_name=runtime.deployment_default.agent_name,
         )
     except DaimonError as exc:
@@ -943,7 +948,7 @@ async def _archive_agent_impl(
     name: str,
     expected_ma_agent_id: str | None = None,
 ) -> None:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.AGENT_LIFECYCLE)
     agent = await resolve_setup_agent(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
@@ -1023,7 +1028,7 @@ async def _capture_backend_source(
             channel_id=origin.parent_channel_id if origin is not None else None,
             thread_id=origin.thread_id if origin is not None else None,
         ),
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
         place=turn_origin_place(origin) if origin is not None else Place(),
         is_dm=False,
         slack_turn_context_id=None,
@@ -1040,7 +1045,7 @@ async def _set_agent_backend_impl(
     expected_revision: int | None = None,
     preview_only: bool = False,
 ) -> dict[str, JsonValue]:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.AGENT_SETTINGS)
     if auth.agent_id is not None:
         raise ToolError("An agent key cannot change model backends.")
     try:
@@ -1059,7 +1064,7 @@ async def _set_agent_backend_impl(
     actor = channel_backend.BackendActor(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
     )
     try:
         agent = await channel_backend.load_backend_agent(
@@ -1134,7 +1139,7 @@ async def _request_agent_backend_switch_impl(
     origin_context_id: str | None = None,
     accepted_drops: tuple[str, ...] | None = None,
 ) -> AgentBackendSwitchInfo:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.AGENT_SETTINGS)
     if auth.agent_id is not None or auth.platform_user_id is None:
         raise ToolError("Request this change from an admin's active chat conversation.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
@@ -1202,7 +1207,7 @@ async def _request_agent_backend_switch_impl(
             actor = BackendActor(
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
             )
             await service.set_backend(
                 agent,

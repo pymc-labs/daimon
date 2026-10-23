@@ -50,6 +50,7 @@ from daimon.adapters.teams.setup_conversation import (
     open_setup_conversation,
 )
 from daimon.core import channel_backend
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import queue_agent_face
@@ -193,7 +194,11 @@ class SetupPanel:
 
     async def _skill_target(self, actor: Actor, name: str) -> RosterAgent | None:
         """The agent `name` as the panel lists it to `actor`: a click never names an id."""
-        roster = await self._roster(actor.tenant_id, actor.conversation_id, is_admin=actor.is_admin)
+        roster = await self._roster(
+            actor.tenant_id,
+            actor.conversation_id,
+            is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+        )
         return next((row for row in roster.rows if row.name == name), None)
 
     async def _skill_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
@@ -267,7 +272,7 @@ class SetupPanel:
 
     async def _operator_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
-        if actor is None or not actor.is_admin:
+        if actor is None or not actor.admin_for(DelegatedAction.AGENT_SETTINGS):
             return dialog_message(OPERATOR_NEEDS_ADMIN)
         if self._runtime.settings.mcp.jwt_secret is None:
             return dialog_message(OPERATOR_NOT_CONFIGURED)
@@ -413,7 +418,11 @@ class SetupPanel:
             )
 
     async def _routing(self, actor: Actor, page: int) -> AdaptiveCard:
-        roster = await self._roster(actor.tenant_id, actor.conversation_id, is_admin=actor.is_admin)
+        roster = await self._roster(
+            actor.tenant_id,
+            actor.conversation_id,
+            is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+        )
         # A non-admin sees only their side of every isolated channel, as on Discord and Slack.
         answering_map = await self._answering_map(actor.tenant_id, actor)
         # The request names an agent nobody reaches yet, else the one answering here.
@@ -423,9 +432,9 @@ class SetupPanel:
         return cards.routing_card(
             answering_map,
             window,
-            is_admin=actor.is_admin,
+            is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
             request_agent=request_agent,
-            changes_channels=actor.is_admin,
+            changes_channels=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
         )
 
     async def _details(
@@ -435,7 +444,11 @@ class SetupPanel:
 
         The roster maps the clicked name to an MA id, so a click never names an id itself.
         """
-        roster = await self._roster(actor.tenant_id, actor.conversation_id, is_admin=actor.is_admin)
+        roster = await self._roster(
+            actor.tenant_id,
+            actor.conversation_id,
+            is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+        )
         match = next((row for row in roster.rows if row.name == name), None)
         if match is None:
             return None
@@ -455,7 +468,7 @@ class SetupPanel:
                     and self._runtime.settings.github_app.private_key is not None,
                 ),
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
-                is_admin=actor.is_admin,
+                is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                 channel_label=None,
             )
             github_panel = await load_grants_panel(
@@ -469,9 +482,9 @@ class SetupPanel:
         coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
         backend_options: tuple[Provider, ...] = ()
         backend_selection: Provider | None = None
-        if actor.is_admin and channel_backend.backend_selection_enabled(
-            self._runtime.settings.turn
-        ):
+        if actor.admin_for(
+            DelegatedAction.AGENT_SETTINGS
+        ) and channel_backend.backend_selection_enabled(self._runtime.settings.turn):
             service = channel_backend.make_backend_service(
                 self._runtime.sessionmaker, self._runtime.settings.turn
             )
@@ -505,9 +518,9 @@ class SetupPanel:
         op, page, chat = data.get("op"), _page(data), actor.conversation_id
         if op in ("backend_preview", "backend_confirm", "backend_cancel"):
             name = str(data.get("agent") or "")
-            if not actor.is_admin or not channel_backend.backend_selection_enabled(
-                self._runtime.settings.turn
-            ):
+            if not actor.admin_for(
+                DelegatedAction.AGENT_SETTINGS
+            ) or not channel_backend.backend_selection_enabled(self._runtime.settings.turn):
                 await record_panel_write(
                     self._runtime.sessionmaker,
                     tenant_id=actor.tenant_id,
@@ -515,7 +528,9 @@ class SetupPanel:
                     platform_user_id=actor.user_id,
                     op="agent_backend",
                     outcome="denied",
-                    reason="needs_admin" if not actor.is_admin else "feature_disabled",
+                    reason="needs_admin"
+                    if not actor.admin_for(DelegatedAction.AGENT_SETTINGS)
+                    else "feature_disabled",
                     agent_name=name,
                 )
                 return toast("Model backend wasn't changed. Ask an organisation admin.")
@@ -569,7 +584,8 @@ class SetupPanel:
                 tenant_id=live_actor.tenant_id,
                 account_id=account_id,
                 subject=build_subject(
-                    is_admin=live_actor.is_admin, platform_user_id=live_actor.user_id
+                    is_admin=live_actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+                    platform_user_id=live_actor.user_id,
                 ),
             )
             try:
@@ -617,7 +633,11 @@ class SetupPanel:
             return replace_card(
                 card
                 or await self._agents(
-                    actor.tenant_id, chat=chat, page=page, is_admin=actor.is_admin, notice=GONE
+                    actor.tenant_id,
+                    chat=chat,
+                    page=page,
+                    is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+                    notice=GONE,
                 )
             )
         if op == "routing":
@@ -639,7 +659,12 @@ class SetupPanel:
             )
             return replace_card(cards.notice_card(cards.ENDED if ended else ALREADY_ENDED))
         return replace_card(
-            await self._agents(actor.tenant_id, chat=chat, page=page, is_admin=actor.is_admin)
+            await self._agents(
+                actor.tenant_id,
+                chat=chat,
+                page=page,
+                is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
+            )
         )
 
     async def _create(
@@ -690,7 +715,7 @@ class SetupPanel:
             f"Created {name}. It does not answer anywhere yet."
             + (
                 " An admin can make it answer in this chat; it will then appear in setup here."
-                if details is None and not actor.is_admin
+                if details is None and not actor.admin_for(DelegatedAction.AGENT_SETTINGS)
                 else ""
             )
         )
@@ -744,6 +769,7 @@ class SetupPanel:
                     caller=AdminCaller(
                         platform_user_id=actor.user_id, is_server_admin=actor.is_platform_admin
                     ),
+                    action=DelegatedAction.AGENT_SETTINGS,
                 )
         except AccessPolicyUnreadable:
             return dialog_message(POLICY_UNREADABLE_REFUSAL)

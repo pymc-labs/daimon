@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.agent_setup.state import PanelMetadata
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -65,7 +65,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
 
     team_id = str(team.get("id") or "")
     user_id = str(user.get("id") or "")
-    if not await resolve_is_admin(client, user_id=user_id):
+    if not await resolve_is_platform_admin(client, user_id=user_id):
         return
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     await client.views_open(  # pyright: ignore[reportUnknownMemberType]

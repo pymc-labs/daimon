@@ -23,6 +23,7 @@ from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
 )
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
 from daimon.core.channel_environments import load_hidden_environment_names
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -194,7 +195,7 @@ async def _load_view(
     refused while any channel is kept to its own agents.
     """
     policy = await load_policy_or_refuse(runtime, auth.tenant_id)
-    restrict_to_location = discovery and not auth.is_admin
+    restrict_to_location = discovery and not auth.admin_for(DelegatedAction.AGENT_SETTINGS)
     if not any_own_readers(policy) and not restrict_to_location:
         return OPEN_VIEW
     if agents is None:

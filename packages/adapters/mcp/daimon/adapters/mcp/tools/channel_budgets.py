@@ -1,12 +1,7 @@
-"""Channel budget tools: read a channel's spending budget; admins set, clear and list them.
+"""Channel budgets for platform admins acting directly with personal user credentials.
 
-A budget caps what one channel may spend (see ``daimon.core.channel_budget``
-for how spend and windows are counted). Reading one is a member action for a
-channel the caller can see. Listing, setting and clearing are admin-only:
-`authorize` (SET_CHANNEL_BUDGET) allows a server admin and never a channel
-admin, since money stays with server admins. Operator tokens read them with ``tenant:read`` and
-change them with ``channels:write``. Money crosses this boundary as decimal
-strings, both ways.
+Chat execution, routines, external agent keys and operator tokens are refused.
+Money crosses this boundary as decimal strings in both directions.
 """
 
 from __future__ import annotations
@@ -99,6 +94,7 @@ _NEEDS_BUDGET_ADMIN = (
 
 def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
     """Raise ``ToolError`` unless the caller may set, clear or raise ``channel_id``'s budget."""
+    _require_platform_admin(auth)
     decision = may_set_channel_budget(
         mcp_subject(auth, is_admin=auth.is_platform_admin), channel_id
     )
@@ -224,6 +220,7 @@ async def _get_channel_budget_impl(
     channel_id: str | None,
     origin_context_id: str | None = None,
 ) -> ChannelBudgetLookup:
+    _require_platform_admin(auth)
     require_scope(auth, "tenant:read")
     platform = _require_platform(auth)
     if channel_id is not None and channel_id.strip():
@@ -247,6 +244,7 @@ async def _get_channel_budget_impl(
 async def _list_channel_budgets_impl(
     runtime: McpRuntime, auth: AuthIdentity
 ) -> list[ChannelBudgetResult]:
+    _require_platform_admin(auth)
     require_scope(auth, "tenant:read")
     _require_platform_admin(auth)
     platform = _require_platform(auth)
@@ -271,6 +269,7 @@ async def _set_channel_budget_impl(
     ends_at: str | None,
 ) -> ChannelBudgetResult:
     """Validate everything before the write: a refused call leaves no row behind."""
+    _require_platform_admin(auth)
     require_scope(auth, "channels:write")
     platform = _require_platform(auth)
     try:
@@ -304,6 +303,7 @@ async def _clear_channel_budget_impl(
     Any other id is used as given, so a budget on a channel since deleted or
     hidden can still be cleared.
     """
+    _require_platform_admin(auth)
     require_scope(auth, "channels:write")
     platform = _require_platform(auth)
     target = (
@@ -324,11 +324,9 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ChannelBudgetLookup:
         """Show a channel's spending budget: its limit, window and what it has spent.
 
-        For the channel this turn is in (in a DM, the channel it was moved
-        from), omit ``channel_id`` and pass this turn's
-        ``origin_context_id``. For another channel, pass its id; a
-        thread id resolves to its parent channel. Any member may read the
-        budget of a channel they can see. ``budget`` is null when the
+        Pass the channel id; a thread id resolves to its parent channel. Only a
+        platform admin acting directly with a personal CLI/OAuth
+        credential may read budgets; chat and routines are refused. ``budget`` is null when the
         channel has none. Read ``summary`` back to the user.
         """
         return await _get_channel_budget_impl(
@@ -337,7 +335,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_channel_budgets(ctx: Context) -> list[ChannelBudgetResult]:  # pyright: ignore[reportUnusedFunction]
-        """List every channel budget in this server or workspace with its spend. Admin-only."""
+        """List channel budgets with a personal platform-admin CLI/OAuth credential."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})

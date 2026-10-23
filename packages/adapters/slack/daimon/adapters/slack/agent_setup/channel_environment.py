@@ -15,6 +15,7 @@ import anthropic
 import structlog
 from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.authz import Subject
 from daimon.core.channel_environments import (
@@ -63,7 +64,11 @@ async def load_picker_subject(
     )
     async with runtime.sessionmaker() as session:
         return await load_live_subject(
-            session, tenant_id=tenant_id, platform="slack", caller=caller
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            caller=caller,
+            action=DelegatedAction.ENVIRONMENTS,
         )
 
 

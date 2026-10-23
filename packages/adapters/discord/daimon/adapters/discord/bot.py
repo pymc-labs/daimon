@@ -4221,6 +4221,7 @@ class DaimonBot(commands.Bot):
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
+                    effective_is_admin=admission.is_admin,
                 )
                 + "\n"
                 + seed_message
@@ -4300,6 +4301,7 @@ class DaimonBot(commands.Bot):
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
+                            effective_is_admin=admission.is_admin,
                         )
                         + "\n"
                         + seed_message
@@ -5549,6 +5551,7 @@ class DaimonBot(commands.Bot):
                     recovery_origin,
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
+                    effective_is_admin=admission.is_admin,
                 )
                 + "\n"
                 + full_message
@@ -5629,6 +5632,7 @@ class DaimonBot(commands.Bot):
                             origin,
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
+                            effective_is_admin=admission.is_admin,
                         )
                         + "\n"
                         + user_message

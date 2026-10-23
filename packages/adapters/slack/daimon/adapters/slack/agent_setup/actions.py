@@ -59,7 +59,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_admin, resolve_is_platform_admin
 from daimon.adapters.slack.agent_policy import (
     refuse_unless_allowed_for_agent_name,
     refuse_unless_pin_allows,
@@ -121,6 +121,7 @@ from daimon.adapters.slack.setup_conversations import (
     setup_reply_button,
 )
 from daimon.core import channel_backend
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import (
     CUSTOM_PICTURES_OFF,
     identity_enabled_for,
@@ -307,7 +308,9 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 
         # Slow path (off the 3s window): tenant, role, roster, attributions.
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(
+            client, user_id=user_id, action=DelegatedAction.AGENT_SETTINGS
+        )
 
         async with runtime.sessionmaker() as session:
             roster = await load_panel_roster(
@@ -334,6 +337,15 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
             )
 
         if payload.get("command") == "/github":
+            is_admin = await resolve_is_platform_admin(client, user_id=user_id)
+            if not is_admin:
+                await post_ephemeral(
+                    client,
+                    channel_id=channel_id or user_id,
+                    user_id=user_id,
+                    text="Only a platform admin can configure GitHub.",
+                )
+                return
             rendered = await github_home_view(
                 runtime, tenant_id=tenant_id, meta=meta, user_id=user_id, is_admin=is_admin
             )
@@ -798,7 +810,9 @@ async def _dispatch_panel_action(
     view_id: str = str(view_info.get("id") or "")
     view_hash: str = str(view_info.get("hash") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(
+        client, user_id=user_id, action=DelegatedAction.AGENT_SETTINGS
+    )
 
     if action_id in {
         panel_views.ACTION_BACKEND_SELECT,
@@ -909,7 +923,9 @@ async def _dispatch_panel_action(
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
             )
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(
+            client, user_id=user_id, action=DelegatedAction.AGENT_SETTINGS
+        )
         actor = channel_backend.BackendActor(
             tenant_id=tenant_id,
             account_id=principal.account_id,
@@ -995,6 +1011,24 @@ async def _dispatch_panel_action(
         )
         return
 
+    if action_id in {
+        panel_views.ACTION_GITHUB_CONNECT,
+        panel_views.ACTION_GITHUB_BACK,
+        panel_views.ACTION_GITHUB_PERSONAL_LINK,
+        github_repos_view.ACTION_OPEN,
+        github_repos_view.ACTION_BACK,
+        github_repos_view.ACTION_CONNECT_LINK,
+    }:
+        is_admin = await resolve_is_platform_admin(client, user_id=user_id)
+        if not is_admin:
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text="Only a platform admin can configure GitHub.",
+            )
+            return
+
     if await handle_github_repos(
         runtime,
         client,
@@ -1022,7 +1056,7 @@ async def _dispatch_panel_action(
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    verified_tenant_admin=True,
+                    is_platform_admin=True,
                 )
                 url = await connect_link(
                     session,

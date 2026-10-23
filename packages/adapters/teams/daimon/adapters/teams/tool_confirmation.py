@@ -26,6 +26,7 @@ from daimon.adapters.teams.card_actions import (
 from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deployment_admin
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
@@ -111,7 +112,9 @@ async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
         return False
     for fresh in (False, True):
         owners = admin_team_owners(runtime, fresh=fresh)
-        if not await is_deployment_admin(settings, owners, user_id=clicker, runtime=runtime):
+        if not await is_deployment_admin(
+            settings, owners, user_id=clicker, runtime=runtime, action=DelegatedAction.TOOL_RULES
+        ):
             return False
     return True
 
@@ -280,7 +283,11 @@ class TeamsConfirmationCards:
             )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
-                    session, tenant_id=tenant_id, platform="teams", caller=caller
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    caller=caller,
+                    action=DelegatedAction.TOOL_RULES,
                 )
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:

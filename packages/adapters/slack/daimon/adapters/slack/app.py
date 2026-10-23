@@ -2710,6 +2710,7 @@ class SlackApp:
                         responder_handle=responder_handle(self.runtime.settings),
                         responder_account=account,
                         session_state=session_state,
+                        effective_is_admin=admission.is_admin,
                     )
                     + "\n"
                     + full_message
@@ -2823,6 +2824,7 @@ class SlackApp:
                                 responder_handle=responder_handle(self.runtime.settings),
                                 responder_account=account,
                                 session_state=session_state,
+                                effective_is_admin=admission.is_admin,
                             )
                             + "\n"
                             + user_message
@@ -3261,6 +3263,7 @@ class SlackApp:
                     responder_handle=responder_handle(self.runtime.settings),
                     responder_account=account,
                     handoff=handoff_notice,
+                    effective_is_admin=follow_admission.is_admin,
                 )
                 + "\n"
                 + seed_user_message
@@ -3349,6 +3352,7 @@ class SlackApp:
                             responder_handle=responder_handle(self.runtime.settings),
                             responder_account=account,
                             handoff=handoff_notice,
+                            effective_is_admin=follow_admission.is_admin,
                         )
                         + "\n"
                         + seed_user_message
