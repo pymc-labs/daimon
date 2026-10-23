@@ -423,6 +423,44 @@ async def test_conversation_worker_rejects_residual_authority_before_native_read
     assert not wire.requests
 
 
+@pytest.mark.parametrize("had_skills", [False, True])
+async def test_a_conversation_worker_declares_losing_skills_only_if_its_source_had_them(
+    conversation_root, had_skills
+):
+    """J4 fleet-openai: a named agent with no skills has none to lose, so its worker
+    needs no declared skills drop; one whose source has skills still does."""
+    from daimon.core.turn.errors import AdmissionDenied
+    from mux.contracts.ids import SkillRef
+
+    _, parent, _, resolved, wire, ports, plan, _ = conversation_root
+    async with ports._load_preparation(parent) as root_request:
+        request = await root_request.for_worker(parent, resolved)
+    assert request.source is not None and request.source.effective_spec is not None
+    skills = (SkillRef(id="theirs", version="1"),) if had_skills else ()
+    request = replace(
+        request,
+        source=request.source.model_copy(
+            update={
+                "effective_spec": request.source.effective_spec.model_copy(
+                    update={"skills": skills}
+                )
+            }
+        ),
+    )
+    changed = replace(
+        resolved,
+        spec=resolved.spec.model_copy(
+            update={"declared_drops": tuple(d for d in DROPS if d != "skills")}
+        ),
+    )
+    if had_skills:
+        with pytest.raises(AdmissionDenied):
+            plan.worker_environment(request, changed)
+    else:
+        assert plan.worker_environment(request, changed) is None
+    assert not wire.requests
+
+
 async def test_lost_create_ack_retry_and_restart_keep_one_consumed_input(conversation_root):
     from daimon.core.turn.persistence import UncertainSend
     from mux.errors import ProviderError
