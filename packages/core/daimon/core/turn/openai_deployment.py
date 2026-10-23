@@ -264,6 +264,16 @@ class OpenAIDeployment(BaseModel):
         revision = request.admission.backend_revision
         drops, spec, environment = worker.declared_drops, worker.spec, worker.environment
         if self.profile == CONVERSATION_PROFILE:
+            # A conversation-only worker runs without all of these. Each must be a
+            # declared loss, unless the captured source never had it (an agent with no
+            # skills has none to lose); with no captured source, all five (fail closed).
+            source = request.source.effective_spec if request.source is not None else None
+            carried = {
+                "tools": source is None or bool(source.tools),
+                "mcp": source is None or bool(source.mcp_servers),
+                "skills": source is None or bool(source.skills),
+            }
+            required = {"sandbox", "memory", *(item for item, had in carried.items() if had)}
             if (
                 revision is None
                 or worker.backend.content_digest() != revision.content_digest()
@@ -271,7 +281,7 @@ class OpenAIDeployment(BaseModel):
                 or spec.model.provider != "openai"
                 or spec.model.id != revision.model
                 or worker.permissions.fleet.scope != request.scope
-                or not {"sandbox", "tools", "mcp", "memory", "skills"}.issubset(drops)
+                or not required.issubset(drops)
                 or worker.resources
                 or environment is not None
                 or spec.tools
