@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0125_plain_mentions_default_on"
-down_revision: str | None = "0120_mcp_token_surface"
+down_revision: str | None = "0123_tenant_backends_explicit"
 branch_labels: str | None = None
 depends_on: str | None = None
 
