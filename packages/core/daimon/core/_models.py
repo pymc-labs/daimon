@@ -4662,3 +4662,23 @@ class LongJobRecord(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LongJobCancelAuditRecord(Base):
+    __tablename__ = "long_job_cancel_audit"
+
+    audit_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("long_job.id", ondelete="CASCADE"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

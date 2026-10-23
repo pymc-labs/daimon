@@ -2798,6 +2798,9 @@ reattaches after restart. Completion atomically records a result and a `job_fini
 wake. Discord verifies current owner destination access and runs that wake unattended
 with only `get_long_job`; built-ins remain off in the parent. Slack and Teams fail
 closed before completion delivery until they can prove current owner destination
-access. Job records and worker transcripts retain source privacy restrictions.
+access. Owners and current tenant admins may manage jobs; source policy separately
+controls content in get/list, with restricted records redacted. Cancellation needs
+management authority only and records a content-free audit. Worker transcripts
+retain source privacy restrictions.
 A durable initial-send intent and lease fence prevent a reclaimed executor from
 sending another initial message. See [Long jobs](long-jobs.md) for policy and recovery.

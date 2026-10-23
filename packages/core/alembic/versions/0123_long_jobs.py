@@ -126,6 +126,21 @@ NULLIF(current_setting('daimon.tenant_id', true), '')::uuid)"""
         "'github_access_ready', 'worker_finished', 'watch_fired', 'job_finished')",
     )
 
+    op.execute("""CREATE TABLE long_job_cancel_audit (
+    audit_id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    id UUID NOT NULL REFERENCES long_job(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    owner_account_id UUID NOT NULL,
+    requested_by UUID NOT NULL,
+    requested_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL
+)""")
+    op.execute("ALTER TABLE long_job_cancel_audit ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE long_job_cancel_audit FORCE ROW LEVEL SECURITY")
+    op.execute("""CREATE POLICY tenant_scope ON long_job_cancel_audit USING (tenant_id =
+NULLIF(current_setting('daimon.tenant_id', true), '')::uuid) WITH CHECK (tenant_id =
+NULLIF(current_setting('daimon.tenant_id', true), '')::uuid)""")
+
 
 def downgrade() -> None:
     raise NotImplementedError(

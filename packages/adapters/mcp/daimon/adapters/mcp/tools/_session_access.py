@@ -323,26 +323,41 @@ async def source_metadata_readable(
     *,
     origin_context_id: str | None = None,
 ) -> bool:
-    """Authorize retained source context exactly like a session transcript."""
-    if not metadata_belongs_to_caller(metadata, auth):
+    """Source privacy only: callers establish owner/admin authority separately.
+
+    Admin status and the hub's admin transcript exception never bypass source
+    privacy here. Private contexts still require their owner's execution grant.
+    """
+    facts = session_facts(metadata, owned=True)
+    if facts.private and metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
+        return False
+    private = metadata.get(MA_METADATA_KEY_PRIVATE_DM)
+    if (
+        private is not None
+        and not is_private_routine_stamp(private)
+        and not (
+            auth.slack_turn_context_id is not None
+            and auth.agent_id is None
+            and private == str(auth.slack_turn_context_id)
+        )
+    ):
         return False
     if auth.agent_id is not None or auth.chat_agent_id is None:
         origin_context_id = None
     read = await load_read_policy(
         runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
     )
-    subject, surface, action = _hub_request(auth)
     return bool(
         authorize(
             read.policy,
-            subject=subject,
-            surface=surface,
-            action=action,
+            subject=mcp_subject(auth),
+            surface=Surface.AGENT_CHAT,
+            action=Action.READ_SESSION,
             agent=read.agent,
             origin_channel_ids=read.origin_channel_ids,
             origin=read.origin_place,
-            session=session_facts(
-                metadata, owned=metadata.get(MA_METADATA_KEY_ACCOUNT) == str(auth.account_id)
-            ),
+            # 'owned' discharges only READ_SESSION's ownership precondition: act
+            # was already decided by long_job_access; source/private checks remain.
+            session=facts,
         )
     )

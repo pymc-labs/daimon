@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from daimon.core._models import (
     Account,
+    LongJobCancelAuditRecord,
     LongJobPolicyHistory,
     LongJobPolicyRecord,
     LongJobRecord,
@@ -20,6 +21,7 @@ from daimon.core.errors import StoreError
 from daimon.core.long_job_models import (
     ACTIVE_STATES,
     LongJob,
+    LongJobCancelAudit,
     LongJobManifest,
     LongJobPolicy,
     LongJobState,
@@ -244,6 +246,7 @@ async def request_cancel(
     tenant_id: uuid.UUID,
     owner_account_id: uuid.UUID,
     admin: bool = False,
+    requested_by: uuid.UUID | None = None,
 ) -> LongJob | None:
     row = await get(
         session, job_id, tenant_id=tenant_id, owner_account_id=owner_account_id, admin=admin
@@ -259,8 +262,36 @@ async def request_cancel(
             )
             .values(cancel_requested=True)
         )
-        return row.model_copy(update={"cancel_requested": True})
+        row = row.model_copy(update={"cancel_requested": True})
+    if row is not None:
+        session.add(
+            LongJobCancelAuditRecord(
+                tenant_id=tenant_id,
+                id=row.id,
+                state=row.state,
+                owner_account_id=row.owner_account_id,
+                requested_by=requested_by or owner_account_id,
+            )
+        )
+        await session.flush()
     return row
+
+
+async def list_cancel_audits(
+    session: AsyncSession, *, tenant_id: uuid.UUID, job_id: uuid.UUID
+) -> list[LongJobCancelAudit]:
+    await scope(session, tenant_id)
+    rows = (
+        await session.scalars(
+            select(LongJobCancelAuditRecord)
+            .where(
+                LongJobCancelAuditRecord.tenant_id == tenant_id,
+                LongJobCancelAuditRecord.id == job_id,
+            )
+            .order_by(LongJobCancelAuditRecord.requested_at)
+        )
+    ).all()
+    return [LongJobCancelAudit.model_validate(row) for row in rows]
 
 
 async def claim(

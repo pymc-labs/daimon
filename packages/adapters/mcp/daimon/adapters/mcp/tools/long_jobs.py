@@ -1,4 +1,4 @@
-"""Attended registration and owner-scoped status tools for isolated workers."""
+"""Start approved jobs, manage them as owner/admin, and read under source policy."""
 
 from __future__ import annotations
 
@@ -11,13 +11,12 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._session_access import source_metadata_readable
+from daimon.adapters.mcp.tools._long_job_access import LongJobCaller, long_job_access
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.adapters.mcp.tools.watches import fresh_admin
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_PRIVATE_DM
+from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.errors import StoreError
-from daimon.core.long_job_models import LongJob
+from daimon.core.long_job_models import LongJob, LongJobCancelReply, LongJobRedacted
 from daimon.core.long_jobs import require_admission
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.scope import ScopeContext
@@ -187,82 +186,80 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def get_long_job(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, job_id: uuid.UUID, origin_context_id: str | None = None
-    ) -> LongJob:
-        """Read an owner's outcome, bounded output tail, files and cost.
+    ) -> LongJob | LongJobRedacted:
+        """Read an owner/admin job; return source-restricted metadata when content is private.
 
-        Source privacy applies: supply origin_context_id from a turn inside a
-        restricted source channel. Retained seals survive later unsealing.
+        Supply origin_context_id from a turn inside a restricted source channel.
+        Admin authority permits management, never a bypass of source privacy.
         """
-        auth = await _auth(ctx)
+        caller = await LongJobCaller.load(runtime, await _auth(ctx), origin_context_id)
         async with runtime.session_factory.begin() as db:
             job = await store.get(
-                db, job_id, tenant_id=auth.tenant_id, owner_account_id=auth.account_id
+                db,
+                job_id,
+                tenant_id=caller.auth.tenant_id,
+                owner_account_id=caller.auth.account_id,
+                admin=caller.is_admin,
             )
-        if job is None or not await source_metadata_readable(
-            runtime,
-            auth,
-            {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
-            origin_context_id=origin_context_id,
-        ):
-            raise ToolError("Long job not found or source context is not readable")
-        return job
+        access = await long_job_access(caller, job)
+        if not access.act:
+            raise ToolError("Long job not found")
+        assert job is not None
+        return access.view(job)
 
     @mcp.tool
-    async def list_long_jobs(ctx: Context, origin_context_id: str | None = None) -> list[LongJob]:  # pyright: ignore[reportUnusedFunction]
-        """List the latest 100 jobs allowed by ownership and source privacy.
+    async def list_long_jobs(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, origin_context_id: str | None = None
+    ) -> list[LongJob | LongJobRedacted]:
+        """List your latest 100 jobs; current human tenant admins may list all tenant jobs.
 
-        Current tenant admins may list tenant jobs where session-read policy
-        permits it. Supply origin_context_id when inside a restricted source.
+        Source-restricted jobs contain only id, state, owner and scheduling metadata.
+        Supply origin_context_id when reading inside a restricted source.
         """
-        auth = await _auth(ctx)
-        admin = await fresh_admin(runtime, auth)
+        caller = await LongJobCaller.load(runtime, await _auth(ctx), origin_context_id)
         async with runtime.session_factory.begin() as db:
             jobs = await store.list_jobs(
-                db, tenant_id=auth.tenant_id, owner_account_id=auth.account_id, admin=admin
+                db,
+                tenant_id=caller.auth.tenant_id,
+                owner_account_id=caller.auth.account_id,
+                admin=caller.is_admin,
             )
-
-        return [
-            job
-            for job in jobs
-            if await source_metadata_readable(
-                runtime,
-                auth,
-                {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
-                origin_context_id=origin_context_id,
-            )
-        ]
+        result: list[LongJob | LongJobRedacted] = []
+        for job in jobs:
+            access = await long_job_access(caller, job)
+            if access.act:
+                result.append(access.view(job))
+        return result
 
     @mcp.tool
     async def cancel_long_job(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, job_id: uuid.UUID, origin_context_id: str | None = None
-    ) -> LongJob:
-        """Request worker interrupt and archive. Owner or current tenant admin only.
+    ) -> LongJobCancelReply:
+        """Request interrupt and archive as owner or current human tenant admin.
 
-        Cancellation becomes terminal after the scheduler has both interrupted and
-        archived the worker session. Repeated requests are safe.
+        Cancellation requires management authority only: source privacy never blocks
+        stopping a job. Reply and audit contain no command, summary or other content.
+        The scheduler makes cancellation terminal after interrupt and archive.
         """
-        auth = await _auth(ctx)
-        admin = await fresh_admin(runtime, auth)
+        caller = await LongJobCaller.load(runtime, await _auth(ctx), origin_context_id)
         async with runtime.session_factory.begin() as db:
             job = await store.get(
-                db, job_id, tenant_id=auth.tenant_id, owner_account_id=auth.account_id, admin=admin
+                db,
+                job_id,
+                tenant_id=caller.auth.tenant_id,
+                owner_account_id=caller.auth.account_id,
+                admin=caller.is_admin,
             )
-        if job is None or not await source_metadata_readable(
-            runtime,
-            auth,
-            {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
-            origin_context_id=origin_context_id,
-        ):
-            raise ToolError("Long job not found or source context is not readable")
-        async with runtime.session_factory.begin() as db:
-            job = await store.request_cancel(
-                db, job_id, tenant_id=auth.tenant_id, owner_account_id=auth.account_id, admin=admin
+            access = await long_job_access(caller, job)
+            if not access.act:
+                raise ToolError("Long job not found")
+            cancelled = await store.request_cancel(
+                db,
+                job_id,
+                tenant_id=caller.auth.tenant_id,
+                owner_account_id=caller.auth.account_id,
+                admin=caller.is_admin,
+                requested_by=caller.auth.account_id,
             )
-        if job is None or not await source_metadata_readable(
-            runtime,
-            auth,
-            {**job.source_metadata, MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id)},
-            origin_context_id=origin_context_id,
-        ):
-            raise ToolError("Long job not found or source context is not readable")
-        return job
+        assert cancelled is not None
+        return LongJobCancelReply.model_validate(cancelled)

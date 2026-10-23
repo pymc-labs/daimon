@@ -85,3 +85,27 @@ class LongJobManifest(BaseModel):
     output_files: list[Annotated[str, Field(max_length=256)]] = Field(
         default_factory=list, max_length=100
     )
+
+
+class LongJobRedacted(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: uuid.UUID
+    state: LongJobState
+    owner_account_id: uuid.UUID
+    created_at: datetime
+    deadline_at: datetime | None
+    source: Literal["source restricted"] = "source restricted"
+
+
+class LongJobCancelReply(BaseModel):
+    model_config = ConfigDict(frozen=True, from_attributes=True)
+
+    id: uuid.UUID
+    state: LongJobState
+    owner_account_id: uuid.UUID
+
+
+class LongJobCancelAudit(LongJobCancelReply):
+    requested_by: uuid.UUID
+    requested_at: datetime

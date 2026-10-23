@@ -57,15 +57,26 @@ registration binds the owner, tenant, agent version, environment revision, threa
 and parent session before launching. Replaying the same approved tool call returns
 the same job. A changed agent or environment refuses launch.
 
-`get_long_job` reads an owner's job by ID. `list_long_jobs` returns the latest 100
-jobs for the owner; current tenant admins may list tenant jobs only where the
-existing session-read privacy policy allows it.
-`cancel_long_job` is available to the owner or a current tenant admin. Tenant
-boundaries apply even to admins, and IDs do not grant access. Reads and cancellation
-results also obey source-channel reader restrictions and private execution grants.
-Pass `origin_context_id` when reading from a turn inside a restricted source.
-Registration retains the parent’s seals and private-context provenance, and workers
-carry those same restrictions. Unsealing a channel does not release retained seals.
+`get_long_job`, `list_long_jobs` and `cancel_long_job` use one access rule. Within
+the tenant, an owner or a freshly verified human admin may manage a job. Other
+callers see “not found” and no list entry; cross-tenant access is always refused.
+Admins can therefore list and stop other owners' jobs, including sealed jobs.
+
+Reading command, title, summary, output names or other job content additionally
+requires the existing source-read policy to permit it. Admin authority never
+substitutes for source readability. Get/list return full content only when both
+management and source-read authority hold. Otherwise they return just id, state,
+owner, creation/deadline timestamps and “source restricted”. List returns the latest
+100 jobs the caller may manage. Pass `origin_context_id` when reading inside a
+restricted source. Retained seals and private execution grants still apply after
+a channel is unsealed, and worker transcripts retain the same source restrictions.
+
+Cancellation requires management authority alone. A seal, missing private grant
+or unavailable source-read proof never prevents stopping a runaway job. Every
+cancel reply contains only job id, state and owner. The tenant-scoped cancellation
+audit stores those same job fields with requester/time metadata, never command,
+summary or other content. Cancellation becomes terminal after the scheduler
+interrupts and archives the worker.
 
 The worker has built-in sandbox tools and no skills, MCP servers, custom tools,
 credential vaults, shared memory or repository mounts. It runs the frozen command

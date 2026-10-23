@@ -899,27 +899,14 @@ async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: 
     assert world.sent == []
 
 
-@pytest.mark.parametrize("private", [False, True])
-@pytest.mark.parametrize("admin", [False, True])
-async def test_long_job_source_and_worker_remain_private_after_unseal(
-    world, monkeypatch, private, admin
-):
-    """The review probe: all three reads must deny the outside caller."""
-    from dataclasses import replace
+async def _register_long_job(world: _World, **stamps: str):
     from decimal import Decimal
-    from unittest.mock import AsyncMock
 
-    from daimon.adapters.mcp.tools import long_jobs as tools
     from daimon.core.authz import Subject
     from daimon.core.config import LongJobsSettings
     from daimon.core.long_job_models import LongJob, LongJobPolicy
     from daimon.core.stores import long_jobs as store
-    from fastmcp import Client, FastMCP
 
-    await world.seal(_SEALED)
-    stamps = dict(daimon_channel=_SEALED, daimon_thread="thread", daimon_sealed=_SEALED)
-    if private:
-        stamps["daimon_private_dm"] = "private-grant"
     now = dt.datetime.now(dt.UTC)
     job = LongJob(
         id=uuid.uuid4(),
@@ -929,7 +916,7 @@ async def test_long_job_source_and_worker_remain_private_after_unseal(
         agent_id=_AGENT,
         agent_name="worker",
         agent_version=1,
-        environment_id="env",
+        environment_id="private-env",
         environment_updated_at=now,
         platform="discord",
         parent_channel_id=_SEALED,
@@ -937,7 +924,9 @@ async def test_long_job_source_and_worker_remain_private_after_unseal(
         parent_session_id="ses_parent",
         tool_use_id="call",
         command=_SEALED_TOPIC,
-        title="private job",
+        title="private job title",
+        summary="private output summary",
+        output_files=["private-output.csv"],
         deadline_minutes=60,
         max_usd=Decimal("5"),
         state="queued",
@@ -956,15 +945,35 @@ async def test_long_job_source_and_worker_remain_private_after_unseal(
             set_by="admin",
         )
         await store.register(db, job, ceilings=LongJobsSettings())
+    return job
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("admin", [False, True])
+async def test_long_job_source_and_worker_remain_private_after_unseal(
+    world, monkeypatch, private, admin
+):
+    import json
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools import _long_job_access as access_tools
+    from daimon.adapters.mcp.tools import long_jobs as tools
+    from fastmcp import Client, FastMCP
+
+    await world.seal(_SEALED)
+    stamps = dict(daimon_channel=_SEALED, daimon_thread="thread", daimon_sealed=_SEALED)
+    if private:
+        stamps["daimon_private_dm"] = "private-grant"
+    job = await _register_long_job(world, **stamps)
     world.add_session("ses_parent", **stamps)
-    # The worker creation transport test separately asserts these exact retained stamps.
     world.add_session("ses_worker", daimon_long_job=str(job.id), **stamps)
     runtime = world.runtime()
     auth = world.auth()
     if admin:
         auth = replace(auth, account_id=uuid.uuid4(), role=Role.ADMIN)
     monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
-    monkeypatch.setattr(tools, "fresh_admin", AsyncMock(return_value=admin))
+    monkeypatch.setattr(access_tools, "fresh_admin", AsyncMock(return_value=admin))
     mcp = FastMCP("source privacy regression")
     tools.register_long_job_tools(mcp, runtime)
     try:
@@ -975,17 +984,188 @@ async def test_long_job_source_and_worker_remain_private_after_unseal(
                 for sid in ("ses_parent", "ses_worker"):
                     with pytest.raises(ToolError):
                         await _list_session_events_impl(runtime, auth, sid, None, None, None)
-                with pytest.raises(ToolError):
-                    await client.call_tool("get_long_job", {"job_id": str(job.id)})
-                with pytest.raises(ToolError):
-                    await client.call_tool("cancel_long_job", {"job_id": str(job.id)})
+                result = await client.call_tool("get_long_job", {"job_id": str(job.id)})
+                redacted = json.loads(result.content[0].text)
+                assert redacted["source"] == "source restricted"
+                assert "command" not in redacted and "summary" not in redacted
                 listing = await client.call_tool("list_long_jobs", {})
-                assert listing.data == []
+                assert json.loads(listing.content[0].text) == [redacted]
             inside = await world.origin(_SEALED, "thread")
             if not private and not admin:
                 result = await client.call_tool(
                     "get_long_job", {"job_id": str(job.id), "origin_context_id": inside}
                 )
                 assert _SEALED_TOPIC in result.content[0].text
+            cancelled = await client.call_tool("cancel_long_job", {"job_id": str(job.id)})
+            assert set(json.loads(cancelled.content[0].text)) == {"id", "state", "owner_account_id"}
+    finally:
+        await runtime.client.close()
+
+
+@pytest.mark.parametrize(
+    "caller_kind,sealed,inside,readable",
+    [
+        ("owner", False, False, True),
+        ("owner", True, False, False),
+        ("owner", True, True, True),
+        ("admin", False, False, True),
+        ("admin_chat", False, False, True),
+        ("admin_chat", True, False, False),
+        ("admin_chat", True, True, True),
+        ("member", False, False, False),
+        ("foreign_admin", False, False, False),
+    ],
+)
+async def test_long_job_act_read_invariant(
+    world, monkeypatch, caller_kind, sealed, inside, readable
+):
+    import json
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools import _long_job_access as access_tools
+    from daimon.adapters.mcp.tools import long_jobs as tools
+    from daimon.core.stores import long_jobs as store
+    from daimon.testing.factories import make_account
+    from fastmcp import Client, FastMCP
+
+    stamps = dict(daimon_channel=_SEALED, daimon_thread="thread")
+    if sealed:
+        await world.seal(_SEALED)
+        stamps["daimon_sealed"] = _SEALED
+    job = await _register_long_job(world, **stamps)
+    runtime = world.runtime()
+    auth = world.auth(platform_user_id="caller")
+    admin = caller_kind in {"admin", "admin_chat", "foreign_admin"}
+    act = caller_kind in {"owner", "admin", "admin_chat"}
+    if caller_kind != "owner":
+        from daimon.core.stores.tenants import get_tenant
+
+        async with world.sessionmaker.begin() as db:
+            tenant = await get_tenant(db, world.tenant_id)
+            assert tenant is not None
+            account = await make_account(db, tenant=tenant)
+        auth = replace(auth, account_id=account.id, role=Role.ADMIN if admin else Role.USER)
+    if caller_kind == "admin":
+        auth = replace(auth, chat_agent_id=None)
+    if caller_kind == "foreign_admin":
+        async with world.sessionmaker.begin() as db:
+            foreign = await make_tenant(db, platform="discord", workspace_id=str(uuid.uuid4()))
+            other = await make_account(db, tenant=foreign)
+        auth = replace(auth, tenant_id=foreign.id, account_id=other.id)
+    origin_id = None
+    if inside:
+        # A verified origin owned by the actual caller, in the job's source.
+        now = dt.datetime.now(dt.UTC)
+        async with world.sessionmaker.begin() as db:
+            origin = await create_origin(
+                db,
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                platform="discord",
+                parent_channel_id=_SEALED,
+                thread_id="thread",
+                responder_ma_agent_id=_AGENT,
+                responder_name="acme-project",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=auth.role,
+                now=now,
+                expires_at=now + dt.timedelta(minutes=10),
+                chat_session_id="test-session",
+            )
+        origin_id = str(origin.id)
+    monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
+    admin_lookup = AsyncMock(return_value=admin)
+    monkeypatch.setattr(access_tools, "fresh_admin", admin_lookup)
+    mcp = FastMCP("long job act/read contract")
+    tools.register_long_job_tools(mcp, runtime)
+    args = {"job_id": str(job.id)}
+    list_args = {}
+    if origin_id is not None:
+        args["origin_context_id"] = origin_id
+        list_args["origin_context_id"] = origin_id
+    try:
+        async with Client(mcp) as client:
+            if not act:
+                for tool in ("get_long_job", "cancel_long_job"):
+                    with pytest.raises(ToolError, match="Long job not found"):
+                        await client.call_tool(tool, args)
+                listing = await client.call_tool("list_long_jobs", list_args)
+                assert listing.data == []
+            else:
+                result = await client.call_tool("get_long_job", args)
+                view = json.loads(result.content[0].text)
+                listing = await client.call_tool("list_long_jobs", list_args)
+                assert json.loads(listing.content[0].text) == [view]
+                if readable:
+                    assert view["command"] == job.command and view["summary"] == job.summary
+                else:
+                    assert set(view) == {
+                        "id",
+                        "state",
+                        "owner_account_id",
+                        "created_at",
+                        "deadline_at",
+                        "source",
+                    }
+                    assert view["source"] == "source restricted"
+                cancelled = await client.call_tool("cancel_long_job", args)
+                reply = json.loads(cancelled.content[0].text)
+                assert reply == {
+                    "id": str(job.id),
+                    "state": job.state,
+                    "owner_account_id": str(job.owner_account_id),
+                }
+        async with world.sessionmaker.begin() as db:
+            audits = await store.list_cancel_audits(db, tenant_id=job.tenant_id, job_id=job.id)
+            live = await store.get(
+                db, job.id, tenant_id=job.tenant_id, owner_account_id=job.owner_account_id
+            )
+            assert live is not None and live.cancel_requested is act
+            assert len(audits) == int(act)
+            if act:
+                audit = audits[0].model_dump(mode="json")
+                assert set(audit) == {
+                    "id",
+                    "state",
+                    "owner_account_id",
+                    "requested_by",
+                    "requested_at",
+                }
+                assert audit["requested_by"] == str(auth.account_id)
+                assert job.command not in json.dumps(audit) and job.summary not in json.dumps(audit)
+    finally:
+        await runtime.client.close()
+
+
+@pytest.mark.parametrize(
+    "failure", [ToolError("source proof unavailable"), RuntimeError("source lookup unavailable")]
+)
+async def test_long_job_cancel_survives_unavailable_source_proof(world, monkeypatch, failure):
+    import json
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools import _long_job_access as access_tools
+    from daimon.adapters.mcp.tools import long_jobs as tools
+    from fastmcp import Client, FastMCP
+
+    job = await _register_long_job(world, daimon_channel=_SEALED, daimon_thread="thread")
+    runtime = world.runtime()
+    monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=world.auth()))
+    monkeypatch.setattr(access_tools, "fresh_admin", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        access_tools,
+        "source_metadata_readable",
+        AsyncMock(side_effect=failure),
+    )
+    mcp = FastMCP("cancel without read")
+    tools.register_long_job_tools(mcp, runtime)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool("get_long_job", {"job_id": str(job.id)})
+            assert json.loads(result.content[0].text)["source"] == "source restricted"
+            result = await client.call_tool("cancel_long_job", {"job_id": str(job.id)})
+            assert set(json.loads(result.content[0].text)) == {"id", "state", "owner_account_id"}
     finally:
         await runtime.client.close()

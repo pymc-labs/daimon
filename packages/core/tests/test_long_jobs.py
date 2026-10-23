@@ -558,6 +558,9 @@ async def test_rls_rejects_cross_tenant_reads_and_writes(db_engine, db_clean):
     job = await seed(sm)
     async with sm.begin() as db:
         await store.register(db, job, ceilings=LIMITS)
+        await store.request_cancel(
+            db, job.id, tenant_id=job.tenant_id, owner_account_id=job.owner_account_id
+        )
         schema = await db.scalar(text("SELECT current_schema()"))
     assert schema.startswith("test_")
     role = "long_job_rls_" + uuid.uuid4().hex
@@ -565,37 +568,42 @@ async def test_rls_rejects_cross_tenant_reads_and_writes(db_engine, db_clean):
         async with db_engine.begin() as conn:
             await conn.execute(text(f'CREATE ROLE "{role}" NOLOGIN NOSUPERUSER NOBYPASSRLS'))
             await conn.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"'))
-            await conn.execute(text(f'GRANT SELECT, UPDATE ON long_job TO "{role}"'))
-            await conn.execute(text("ALTER TABLE long_job ENABLE ROW LEVEL SECURITY"))
-            await conn.execute(text("ALTER TABLE long_job FORCE ROW LEVEL SECURITY"))
-            await conn.execute(
-                text(
-                    "CREATE POLICY tenant_scope ON long_job USING "
-                    "(tenant_id = NULLIF(current_setting('daimon.tenant_id', true), '')::uuid) "
-                    "WITH CHECK (tenant_id = NULLIF(current_setting('daimon.tenant_id', true), '')::uuid)"
+            for table in ("long_job", "long_job_cancel_audit"):
+                await conn.execute(text(f'GRANT SELECT, UPDATE ON {table} TO "{role}"'))
+                await conn.execute(text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+                await conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
+                await conn.execute(
+                    text(
+                        f"CREATE POLICY tenant_scope ON {table} USING "
+                        "(tenant_id = NULLIF(current_setting('daimon.tenant_id', true), '')::uuid) "
+                        "WITH CHECK (tenant_id = NULLIF(current_setting('daimon.tenant_id', true), '')::uuid)"
+                    )
                 )
-            )
         async with db_engine.begin() as conn:
             await conn.execute(text(f'SET LOCAL ROLE "{role}"'))
-            assert (await conn.execute(text("SELECT id FROM long_job"))).all() == []
+            for table in ("long_job", "long_job_cancel_audit"):
+                assert (await conn.execute(text(f"SELECT id FROM {table}"))).all() == []
             await conn.execute(select(func.set_config("daimon.tenant_id", str(uuid.uuid4()), True)))
-            assert (await conn.execute(text("SELECT id FROM long_job"))).all() == []
+            for table in ("long_job", "long_job_cancel_audit"):
+                assert (await conn.execute(text(f"SELECT id FROM {table}"))).all() == []
             await conn.execute(
                 select(func.set_config("daimon.tenant_id", str(job.tenant_id), True))
             )
-            assert [
-                row[0] for row in (await conn.execute(text("SELECT id FROM long_job"))).all()
-            ] == [job.id]
-        with pytest.raises(DBAPIError, match="row-level security"):
-            async with db_engine.begin() as conn:
-                await conn.execute(text(f'SET LOCAL ROLE "{role}"'))
-                await conn.execute(
-                    select(func.set_config("daimon.tenant_id", str(job.tenant_id), True))
-                )
-                await conn.execute(
-                    text("UPDATE long_job SET tenant_id=:other WHERE id=:job"),
-                    {"other": uuid.uuid4(), "job": job.id},
-                )
+            for table in ("long_job", "long_job_cancel_audit"):
+                assert [
+                    row[0] for row in (await conn.execute(text(f"SELECT id FROM {table}"))).all()
+                ] == [job.id]
+        for table in ("long_job", "long_job_cancel_audit"):
+            with pytest.raises(DBAPIError, match="row-level security"):
+                async with db_engine.begin() as conn:
+                    await conn.execute(text(f'SET LOCAL ROLE "{role}"'))
+                    await conn.execute(
+                        select(func.set_config("daimon.tenant_id", str(job.tenant_id), True))
+                    )
+                    await conn.execute(
+                        text(f"UPDATE {table} SET tenant_id=:other WHERE id=:job"),
+                        {"other": uuid.uuid4(), "job": job.id},
+                    )
     finally:
         async with db_engine.begin() as conn:
             await conn.execute(text(f'DROP OWNED BY "{role}"'))
@@ -878,3 +886,35 @@ async def test_uncertain_initial_send_is_reconciled_without_retry(db_engine, db_
     assert (await read(sm, job)).state == "lost"
     assert "send" not in port.calls
     assert port.calls.index("interrupt") < port.calls.index("archive")
+
+
+async def test_cancel_audit_is_content_free_and_tenant_scoped(db_engine, db_clean):
+    from sqlalchemy import text
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = (await seed(sm)).model_copy(
+        update={"command": "secret shell command", "summary": "secret output summary"}
+    )
+    async with sm.begin() as db:
+        await store.register(db, job, ceilings=LIMITS)
+        await store.request_cancel(
+            db, job.id, tenant_id=job.tenant_id, owner_account_id=job.owner_account_id
+        )
+        assert await store.list_cancel_audits(db, tenant_id=uuid.uuid4(), job_id=job.id) == []
+        rows = (
+            (await db.execute(text("SELECT to_jsonb(a) FROM long_job_cancel_audit a")))
+            .scalars()
+            .all()
+        )
+    [audit] = rows
+    assert set(audit) == {
+        "audit_id",
+        "tenant_id",
+        "id",
+        "state",
+        "owner_account_id",
+        "requested_by",
+        "requested_at",
+    }
+    assert audit["id"] == str(job.id)
+    assert "secret" not in str(audit)
