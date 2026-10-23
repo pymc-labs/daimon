@@ -43,7 +43,13 @@ from daimon.core.fleet import (
     holds_slot,
     worker_slot,
 )
-from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
+from daimon.core.stores import (
+    check_persisted_read,
+    mux_state,
+    read_persisted_columns,
+    task_continuations,
+    tenant_ledger,
+)
 from pydantic import JsonValue
 from sqlalchemy import ColumnElement, Row, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -1267,57 +1273,83 @@ async def save_budget(
     with the same exact Numeric basis as the rows, never ambient Decimal math.
     No status, result, usage outbox or tenant debit is changed here.
     Only the producer's proven never-allocated evidence class may decrease.
+
+    The graph's rows are locked, so they are the stored rows: a run none of whose
+    workers changed writes nothing when its stored sum and debit already match
+    (an exact sum of stored micro-dollar amounts, as `project_budget` takes), and the
+    result is those rows plus what each UPDATE returned, workers in ordinal order,
+    as `run_status` would read them back.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
+    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
     for run, workers in graph:
+        saved: list[FleetWorker] = []
         for worker in workers:
             amount = _amount(exposures[worker.id])
             if amount < worker.reserved_usd and worker.id not in zero_spend:
                 raise FleetConflict("unknown worker exposure cannot be released")
             if amount == worker.reserved_usd:
+                saved.append(worker)
                 continue
-            changed = await session.scalar(
-                update(FleetWorkerRow)
-                .where(
-                    FleetWorkerRow.tenant_id == tenant_id,
-                    FleetWorkerRow.id == worker.id,
-                    FleetWorkerRow.version == worker.version,
+            changed = (
+                await session.execute(
+                    update(FleetWorkerRow)
+                    .where(
+                        FleetWorkerRow.tenant_id == tenant_id,
+                        FleetWorkerRow.id == worker.id,
+                        FleetWorkerRow.version == worker.version,
+                    )
+                    .values(
+                        reserved_usd=amount,
+                        version=FleetWorkerRow.version + 1,
+                        updated_at=func.now(),
+                    )
+                    .returning(*FleetWorkerRow.__table__.c)
                 )
-                .values(
-                    reserved_usd=amount, version=FleetWorkerRow.version + 1, updated_at=func.now()
-                )
-                .returning(FleetWorkerRow.id)
-            )
+            ).one_or_none()
             if changed is None:
                 raise FleetConflict("worker changed during monetary update")
+            saved.append(_worker(changed))
+        observed = _amount(debits[run.id])
+        if all(new is old for new, old in zip(saved, workers, strict=True)):
+            with localcontext() as arithmetic:
+                arithmetic.prec = 80  # exact for stored micro-dollar amounts, as SQL sums are
+                held = sum((worker.reserved_usd for worker in workers), Decimal(0))
+            if held == run.reserved_usd and observed == run.observed_usd:
+                result.append((run, tuple(sorted(saved, key=lambda w: w.ordinal))))
+                continue
         total = await session.scalar(
             select(func.coalesce(func.sum(FleetWorkerRow.reserved_usd), 0)).where(
                 FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run.id
             )
         )
-        observed = _amount(debits[run.id])
         if total == run.reserved_usd and observed == run.observed_usd:
+            result.append((run, tuple(sorted(saved, key=lambda w: w.ordinal))))
             continue
-        changed = await session.scalar(
-            update(FleetRunRow)
-            .where(
-                FleetRunRow.tenant_id == tenant_id,
-                FleetRunRow.id == run.id,
-                FleetRunRow.version == run.version,
+        changed_run = (
+            await session.execute(
+                update(FleetRunRow)
+                .where(
+                    FleetRunRow.tenant_id == tenant_id,
+                    FleetRunRow.id == run.id,
+                    FleetRunRow.version == run.version,
+                )
+                .values(
+                    reserved_usd=total,
+                    observed_usd=observed,
+                    version=FleetRunRow.version + 1,
+                    updated_at=func.now(),
+                )
+                .returning(*FleetRunRow.__table__.c)
             )
-            .values(
-                reserved_usd=total,
-                observed_usd=observed,
-                version=FleetRunRow.version + 1,
-                updated_at=func.now(),
-            )
-            .returning(FleetRunRow.id)
-        )
-        if changed is None:
+        ).one_or_none()
+        if changed_run is None:
             raise FleetConflict("run changed during monetary update")
-    # Already-held locks are retained; do not acquire the funds lock twice.
-    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
-    for run, _ in graph:
-        result.append(await run_status(session, tenant_id=tenant_id, run_id=run.id))
+        result.append((_run(changed_run), tuple(sorted(saved, key=lambda w: w.ordinal))))
+    # Already-held locks are retained; do not acquire the funds lock twice. The rows
+    # are not read back, but a read back would refuse the caller's unflushed changes.
+    if graph:
+        check_persisted_read(session, select(FleetRunRow.id))
+        check_persisted_read(session, select(FleetWorkerRow.id))
     return tuple(result)
