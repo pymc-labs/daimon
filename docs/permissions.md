@@ -21,8 +21,9 @@ still require confirmation. Names in the confirmed Daimon and publishing sets,
 admin-confirmed actions, and gate or permission setters never receive an
 approval override, whatever server exposes them. This includes watch actions,
 skill addition, lead resolution, backend switches, Microsoft sends/writes,
-publishing and channel/agent permission changes. An unrelated third-party tool
-with a protected name conservatively asks too. A second hostname, HTTP URL,
+publishing and channel/agent permission changes. With overrides enabled, an
+unrelated third-party tool with a protected name conservatively asks too.
+A second hostname, HTTP URL,
 IP address or proxy cannot turn those names into ordinary third-party writes.
 Endpoint-binding checks also retain fixed gates for recognized own-endpoint
 aliases; attaching such aliases is refused.
@@ -57,9 +58,12 @@ requires a fresh admission, rather than repeatedly sending the stale grant.
 The generic `tenants access-policy set --clear` refuses while approval overrides
 remain; clear them using the native admin controls first.
 
-Before rolling back to an older build, remove stored approval settings or restore
-an older policy backup. Older policy readers reject unknown fields, so stored
-`approvals` and `approvals_set_by` fields make the policy unreadable and refuse
+Before rolling back to an older build, keep this build running while a native
+server/workspace admin opens `/here` (Teams: `here`) and chooses **Inherit** for
+Server and for every channel/thread with a saved setting. Alternatively, restore
+a policy backup from before approval overrides were saved. Older policy readers
+reject unknown fields, so stored `approvals` and `approvals_set_by` fields make
+the policy unreadable and refuse
 that tenant's turns. Disabling deployment overrides alone does not remove those
 stored fields.
 

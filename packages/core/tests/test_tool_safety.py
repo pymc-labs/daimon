@@ -885,3 +885,37 @@ def test_server_names_with_a_slash_are_rejected(name: str) -> None:
     rejection = get_mcp_server_name_rejection(name)
     assert rejection is not None and name in rejection
     assert get_mcp_server_name_rejection("linear-bridge") is None
+
+
+@pytest.mark.parametrize("overrides", [False, True])
+@pytest.mark.parametrize("tool", ["set_branch_protection_rule", "configure_admin_panel"])
+@pytest.mark.parametrize(
+    ("authority", "effect", "reason"),
+    [
+        ("annotation", "read", "read"),
+        ("operator", "read", "read"),
+        ("agent", "write", "agent_rule_allow"),
+        ("combined", "read", "agent_rule_allow"),
+    ],
+)
+def test_protected_names_preserve_existing_decisions_without_deployment_opt_in(
+    overrides: bool, tool: str, authority: str, effect: str, reason: str
+) -> None:
+    rule = ResolvedAgentToolRule(rule="allow") if authority in {"agent", "combined"} else None
+    verdict = decide_tool_call(
+        ToolSafetyPolicy(
+            enabled=True,
+            allow_gate_overrides=overrides,
+            agent_rules=rule is not None,
+            effects={"third-party": "read"} if authority == "operator" else {},
+        ),
+        _call("third-party", tool),
+        attended=True,
+        annotations=ToolAnnotations(read_only_hint=True)
+        if authority in {"annotation", "combined"}
+        else None,
+        agent_rule=rule,
+    )
+    assert (verdict.outcome, verdict.effect, verdict.reason) == (
+        ("ask", "write", "protected_tool_name") if overrides else ("allow", effect, reason)
+    )
