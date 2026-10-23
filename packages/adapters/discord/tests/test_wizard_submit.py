@@ -22,7 +22,7 @@ import discord
 import pytest
 from daimon.adapters.discord import wizard as wizard_module
 from daimon.adapters.discord import wizard_submit as wizard_submit_module
-from daimon.adapters.discord.wizard_submit import WizardSubmitButton
+from daimon.adapters.discord.wizard_submit import WizardSubmitButton, queue_timed_out_text
 from daimon.core.stores.domain import WizardSessionRow
 from daimon.core.stores.wizard_session import get_wizard_session, update_wizard_state
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
@@ -443,3 +443,16 @@ async def test_a_failing_collapse_edit_still_spawns_the_claimed_turn(
     )
     interaction.followup.send.assert_not_awaited()
     interaction.response.send_message.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("channel_type", "expected"),
+    [
+        (discord.Thread, "Daimon is too busy right now. @mention Daimon again in a moment."),
+        (discord.DMChannel, "Daimon is too busy right now. Send your message again in a moment."),
+    ],
+)
+def test_a_submit_that_waits_too_long_says_daimon_is_busy(
+    channel_type: type[object], expected: str
+) -> None:
+    assert queue_timed_out_text(MagicMock(spec=channel_type)) == expected

@@ -5,6 +5,7 @@ Admission and the DM store are patched on the command module.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -177,6 +178,60 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     (reply,), _ = message.channel.send.await_args
     assert reply == _OVER_BUDGET, "the member is told why the DM stopped"
     assert bot.turn_queue.in_flight() == 0, "the slot is returned"
+
+
+async def test_a_dm_that_waits_too_long_says_daimon_is_busy(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key="5",
+            external_user_id="999",
+            workspace_id=str(_GUILD),
+            source_channel_id=str(_PARENT),
+        )
+    reply_to_dm = AsyncMock()
+    monkeypatch.setattr(dm_module, "reply_to_dm", reply_to_dm)
+    member = MagicMock()
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild = MagicMock()
+    guild.owner_id = 1
+    guild.fetch_member = AsyncMock(return_value=member)
+    bot = MagicMock()
+    bot.draining = False
+    bot.runtime.sessionmaker = db_session_factory
+    bot.get_guild.return_value = guild
+    bot.turn_queue = TurnQueue(
+        platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=0.05
+    )
+    held = bot.turn_queue.claim(uuid.uuid4())  # another turn holds the only slot
+    message = MagicMock()
+    message.author.bot = False
+    message.author.id = 999
+    message.channel = MagicMock(spec=discord.DMChannel)
+    message.channel.id = 5
+    message.channel.send = AsyncMock()
+    message.content = "hello"
+    cog = DirectMessageCog(bot)
+
+    try:
+        await cog.on_message(message)
+    finally:
+        held.release()
+
+    (reply,), _ = message.channel.send.await_args
+    assert reply == "Daimon is too busy right now. Send your message again in a moment.", (
+        "busy, not broken, and nobody to @mention in a DM"
+    )
+    reply_to_dm.assert_not_awaited()
+    assert bot.turn_queue.in_flight() == 0 and bot.turn_queue.depth() == 0
 
 
 def test_command_is_registered_as_dm_me() -> None:

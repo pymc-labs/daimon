@@ -601,7 +601,7 @@ class SlackTurnLifecycle:
 
     async def end_unstarted(self, *, stopped: bool, text: str = QUEUE_TIMED_OUT_TEXT) -> None:
         """End a card whose turn never started: Stop while it waited for a slot
-        (the stopped turn's words), or `text` (the ordinary error after the
+        (the stopped turn's words), or `text` (the busy notice after the
         queue's max wait, or a refusal)."""
         if stopped:
             await self._flush_cancelled()

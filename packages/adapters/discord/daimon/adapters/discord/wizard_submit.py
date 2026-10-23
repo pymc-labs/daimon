@@ -167,6 +167,13 @@ _OVER_CAP = (
 )
 
 
+def queue_timed_out_text(channel: object) -> str:
+    """The busy notice for a submit that waited too long: a DM has nobody to @mention."""
+    return (
+        QUEUE_TIMED_OUT_DM_TEXT if isinstance(channel, discord.DMChannel) else QUEUE_TIMED_OUT_TEXT
+    )
+
+
 class WizardSubmitButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.LayoutView]],
     template=SUBMIT_CUSTOM_ID_TEMPLATE,
@@ -685,11 +692,7 @@ async def run_wizard_submit_turn_observed(
             ticket, cancel, sessionmaker=bot.runtime.sessionmaker, tenant_id=row.tenant_id
         )
         if slot != "started":
-            busy = (
-                QUEUE_TIMED_OUT_DM_TEXT
-                if isinstance(interaction.channel, discord.DMChannel)
-                else QUEUE_TIMED_OUT_TEXT
-            )
+            busy = queue_timed_out_text(interaction.channel)
             await _end_card(
                 {
                     "cancelled": "Stopped.\nSend a message to start again.",
