@@ -215,7 +215,8 @@ def _worker_agent(worker: FleetWorker) -> str:
     ]
     if not isinstance(name, str) or not name.strip() or name != agent:
         # A task copy of the root: every one runs without tools and skills, so say only
-        # what the root's own setup lost (its connectors, stored files, repositories).
+        # what the root's own setup lost (its connectors, stored files, repositories,
+        # memory).
         lost = [_DROP_WORDS[item] for item in declared if item in _COPY_LOSSES]
         return f" (without {', '.join(dict.fromkeys(lost))})" if lost else ""
     # What it runs without, so the person who asked sees it, not only the root.
@@ -228,7 +229,7 @@ def _worker_agent(worker: FleetWorker) -> str:
 
 
 #: Losses a task copy of the root shows; the rest every task worker has.
-_COPY_LOSSES = frozenset({"mcp", "files", "repository"})
+_COPY_LOSSES = frozenset({"mcp", "files", "repository", "memory"})
 
 #: Plain words for what an agent worker runs without (its declared losses).
 _DROP_WORDS = {

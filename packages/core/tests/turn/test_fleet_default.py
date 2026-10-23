@@ -264,7 +264,30 @@ async def unconfigured(value):
     return grant
 
 
+@pytest.fixture
+async def memoryless_root(db_preflight, db_committing_engine):
+    """A root on its agent's very first turn: its memory store doesn't exist yet."""
+    async for value in root_turn.__wrapped__(db_preflight, db_committing_engine, memory=False):
+        yield value
+
+
 async def test_fresh_agent_spawns_three_workers_under_the_default_caps(root_turn):
+    specs = await _spawn_three_default_workers(root_turn)
+    # The agent's memory store exists, so its workers keep (read-only) memory.
+    assert all("memory" not in spec.declared_drops for spec in specs)
+
+
+async def test_a_first_ask_before_the_memory_store_exists_runs_workers_without_memory(
+    memoryless_root,
+):
+    """The first fleet ask in a new server is admitted; its workers declare the memory loss."""
+    deps, prepared, *_ = memoryless_root
+    assert prepared._source.memory_store_id is None
+    specs = await _spawn_three_default_workers(memoryless_root)
+    assert all("memory" in spec.declared_drops for spec in specs)
+
+
+async def _spawn_three_default_workers(root_turn):
     deps, prepared, _, intent, origin, scope, _, _ = root_turn
     grant = await unconfigured(root_turn)
     await freeze(root_turn)
@@ -301,7 +324,7 @@ async def test_fresh_agent_spawns_three_workers_under_the_default_caps(root_turn
     root_model = parent.spec.model.id
     models = [model.id for model in grant.models if model.provider == "anthropic"][:3]
     assert root_model not in models or len(models) == 3
-    workers = []
+    workers, specs = [], []
     for ordinal, model in enumerate(models):
         spec = task_worker_spec(parent, role=f"W{ordinal}", task="Postgres or SQLite?", model=model)
         limits = default_worker_limits(
@@ -331,8 +354,14 @@ async def test_fresh_agent_spawns_three_workers_under_the_default_caps(root_turn
         )
         assert worker.status != "cancelled", worker.error_code
         workers.append(worker)
+        specs.append(resolved.spec)
+        assert all(
+            ref.resource is None or ref.resource.kind != "memory_store"
+            for ref in resolved.resources
+        ) == ("memory" in resolved.spec.declared_drops)
     assert len(workers) == 3 and len(dispatched) == 3
     assert root_refusal(origin.id) is None
+    return specs
 
 
 async def test_fleet_kill_switch_stops_the_default(root_turn):

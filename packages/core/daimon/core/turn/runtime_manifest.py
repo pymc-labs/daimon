@@ -2156,13 +2156,14 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
 
     Nothing with its own login enters a worker ceiling: the agent can still run a
     fleet, its workers run without it, and no credential ever reaches a worker. Each
-    loss is declared (`mcp`, `files`, `repository`):
+    loss is declared (`mcp`, `files`, `repository`, `memory`):
     - a connector with its own login (an MCP server carrying a credential, or one a
       projected credential pairs with), with its toolset and binding;
     - a stored connector login the projector can't pair with one server
       (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
     - stored secrets the session would write to a file (`.env`);
-    - repositories cloned with a login.
+    - repositories cloned with a login;
+    - memory, while the agent's memory store doesn't exist yet (its first turn).
     """
     spec = source.effective_spec
     if spec is None:
@@ -2213,6 +2214,10 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
     if len(repositories) != len(source.repository_sources):
         drops.add("repository")
+    if source.memory_store_id is None and source.memory_required is not False:
+        # The agent's memory store is created by its first session, so on its very
+        # first turn there is none to mount: its workers run without memory.
+        drops.add("memory")
     if drops:
         normalized = normalized.model_copy(
             update={"declared_drops": tuple(sorted({*normalized.declared_drops, *drops}))}
