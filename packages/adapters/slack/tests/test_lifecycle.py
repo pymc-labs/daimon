@@ -1106,6 +1106,7 @@ async def test_terminal_success_empty_content_shows_turn_cancelled(
     [
         TerminationReason.CONNECTION_LOST,
         TerminationReason.UPSTREAM,
+        TerminationReason.REFUSED,
         TerminationReason.INTERRUPTED,
         TerminationReason.INTERRUPT_TIMEOUT,
         TerminationReason.REQUIRES_ACTION,

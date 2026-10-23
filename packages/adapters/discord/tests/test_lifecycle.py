@@ -1268,6 +1268,7 @@ class TestCleanReplace:
 _NOTICE_REASONS = [
     TerminationReason.CONNECTION_LOST,
     TerminationReason.UPSTREAM,
+    TerminationReason.REFUSED,
     TerminationReason.INTERRUPTED,
     TerminationReason.INTERRUPT_TIMEOUT,
     TerminationReason.REQUIRES_ACTION,
