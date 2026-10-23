@@ -3767,6 +3767,62 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision() -> None:
         await _fork_agent_impl(_runtime(client), auth, source_name="source", new_name="myfork")
 
 
+async def test_fork_agent_impl_new_copy_if_taken_takes_the_next_free_name(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J2: "make a copy of yourself" makes a NEW copy beside earlier ones, never reuses them."""
+    tenant_id = uuid.uuid4()
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+
+    def tagged(agent_id: str, name: str) -> dict[str, Any]:
+        meta = {"daimon_tenant": str(tenant_id), "daimon_name": name}
+        return ma_agent(id=agent_id, name=name, metadata=meta).model_dump(mode="json")
+
+    created: list[dict[str, Any]] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = ma_agent(id="ag_new", name="daimon-argon-3")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                tagged("ag_src", "daimon"),
+                tagged("ag_old", "daimon-argon"),
+                tagged("ag_old2", "daimon-argon-2"),
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(200, json=tagged("ag_src", "daimon")),
+    )
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    result = await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="daimon",
+        new_name="daimon-argon",
+        new_copy_if_taken=True,
+    )
+    assert len(created) == 1, "a new copy is created even though daimon-argon exists"
+    assert created[0]["metadata"]["daimon_name"] == "daimon-argon-3", (
+        "the copy takes the first free name, not an earlier copy's"
+    )
+    assert result.name == "daimon-argon-3", "the result names the new copy"
+
+
 async def test_create_agent_rejects_name_held_by_other_owner() -> None:
     """create_agent raises ToolError when any same-name agent exists in the tenant,
     regardless of owner. Inverted from the previous owner-scoped check — personal-stamped

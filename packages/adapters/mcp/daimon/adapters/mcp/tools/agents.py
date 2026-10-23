@@ -67,6 +67,7 @@ from daimon.core.defaults.mcp_merge import (
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
@@ -370,6 +371,17 @@ async def _reject_guild_name_collision(
         raise ToolError(
             f"agent '{name}' already exists in this {space_noun(auth.platform)} — pick another name"
         )
+
+
+async def _free_agent_name(runtime: McpRuntime, auth: AuthIdentity, name: str) -> str:
+    """`name`, or the first of `name-2`, `name-3`... that no live agent here holds."""
+    rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    taken = {row.metadata.get(MA_METADATA_KEY_NAME) for row in rows}
+    candidate, n = name, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{name}-{n}"
+    return candidate
 
 
 async def _list_agents_impl(
@@ -1035,11 +1047,16 @@ async def _fork_agent_impl(
     source_name: str,
     new_name: str,
     expected_ma_agent_id: str | None = None,
+    new_copy_if_taken: bool = False,
 ) -> AgentInfo:
     # Forking is an admin's call: a fork routes nowhere and has no channel
     # pin of its own, so it is free to run anywhere the source can't.
     _require_admin(auth)
-    await _reject_guild_name_collision(runtime, auth, new_name)
+    if new_copy_if_taken:
+        # "Make a copy of yourself" wants a new copy, never an earlier one.
+        new_name = await _free_agent_name(runtime, auth, new_name)
+    else:
+        await _reject_guild_name_collision(runtime, auth, new_name)
     source = await resolve_setup_agent(
         runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
     )
@@ -1852,7 +1869,11 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def fork_agent(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, source_name: str, new_name: str, expected_ma_agent_id: str | None = None
+        ctx: Context,
+        source_name: str,
+        new_name: str,
+        expected_ma_agent_id: str | None = None,
+        new_copy_if_taken: bool = False,
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
         Admin-only. Copies its prompt, model, skills and the MCP servers that need
@@ -1865,13 +1886,19 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Continue configuring it through Daimon with the copy named as the setup
         target. A returned ``answering`` field says the copy is routed nowhere yet:
-        post it verbatim."""
+        post it verbatim.
+
+        ``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free
+        ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
+        is the copy's. Pass true for "make a copy of yourself" asks, where the
+        person named no copy."""
         return await _fork_agent_impl(
             runtime,
             await _auth(ctx),
             source_name,
             new_name,
             expected_ma_agent_id=expected_ma_agent_id,
+            new_copy_if_taken=new_copy_if_taken,
         )
 
     @mcp.tool(tags={"admin"})
@@ -1927,7 +1954,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             from the next message when the switched agent answers here (the result's
             summary says which); switching the default agent applies to every channel on
             this server. For "make a copy of yourself on Gemini": copy the agent with
-            fork_agent, hand this conversation to the copy with hand_off_task while it is
+            fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
+            one), hand this conversation to the copy with hand_off_task while it is
             still on this provider, then switch the copy here; the confirmed switch moves
             this conversation to Gemini from the next message.
             First call without preview_digest and show the returned compatibility,

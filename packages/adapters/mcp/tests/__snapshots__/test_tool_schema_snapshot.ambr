@@ -2586,6 +2586,11 @@
         Continue configuring it through Daimon with the copy named as the setup
         target. A returned ``answering`` field says the copy is routed nowhere yet:
         post it verbatim.
+        <blank line>
+        ``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free
+        ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
+        is the copy's. Pass true for "make a copy of yourself" asks, where the
+        person named no copy.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2600,6 +2605,10 @@
               }),
             ]),
             'default': None,
+          }),
+          'new_copy_if_taken': dict({
+            'default': False,
+            'type': 'boolean',
           }),
           'new_name': dict({
             'type': 'string',
