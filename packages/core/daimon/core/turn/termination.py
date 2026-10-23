@@ -212,7 +212,7 @@ def normalized_termination_reason(event: Event) -> TerminationReason | None:
     if event.type != "session.turn_ended":
         return None
     payload = TurnEndedPayload.model_validate(event.payload)
-    if payload.native_reason == "refusal":
+    if payload.native_reason == "refusal" and event.native.provider == "anthropic":
         return TerminationReason.REFUSED
     return {
         "completed": TerminationReason.COMPLETED,
