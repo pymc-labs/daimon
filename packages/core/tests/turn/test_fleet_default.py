@@ -645,3 +645,31 @@ def test_tightening_is_checked_for_worker_agents_provider_and_token_caps():
         update={"limits": capped.limits.model_copy(update={"max_input_tokens": 5000})}
     )
     assert not fleet_grant_within(bigger, capped)
+
+
+# --- Only platforms that own the fleet lifecycle get the default (LEAD 084330Z) -------
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams", None])
+async def test_slack_teams_and_unknown_roots_get_no_default_fleet(root_turn, platform):
+    """Only Discord settles and delivers workers today; elsewhere they'd be paid for and lost."""
+    deps, prepared, *_ = root_turn
+    await unconfigured(root_turn)
+    admission = replace(
+        prepared.admission, grant=replace(prepared.admission.grant, platform=platform)
+    )
+    assert await read_agent_fleet_grant(deps, admission, now=datetime.now(UTC)) is None
+
+
+async def test_discord_keeps_the_default_and_a_custom_grant_still_applies_on_slack(root_turn):
+    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
+
+    deps, prepared, *_ = root_turn
+    assert {"discord"} == FLEET_LIFECYCLE_PLATFORMS
+    # The fixture's own root holds an operator's custom grant: it applies on Slack too.
+    slack = replace(prepared.admission, grant=replace(prepared.admission.grant, platform="slack"))
+    custom_grant = await read_agent_fleet_grant(deps, slack, now=datetime.now(UTC))
+    assert custom_grant is not None and not is_default_fleet(custom_grant)
+    # With no custom grant, Discord gets the default.
+    grant = await unconfigured(root_turn)
+    assert is_default_fleet(grant)

@@ -319,6 +319,13 @@ class HostFleetToolService:
                 obstacle = root_refusal(origin.id)
                 if obstacle is not None:
                     raise ToolError(fleet_root_obstacle_text(obstacle)) from None
+                from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
+
+                if caller.platform not in FLEET_LIFECYCLE_PLATFORMS:
+                    # No default fleet where results can't be delivered yet.
+                    raise ToolError(
+                        "Fleets run in Discord for now; they can't start here yet."
+                    ) from None
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
             parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_admin))
         else:

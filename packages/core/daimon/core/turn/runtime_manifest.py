@@ -98,9 +98,11 @@ async def read_agent_fleet_grant(
     """The fleet the actual admitted source may use now, without name lookup.
 
     Its own grant when it has one; otherwise the computed default, unless fleet
-    was turned off for it. `FLEET__ENABLED=false` stops all of them.
+    was turned off for it or the turn's platform doesn't run fleets yet
+    (`FLEET_LIFECYCLE_PLATFORMS`). `FLEET__ENABLED=false` stops all of them.
     """
     from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
     from daimon.core.ma_identity import derive_agent_uuid
 
     if not deps.fleet_enabled:
@@ -112,6 +114,9 @@ async def read_agent_fleet_grant(
         derive_agent_uuid(tenant_id=admission.grant.tenant_id, ma_agent_id=admission.agent.id),
         now=now,
     )
+    if setting.kind == "default" and admission.grant.platform not in FLEET_LIFECYCLE_PLATFORMS:
+        # The default fleet only where the adapter settles and delivers workers.
+        return None
     return setting.grant
 
 

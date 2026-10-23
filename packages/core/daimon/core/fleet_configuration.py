@@ -115,6 +115,12 @@ class FleetConfigInput(BaseModel):
         )
 
 
+#: Platforms whose adapter owns a fleet's lifecycle: it settles or defers each worker's
+#: completion (`worker_finished_decision`) and delivers the results to the root's
+#: thread. Only there does the computed default fleet apply; elsewhere late workers
+#: would be paid for and never delivered. Slack and Teams join once their adapters do.
+FLEET_LIFECYCLE_PLATFORMS: frozenset[str] = frozenset({"discord"})
+
 #: The fleet every agent has until its owner or an admin sets one or turns it off.
 DEFAULT_FLEET_MAX_WORKERS = 4
 DEFAULT_FLEET_BUDGET_USD = Decimal("2")
