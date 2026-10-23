@@ -9,7 +9,6 @@ accidentally wired into the CLI turn driver.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import cast
 
 import structlog.testing
 from anthropic.types.beta.sessions.beta_managed_agents_session_end_turn import (
@@ -24,24 +23,29 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
     BetaManagedAgentsSpanModelUsage,
 )
-from daimon.adapters.cli.run.command import run_conversation
-from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import Settings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
+from daimon.adapters.cli.run.command import TurnPath, run_conversation
 from daimon.core.stores import usage_events
+from daimon.core.turn.io import TurnIO
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     send_events_response,
     sse_response,
 )
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from packages.adapters.cli.tests.run.conftest import (
+    RuntimeFactory,
+    assert_io_ran_on,
+    cli_principal_count,
+)
 
 
 async def test_cli_turn_writes_no_usage_events(
     db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
+    make_rt: RuntimeFactory,
+    leg_path: TurnPath,
+    turn_ios: list[TurnIO],
 ) -> None:
     """CLI turn must produce zero usage_events rows.
 
@@ -86,16 +90,18 @@ async def test_cli_turn_writes_no_usage_events(
         lambda request, _match: send_events_response(),
     )
 
-    rt = CliRuntime(
-        settings=cast(Settings, object()),
-        anthropic=build_fake_anthropic(router.dispatch),
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-    )
+    rt = make_rt(build_fake_anthropic(router.dispatch))
 
     with structlog.testing.capture_logs() as logs:
-        await run_conversation(rt=rt, session_id="test-session-abc", user_message="hello")
+        exit_code = await run_conversation(
+            rt=rt, session_id="test-session-abc", user_message="hello", path=leg_path
+        )
+
+    assert exit_code == 0
+    # Which I/O ran: the leg's own turn I/O consumed the fake stream, and only the
+    # mux bridge touched the identity tables.
+    assert_io_ran_on(leg_path, turn_ios)
+    assert await cli_principal_count(db_session) == (1 if leg_path == "mux" else 0)
 
     count = await usage_events.count_all(db_session)
     assert count == 0, "CLI turn must write zero usage_events rows"

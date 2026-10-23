@@ -10,7 +10,6 @@ from typing import Any, cast
 import anthropic
 import httpx
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions.beta_managed_agents_session_end_turn import (
     BetaManagedAgentsSessionEndTurn,
 )
@@ -19,25 +18,21 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 )
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.run import command as cmd_mod
-from daimon.adapters.cli.run.command import run_conversation
-from daimon.adapters.cli.runtime import CliRuntime
+from daimon.adapters.cli.run.command import TurnPath, run_conversation
 from daimon.core.config import Settings
 from daimon.core.errors import TurnError
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.ceiling import CEILING_MESSAGE
+from daimon.core.turn.io import TurnIO
 from daimon.core.turn.state import TurnState
 from mux.testing.drivers.anthropic.ma import MARouter, sse_response
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
 
-
-def _make_rt() -> CliRuntime:
-    rt = object.__new__(CliRuntime)
-    object.__setattr__(rt, "settings", cast(Settings, object()))
-    object.__setattr__(rt, "anthropic", cast(AsyncAnthropic, object()))
-    object.__setattr__(rt, "sessionmaker", cast(async_sessionmaker[AsyncSession], object()))
-    return cast(CliRuntime, rt)
+from packages.adapters.cli.tests.run.conftest import (
+    RuntimeFactory,
+    assert_io_ran_on,
+    cli_principal_count,
+)
 
 
 def _install_run_turn(
@@ -52,6 +47,19 @@ def _install_run_turn(
         return state
 
     monkeypatch.setattr(cmd_mod, "run_turn", fake_run_turn)
+
+
+async def _assert_bridge(db: AsyncSession, leg_path: TurnPath, captured: dict[str, Any]) -> None:
+    """Which I/O ran before the driver: the mux bridge read the database and minted
+    the operator's scope; the legacy path did neither."""
+    assert captured["path"] == leg_path
+    if leg_path == "mux":
+        assert captured["scope"] is not None
+        assert captured["scope"].authorization_id == "cli-operator-run"
+        assert await cli_principal_count(db) == 1
+    else:
+        assert captured["scope"] is None
+        assert await cli_principal_count(db) == 0
 
 
 def _invoke(args: list[str], **kwargs: Any) -> Any:
@@ -85,55 +93,98 @@ def test_run_new_turn_missing_message_exits_1(
 
 
 @pytest.mark.asyncio
-async def test_run_exits_0_on_end_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_run_turn(monkeypatch, state=TurnState())
-    rt = _make_rt()
-    exit_code = await run_conversation(rt=rt, session_id="s1", user_message="hello")
+async def test_run_exits_0_on_end_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    make_rt: RuntimeFactory,
+    leg_path: TurnPath,
+    db_session: AsyncSession,
+) -> None:
+    captured: dict[str, Any] = {}
+    _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
+    exit_code = await run_conversation(
+        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
+    )
     assert exit_code == 0
+    await _assert_bridge(db_session, leg_path, captured)
 
 
 @pytest.mark.asyncio
-async def test_run_exits_1_on_turn_error(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_exits_1_on_turn_error(
+    monkeypatch: pytest.MonkeyPatch,
+    make_rt: RuntimeFactory,
+    leg_path: TurnPath,
+    db_session: AsyncSession,
+) -> None:
+    captured: dict[str, Any] = {}
     _install_run_turn(
         monkeypatch,
         state=TurnState(error=TurnError(kind="upstream", message="boom")),
+        captured=captured,
     )
-    rt = _make_rt()
-    exit_code = await run_conversation(rt=rt, session_id="s1", user_message="hello")
+    exit_code = await run_conversation(
+        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
+    )
     assert exit_code == 1
+    await _assert_bridge(db_session, leg_path, captured)
 
 
 @pytest.mark.asyncio
-async def test_run_reads_message_from_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_reads_message_from_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    make_rt: RuntimeFactory,
+    leg_path: TurnPath,
+    db_session: AsyncSession,
+) -> None:
     captured: dict[str, Any] = {}
     _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
-    rt = _make_rt()
-    exit_code = await run_conversation(rt=rt, session_id="s1", user_message="hello from stdin")
+    exit_code = await run_conversation(
+        rt=make_rt(), session_id="s1", user_message="hello from stdin", path=leg_path
+    )
     assert exit_code == 0
     assert captured["user_message"] == "hello from stdin"
+    await _assert_bridge(db_session, leg_path, captured)
 
 
 @pytest.mark.asyncio
 async def test_run_api_error_emits_failed_terminal_and_exits_1(
     monkeypatch: pytest.MonkeyPatch,
+    make_rt: RuntimeFactory,
+    leg_path: TurnPath,
+    db_session: AsyncSession,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     class _FakeReq:
         method = "POST"
         url = "https://x"
 
-    async def raising(**_kwargs: Any) -> TurnState:
+    seen: dict[str, Any] = {}
+
+    async def raising(**kwargs: Any) -> TurnState:
+        seen.update(kwargs)
         raise anthropic.APIConnectionError(request=cast(Any, _FakeReq()))
 
     monkeypatch.setattr(cmd_mod, "run_turn", raising)
 
-    rt = _make_rt()
-    exit_code = await run_conversation(rt=rt, session_id="s1", user_message="hello")
+    exit_code = await run_conversation(
+        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
+    )
     assert exit_code == 1
+    await _assert_bridge(db_session, leg_path, seen)
+    terminals = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{") and '"terminal"' in line
+    ]
+    assert [t["status"] for t in terminals] == ["failed"]
+    assert terminals[0]["error"]["kind"] == "upstream"
 
 
 @pytest.mark.asyncio
 async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_terminal_event(
     capsys: pytest.CaptureFixture[str],
+    make_rt: RuntimeFactory,
+    leg_path: TurnPath,
+    turn_ios: list[TurnIO],
 ) -> None:
     """Exercises the REAL driver (not a monkeypatched run_turn) so this test
     actually stands behind the claim that `daimon run` is ceiling-covered --
@@ -171,22 +222,16 @@ async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_termi
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
     client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
 
-    rt = CliRuntime(
-        settings=cast(Settings, object()),
-        anthropic=client,
-        sessionmaker=cast(async_sessionmaker[AsyncSession], object()),
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-    )
-
     exit_code = await run_conversation(
-        rt=rt,
+        rt=make_rt(client),
         session_id="sess_ceiling",
         user_message="hello",
+        path=leg_path,
         deadline=datetime.now(UTC) - timedelta(seconds=5),
     )
 
     assert exit_code == 1, "a ceiling breach must exit nonzero"
+    assert_io_ran_on(leg_path, turn_ios)
 
     # structlog's own log lines share stdout with the NDJSON protocol lines;
     # only lines that parse as JSON objects belong to the protocol.
@@ -218,6 +263,9 @@ async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_termi
 @pytest.mark.asyncio
 async def test_run_conversation_passes_the_tool_posture_to_the_driver(
     monkeypatch: pytest.MonkeyPatch,
+    make_rt: RuntimeFactory,
+    leg_path: TurnPath,
+    db_session: AsyncSession,
 ) -> None:
     """The observing wrapper must forward the tool-safety posture to the turn."""
     from daimon.core.tool_safety import ToolSafetyPolicy
@@ -229,7 +277,12 @@ async def test_run_conversation_passes_the_tool_posture_to_the_driver(
     posture = PolicyApproval(decide=unattended_decider(ToolSafetyPolicy(enabled=True)))
 
     await run_conversation(
-        rt=_make_rt(), session_id="s1", user_message="hello", tool_confirmation=posture
+        rt=make_rt(),
+        session_id="s1",
+        user_message="hello",
+        path=leg_path,
+        tool_confirmation=posture,
     )
 
     assert captured["tool_confirmation"] is posture
+    await _assert_bridge(db_session, leg_path, captured)
