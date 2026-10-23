@@ -533,7 +533,8 @@ class SetupPanel:
                 channel_label=None,
             )
             details = await self._without_hidden_places(session, actor, details)
-            owned = await owns_agent(
+            # Only a member's ownership adds anything: an admin already gets every control.
+            owned = not actor.is_admin and await owns_agent(
                 session,
                 tenant_id=actor.tenant_id,
                 ma_agent_id=match.ma_agent_id,
