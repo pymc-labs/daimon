@@ -177,7 +177,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             sessions,
             client,
             settings,
-            DeploymentDefault(agent_name="Researcher", environment_name="default"),
+            DeploymentDefault(agent_name="Daimon", environment_name="default"),
         )
         auth = AuthIdentity(
             tenant_id=tenant.id,
@@ -293,7 +293,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     gate()
     agent()
     agent()
-    with pytest.raises(ToolError, match="(?i)preview again"):
+    with pytest.raises(ToolError, match="Someone just switched Researcher; it's now on"):
         await _request_agent_backend_switch_impl(
             runtime,
             auth,
@@ -852,6 +852,10 @@ def _admin_auth():
             "Try again in a minute",
         ),
         ({"reason": "stale_preview"}, "preview again"),
+        (
+            {"reason": "stale_revision"},
+            "Someone just switched X. Ask again if you still want OpenAI",
+        ),
         ({"reason": "owner_or_admin_required"}, "needs its owner"),
         (
             {"reason": "source_unsupported", "missing": ("credentials",)},
@@ -1174,6 +1178,111 @@ async def test_a_switch_preview_to_gpt_never_creates_the_tenants_environment(
         auth,
         agent_name="Researcher",
         target_backend="openai",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview"
+
+
+def test_two_switches_at_once_name_where_the_agent_is_now():
+    from daimon.adapters.mcp.tools.agents import _backend_switch_refusal
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    text = str(
+        _backend_switch_refusal(
+            AgentBackendRefused("stale_revision"),
+            "Daimon",
+            "openai",
+            _admin_auth(),
+            current="gemini",
+        )
+    )
+    assert text == (
+        "Someone just switched Daimon; it's now on Gemini. "
+        "Ask again if you still want OpenAI. Nothing changed."
+    )
+
+
+@pytest.mark.parametrize("default", ["deployment", "server", "managed"])
+async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone(
+    active_chat, default
+):
+    from daimon.core.scope import DeploymentDefault, TenantScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    if default == "managed":
+        from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+
+        # The built-in agent is known by its managed mark, whatever its name.
+        payload["metadata"][MA_METADATA_KEY_MANAGED] = "true"
+    elif default == "deployment":
+        runtime = replace(
+            runtime,
+            deployment_default=DeploymentDefault(
+                agent_name="Researcher", environment_name="default"
+            ),
+        )
+    elif default == "server":
+        async with runtime.session_factory.begin() as session:
+            await set_fields(
+                session,
+                scope=TenantScopeRef(tenant_id=auth.tenant_id),
+                tenant_id=auth.tenant_id,
+                agent_name="Researcher",
+            )
+    member = replace(auth, role=Role.USER, is_admin=False)
+    switch = {
+        "agent_name": "Researcher",
+        "target_backend": "gemini",
+        "origin_context_id": str(origin.id),
+    }
+    # Without "for everyone", a member and an admin alike are offered a copy instead.
+    for who in (member, auth):
+        gate()
+        agent()
+        with pytest.raises(ToolError) as refused:
+            await _request_agent_backend_switch_impl(runtime, who, **switch)
+        assert str(refused.value).startswith(
+            "Switching Researcher changes it for everyone on this server. "
+            "To try Gemini just here, I can make a copy of me on Gemini. Nothing changed."
+        )
+    # "For everyone" still needs the owner or an admin.
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
+        await _request_agent_backend_switch_impl(runtime, member, **switch, for_everyone=True)
+    assert await _release_rows(runtime, auth) == []
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(runtime, auth, **switch, for_everyone=True)
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        **switch,
+        for_everyone=True,
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert changed.status == "changed"
+    assert "New conversations with Researcher use Gemini" in changed.summary
+
+
+async def test_a_non_default_agent_switches_without_saying_for_everyone(active_chat):
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    assert runtime.deployment_default.agent_name != "Researcher"
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview"

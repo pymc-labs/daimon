@@ -288,7 +288,14 @@ async def test_click_rechecks_real_preview_and_rejects_changed_facts(owned_previ
     elif change == "revision":
         await service.set_backend(agent, "anthropic", 0, actor)
     trace.queue(reply())
-    assert await check(prompt, "requester") is not None
+    refused = await check(prompt, "requester")
+    assert refused is not None
+    if change == "revision":
+        # Someone else's switch landed after this card was posted: say where it is now.
+        assert refused.startswith(
+            f"Someone just switched {prompt.backend_switch.agent}; it's now on Anthropic. "
+            "Ask again if you still want"
+        ), refused
     current = await service.current(agent)
     assert current is None if change != "revision" else current.local == 1
     assert not trace.violations and not trace.replies
@@ -877,6 +884,7 @@ async def test_card_names_the_model_and_where_the_switch_applies(
             model="gemini-4-argon",
             expected_revision=preview.setting_revision,
             preview_digest=preview.digest,
+            for_everyone=default_agent,
         ),
         requester_platform_user_id="requester",
         now=datetime.now(UTC),
@@ -896,7 +904,7 @@ async def test_card_names_the_model_and_where_the_switch_applies(
     assert prepared.title == "Switch Researcher to Gemini (gemini-4-argon)?"
     assert prepared.consequence is not None
     reach = (
-        f"Affects new conversations in every channel on this {place}"
+        f"Affects new conversations for everyone on this {place}"
         if default_agent
         else "Affects new conversations wherever Researcher answers"
     )
@@ -1083,3 +1091,121 @@ async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_
     assert (moves in prepared.consequence) == (handed_to == "Researcher")
     if handed_to == "Researcher":
         assert "earlier messages here aren't carried over" in prepared.consequence
+
+
+async def _reload(owned_preview):
+    from daimon.core.channel_backend import load_backend_agent
+
+    _, agent, _, sessions, client, *_ = owned_preview
+    return await load_backend_agent(
+        client, sessions, tenant_id=agent.tenant_id, agent_name="Researcher"
+    )
+
+
+def _switch_callbacks(owned_preview, *, default_agent_name: str = "daimon"):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, *_ = owned_preview
+    return backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        default_agent_name=default_agent_name,
+        answering_agent_name="Researcher",
+    )
+
+
+def _switch_prompt(preview, **changes: object):
+    return prompt_for_tool_call(
+        _call(
+            target_backend="gemini",
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+            **changes,
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.parametrize("default", ["named", "managed"])
+async def test_a_default_agent_card_is_refused_unless_its_for_everyone(owned_preview, default):
+    """A dropped for_everyone on the confirm call posts no card: the copy offer instead."""
+    from daimon.core.confirmation import CardRefusal
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+
+    service, agent, actor, sessions, client, trace, payload, reply, _ = owned_preview
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "openai", "gemini"), policy.revision, actor
+    )
+    if default == "managed":
+        # A built-in agent is found by its managed mark, whatever its name.
+        payload["metadata"][MA_METADATA_KEY_MANAGED] = "true"
+    trace.queue(reply())
+    agent = await _reload(owned_preview)
+    preview = await service.preview(agent, "gemini", None)
+    prepare, check = _switch_callbacks(
+        owned_preview, default_agent_name="Researcher" if default == "named" else "daimon"
+    )
+    trace.queue(reply())
+    with pytest.raises(CardRefusal) as refused:
+        await prepare(_switch_prompt(preview))
+    assert str(refused.value) == (
+        "Switching Researcher changes it for everyone on this server. "
+        "To try Gemini just here, I can make a copy of me on Gemini."
+    )
+    trace.queue(reply())
+    assert await check(_switch_prompt(preview), "requester") == str(refused.value)
+    trace.queue(reply())
+    prepared = await prepare(_switch_prompt(preview, for_everyone=True))
+    assert prepared.consequence is not None
+    assert prepared.consequence.startswith("Affects new conversations for everyone on this server")
+    assert await service.current(agent) is None
+
+
+async def test_a_switch_that_lands_before_the_card_is_posted_says_who_won(owned_preview):
+    from daimon.core.confirmation import CardRefusal
+
+    service, agent, actor, sessions, client, trace, payload, reply, _ = owned_preview
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "openai", "gemini"), policy.revision, actor
+    )
+    preview = await service.preview(agent, "gemini", None)
+    await service.set_backend(agent, "openai", 0, actor)
+    prepare, _ = _switch_callbacks(owned_preview)
+    trace.queue(reply())
+    with pytest.raises(CardRefusal) as refused:
+        await prepare(_switch_prompt(preview))
+    assert str(refused.value) == (
+        "Someone just switched Researcher; it's now on OpenAI. Ask again if you still want Gemini."
+    )
+
+
+async def test_a_refusal_worded_for_the_person_reaches_the_model_as_is():
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import CardRefusal
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY, backend_switch_tools
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    said = (
+        "Someone just switched Researcher; it's now on OpenAI. Ask again if you still want Gemini."
+    )
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=AsyncMock(side_effect=CardRefusal(said)),
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=backend_switch_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(_call())
+    assert result.allow is False and result.deny_message == said

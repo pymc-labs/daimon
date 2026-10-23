@@ -278,6 +278,22 @@ def provider_name(provider: str | None) -> str:
     return _PROVIDER_NAMES.get(provider or "", "a model provider")
 
 
+def switched_meanwhile_text(agent: str, now_on: str | None, wanted: str | None) -> str:
+    """Two switches of one agent at once: the other landed first. The same on every platform."""
+    where = f"; it's now on {provider_name(now_on)}" if now_on else ""
+    still = provider_name(wanted) if wanted else "that change"
+    return f"Someone just switched {agent}{where}. Ask again if you still want {still}."
+
+
+def default_agent_switch_text(agent: str, wanted: str, *, place: str, me: bool) -> str:
+    """A chat switch of the server's default agent, not said to be for everyone."""
+    provider = provider_name(wanted)
+    return (
+        f"Switching {agent} changes it for everyone on this {place}. To try {provider} "
+        f"just here, I can make a copy of {'me' if me else agent} on {provider}."
+    )
+
+
 _DM_REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _Copy("{agent} only works in other channels.", "Ask it there."),
     "own_agents_only": _Copy("This channel only uses its own agents.", "Ask in that channel."),

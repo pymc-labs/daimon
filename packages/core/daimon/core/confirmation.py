@@ -124,6 +124,8 @@ class BackendSwitchReference(BaseModel):
     required_capabilities: tuple[Capability, ...] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # The person said the switch is for everyone: needed for the server's default agent.
+    for_everyone: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
 
     @field_validator("accepted_drops", mode="before")
     @classmethod
@@ -435,6 +437,7 @@ def prompt_for_tool_call(
                 "accepted_drops": data.get("accepted_drops"),
                 "thread_mode": data.get("thread_mode"),
                 "required_capabilities": data.get("required_capabilities"),
+                "for_everyone": data.get("for_everyone") or False,
             }
         )
         # No model-supplied compatibility text is accepted. The host hook must
@@ -652,6 +655,10 @@ def settings_line(settings: Mapping[str, object]) -> str:
     return "; ".join(parts) or "the model provider's defaults"
 
 
+class CardRefusal(ValueError):
+    """A card refused for a reason worded for the person; its text is shown as is."""
+
+
 def backend_switch_callbacks(
     service: AgentBackendService,
     *,
@@ -677,7 +684,11 @@ def backend_switch_callbacks(
     shared service's compare-and-set after the approved tool call.
     """
     from daimon.core.authz import build_subject
-    from daimon.core.channel_backend import BackendActor, load_backend_agent
+    from daimon.core.channel_backend import (
+        BackendActor,
+        answers_for_everyone,
+        load_backend_agent,
+    )
     from daimon.core.stores.accounts import get_account_with_tenant
 
     async def verified(
@@ -701,15 +712,44 @@ def backend_switch_callbacks(
             agent_name=reference.agent,
             resource_host=resource_host,
         )
+        if not reference.for_everyone and await answers_for_everyone(
+            sessionmaker, agent, default_agent_name=default_agent_name
+        ):
+            from daimon.core.turn.notices import default_agent_switch_text
+
+            raise CardRefusal(
+                default_agent_switch_text(
+                    agent.name,
+                    reference.target_backend,
+                    place=place_word,
+                    me=answering_agent_name == agent.name,
+                )
+            )
         preview = await service.preview(
             agent, reference.target_backend, reference.model, reference_settings(reference)
         )
+        if (
+            preview.tenant_id == tenant_id
+            and preview.agent_id == agent.agent_id
+            and preview.setting_revision != reference.expected_revision
+        ):
+            # Another switch of this agent landed after this card was posted.
+            from daimon.core.turn.notices import switched_meanwhile_text
+            from mux.contracts.config import DEFAULT_BACKEND
+
+            setting = await service.current(agent)
+            raise CardRefusal(
+                switched_meanwhile_text(
+                    reference.agent,
+                    (setting.backend if setting is not None else None) or DEFAULT_BACKEND,
+                    reference.target_backend,
+                )
+            )
         if (
             preview.tenant_id != tenant_id
             or preview.agent_id != agent.agent_id
             or preview.target_backend != reference.target_backend
             or not preview.allowed
-            or preview.setting_revision != reference.expected_revision
             or preview.digest != reference.preview_digest
             or (preview.declared_drops and reference.accepted_drops != preview.declared_drops)
             or (not preview.declared_drops and reference.accepted_drops not in (None, ()))
@@ -935,8 +975,10 @@ def backend_switch_callbacks(
         )
         answering = await _answering_here(answering_agent_name)
         reach = (
-            f"Affects new conversations in every channel on this {place_word}"
-            if default_agent_name is not None and agent.name == default_agent_name
+            f"Affects new conversations for everyone on this {place_word}"
+            if await answers_for_everyone(
+                sessionmaker, agent, default_agent_name=default_agent_name
+            )
             else f"Affects new conversations wherever {agent.name} answers"
         )
         return prompt.model_copy(
@@ -970,6 +1012,8 @@ def backend_switch_callbacks(
                 await verified_configuration(prompt, clicker)
             else:
                 await verified(prompt, clicker)
+        except CardRefusal as exc:
+            return str(exc)
         except ValueError:
             return "This preview or your permission changed. Preview and confirm again."
         return None

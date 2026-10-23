@@ -216,7 +216,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
             turn=TurnSettings(path="mux", channel_backends=True),
             mcp=McpSettings(public_url="https://mcp.invalid"),
         )
-        default = DeploymentDefault(agent_name="Researcher", environment_name="default")
+        default = DeploymentDefault(agent_name="Daimon", environment_name="default")
         runtime = McpRuntime(sessions, client, settings, default)
         auth = AuthIdentity(
             tenant_id=tenant.id,
@@ -599,7 +599,7 @@ async def test_confirming_the_previewed_losses_applies_once_with_revision_and_au
     assert events[0].account_id == chat.auth.account_id
     assert "declared_drops=" in events[0].reason
     # The confirmed call cannot apply twice.
-    with pytest.raises(Exception, match="(?i)preview again"):
+    with pytest.raises(Exception, match="Someone just switched Researcher; it's now on"):
         await apply(chat, data)
     assert len(await chat.audit()) == 1
 
