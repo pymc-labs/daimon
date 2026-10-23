@@ -137,6 +137,20 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
     "run_deadline": "the fleet ran out of time; ask again with a smaller task",
     "worker_lost": "it was lost when Daimon restarted; ask again",
     "stop_requested": "it was stopped",
+    # The budget watch's own stop reasons, when they end a worker.
+    "worker_stop_requested": "it was stopped",
+    "terminal": "the fleet had already ended; ask again",
+    "funding_unavailable": (
+        "this server's balance couldn't be checked, so it didn't start; try again in a minute"
+    ),
+    "pricing_unavailable": (
+        "its cost couldn't be priced, so it was stopped; ask for another model, "
+        "or give an admin the reference"
+    ),
+    "accepted_attempt_inventory_unavailable": (
+        "an earlier attempt couldn't be accounted for, so it wasn't run again; "
+        "give an admin the reference"
+    ),
     "watch_ended": "the fleet ended before it finished; ask again",
     "shutdown": "Daimon restarted before it finished; ask again",
     "usage_unavailable": "its spending couldn't be measured, so it was stopped; try again",
@@ -166,7 +180,14 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
 #: Codes whose fix is "give an admin the reference": the card adds the worker id prefix
 #: the host logs (fleet.worker_task_failed).
 _REFERENCED_CODES: Final = frozenset(
-    {"setup_error", "dispatch_refused", "preparation_refused", "worker_runtime_missing"}
+    {
+        "setup_error",
+        "dispatch_refused",
+        "preparation_refused",
+        "worker_runtime_missing",
+        "pricing_unavailable",
+        "accepted_attempt_inventory_unavailable",
+    }
 )
 
 

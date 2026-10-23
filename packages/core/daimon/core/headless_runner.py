@@ -711,13 +711,16 @@ async def commit_worker_transition(
                     failure_code = "dispatch_refused"
                 if dispatch_changed:
                     raise FleetConflict("worker preparation claim changed", reason="claim_changed")
+                # A person's Stop is already recorded: the worker ends as stopped, never
+                # as a refusal or our failure.
+                stopped = latest.error_code == "stop_requested"
                 updated = await fleet_store.finish(
                     db,
                     tenant_id=worker.tenant_id,
                     worker_id=worker.id,
                     expected_version=latest.version,
-                    status="failed",
-                    error_code=failure_code,
+                    status="cancelled" if stopped else "failed",
+                    error_code="stop_requested" if stopped else failure_code,
                 )
         else:
             updated = await action(db, latest)

@@ -139,6 +139,8 @@ WorkerFailureCode = Literal[
     "provider_busy",
     "provider_quota_zero",
     "provider_rate_limited",
+    "stop_requested",
+    "watch_ended",
 ]
 
 # Admission refusals a person can act on, by their closed reason.
@@ -155,6 +157,23 @@ _BACKEND_CAUSE_CODES: dict[str, WorkerFailureCode] = {
     "channel_pin": "channel_backend_pinned",
     "agent_backend": "worker_runtime_missing",
 }
+
+
+def _timed_out(error: BaseException) -> bool:
+    """A timeout anywhere in the chain: a raw TimeoutError, or the turn ceiling
+    `run_worker` re-raises it as (`TurnError(kind="ceiling")`)."""
+    from daimon.core.errors import TurnError
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TimeoutError) or (
+            isinstance(current, TurnError) and current.kind == "ceiling"
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _quota_cause(error: BaseException) -> WorkerFailureCode | None:
@@ -229,12 +248,18 @@ def worker_failure_code(
     refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
     if (quota := _quota_cause(error)) is not None:
         return quota
-    if isinstance(error, TimeoutError):
+    if _timed_out(error):
         if phase == "preparation_refused":
             return "preparation_deadline_exceeded"
+        from mux.profiles import INLINE_REUSE
+
         # Gemini can accept a turn and never start it; at the deadline that can't be
         # told from a slow answer (usage arrives only at the end), so say both.
-        return "provider_busy" if backend == "gemini" else "timed_out"
+        return "provider_busy" if backend == INLINE_REUSE.provider else "timed_out"
+    if isinstance(error, asyncio.CancelledError):
+        # Cancelled from outside (the run's watch, a restart): never a refusal. A
+        # person's Stop is kept as stop_requested by the transition itself.
+        return "watch_ended"
     if not isinstance(error, Exception) or isinstance(error, refusal):
         return _admission_cause(error) or phase
     if isinstance(error, _provider_failures()):
@@ -1554,6 +1579,14 @@ class HostFleetPorts:
                                             cancel=cancel,
                                         )
                                     except BaseException as error:
+                                        # This task's own deadline (the asyncio.timeout above)
+                                        # shows here as a cancel: record it as the timeout.
+                                        cause: BaseException = (
+                                            TimeoutError()
+                                            if isinstance(error, asyncio.CancelledError)
+                                            and request.now() >= bound
+                                            else error
+                                        )
                                         # run_worker records its own pre-native failures;
                                         # a second commit would only wait on the lock again.
                                         if not getattr(error, FAILURE_RECORDED, False):
@@ -1563,7 +1596,7 @@ class HostFleetPorts:
                                                     parent,
                                                     claimed,
                                                     failure_code=worker_failure_code(
-                                                        error, failure_code, backend=claimed.backend
+                                                        cause, failure_code, backend=claimed.backend
                                                     ),
                                                 )
                                             )
@@ -2096,7 +2129,9 @@ class HostFleetPorts:
                         result={"worker_id": str(usage.worker.id)},
                     )
                     run, worker = usage.run, usage.worker
-            if worker.status == "cancelled" and worker.error_code is not None:
+            # A worker cancelled at admission carries its refusal code; one a person
+            # stopped is replayed as it stands.
+            if worker.status == "cancelled" and worker.error_code not in (None, "stop_requested"):
                 raise FleetRefused("financial_admission_refused")
             if worker.status == "pending":
                 await self._dispatch(parent, worker, resolved, reviewed_result)

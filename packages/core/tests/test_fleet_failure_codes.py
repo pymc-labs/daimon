@@ -31,7 +31,6 @@ def validation_error() -> ValidationError:
         FleetConflict("claim changed", reason="claim_changed"),
         UnsupportedCapability(("x",), "anthropic.managed_agents"),
         ProviderError("invalid_request", retryable=False),
-        asyncio.CancelledError(),
     ],
 )
 def test_refusals_keep_their_phase_code(error, phase):
@@ -167,6 +166,30 @@ def test_a_timeout_reads_as_running_out_of_time_or_the_provider_not_answering(ph
     assert worker_failure_code(TimeoutError(), phase, backend=backend) == code
 
 
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+def test_a_cancel_from_outside_is_never_a_refusal(phase):
+    assert worker_failure_code(asyncio.CancelledError(), phase) == "watch_ended"
+
+
+@pytest.mark.parametrize(
+    ("backend", "code"), [("gemini", "provider_busy"), ("openai", "timed_out"), (None, "timed_out")]
+)
+def test_the_turn_ceiling_run_worker_raises_reads_as_a_timeout(backend, code):
+    """run_worker re-raises its TimeoutError as ceiling_error(); that is a timeout too."""
+    from daimon.core.turn.ceiling import ceiling_error
+
+    ceiling = ceiling_error()
+    assert worker_failure_code(ceiling, "dispatch_refused", backend=backend) == code
+    try:
+        try:
+            raise TimeoutError
+        except TimeoutError as error:
+            raise ceiling_error() from error
+    except Exception as raised:
+        assert worker_failure_code(raised, "dispatch_refused", backend=backend) == code
+    assert worker_failure_code(ceiling, "preparation_refused") == "preparation_deadline_exceeded"
+
+
 def test_provider_busy_never_claims_it_was_busy():
     text = worker_error_text("provider_busy") or ""
     assert text.startswith("the model provider didn't answer in time (it may be busy)")
@@ -238,7 +261,16 @@ def test_every_failure_reason_names_a_cause_and_a_fix():
     from daimon.core.fleet_orchestration import WorkerFailureCode
 
     assert set(get_args(WorkerFailureCode)) <= set(WORKER_ERROR_TEXT)
+    # The budget watch's stop reasons, when they end a worker, read in words too.
+    watch_reasons = {
+        "worker_stop_requested",
+        "funding_unavailable",
+        "pricing_unavailable",
+        "terminal",
+        "accepted_attempt_inventory_unavailable",
+    }
+    assert watch_reasons <= set(WORKER_ERROR_TEXT)
     for code, text in WORKER_ERROR_TEXT.items():
         assert "on that model here" not in text, code
-        if code != "stop_requested":
+        if code not in ("stop_requested", "worker_stop_requested"):
             assert "; " in text, f"{code} names no fix: {text}"

@@ -158,3 +158,50 @@ async def test_soft_budget_malformed_host_bounds_refuse_before_any_native_work(
             cancel=asyncio.Event(),
         )
     assert native_requests == [] and owned.wire.requests == []
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_a_worker_out_of_time_inside_run_worker_reads_as_a_timeout(
+    claimed_worker_request, monkeypatch
+):
+    """#1413 review B2: run_worker re-raises its TimeoutError as the turn ceiling.
+
+    The worker must record a timeout, and the same raised error must read as one in
+    the dispatcher too (provider_busy for Gemini), never as a refusal.
+    """
+    from daimon.core import headless_runner
+    from daimon.core.errors import TurnError
+    from daimon.core.fleet_orchestration import worker_failure_code
+
+    request, root, worker, prices, _, native_requests = claimed_worker_request
+
+    async def slow(*_args, **_kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", slow)
+    candidate = replace(request, deadline=request.now() + timedelta(milliseconds=300))
+    with pytest.raises(TurnError) as raised:
+        await run_worker(
+            candidate,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert raised.value.kind == "ceiling"
+    assert native_requests == []
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db,
+            tenant_id=request.tenant_id,
+            actor_id=root.fleet.account_id,
+            run_id=worker.run_id,
+        )
+        persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
+    assert persisted.status == "failed"
+    assert persisted.error_code == "preparation_deadline_exceeded"
+    assert (
+        worker_failure_code(raised.value, "dispatch_refused", backend=worker.backend)
+        == "provider_busy"
+    )
