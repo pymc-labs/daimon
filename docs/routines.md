@@ -845,3 +845,11 @@ manage their metadata but cannot read those private previews, errors, delivery
 payloads, or delivery notes. Upgrade migration `0140_clear_legacy_routine_output`
 erases previously retained output for these legacy rows; see the
 [self-hosting rollout instructions](self-hosting.md#clearing-retained-legacy-routine-output).
+
+## Long-job dispatch
+
+The scheduler also dispatches [long jobs](long-jobs.md) as separate leased tasks. Their
+worker deadline is independent of the interactive turn ceiling. Workers retain leases
+across heartbeats, and expired launching/running leases are reclaimed by replaying the
+same session. Long-job policy does not enable sandbox tools for routines or other
+unattended entry points.

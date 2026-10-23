@@ -50,6 +50,7 @@ from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
     environments,
+    long_jobs,
     routines,
     self_edit,
     sessions,
@@ -442,6 +443,7 @@ def create_mcp_app(
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
+            always_visible=["get_long_job"],
             search_result_serializer=serialize_tools_for_output_markdown,
         )
     )
@@ -560,6 +562,7 @@ def create_mcp_app(
     time.register_time_tools(mcp, runtime)
     register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
+    long_jobs.register_long_job_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 

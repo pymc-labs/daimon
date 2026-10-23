@@ -75,6 +75,8 @@ from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
 from daimon.core.logging_setup import configure_logging
+from daimon.core.long_jobs import LongJobExecutor
+from daimon.core.long_jobs_ma import ManagedLongJobPort
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     ResolverCache,
@@ -1603,6 +1605,7 @@ async def run(
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
+    long_jobs = LongJobExecutor(sm, ManagedLongJobPort(client, sm, settings), settings.long_jobs)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1625,6 +1628,7 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 wait_for_completion=True,
             )
+            await long_jobs.sweep()
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
@@ -1667,6 +1671,7 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 dispatcher=dispatcher,
             )
+            await long_jobs.sweep()
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
@@ -1719,6 +1724,7 @@ async def run(
         if dm_tasks:
             await asyncio.wait(dm_tasks, timeout=60)
         dm_turn_deps.running_turns.begin_shutdown()
+        await long_jobs.close()
         await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()

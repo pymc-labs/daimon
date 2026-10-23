@@ -170,6 +170,7 @@ SERVER_SEPARATOR: Final[str] = "/"
 #: to the input field whose presence makes the call the write. Without it the
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    "start_long_job": "command",
     "create_watch": "source",
     "resume_watch": "watch_id",
     "rotate_watch_key": "watch_id",
@@ -187,7 +188,7 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
 
 
 WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
-    {"create_watch", "resume_watch", "rotate_watch_key"}
+    {"create_watch", "resume_watch", "rotate_watch_key", "start_long_job"}
 )
 
 

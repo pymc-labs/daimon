@@ -21,6 +21,7 @@ nav:
   - Permissions: permissions.md
   - Isolation: isolation.md
   - Routines: routines.md
+  - Long jobs: long-jobs.md
   - Billing: billing.md
   - Defaults: defaults.md
   - GitHub push resync: github-push-resync.md

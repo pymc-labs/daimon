@@ -25,7 +25,7 @@ split: a server named `linear/bridge` would otherwise alias a tool on
 `linear`. A server name holding `/` is refused outright.
 
 `ENTRY_POINT_POLICY` records each entry point's skills policy. Built-in
-sandbox tools are off everywhere; the one opt-in is an admin's, per routine
+sandbox tools are off except in isolated long-job workers; the admin opt-in is per routine
 (`Routine.sandbox_tools_enabled`), and `capability_policy` honours it only for
 the `routine` entry point.
 """
@@ -76,7 +76,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 UnattendedEntryPoint = Literal[
-    "watch", "routine", "wake", "mcp_chat", "fleet_worker", "cli_run", "checkpoint"
+    "watch", "routine", "wake", "mcp_chat", "fleet_worker", "cli_run", "checkpoint", "long_job"
 ]
 
 log = structlog.get_logger(__name__)
@@ -109,9 +109,10 @@ class CapabilityPolicy:
     allow_skills: bool
 
 
-#: Built-ins are off for every unattended entry point. Only a routine can be
+#: Built-ins are on for isolated long-job workers. Only a routine can be
 #: opted in, one at a time, by an admin (`capability_policy`).
 ENTRY_POINT_POLICY: Final[Mapping[UnattendedEntryPoint, CapabilityPolicy]] = {
+    "long_job": CapabilityPolicy(allow_builtins=True, allow_skills=False),
     "watch": CapabilityPolicy(allow_builtins=False, allow_skills=False),
     "routine": CapabilityPolicy(allow_builtins=False, allow_skills=True),
     "wake": CapabilityPolicy(allow_builtins=False, allow_skills=True),
@@ -796,7 +797,8 @@ def _allowlisted(
     An entry whose server name holds `/` is refused rather than skipped: a
     caller that built one has already confused a composite key for a server.
 
-    Daimon's own management server is never kept, whatever the list says:
+    Daimon's own management server is removed except for an explicitly
+    allowlisted `get_long_job` on the verified deployment endpoint:
     `daimon-mcp`, a server named `sandbox`, and any server whose URL is the
     deployment's endpoint under a query, duplicate-parameter or path alias
     (`same_mcp_endpoint`).
@@ -810,7 +812,18 @@ def _allowlisted(
     for server, name in sorted(allowlist):
         if SERVER_SEPARATOR in server:
             _refuse(f"a server name holding '/' (tool allowlist entry {server!r})")
-        if server and name and server not in own:
+        job_reader = (
+            server == DAIMON_SERVER_NAME
+            and name == "get_long_job"
+            and public_url is not None
+            and any(
+                s["name"] == server
+                and isinstance(s.get("url"), str)
+                and same_mcp_endpoint(s["url"], public_url)
+                for s in servers
+            )
+        )
+        if server and name and (server not in own or job_reader):
             wanted.setdefault(server, []).append(name)
     kept: list[dict[str, Any]] = []
     for tool in tools:
@@ -893,6 +906,13 @@ async def constrain_capabilities(
         tools=[_asking(tool) for tool in (gated if gated is not None else tools)],
         mcp_servers=healed if healed is not None else servers,
     )
+    # Fixed confirmation gates may append their own enabled configurations.
+    # Reapply the explicit authority boundary after those rewrites.
+    if tool_allowlist is not None:
+        kept_tools, kept_servers = _allowlisted(
+            send.tools, send.mcp_servers, tool_allowlist, public_url=public_url
+        )
+        send = SessionToolConfig(tools=kept_tools, mcp_servers=kept_servers)
     return ConstrainedSession(send=send, original=original, changed=send != original)
 
 

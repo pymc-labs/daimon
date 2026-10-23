@@ -1456,3 +1456,9 @@ python -m mux.testing.harness_conformance --harness-url http://127.0.0.1:8088 --
 `HarnessTarget.tool_name` and `mcp_tool_name` map tool names for engines that prefix them.
 `tests/harness_conformance` runs the kit against `apps/harness` offline in CI, once per model
 loop (the Codex loop runs when `HARNESS_CODEX_BINARY` points at the pinned binary).
+
+
+The Anthropic session-create extension accepts an explicit `system` override,
+including `null` to clear it. This lets isolated long-job workers replace the
+parent agent instructions without changing the agent resource. Omission preserves
+the existing session-create payload.

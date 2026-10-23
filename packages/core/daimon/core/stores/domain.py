@@ -62,6 +62,7 @@ ContinuationReason = Literal[
     "github_access_ready",
     "worker_finished",
     "watch_fired",
+    "job_finished",
 ]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]

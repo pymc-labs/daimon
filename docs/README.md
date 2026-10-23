@@ -48,3 +48,5 @@ pieces fit together.
 in CI; edit the model field or the tool docstring, then re-run the generator.
 
 - [Lead intake](lead-intake.md) — encrypted lead capture, qualification, delivery and CRM review.
+
+- [Long jobs](long-jobs.md): approved isolated workers, tenant policy and completion wakes.
