@@ -162,3 +162,26 @@ async def test_the_setup_bound_never_cuts_a_slow_native_bind(native_worker, monk
         cancel=asyncio.Event(),
     )
     assert result.status == "succeeded" and result.turns_used == 1
+
+
+async def test_an_intent_change_names_the_fields_that_differ(native_worker, monkeypatch):
+    """SMOKE d75dd687: Argon workers failed with intent_changed and nothing said which part
+    of the admitted intent no longer matched."""
+    from dataclasses import replace
+
+    from daimon.core import headless_runner
+
+    request, root, claimed, _, _ = native_worker
+    claimed = replace(claimed, max_turns=claimed.max_turns + 1)
+    with structlog.testing.capture_logs() as logs, pytest.raises(FleetConflict) as raised:
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert raised.value.reason == "intent_changed"
+    (event,) = [e for e in logs if e["event"] == "fleet.worker_intent_changed"]
+    assert event["fields"] == ["max_turns"]

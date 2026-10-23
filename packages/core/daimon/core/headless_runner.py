@@ -965,12 +965,25 @@ async def run_worker(
             resolved = normalize(
                 policy=policy, now=request.now(), captured_source=source, digest_phase="run_worker"
             )
-            if (
-                resolved.digest != worker.spec_digest
-                or resolved.limits.budget_usd != worker.budget_usd
-                or resolved.limits.deadline != worker.deadline_at
-                or resolved.limits.max_turns != worker.max_turns
-            ):
+            changed = [
+                name
+                for name, now_value, admitted in (
+                    ("spec_digest", resolved.digest, worker.spec_digest),
+                    ("budget_usd", resolved.limits.budget_usd, worker.budget_usd),
+                    ("deadline", resolved.limits.deadline, worker.deadline_at),
+                    ("max_turns", resolved.limits.max_turns, worker.max_turns),
+                )
+                if now_value != admitted
+            ]
+            if changed:
+                # Field names only: what differs between spawn and dispatch, never values.
+                log.warning(
+                    "fleet.worker_intent_changed",
+                    run_id=str(worker.run_id),
+                    worker_id=str(worker.id),
+                    backend=worker.backend,
+                    fields=changed,
+                )
                 raise FleetConflict(
                     "worker intent no longer resolves under current root authority",
                     reason="intent_changed",
