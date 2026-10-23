@@ -1047,6 +1047,14 @@ type WorkerCancelReason = Literal[
 ]
 
 
+class WorkerCancel(asyncio.Event):
+    """A worker's cancel event that remembers why it was first set (`cancel_workers`)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reason: WorkerCancelReason | None = None
+
+
 def cancel_workers(
     events: Mapping[uuid.UUID, asyncio.Event],
     reason: WorkerCancelReason,
@@ -1070,6 +1078,8 @@ def cancel_workers(
         worker_ids=[str(worker_id) for worker_id, _ in pending],
     )
     for _, event in pending:
+        if isinstance(event, WorkerCancel):
+            event.reason = reason
         event.set()
 
 

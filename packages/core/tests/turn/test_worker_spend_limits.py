@@ -205,3 +205,105 @@ async def test_a_worker_out_of_time_inside_run_worker_reads_as_a_timeout(
         worker_failure_code(raised.value, "dispatch_refused", backend=worker.backend)
         == "provider_busy"
     )
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_a_dispatched_turn_that_ends_at_the_ceiling_reads_as_a_timeout(
+    claimed_worker_request, monkeypatch
+):
+    """#1413 re-review B2: past dispatch, run_prepared_turn RETURNS the ceiling outcome.
+
+    run_worker's result_not_successful refusal must carry it, so the dispatcher
+    records provider_busy (Gemini accepted the turn and never answered) or timed_out,
+    never "Daimon refused to start it".
+    """
+    from daimon.core import headless_runner
+    from daimon.core.fleet_orchestration import worker_failure_code
+    from daimon.core.turn.ceiling import ceiling_error
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+    from daimon.core.turn.termination import TerminationReason
+
+    request, root, worker, prices, _, _ = claimed_worker_request
+
+    async def ceiling(*_args, **_kwargs):
+        return RunOutcome(
+            state=TurnState(error=ceiling_error(), termination=TerminationReason.CEILING),
+            ma_session_id="session",
+            mapping_id=None,
+            recovered=False,
+        )
+
+    monkeypatch.setattr(headless_runner, "run_prepared_turn", ceiling)
+    with pytest.raises(FleetConflict) as raised:
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert raised.value.reason == "result_not_successful"
+    assert worker.backend == "gemini"
+    assert worker_failure_code(raised.value, "dispatch_refused", backend=worker.backend) == (
+        "provider_busy"
+    )
+    # The same returned ceiling on any other provider is a plain timeout.
+    assert worker_failure_code(raised.value, "dispatch_refused", backend="openai") == "timed_out"
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("past_deadline", [True, False])
+async def test_a_pre_native_cancel_at_the_deadline_reads_as_a_timeout(
+    claimed_worker_request, monkeypatch, past_deadline
+):
+    """LEAD (#1416 review): the dispatcher's deadline cancels run_worker before native
+    start. That's the worker running out of time, not the fleet ending."""
+    from datetime import UTC, datetime
+
+    from daimon.core import headless_runner
+
+    request, root, worker, prices, _, native_requests = claimed_worker_request
+
+    async def slow(*_args, **_kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", slow)
+    # run_worker's own bound stays far off, so only the outside cancel ends it.
+    monkeypatch.setattr(
+        headless_runner,
+        "turn_deadline",
+        lambda **_: datetime.now(UTC) + timedelta(minutes=5),
+    )
+    candidate = replace(
+        request,
+        deadline=request.now() + timedelta(milliseconds=100 if past_deadline else 60_000),
+    )
+    task = asyncio.create_task(
+        run_worker(
+            candidate,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    )
+    await asyncio.sleep(0.3)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert native_requests == []
+    async with request.deps.sessionmaker.begin() as db:
+        graph, _ = await fleet.lock_budget(
+            db,
+            tenant_id=request.tenant_id,
+            actor_id=root.fleet.account_id,
+            run_id=worker.run_id,
+        )
+        persisted = next(row for _, rows in graph for row in rows if row.id == worker.id)
+    assert persisted.status == "failed"
+    assert persisted.error_code == (
+        "preparation_deadline_exceeded" if past_deadline else "watch_ended"
+    )

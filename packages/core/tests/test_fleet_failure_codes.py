@@ -1,6 +1,7 @@
 """A worker's failure code tells a refusal from a bug (RESCORE-2 J4)."""
 
 import asyncio
+import uuid
 
 import pytest
 from daimon.core.fleet import FleetConflict, worker_error_text
@@ -274,3 +275,31 @@ def test_every_failure_reason_names_a_cause_and_a_fix():
         assert "on that model here" not in text, code
         if code not in ("stop_requested", "worker_stop_requested"):
             assert "; " in text, f"{code} names no fix: {text}"
+
+
+def test_the_cause_chain_is_followed_through_cause_and_context():
+    """A timeout raised during handling (context) under an explicit cause still counts."""
+    try:
+        try:
+            raise TimeoutError
+        except TimeoutError:
+            raise RuntimeError("cleanup failed") from ValueError("unrelated cause")
+    except RuntimeError as error:
+        assert worker_failure_code(error, "dispatch_refused") == "timed_out"
+
+
+async def test_the_budget_watch_stamps_its_cancel_reason():
+    from daimon.core.channel_budget import WorkerCancel, cancel_workers
+    from daimon.core.fleet import WORKER_ERROR_TEXT
+    from daimon.core.fleet_orchestration import (
+        _CANCEL_CODES,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    first, plain = WorkerCancel(), asyncio.Event()
+    cancel_workers({uuid.uuid4(): first, uuid.uuid4(): plain}, "shutdown", run_id=None)
+    assert first.is_set() and plain.is_set() and first.reason == "shutdown"
+    # The first reason wins: an event already set isn't restamped.
+    cancel_workers({uuid.uuid4(): first}, "budget", run_id=None)
+    assert first.reason == "shutdown"
+    assert set(_CANCEL_CODES.values()) <= set(WORKER_ERROR_TEXT)
+    assert WORKER_ERROR_TEXT[_CANCEL_CODES["shutdown"]].startswith("Daimon restarted")

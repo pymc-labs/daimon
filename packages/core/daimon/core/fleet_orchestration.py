@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -141,7 +141,21 @@ WorkerFailureCode = Literal[
     "provider_rate_limited",
     "stop_requested",
     "watch_ended",
+    "shutdown",
+    "run_deadline",
+    "usage_unavailable",
 ]
+
+# Why the budget watch cancelled a worker (`cancel_workers`), as its failure code.
+_CANCEL_CODES: dict[str, WorkerFailureCode] = {
+    "shutdown": "shutdown",
+    "run_deadline": "run_deadline",
+    "usage_unavailable": "usage_unavailable",
+    "budget": "cap_exceeded",
+    "terminal": "watch_ended",
+    "watch_ended": "watch_ended",
+    "watch_cancelled": "watch_ended",
+}
 
 # Admission refusals a person can act on, by their closed reason.
 _ADMISSION_REASON_CODES: dict[str, WorkerFailureCode] = {
@@ -164,32 +178,38 @@ def _timed_out(error: BaseException) -> bool:
     `run_worker` re-raises it as (`TurnError(kind="ceiling")`)."""
     from daimon.core.errors import TurnError
 
+    return any(
+        isinstance(current, TimeoutError)
+        or (isinstance(current, TurnError) and current.kind == "ceiling")
+        for current in _chain(error)
+    )
+
+
+def _chain(error: BaseException) -> Iterator[BaseException]:
+    """`error` and everything it was raised from or during (`__cause__` and `__context__`)."""
     seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
-        if isinstance(current, TimeoutError) or (
-            isinstance(current, TurnError) and current.kind == "ceiling"
-        ):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+        yield current
+        pending.extend(
+            linked for linked in (current.__context__, current.__cause__) if linked is not None
+        )
 
 
 def _quota_cause(error: BaseException) -> WorkerFailureCode | None:
     """A provider quota refusal in `error`'s chain (the codes `provider_quota_copy` reads)."""
     from mux.errors import ProviderError
 
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
+    for current in _chain(error):
         if isinstance(current, ProviderError) and current.category == "rate_limited":
             if current.native_code == "quota_zero":
                 return "provider_quota_zero"
             if current.native_code == "quota_exhausted":
                 return "provider_rate_limited"
-        current = current.__cause__ or current.__context__
     return None
 
 
@@ -1481,6 +1501,7 @@ class HostFleetPorts:
         reviewed_result: Event | None,
     ) -> None:
         from daimon.core.channel_budget import (
+            WorkerCancel,
             WorkerCancelReason,
             cancel_workers,
             watch_fleet_budget,
@@ -1545,7 +1566,7 @@ class HostFleetPorts:
                         done.exception()
 
                 watch[2].add_done_callback(ended)
-            cancel = watch[0].setdefault(worker.id, asyncio.Event())
+            cancel = watch[0].setdefault(worker.id, WorkerCancel())
             trigger = worker_trigger(reviewed_result)
 
             async def execute() -> None:
@@ -1587,6 +1608,15 @@ class HostFleetPorts:
                                             and request.now() >= bound
                                             else error
                                         )
+                                        code = worker_failure_code(
+                                            cause, failure_code, backend=claimed.backend
+                                        )
+                                        if isinstance(cause, asyncio.CancelledError):
+                                            # The budget watch says why it cancelled (a
+                                            # restart, the run's deadline, a limit).
+                                            code = _CANCEL_CODES.get(
+                                                getattr(cancel, "reason", None) or "", code
+                                            )
                                         # run_worker records its own pre-native failures;
                                         # a second commit would only wait on the lock again.
                                         if not getattr(error, FAILURE_RECORDED, False):
@@ -1595,9 +1625,7 @@ class HostFleetPorts:
                                                     request,
                                                     parent,
                                                     claimed,
-                                                    failure_code=worker_failure_code(
-                                                        cause, failure_code, backend=claimed.backend
-                                                    ),
+                                                    failure_code=code,
                                                 )
                                             )
                                         raise

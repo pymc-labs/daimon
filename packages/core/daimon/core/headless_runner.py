@@ -1263,10 +1263,13 @@ async def run_worker(
                         outcome.termination != TerminationReason.COMPLETED
                         or current.status != "succeeded"
                     ):
+                        # Chained from the turn's own error, so the worker's failure
+                        # code names it: the ceiling (a dispatched Gemini turn that
+                        # never answered), a provider quota, ...
                         raise FleetConflict(
                             "worker did not produce an authoritative successful result",
                             reason="result_not_successful",
-                        )
+                        ) from outcome.state.error
                     return current
                 finally:
                     if prepared is not None:
@@ -1275,8 +1278,17 @@ async def run_worker(
         if not native_started:
             from daimon.core.fleet_orchestration import worker_failure_code
 
+            # The dispatcher's own deadline (its asyncio.timeout) shows here as a cancel:
+            # that's this worker running out of time, not the fleet ending.
+            deadline_hit = isinstance(error, asyncio.CancelledError) and request.now() >= min(
+                request.deadline, worker.deadline_at
+            )
             # A bug before native start is ours, never "couldn't be set up on that model".
-            failure_code = worker_failure_code(error, "preparation_refused")
+            failure_code = (
+                "preparation_deadline_exceeded"
+                if deadline_hit
+                else worker_failure_code(error, "preparation_refused")
+            )
             await asyncio.shield(
                 commit_worker_failure(request, parent, claim, failure_code=failure_code)
             )
