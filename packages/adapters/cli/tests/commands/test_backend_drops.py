@@ -22,7 +22,13 @@ from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.pytest_plugin import db_preflight as db_preflight
-from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import (
+    FakeMemoryStoreState,
+    MARouter,
+    build_fake_anthropic,
+    list_response,
+    make_fake_memory_store_handler,
+)
 from rich.console import Console
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -67,7 +73,37 @@ async def operator(db_preflight, db_nullpool_engine, db_clean, request):
         rf"/v1/environments/{environment.id}",
         lambda *_: httpx.Response(200, json=environment.model_dump(mode="json")),
     )
-    router.add("GET", r"/v1/agents", lambda *_: list_response([agent.model_dump(mode="json")]))
+    # Copies made by `daimon agents fork`, and every memory store, live here too.
+    copies: dict[str, dict[str, object]] = {}
+    memory = make_fake_memory_store_handler(FakeMemoryStoreState())
+
+    def create_copy(request, _match):
+        body = json.loads(request.content)
+        made = ma_agent(
+            id=f"agent_copy_{len(copies)}",
+            name=body["name"],
+            metadata=body["metadata"],
+            system=body.get("system"),
+            # The request's tool params aren't the response's shape; the
+            # source's are, and nothing here reads the copy's tools.
+            tools=agent.tools,
+        )
+        copies[made.id] = made.model_dump(mode="json")
+        return httpx.Response(200, json=copies[made.id])
+
+    router.add("POST", r"/v1/agents", create_copy)
+    router.add(
+        "GET",
+        r"/v1/agents/(agent_copy_\d+)",
+        lambda _request, match: httpx.Response(200, json=copies[match.group(1)]),
+    )
+    for method in ("GET", "POST"):
+        router.add(method, r"/v1/memory_stores(/.*)?", lambda request, _match: memory(request))
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda *_: list_response([agent.model_dump(mode="json"), *copies.values()]),
+    )
     router.add(
         "GET", r"/v1/environments", lambda *_: list_response([environment.model_dump(mode="json")])
     )
@@ -1049,3 +1085,75 @@ async def test_the_operator_assigns_shows_and_clears_an_owner(operator):
     async with rt.sessionmaker() as db:
         rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_owner")
     assert sorted(row.operation for row in rows) == ["assign", "clear"]
+
+
+async def test_a_cli_fork_of_a_switched_agent_with_memory_keeps_a_consent_its_turns_accept(
+    operator,
+):
+    """The copy's consent is pinned to the copy as its turns will capture it,
+    shared memory store included, after everything the fork does (its face too)."""
+    from daimon.adapters.cli.commands.agents import agents_fork
+    from daimon.core.authz import Place
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.memory_resource import ensure_memory_store_and_mount
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.mux_compat import write_memory
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores import agent_backends
+    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.deps import build_turn_deps
+    from daimon.core.turn.runtime_manifest import source_preservation_pin
+
+    rt, tenant, agent, *_ = operator
+    await run(operator, accept_drops="memory,sandbox")
+    source_setting = await revisions(operator)
+    assert source_setting.backend == "openai" and source_setting.drop_consent is not None
+    mount = await ensure_memory_store_and_mount(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id),
+        agent_name="Research",
+    )
+    await write_memory(
+        rt.anthropic,
+        mount["memory_store_id"],
+        "/conventions.md",
+        "tabs",
+        scope=resource_scope(tenant_id=str(tenant.id)),
+    )
+    output = StringIO()
+    await agents_fork(rt=rt, console=Console(file=output, width=240), src="Research", dst="Copy")
+
+    copy = await load_backend_agent(
+        rt.anthropic, rt.sessionmaker, tenant_id=tenant.id, agent_name="Copy"
+    )
+    async with rt.sessionmaker() as db:
+        setting = await agent_backends.current(db, tenant.id, copy.agent_id)
+        principal = await get_or_create_cli_principal(db, tenant_id=tenant.id, os_user="operator")
+    assert setting is not None and setting.backend == "openai"
+    assert setting.drop_consent is not None
+    assert setting.declared_drops == ("memory", "sandbox")
+    deps = build_turn_deps(
+        rt.settings,
+        rt.anthropic,
+        rt.sessionmaker,
+        deployment_default=rt.deployment_default,
+        resolver_cache=rt.resolver_cache,
+        billing_config=None,
+    )
+    captured = await capture_backend_source(
+        deps,
+        copy,
+        context=ScopeContext(tenant_id=tenant.id, account_id=principal.account_id, platform="cli"),
+        subject=Subject(is_admin=True),
+        place=Place(),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+        external_user_id=principal.os_user,
+        explicit_target_name="Copy",
+    )
+    assert source_preservation_pin(captured) == setting.drop_consent.source_pin
+    assert "It runs on OpenAI, like Research." in output.getvalue()
+    assert "It has a copy of Research's shared memory." in output.getvalue()

@@ -84,7 +84,12 @@ async def _source_setting(
     model: str | None = "gemini-4-argon",
     grant: AgentFleetGrant | None = None,
     consent: dict[str, Any] | None = None,
+    thread_mode: Any = None,
 ) -> AgentBackendRevision:
+    """A source setting as stored. A provider switch made in production always
+    carries a consent (see the CLI fork test for that path); Anthropic settings
+    and a fleet grant never do. The consent-free non-default rows here exercise
+    the provider checks on their own."""
     async with sessions.begin() as session:
         return await agent_backends.put_revision(
             session,
@@ -99,6 +104,7 @@ async def _source_setting(
             digest="source-digest",
             fleet_grant=grant.model_dump(mode="json") if grant is not None else None,
             drop_consent=consent,
+            thread_mode=thread_mode,
         )
 
 
@@ -106,20 +112,26 @@ def _copy(agent: BackendAgent) -> BackendAgent:
     return agent.model_copy(update={"agent_id": uuid.uuid4(), "name": "copy"})
 
 
-async def test_a_copy_takes_the_provider_model_settings_and_fleet_grant(owned) -> None:
+async def test_a_copy_takes_the_settings_and_fleet_grant(owned) -> None:
     service, agent, actor, sessions = owned
     await enable(service, agent, actor)
     source = await _source_setting(
-        sessions, agent.tenant_id, agent.agent_id, grant=_grant(NOW + timedelta(hours=1), epoch=1)
+        sessions,
+        agent.tenant_id,
+        agent.agent_id,
+        backend=None,
+        model=None,
+        thread_mode="shared",
+        grant=_grant(NOW + timedelta(hours=1), epoch=1),
     )
     copy = _copy(agent)
     carried = await service.carry_to_copy(
-        source, copy, fleet_grant=True, account_id=actor.account_id, now=NOW
+        source, copy, fleet_grant=True, shared_threads=True, account_id=actor.account_id, now=NOW
     )
     assert carried.left_backend is None and carried.fleet
     revision = await service.current(copy)
     assert revision is not None and revision == carried.revision
-    assert (revision.local, revision.backend, revision.model) == (1, "gemini", "gemini-4-argon")
+    assert (revision.local, revision.backend, revision.thread_mode) == (1, None, "shared")
     grant = await service.read_fleet_grant(copy.tenant_id, copy.agent_id, now=NOW)
     assert grant is not None and grant.epoch == 1 and grant.max_workers == 4
     async with sessions() as session:
@@ -134,23 +146,35 @@ async def test_a_copy_takes_the_provider_model_settings_and_fleet_grant(owned) -
     assert again == CarriedBackend(None, None, fleet=False)
 
 
-async def test_a_channel_copy_and_an_expired_grant_take_no_fleet(owned) -> None:
+async def test_settings_only_and_an_expired_grant_take_no_fleet_and_no_shared_threads(
+    owned,
+) -> None:
     service, agent, actor, sessions = owned
     await enable(service, agent, actor)
     source = await _source_setting(
-        sessions, agent.tenant_id, agent.agent_id, grant=_grant(NOW + timedelta(hours=1), epoch=1)
+        sessions,
+        agent.tenant_id,
+        agent.agent_id,
+        backend=None,
+        model=None,
+        thread_mode="shared",
+        grant=_grant(NOW + timedelta(hours=1), epoch=1),
     )
-    channel_copy = _copy(agent)
-    carried = await service.carry_to_copy(
-        source, channel_copy, fleet_grant=False, account_id=None, now=NOW
+    # Not the admin's "all": no grant, and shared threads stay an admin's call.
+    settings_only = await service.carry_to_copy(
+        source, _copy(agent), fleet_grant=False, account_id=None, now=NOW
     )
-    assert carried.revision is not None and carried.revision.backend == "gemini"
-    assert not carried.fleet and carried.revision.fleet_grant is None
-    late = _copy(agent)
-    expired = await service.carry_to_copy(
-        source, late, fleet_grant=True, account_id=None, now=NOW + timedelta(days=1)
+    assert settings_only == CarriedBackend(None, None, fleet=False)
+    late = await service.carry_to_copy(
+        source,
+        _copy(agent),
+        fleet_grant=True,
+        shared_threads=True,
+        account_id=None,
+        now=NOW + timedelta(days=1),
     )
-    assert expired.revision is not None and not expired.fleet
+    assert late.revision is not None and not late.fleet
+    assert late.revision.thread_mode == "shared" and late.revision.fleet_grant is None
 
 
 async def test_a_switch_that_dropped_features_needs_the_copys_own_consent(owned) -> None:
@@ -272,10 +296,14 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
         ),
         BackendActor(tenant.id, account.id, Subject(is_admin=True)),
     )
+    # An Anthropic agent with fleet on: no provider switch, so no drop consent,
+    # as the fleet card writes it.
     await _source_setting(
         factory,
         tenant.id,
         source_uuid,
+        backend=None,
+        model=None,
         grant=_grant(datetime.now(UTC) + timedelta(hours=1), epoch=1),
     )
     memory = FakeMemoryStoreState()
@@ -307,10 +335,6 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
     async with factory() as session:
         revision = await agent_backends.current(session, tenant.id, copy_uuid)
         store = await get_memory_store_id(session, tenant_id=tenant.id, agent_id=copy_uuid)
-    assert revision is not None and (revision.backend, revision.model) == (
-        "gemini",
-        "gemini-4-argon",
-    )
     notes = fork_notes(copy, "mine")
     assert (
         'crm (https://crm.example.com) needs connecting again: ask in chat "connect crm to mine".'
@@ -318,18 +342,18 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
     assert not any("SECRET" in note for note in notes), "a server's path or query is never echoed"
     kept_back = "source's memory and fleet setup stay with source."
     if channel_copy or carry != "all":
-        assert revision.fleet_grant is None and store is None
+        assert revision is None and store is None
         assert copy.carry.memory is None
         assert (kept_back in notes) is not channel_copy
         assert not any("fleet setup, with" in note for note in notes)
         return
     assert kept_back not in notes
+    assert revision is not None and revision.backend is None
     assert revision.fleet_grant is not None
     assert store is not None and store != mount["memory_store_id"]
     copied = {(m["path"], m["content"]) for m in memory.memories[store]}
     assert copied == {("/conventions.md", "tabs"), ("/project/facts.md", "due friday")}
     assert copy.carry.memory == CopiedMemory(2, 0)
-    assert "It runs on Gemini (gemini-4-argon), like source." in notes
     assert (
         "It has source's fleet setup, with the same limits; each agent spends up to them on "
         "its own."
@@ -517,7 +541,7 @@ async def test_the_seeded_name_follows_copies_of_copies_only(
         tenant = await make_tenant(session)
     source = ma_agent(id="ag_src", name="source", tenant_id=tenant.id, metadata=metadata)
     created: list[dict[str, Any]] = []
-    await copy_agent(
+    copy = await copy_agent(
         _plain_client(tenant.id, source, created),
         db_session_factory,
         tenant_id=tenant.id,
@@ -528,6 +552,8 @@ async def test_the_seeded_name_follows_copies_of_copies_only(
         default_agent_name="daimon",
     )
     assert created[0]["metadata"].get(MA_METADATA_KEY_COPY_OF) == stamp
+    # Nothing to keep back from a source with no memory and no fleet: no line about it.
+    assert not copy.carry.kept_back and fork_notes(copy, "mine") == ()
 
 
 async def test_a_failed_carry_still_returns_the_copy_and_lists_only_active_repos(
@@ -565,3 +591,37 @@ async def test_a_failed_carry_still_returns_the_copy_and_lists_only_active_repos
     assert copy.carry.memory_failed
     assert copy.carry.backend is None
     assert copy.carry.github_repos == ("acme/app",)
+
+
+async def test_a_carried_consent_that_no_longer_matches_the_copy_is_withdrawn(owned) -> None:
+    _service, agent, actor, sessions = owned
+    await enable(_service, agent, actor)
+    copy = _copy(agent)
+    async with sessions.begin() as session:
+        written = await agent_backends.put_revision(
+            session,
+            tenant_id=copy.tenant_id,
+            agent_id=copy.agent_id,
+            agent_name=copy.name,
+            local=1,
+            backend="gemini",
+            previous_local=None,
+            preview_digest="preview",
+            digest="copy-digest",
+            drop_consent=CONSENT,
+            fleet_grant=_grant(NOW + timedelta(hours=1), epoch=1).model_dump(mode="json"),
+        )
+
+    async def capture(target: BackendAgent) -> BackendAgent:
+        return target
+
+    service = AgentBackendService(sessions, enabled=True, capture_source=capture)
+    assert not await service.recheck_copy_consent(copy, written)
+    current = await service.current(copy)
+    assert current is not None and (current.local, current.backend) == (2, None)
+    assert current.drop_consent is None and current.fleet_grant is not None
+    async with sessions() as session:
+        rows = await security_audit.list_events(
+            session, tenant_id=copy.tenant_id, agent_id=copy.agent_id
+        )
+    assert [r.operation for r in rows] == ["copy_withdrawn"]

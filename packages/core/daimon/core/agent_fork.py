@@ -10,7 +10,7 @@ the two never share a skill id; skills scoped to another agent, and any copy
 that fails, are left off and named. It also takes the source's provider,
 model and settings, and, made by an admin or the source's owner
 (`carry="all"`), its fleet grant and shared memory (`_carry`); a channel's
-own copy takes the provider and model only.
+own copy takes none of these.
 Its face starts rendering as soon as it exists, so its first post has it.
 Whether it may be copied is `authorize(FORK)`'s: an admin's call, and never
 a pinned agent. The chat `fork_agent` tool, the CLI and
@@ -57,7 +57,12 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.memory_resource import COPY_MEMORY_LIMIT, CopiedMemory, copy_shared_memory
+from daimon.core.memory_resource import (
+    COPY_MEMORY_LIMIT,
+    CopiedMemory,
+    copy_shared_memory,
+    ensure_memory_store_and_mount,
+)
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_agent, retrieve_agent
 from daimon.core.neutral_resources import HostAgentCopy, NeutralResourceHost
@@ -67,7 +72,8 @@ from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores import agent_backends, github_access
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.domain import BackendAgent, UserSkillRow
+from daimon.core.stores.agent_memory_stores import get_memory_store_id
+from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, UserSkillRow
 from daimon.core.stores.github_access import AgentRepo
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from mux.contracts.resources import Agent
@@ -419,6 +425,7 @@ async def copy_agent(
         new_name=new_name,
         channel_copy=MA_METADATA_KEY_CHANNEL_COPY in (extra_metadata or {}),
         carry_all=carry == "all",
+        admin=subject.is_admin and not subject.via_agent_key and not subject.client,
         capture_source=capture_source,
         reconnect=reconnect,
     )
@@ -460,6 +467,7 @@ class _CarryArgs:
     new_name: str
     channel_copy: bool
     carry_all: bool
+    admin: bool
     capture_source: CaptureSource | None
     reconnect: tuple[tuple[str, str], ...]
 
@@ -474,38 +482,31 @@ async def _carry(
 
     Only a copy made with `carry="all"` takes the fleet grant (spending
     authority) and the shared memory (what the source's people told it). A
-    channel's own copy never does: it exists to keep a channel apart. Who owns
-    the copy is recorded apart, by the owner rule.
+    channel's own copy takes none of it, its provider setting included: it
+    exists to keep a channel apart, and it has no capture to re-take a switch's
+    consent with. Who owns the copy is recorded apart, by the owner rule.
+
+    The provider comes last. A carried consent is pinned to everything the
+    copy's capture reads, its shared memory store among them, so the store is
+    made first and the pin is checked again once written
+    (`AgentBackendService.recheck_copy_consent`).
     """
     full = args.carry_all and not args.channel_copy
     tenant_id = args.tenant_id
     copy_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(copy.id))
     log_fields = {"tenant_id": str(tenant_id), "agent_id": copy.id}
-    backend: CarriedBackend | None = None
+    source_revision: AgentBackendRevision | None = None
+    source_store: str | None = None
     try:
         async with sessionmaker() as session:
             source_revision = await agent_backends.current(session, tenant_id, args.source_uuid)
-        if source_revision is not None:
-            backend_agent = await load_backend_agent(
-                anthropic,
-                sessionmaker,
-                tenant_id=tenant_id,
-                agent_name=args.new_name,
-                actual_agent=copy,
-            )
-            backend = await AgentBackendService(
-                sessionmaker, enabled=True, capture_source=args.capture_source
-            ).carry_to_copy(
-                source_revision,
-                backend_agent,
-                fleet_grant=full,
-                account_id=None,
-                now=datetime.now(UTC),
+            source_store = await get_memory_store_id(
+                session, tenant_id=tenant_id, agent_id=args.source_uuid
             )
     except Exception as exc:
         # Best effort from here on: the copy exists, and raising would report it as not made.
         _log.warning(
-            "agent_fork.backend_carry_failed", error=type(exc).__name__, **log_fields, exc_info=True
+            "agent_fork.source_read_failed", error=type(exc).__name__, **log_fields, exc_info=True
         )
     memory: CopiedMemory | None = None
     memory_failed = False
@@ -527,6 +528,62 @@ async def _carry(
                 exc_info=True,
             )
             memory_failed = True
+    backend: CarriedBackend | None = None
+    if source_revision is not None and not args.channel_copy:
+        capture = args.capture_source
+        if source_revision.drop_consent is not None and capture is not None:
+            try:
+                # The pin reads the copy's shared store: it must exist before the capture.
+                await ensure_memory_store_and_mount(
+                    anthropic,
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_id=copy_uuid,
+                    agent_name=args.new_name,
+                )
+            except Exception as exc:
+                # No stable pin without it: the switch waits to be confirmed again.
+                _log.warning(
+                    "agent_fork.memory_store_failed",
+                    error=type(exc).__name__,
+                    **log_fields,
+                    exc_info=True,
+                )
+                capture = None
+        try:
+            backend_agent = await load_backend_agent(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                agent_name=args.new_name,
+                actual_agent=copy,
+            )
+            service = AgentBackendService(sessionmaker, enabled=True, capture_source=capture)
+            backend = await service.carry_to_copy(
+                source_revision,
+                backend_agent,
+                fleet_grant=full,
+                shared_threads=full and args.admin,
+                account_id=None,
+                now=datetime.now(UTC),
+            )
+            if backend.revision is not None and not await service.recheck_copy_consent(
+                backend_agent, backend.revision
+            ):
+                backend = CarriedBackend(
+                    None,
+                    backend.revision.backend,
+                    fleet=backend.fleet,
+                    left_reason="needs_consent",
+                    fleet_left=backend.fleet_left,
+                )
+        except Exception as exc:
+            _log.warning(
+                "agent_fork.backend_carry_failed",
+                error=type(exc).__name__,
+                **log_fields,
+                exc_info=True,
+            )
     repos: list[AgentRepo] = []
     try:
         async with sessionmaker() as session:
@@ -537,6 +594,7 @@ async def _carry(
         _log.warning(
             "agent_fork.repos_read_failed", error=type(exc).__name__, **log_fields, exc_info=True
         )
+    has_fleet = source_revision is not None and source_revision.fleet_grant is not None
     return CopyCarry(
         source_name=args.source_name,
         backend=backend,
@@ -544,7 +602,8 @@ async def _carry(
         memory_failed=memory_failed,
         reconnect=args.reconnect,
         github_repos=tuple(repo.full_name for repo in repos if repo.status == "active"),
-        kept_back=not full and not args.channel_copy,
+        # Said only when the source has a memory or a fleet setup to keep back.
+        kept_back=not full and not args.channel_copy and (has_fleet or source_store is not None),
     )
 
 

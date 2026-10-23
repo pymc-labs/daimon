@@ -58,7 +58,13 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
-from mux.testing.drivers.anthropic.ma import MARouter, build_stub_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import (
+    FakeMemoryStoreState,
+    MARouter,
+    build_stub_anthropic,
+    list_response,
+    make_fake_memory_store_handler,
+)
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
@@ -711,6 +717,9 @@ async def test_agents_fork_captures_the_copy_for_a_switch_that_dropped_features(
             ),
         ),
     )
+    memory = make_fake_memory_store_handler(FakeMemoryStoreState())
+    for method in ("GET", "POST"):
+        router.add(method, r"/v1/memory_stores(/.*)?", lambda req, m: memory(req))
     captured: list[dict[str, object]] = []
 
     async def capture(_deps: object, agent: object, **kwargs: object) -> object:

@@ -1476,6 +1476,7 @@ class AgentBackendService:
         copy: BackendAgent,
         *,
         fleet_grant: bool,
+        shared_threads: bool = False,
         account_id: uuid.UUID | None,
         now: datetime,
     ) -> CarriedBackend:
@@ -1489,12 +1490,15 @@ class AgentBackendService:
         copy would drop more, the provider is left at the default and named in
         `left_backend`, as is one that can't run here any more or that the
         tenant turned off. The grant must pass `checked_fleet_grant` again, or
-        it is left behind (`fleet_left`). A copy that already has a setting is
-        never overwritten.
+        it is left behind (`fleet_left`). Shared threads are an admin's call
+        (`_change`), so they come only with `shared_threads`. A copy that already
+        has a setting is never overwritten.
         """
         backend: Provider | None = source.backend
         model: str | None = source.model
         settings = AgentSettings.of(source)
+        if settings.thread_mode == "shared" and not shared_threads:
+            settings = AgentSettings(settings.profile, settings.requires, None)
         left: Provider | None = None
         reason: LeftReason | None = None
         offered: AgentFleetGrant | None = None
@@ -1583,23 +1587,24 @@ class AgentBackendService:
                     settings=settings,
                 )
             try:
-                revision = await agent_backends.put_revision(
-                    session,
-                    tenant_id=copy.tenant_id,
-                    agent_id=copy.agent_id,
-                    agent_name=copy.name,
-                    local=1,
-                    backend=backend,
-                    previous_local=None,
-                    digest=_revision_digest(copy, backend, grant, consent, model, settings),
-                    preview_digest=preview.digest,
-                    fleet_grant=grant,
-                    drop_consent=consent,
-                    model=model,
-                    profile=settings.profile,
-                    requires=cast(JsonValue, settings.facts().get("requires")),
-                    thread_mode=settings.thread_mode,
-                )
+                async with session.begin_nested():
+                    revision = await agent_backends.put_revision(
+                        session,
+                        tenant_id=copy.tenant_id,
+                        agent_id=copy.agent_id,
+                        agent_name=copy.name,
+                        local=1,
+                        backend=backend,
+                        previous_local=None,
+                        digest=_revision_digest(copy, backend, grant, consent, model, settings),
+                        preview_digest=preview.digest,
+                        fleet_grant=grant,
+                        drop_consent=consent,
+                        model=model,
+                        profile=settings.profile,
+                        requires=cast(JsonValue, settings.facts().get("requires")),
+                        thread_mode=settings.thread_mode,
+                    )
             except IntegrityError:
                 return CarriedBackend(None, left, fleet=False, left_reason=reason)
             await security_audit.append_event(
@@ -1622,6 +1627,57 @@ class AgentBackendService:
                 left_reason=reason,
                 fleet_left=fleet_left,
             )
+
+    async def recheck_copy_consent(
+        self, copy: BackendAgent, revision: AgentBackendRevision
+    ) -> bool:
+        """Whether a copy's carried consent still matches its capture; withdraw it if not.
+
+        Its pin covers everything the capture reads, so anything the copy
+        gained after `carry_to_copy` (its memory store, say) would refuse every
+        turn. A stale one is replaced by a default setting (keeping the fleet
+        grant), so the copy runs on the default provider until switched.
+        """
+        if revision.drop_consent is None or self._capture_source is None:
+            return True
+        from daimon.core.turn.runtime_manifest import source_preservation_pin
+
+        captured = await self._capture_source(copy)
+        if source_preservation_pin(captured) == revision.drop_consent.source_pin:
+            return True
+        async with policy_store.policy_write_transaction(
+            self._sessions, tenant_id=copy.tenant_id
+        ) as session:
+            current = await agent_backends.current(session, copy.tenant_id, copy.agent_id)
+            if current is None or current.local != revision.local:
+                return False
+            withdrawn = await agent_backends.put_revision(
+                session,
+                tenant_id=copy.tenant_id,
+                agent_id=copy.agent_id,
+                agent_name=copy.name,
+                local=revision.local + 1,
+                backend=None,
+                previous_local=revision.local,
+                digest=_revision_digest(copy, None, revision.fleet_grant),
+                preview_digest=revision.preview_digest,
+                fleet_grant=revision.fleet_grant,
+            )
+            await security_audit.append_event(
+                session,
+                tenant_id=copy.tenant_id,
+                account_id=None,
+                agent_id=copy.agent_id,
+                platform=None,
+                platform_user_id=None,
+                tool_name="agent_backend",
+                operation="copy_withdrawn",
+                outcome="allowed",
+                reason="carried consent no longer matches the copy",
+                scope=f"agent_backend:{copy.agent_id}:{withdrawn.local}",
+            )
+        log.warning("agent_backend.copy_consent_withdrawn", agent_id=str(copy.agent_id))
+        return False
 
     async def audit(
         self,

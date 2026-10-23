@@ -267,18 +267,18 @@ three ways (`packages/core/daimon/core/agent_fork.py:115-133`):
 - another agent's skills, and any that fail to copy, are left off and named.
 
 A fork also takes the source's provider setting
-(`AgentBackendService.carry_to_copy`). Only a fork made by an admin or the
-source's owner (`copy_agent(carry="all")`) also takes the fleet grant and the
-shared memory (`memory_resource.copy_shared_memory`); anyone else's fork, and
-one whose maker the caller doesn't state, takes the settings only.
-A copied fleet grant passes the same checks as setting one
-(`checked_fleet_grant`), or it is left behind. The receipt names a keyed MCP
-server by name and `scheme://host` only, never its path or query.
-Personal and channel memory stores are never copied. A provider switch whose
-consent dropped features is carried only with a fresh consent pinned to the
-fork, and only when the fork drops nothing more; a provider turned off for
-the tenant is never carried. A channel's own copy takes
-the provider setting only: no fleet grant and no memory.
+(`AgentBackendService.carry_to_copy`). A provider switch's consent is pinned to
+the source, so it is carried only with a fresh consent from the fork's own
+capture (made after the fork's shared memory store exists, and checked again
+once written), and only when the fork drops nothing more; without a capture it
+is left behind. Today only `daimon agents fork` passes one. A provider turned
+off for the tenant is never carried. Only a fork made with
+`copy_agent(carry="all")`, which the CLI passes, also takes the fleet grant,
+checked again as setting one is (`checked_fleet_grant`), and the shared memory
+(`memory_resource.copy_shared_memory`); shared threads come along only then
+and for an admin. Personal and channel memory stores are never copied. The
+receipt names a keyed MCP server by name and `scheme://host` only, never its
+path or query. A channel's own copy takes none of this.
 
 ## Skills
 
