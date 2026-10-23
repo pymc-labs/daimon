@@ -1580,6 +1580,7 @@ async def _capture_source_capabilities(
     from daimon.core.skills.ingest import retained_archive_files
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
+    from daimon.core.turn.runtime_defaults import template_rows
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
@@ -1593,19 +1594,32 @@ async def _capture_source_capabilities(
 
     source = source.model_copy(update={"representations": ()})
     path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if path is None:
-        return source
-    try:
-        with Path(path).open("rb") as stream:
-            raw = stream.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise ValueError("manifest too large")
-        rows = _ROWS.validate_json(raw)
-    except (OSError, ValueError):
-        # This optional capability evidence cannot break an ordinary source
-        # capture. A full deployment still refuses without the representation,
-        # and its closed runtime-manifest loader independently rejects bad input.
-        return source
+    rows: list[dict[str, JsonValue]] = []
+    if path is not None:
+        try:
+            with Path(path).open("rb") as stream:
+                raw = stream.read(_MAX_BYTES + 1)
+            if len(raw) > _MAX_BYTES:
+                raise ValueError("manifest too large")
+            rows = _ROWS.validate_json(raw)
+        except (OSError, ValueError):
+            # This optional capability evidence cannot break an ordinary source
+            # capture. A full deployment still refuses without the representation,
+            # and its closed runtime-manifest loader independently rejects bad input.
+            return source
+    # A code-default agent template counts only where the operator configured no
+    # row for this tenant's profile at all, matching selection's last resort.
+    tenant = str(source.tenant_id)
+    operator_profiles = {str(row.get("profile")) for row in rows if row.get("tenant_id") == tenant}
+    rows = [
+        *rows,
+        *(
+            row
+            for row in template_rows(tenant)
+            if row.get("root_materialization") is True
+            and str(row.get("profile")) not in operator_profiles
+        ),
+    ]
     revision = request.admission.backend_revision
     if (
         request.worker is not None
@@ -3075,19 +3089,18 @@ def manifest_hold_usd(
     channel's own row wins over a tenant-wide "*" row. None when no manifest is
     installed or readable, no single row is selected, or it names no valid hold.
     """
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
+    from daimon.core.turn.runtime_defaults import template_rows
+
+    try:
+        rows = _configured_rows()
+    except AdmissionDenied:
         return None
     try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            return None
-        rows = _ROWS.validate_json(raw)
-
         # The rows a fleet worker's selection would see; without its source agent,
         # only rows that pin none.
-        def worker_rows(allow_wildcard: bool) -> list[dict[str, JsonValue]]:
+        def worker_rows(
+            allow_wildcard: bool, rows: list[dict[str, JsonValue]] = rows
+        ) -> list[dict[str, JsonValue]]:
             return _rows_for(
                 rows,
                 revision,
@@ -3099,7 +3112,12 @@ def manifest_hold_usd(
                 source_agent_version=source_agent_version,
             )
 
-        selected = worker_rows(False) or _most_specific(worker_rows(True))
+        selected = (
+            worker_rows(False)
+            or _most_specific(worker_rows(True))
+            # Selection's code-default fallback; the hold agrees with the row it picks.
+            or _most_specific(worker_rows(True, template_rows(tenant_id)))
+        )
         if len(selected) != 1:
             return None
         hold = Decimal(str(selected[0]["hold_usd"]))
@@ -3127,6 +3145,25 @@ def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue
     return rows
 
 
+def _configured_rows() -> list[dict[str, JsonValue]]:
+    """The operator manifest's rows; none when no manifest is configured.
+
+    A configured manifest that can't be read refuses (`AdmissionDenied`) rather than
+    falling back to the code defaults, so a broken operator file never widens access.
+    """
+    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not manifest_path:
+        return []
+    try:
+        with Path(manifest_path).open("rb") as manifest:
+            raw = manifest.read(_MAX_BYTES + 1)
+        if len(raw) > _MAX_BYTES:
+            raise AdmissionDenied(reason="backend_unsupported")
+        return _ROWS.validate_json(raw)
+    except (OSError, ValidationError):
+        raise AdmissionDenied(reason="backend_unsupported") from None
+
+
 def select_runtime_manifest[Plan: CounterpartPlan](
     request: ProviderPreparationRequest, plan_type: type[Plan]
 ) -> Plan:
@@ -3144,21 +3181,36 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     account_id — a wildcard row is a template, never a literal "*" identity.
     """
 
+    from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_configured
+    from daimon.core.turn.runtime_defaults import default_rows
+
     revision = request.admission.backend_revision
     if revision is None:
         raise AdmissionDenied(reason="backend_unsupported")
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
-        raise AdmissionDenied(reason="backend_unsupported")
     try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise AdmissionDenied(reason="backend_unsupported")
-        rows = _ROWS.validate_json(raw)
+        rows = _configured_rows()
         selected = _matching_rows(rows, revision, request, allow_wildcard=False)
         if not selected:
             selected = _most_specific(_matching_rows(rows, revision, request, allow_wildcard=True))
+        if not selected:
+            # No operator row serves this turn: the deployment's code defaults do.
+            provider = get_profile(revision.profile).provider
+            if provider in DEFAULT_KEY_ENV and not provider_key_configured(provider):
+                # The operator's step, named only in the log: set DEFAULT_KEY_ENV[provider].
+                log.warning(
+                    "provider_runtime.not_configured",
+                    provider=provider,
+                    key_env=DEFAULT_KEY_ENV[provider],
+                )
+                raise AdmissionDenied(
+                    reason="backend_unsupported",
+                    cause="provider_not_configured",
+                    provider=provider,
+                )
+            defaults = default_rows(request.scope.tenant_id, request)
+            selected = _most_specific(
+                _matching_rows(defaults, revision, request, allow_wildcard=True)
+            )
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
         resolved = dict(selected[0])

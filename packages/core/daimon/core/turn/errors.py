@@ -36,7 +36,9 @@ AdmissionDenialReason = Literal[
 # Why a `backend_unsupported` turn refused, for copy that names the fix: the
 # channel's own backend pin, a provider the tenant's allowlist doesn't turn on,
 # or the agent's backend that this deployment can't run.
-BackendRefusalCause = Literal["channel_pin", "provider_not_allowed", "agent_backend"]
+BackendRefusalCause = Literal[
+    "channel_pin", "provider_not_allowed", "agent_backend", "provider_not_configured"
+]
 MissingConfigPart = Literal["agent", "environment"]
 
 

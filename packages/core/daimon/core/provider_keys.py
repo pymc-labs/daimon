@@ -28,8 +28,18 @@ DEFAULT_KEY_ENV: dict[Provider, str] = {
 _ORDER: tuple[Provider, ...] = get_args(Provider)
 
 
+def provider_key_configured(provider: Provider) -> bool:
+    """Whether this deployment names a key for `provider`, without reading its value.
+
+    Runtime selection and readback use this: they must never read a credential.
+    A blank key still fails closed where the transport reads it.
+    """
+    env = DEFAULT_KEY_ENV.get(provider)
+    return env is not None and env in os.environ
+
+
 def provider_key_present(provider: Provider) -> bool:
-    """Whether this deployment's own key for `provider` is set (not blank)."""
+    """Whether this deployment's own key for `provider` is set and not blank."""
     env = DEFAULT_KEY_ENV.get(provider)
     return env is not None and bool((os.environ.get(env) or "").strip())
 
