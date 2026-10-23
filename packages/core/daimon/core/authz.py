@@ -347,6 +347,9 @@ class Request:
     fleet: FleetFacts | None = None
     # The channel the calling turn is held to; None for an unheld call.
     hold: TurnHold | None = None
+    # The agent is the one answering the caller's own chat turn (host-verified from the
+    # turn's credential, never a model-supplied id).
+    answering: bool = False
 
 
 #: What a client requester may never do, whatever its place or surface.
@@ -730,7 +733,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return _decide_hand_off(policy, req)
 
     if req.action is Action.FORK:
-        if not subject.is_admin or subject.via_agent_key:
+        # A person may copy the agent answering their own turn (any member may fork it,
+        # within its default caps); any other agent is an admin's to copy. Never an
+        # agent key, and never from a held turn.
+        own = req.answering and subject.platform_user_id is not None and req.hold is None
+        if subject.via_agent_key or not (subject.is_admin or own):
             return _deny("admin_required")
         if not agent.permissions.may_be_copied:
             return _deny("agent_has_rule")
@@ -919,6 +926,7 @@ def authorize(
     approved: bool = False,
     fleet: FleetFacts | None = None,
     hold: TurnHold | None = None,
+    answering: bool = False,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -944,6 +952,7 @@ def authorize(
             approved=approved,
             fleet=fleet,
             hold=hold,
+            answering=answering,
         ),
     )
 

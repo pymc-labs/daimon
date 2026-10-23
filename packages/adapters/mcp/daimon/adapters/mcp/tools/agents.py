@@ -1060,9 +1060,12 @@ async def _fork_agent_impl(
     expected_ma_agent_id: str | None = None,
     new_copy_if_taken: bool = False,
 ) -> AgentInfo:
-    # Forking is an admin's call: a fork routes nowhere and has no channel
-    # pin of its own, so it is free to run anywhere the source can't.
-    _require_admin(auth)
+    # Forking another agent is an admin's call: a fork routes nowhere and has no
+    # channel pin of its own, so it is free to run anywhere the source can't. Anyone
+    # may copy the agent answering their own chat turn (it is theirs to own; TARGET-V2
+    # J10), so only a person's own turn credential gets that far.
+    if not auth.is_admin and (auth.chat_agent_id is None or not may_own(auth)):
+        _require_admin(auth)
     public_url = runtime.settings.mcp.public_url
     async with contextlib.AsyncExitStack() as stack:
         # Pick, check and create under the name's lock, so two copies at once
@@ -1083,6 +1086,16 @@ async def _fork_agent_impl(
         source = await resolve_setup_agent(
             runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
         )
+        # From the turn's credential, never a model-supplied id.
+        answering = (
+            auth.chat_agent_id is not None
+            and auth.agent_id is None
+            and auth.hold is None
+            and derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=source.id)
+            == auth.chat_agent_id
+        )
+        if not auth.is_admin and not answering:
+            _require_admin(auth)
         try:
             copy = await copy_agent(
                 runtime.client,
@@ -1095,6 +1108,7 @@ async def _fork_agent_impl(
                 default_agent_name=runtime.deployment_default.agent_name,
                 # Whoever made the copy owns it.
                 owner=auth.account_id if may_own(auth) else None,
+                answering=answering,
             )
         except DaimonError as exc:
             raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
@@ -1896,7 +1910,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         new_copy_if_taken: bool = False,
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
-        Admin-only. Only for a saved, named copy someone asked to keep. Running
+        Anyone may copy you (the agent answering them), and owns that copy; copying
+        any other agent is admin-only. Only for a saved, named copy someone asked
+        to keep. Running
         copies of yourself on several models at once is not this: that is a fleet
         of task workers (fleet_spawn), which needs no admin.
         Copies its prompt, model, skills and the MCP servers that need

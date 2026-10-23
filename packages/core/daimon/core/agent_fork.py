@@ -243,6 +243,7 @@ async def copy_agent(
     default_agent_name: str | None,
     extra_metadata: Mapping[str, str] | None = None,
     owner: uuid.UUID | Literal["source"] | None = None,
+    answering: bool = False,
 ) -> AgentCopy:
     """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
 
@@ -250,6 +251,8 @@ async def copy_agent(
     `default_agent_name` is the deployment default, which gets no face.
     `owner` is who owns the copy: the person who made it, or `"source"` to keep
     the source agent's owner (a channel's copy); None leaves it admin-only.
+    `answering`: `source` is the agent answering the subject's own chat turn
+    (host-verified), which any person may copy; any other agent needs an admin.
     """
     async with sessionmaker() as session:
         try:
@@ -264,6 +267,7 @@ async def copy_agent(
         subject=subject,
         action=Action.FORK,
         agent=build_agent_ref(source.name, source.metadata),
+        answering=answering,
     )
     if decision.reason == "agent_has_rule":
         # The copy would run anywhere with the prompt and skills of one that may not.
