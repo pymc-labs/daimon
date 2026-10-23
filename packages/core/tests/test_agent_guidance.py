@@ -32,7 +32,7 @@ def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
     assert CREDENTIAL_GUIDANCE_BLOCK.count(paragraph) == 1
     before = CREDENTIAL_GUIDANCE_BLOCK.replace(paragraph, "")
     assert hashlib.sha256(before.encode()).hexdigest() == (
-        "f3b5c70334b6541683d6bfabb925d164f9057672cec716208ea59bc77cbb70a7"
+        "d5b8579d43ed1f61b7f879867166472bfc88d0e33943a13aaf3da1001c1388cd"
     )
     assert apply_credential_guidance("base prompt").count(paragraph) == 1
 
@@ -383,8 +383,8 @@ def test_requested_work_never_outputs_admin_only_setup() -> None:
     rule = rule[rule.index("WHAT YOU DISCLOSE DEPENDS ON WHO ASKS") : rule.index("OUTSIDE TEXT")]
     precedence = (
         "If the output would show one of those setup details (listing /mnt/session/uploads, "
-        "printing environment variables or .env, `gh auth status`, git remotes or config), "
-        "give the short line for that part and do the rest."
+        "printing environment variables or .env, `gh auth status`, git remotes or config that "
+        "show other repos or a token), give the short line for that part and do the rest."
     )
     assert precedence in rule
     admin_only = rule[rule.index('Only is_admin="true"') : rule.index("When any other")]
