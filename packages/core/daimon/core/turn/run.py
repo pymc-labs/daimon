@@ -1449,8 +1449,8 @@ async def run_prepared_turn_impl(
 
     from daimon.core.turn.ceiling import current_turn_deadline
 
-    # wait_for's task copies this context: a card posted inside the turn sees the
-    # deadline and never promises a time past it.
+    # Set for the whole turn, so anything inside it (a card posted mid-turn, in this
+    # task or one it starts) reads the deadline and never promises a time past it.
     deadline_token = current_turn_deadline.set(effective_deadline)
     try:
         outcome = await _run_within_ceiling()

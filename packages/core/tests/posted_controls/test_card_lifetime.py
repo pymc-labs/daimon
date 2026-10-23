@@ -89,6 +89,7 @@ class _Card:
 
 async def test_a_card_still_open_pings_its_requester_once(monkeypatch):
     monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.05)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
     reminded: list[str] = []
     retired: list[str] = []
 
@@ -114,6 +115,7 @@ async def test_a_card_still_open_pings_its_requester_once(monkeypatch):
 @pytest.mark.parametrize("case", ["answered_first", "short_card", "no_hook"])
 async def test_no_reminder_when_answered_short_or_unsupported(monkeypatch, case):
     monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.1)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
     reminded: list[int] = []
 
     async def remind() -> None:
@@ -138,6 +140,7 @@ async def test_no_reminder_when_answered_short_or_unsupported(monkeypatch, case)
 
 async def test_a_failed_reminder_never_ends_the_wait(monkeypatch):
     monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
 
     async def remind() -> None:
         raise RuntimeError("thread gone")
@@ -160,3 +163,65 @@ def test_an_expired_card_says_plainly_that_nobody_clicked():
     assert expired.footer == "This request ended before anyone clicked. Ask again to redo it."
     # A stopped card (a cancelled turn, or one retired after its Approve) claims nothing.
     assert build_confirmation_card(prompt, state="stopped").footer is None
+
+
+async def test_no_reminder_with_less_than_a_minute_left(monkeypatch):
+    """A ping nobody can act on in time is noise: at least REMIND_MIN_LEFT_S must remain."""
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.05)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 1.0)
+    reminded: list[int] = []
+
+    async def remind() -> None:
+        reminded.append(1)
+
+    async def retire(_state: str) -> None:
+        return None
+
+    future: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
+    answer = await wait_local_confirmation(
+        _prompt(0.3), future, stop=lambda: None, retire=retire, remind=remind
+    )
+    assert answer == "expired" and reminded == []
+
+
+async def test_a_hung_reminder_never_holds_the_card_past_its_expiry(monkeypatch):
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
+
+    async def remind() -> None:
+        await asyncio.sleep(30)  # a platform post that never returns
+
+    async def retire(_state: str) -> None:
+        return None
+
+    future: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
+    started = asyncio.get_running_loop().time()
+    answer = await wait_local_confirmation(
+        _prompt(0.3), future, stop=lambda: None, retire=retire, remind=remind
+    )
+    assert answer == "expired"
+    assert asyncio.get_running_loop().time() - started < 1.0
+
+
+async def test_with_no_time_left_in_the_turn_the_write_is_refused_without_a_card():
+    from daimon.core.turn.approvals import NO_TIME_TO_ASK_MESSAGE
+
+    posted: list[ConfirmationPrompt] = []
+
+    async def confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        posted.append(prompt)
+        return "approved"
+
+    decide = interactive_decider(
+        ToolSafetyPolicy(enabled=True, confirmation_timeout_s=86_400),
+        requester_platform_user_id="U1",
+        confirm=confirm,
+        now=lambda: NOW,
+    )
+    token = current_turn_deadline.set(NOW + timedelta(seconds=8))  # 3 s of card time
+    try:
+        result = await decide(CALL)
+    finally:
+        current_turn_deadline.reset(token)
+    assert not result.allow and result.deny_message == NO_TIME_TO_ASK_MESSAGE
+    assert posted == []

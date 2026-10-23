@@ -920,3 +920,24 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
         tenant_id=str(tenant), platform="slack", channel_id="C_ORIGIN"
     )
     assert hook(None) is None, "no admitted channel, no pin card"
+
+
+async def test_a_card_still_open_posts_one_reminder_in_its_thread(monkeypatch) -> None:
+    """ROOT 2: a long card pings its requester once, in the card's thread."""
+    from daimon.core.posted_controls import lifecycle
+
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, _approve = await _post(cards, client, _prompt(expires_in=timedelta(seconds=0.3)))
+    assert await waiting == "expired"
+    posts = [call.kwargs for call in client.chat_postMessage.await_args_list]
+    reminders = [kwargs for kwargs in posts if "still waiting" in str(kwargs.get("text"))]
+    assert reminders == [
+        {
+            "channel": "C1",
+            "thread_ts": "1699.9",
+            "text": "<@U1> This is still waiting for your click.",
+        }
+    ]

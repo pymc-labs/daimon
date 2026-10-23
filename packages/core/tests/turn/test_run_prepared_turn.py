@@ -3396,3 +3396,88 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
     )
     assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"
+
+
+async def test_a_card_posted_inside_the_turn_never_shows_a_time_past_its_deadline(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROOT 2: run_prepared_turn sets the turn's deadline; a 24h card asked for inside
+    the turn expires 5 s before it, and nothing is set once the turn has ended."""
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.approvals import CARD_TURN_MARGIN
+    from daimon.core.turn.ceiling import current_turn_deadline
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-card-deadline",
+        ma_session_id="sess_card_deadline",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True, confirmation_timeout_s=86_400),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_card_deadline",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    prompts: list[ConfirmationPrompt] = []
+    deadlines: list[object] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        posture = kwargs["tool_confirmation"]
+        assert isinstance(posture, PolicyApproval)
+        deadlines.append(current_turn_deadline.get())
+        # The model asks for a gated write mid-turn.
+        await posture.decide(
+            ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
+        )
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    deadline = datetime.now(UTC) + timedelta(minutes=30)
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-card-deadline",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        confirm_write=card,
+        deadline=deadline,
+    )
+    assert deadlines == [deadline]
+    (prompt,) = prompts
+    # A 24h policy, but the card shows (and keeps) the turn's end, less the margin.
+    assert prompt.expires_at <= deadline - CARD_TURN_MARGIN
+    assert prompt.expires_at > deadline - CARD_TURN_MARGIN - timedelta(seconds=5)
+    assert current_turn_deadline.get() is None
