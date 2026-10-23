@@ -12,7 +12,12 @@ from typing import Literal
 
 from daimon.adapters.teams.card_actions import button, clip, error_text, submitted_fields
 from daimon.core.cron_words import schedule_words
-from daimon.core.routines import can_manage_routine, derive_glyph, routine_label
+from daimon.core.routines import (
+    RECORD_ONLY_NOTICE,
+    can_manage_routine,
+    derive_glyph,
+    routine_label,
+)
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.cards import (
     Action,
@@ -56,7 +61,8 @@ _CRON_MAX_CHARS = 100
 
 def created_notice(agent: str, cron: str, timezone: str) -> str:
     schedule = schedule_words(clip(cron, _CRON_MAX_CHARS), timezone)
-    return f"✅ Routine created for {agent}, {schedule}."
+    record_only = RECORD_ONLY_NOTICE.format(output="Last output")
+    return f"✅ Routine created for {agent}, {schedule}.\n\n{record_only}"
 
 
 def _button(

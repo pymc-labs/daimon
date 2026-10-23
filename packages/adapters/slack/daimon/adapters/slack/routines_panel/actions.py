@@ -44,6 +44,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.routines import (
+    GONE_AGENT_NOTICE,
     can_manage_routine,
     channel_agent,
     may_schedule_agent,
@@ -344,6 +345,8 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 name = agent.metadata.get(MA_METADATA_KEY_NAME)
                 if name is not None:
                     agent_names.append(name)
+            known = list(agent_names)
+            here: str | None = None
             if not is_admin:
                 async with runtime.sessionmaker() as session:
                     here = await channel_agent(
@@ -357,6 +360,13 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     for name in agent_names
                     if may_schedule_agent(name, is_admin=False, answers_here=here)
                 ]
+            if not agent_names and here is not None and here not in known:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=GONE_AGENT_NOTICE.format(agent=here),
+                )
+                return
             if not agent_names:
                 nouns = RefusalNouns.for_platform("slack")
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]

@@ -38,6 +38,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routines import (
+    RECORD_ONLY_NOTICE,
     can_manage_routine,
     channel_agent,
     may_schedule_agent,
@@ -314,7 +315,10 @@ async def run_routines_create_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=f"✅ Routine created for {agent_name}, {schedule_words(cron_expr, timezone_)}.",
+            text=(
+                f"✅ Routine created for {agent_name}, {schedule_words(cron_expr, timezone_)}."
+                f"\n\n{RECORD_ONLY_NOTICE.format(output='View last output')}"
+            ),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
         log.error("slack.routines_create_failed", team_id=team_id, exc_info=exc)

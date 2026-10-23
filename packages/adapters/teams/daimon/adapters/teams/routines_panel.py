@@ -45,6 +45,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.routines import (
+    GONE_AGENT_NOTICE,
     can_manage_routine,
     channel_agent,
     may_schedule_agent,
@@ -208,6 +209,10 @@ class RoutinesPanel:
             return dialog_notice(NEW_ROUTINE, DENIED)
         if not await self._schedulable(actor):
             if not actor.is_admin:
+                here = await self._answers_here(actor)
+                if here is not None:
+                    # The channel names an agent the tenant no longer has.
+                    return dialog_notice(NEW_ROUTINE, GONE_AGENT_NOTICE.format(agent=here))
                 return dialog_notice(NEW_ROUTINE, NO_AGENT)
             nouns = RefusalNouns.for_platform("teams")
             return dialog_notice(

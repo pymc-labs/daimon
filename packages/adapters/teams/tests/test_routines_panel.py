@@ -14,6 +14,7 @@ import pytest
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.routines_panel import NOT_HERE, NOT_OWNER
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.routines import GONE_AGENT_NOTICE
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
 from daimon.testing.ma_models import ma_agent
@@ -29,6 +30,7 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -194,6 +196,7 @@ async def test_create_follows_the_chat_rule_for_who_may_schedule_which_agent(
     assert '"acme-project"' not in json.dumps(member), "only the agent that answers here"
     assert refused["task"]["value"] == NOT_HERE.format(agent="acme-project")
     assert "Routine created for daimon" in created["task"]["value"]
+    assert "aren't posted anywhere" in created["task"]["value"], "it says it is record-only"
     async with db_session_factory() as session:
         [row] = await list_routines_for_tenant(session, tenant_id=TENANT)
     assert (row.created_by_user_id, row.agent_name) == (OTHER_AAD_OBJECT_ID, "daimon")
@@ -252,3 +255,32 @@ async def test_create_from_a_channel_thread_offers_the_agent_that_channel_answer
     assert member["task"]["type"] == "continue", member
     assert '"acme-project"' in json.dumps(member), "the channel's own agent"
     assert '"daimon"' not in json.dumps(member), "not the workspace default"
+
+
+async def test_a_member_is_told_the_channels_agent_was_deleted(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A channel set to an agent the workspace no longer has names it, rather than
+    saying no agent answers here."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    channel = "19:research@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+            tenant_id=TENANT,
+            agent_name="retired-bot",
+            mode="agent",
+        )
+    fetch = {"data": {"dialog_id": "routine_create", "msteams": {"type": "task/fetch"}}}
+    async with _running(db_session_factory, teams_api_fake) as service:
+        member = await post_activity(
+            service,
+            make_invoke(
+                "task/fetch", fetch, user=OTHER_AAD_OBJECT_ID, chat=f"{channel};messageid=17"
+            ),
+        )
+
+    assert notice_text(member) == GONE_AGENT_NOTICE.format(agent="retired-bot")

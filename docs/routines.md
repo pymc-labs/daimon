@@ -158,7 +158,10 @@ The platform surfaces differ, and the difference is deliberate:
   start turns (`ACT_FOR_CREATOR`), and `authorize(SAVE_ROUTINE)` must allow
   the agent with no destination, saved from that channel (a pinned agent, or
   another channel's own agent, is refused). A refusal uses the turn refusal
-  copy, so the panel never confirms a routine every fire would refuse.
+  copy, so the panel never confirms a routine every fire would refuse. A panel
+  routine has no destination, so its confirmation says its results aren't
+  posted anywhere and points at the panel's last-output action. A member whose
+  channel is set to an agent that no longer exists is told that agent's name.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
@@ -489,7 +492,10 @@ provider refusal that names no cause reads "This agent's model provider can't
 run here." A used-up channel budget ends `It won't run until the budget has
 room again.` A used-up prepaid provider hold (`provider_hold_cap_reached`)
 frees up on its own as attempts settle or age out, so it keeps the turn
-refusal's words but ends with the try-again line.
+refusal's words but ends with the try-again line. The chat copy for a pinned agent and
+for a creator from another organisation tells someone to ask or mention the
+agent elsewhere, which nobody can do for a scheduled run, so a routine says
+to change where it posts, or to ask an admin, instead.
 
 The notice is queued only
 while `last_error` is still null, so a routine that keeps failing posts once

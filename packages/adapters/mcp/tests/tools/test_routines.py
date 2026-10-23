@@ -1402,6 +1402,48 @@ async def _create_here(
     )
 
 
+_origin_destination = _routines_mod._origin_destination  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("platform", "channel", "thread", "expected"),
+    [
+        ("discord", "444", "999", ("thread", "999")),
+        ("discord", "444", "444", ("channel", "444")),
+        ("discord", "444", "dm:" + "0" * 8, None),
+        ("slack", "C0123ABC", "1717.5", ("thread", "C0123ABC:1717.5")),
+        ("slack", "D0123ABC", "1717.5", None),
+        (
+            "teams",
+            "19:x@thread.tacv2",
+            "19:x@thread.tacv2;messageid=17000",
+            ("thread", "19:x@thread.tacv2;messageid=17000"),
+        ),
+        ("teams", "19:x@thread.tacv2", "19:x@thread.tacv2", ("channel", "19:x@thread.tacv2")),
+        ("teams", "a:1xyz", "a:1xyz", None),
+        ("teams", "19:x@thread.v2", "19:x@thread.v2", None),
+    ],
+    ids=[
+        "discord-thread",
+        "discord-channel",
+        "discord-dm",
+        "slack-thread",
+        "slack-im",
+        "teams-thread",
+        "teams-root",
+        "teams-1to1",
+        "teams-group",
+    ],
+)
+def test_the_conversation_a_routine_was_asked_in_is_its_default_destination(
+    platform: str, channel: str, thread: str, expected: tuple[str, str] | None
+) -> None:
+    """Where a routine made in each kind of conversation posts; None stays record-only,
+    since a routine cannot post into a DM or a chat."""
+    origin = SimpleNamespace(parent_channel_id=channel, thread_id=thread)
+    assert _origin_destination(platform, origin) == expected  # type: ignore[arg-type]
+
+
 async def test_a_routine_made_in_a_conversation_without_a_destination_posts_back_there(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,

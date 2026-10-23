@@ -336,6 +336,17 @@ _PASSING_DENIALS: Final[frozenset[str]] = frozenset({"provider_hold_cap_reached"
 #: `backend_unsupported` with no named cause: the turn copy's "right now"
 #: would contradict "until that's fixed".
 _PROVIDER_CANT_RUN = "This agent's model provider can't run here.\n\nAsk {who} to check it."
+#: The chat copy for these tells someone to mention or ask the agent
+#: elsewhere, which nobody can do for a scheduled run.
+_ROUTINE_REFUSALS: Final[dict[str, str]] = {
+    "client_requester": (
+        "This routine's creator is from another organisation, so it can't run here."
+        "\n\nAsk {who} to recreate it."
+    ),
+    "runs_elsewhere": (
+        "This agent only works in other channels.\n\nChange where this routine posts, or ask {who}."
+    ),
+}
 
 
 def failure_notice_text(
@@ -358,11 +369,15 @@ def failure_notice_text(
                 then = _NEXT_RUN
             if error.reason == "backend_unsupported" and error.cause is None:
                 refusal = _PROVIDER_CANT_RUN.format(who=nouns.who)
+            elif (routine_copy := _ROUTINE_REFUSALS.get(error.reason)) is not None:
+                refusal = routine_copy.format(who=nouns.who)
             else:
                 refusal = admission_refusal_text(
                     error.reason, nouns, cause=error.cause, provider=error.provider
                 )
             return f"{refusal}\n\n{then}"
+        if reason is TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE:
+            return f"{_ROUTINE_REFUSALS['runs_elsewhere'].format(who=nouns.who)}\n\n{then}"
         if notice := render_termination_notice(
             reason,
             setup_command=nouns.setup,

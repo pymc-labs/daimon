@@ -19,6 +19,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 PANEL_CAP = 25
 
+#: A panel routine has no destination: say so where it is confirmed, and how
+#: to read its result. `{output}` is the panel's own name for that action.
+RECORD_ONLY_NOTICE = (
+    "Its results aren't posted anywhere: open Routines and choose {output} to read them. "
+    "To have them posted in a channel, ask the agent there to make the routine instead."
+)
+#: A member's refusal when the agent this channel answers with was deleted:
+#: name it, rather than say no agent answers here.
+GONE_AGENT_NOTICE = (
+    "{agent}, the agent this channel answers with, no longer exists.\n\n"
+    "Ask an admin to pick another."
+)
+
 Glyph = Literal["⏸", "⏳", "❌", "✅"]
 
 

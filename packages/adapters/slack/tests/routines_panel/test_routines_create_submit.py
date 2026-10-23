@@ -272,6 +272,9 @@ async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
     texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
     assert any("✅ Routine created for" in t for t in texts)
     assert any("every day at 18:00 UTC" in t for t in texts), "schedule is shown in words"
+    assert any("aren't posted anywhere" in t and "View last output" in t for t in texts), (
+        "a panel routine says it is record-only and how to read it"
+    )
     assert not any("0 18 * * *" in t for t in texts), "the raw cron is not echoed"
 
 

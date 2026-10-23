@@ -214,6 +214,26 @@ def test_a_refusal_no_later_run_gets_past_names_its_cause_and_says_so(
     assert text.endswith("until that's fixed.")
 
 
+@pytest.mark.parametrize(
+    ("reason", "error"),
+    [
+        (TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE, None),
+        (
+            TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
+            AdmissionDenied(reason="runs_elsewhere"),
+        ),
+        (TerminationReason.ADMISSION_DENIED, AdmissionDenied(reason="client_requester")),
+    ],
+)
+def test_a_routine_refusal_never_tells_the_channel_to_ask_or_mention_the_agent(
+    reason: TerminationReason, error: AdmissionDenied | None
+) -> None:
+    """Nobody can mention or ask a scheduled run anything."""
+    text = failure_notice_text(reason, platform="slack", error=error)
+    assert "Ask it there" not in text and "Mention me" not in text, text
+    assert text.endswith("until that's fixed."), text
+
+
 def test_a_provider_hold_that_frees_up_by_itself_says_it_will_try_again() -> None:
     """Holds settle as attempts finish and age out, so a later run can pass."""
     error = AdmissionDenied(reason="provider_hold_cap_reached")
