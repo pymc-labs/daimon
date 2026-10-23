@@ -588,7 +588,7 @@ verdict runs an ordinary turn through `admit()` as the burst's newest author,
 with every notice withheld. Teams also counts a quote of the bot's message as
 a mention.
 
-With `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT=true` (off by default), a person's
+With `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT` on (the default), a person's
 first unmentioned reply in a thread the bot opened, in a thread that isn't
 followed, gets a 🔔 reaction and no turn: only a mention continues the
 conversation. The hint shows once per thread per
@@ -2016,8 +2016,7 @@ deletion.
 ### Platform table rendering
 
 `DAIMON_TABLE_RENDERING` is a JSON map of tenant UUIDs to booleans. Discord
-renders tables unless the tenant is set to false; Slack renders them only when
-set to true. Teams renders Markdown tables natively, so the setting does nothing
+and Slack render tables unless the tenant is set to false. Teams renders Markdown tables natively, so the setting does nothing
 there. UUID keys are validated at startup. Core `tables.render_tables` parses pipe-delimited Markdown tables outside fenced
 code and accepts an optional async platform hook. Without a hook the input is
 returned unchanged. Both adapter helpers also default to disabled. Hook failures
@@ -2297,9 +2296,9 @@ mark their fixed guidance explicitly. Terminal
 failure cards retain audited guidance as their next step, including an expired
 setup context encountered during reconnection.
 
-### Opt-in Discord waiting cards
+### Discord waiting cards
 
-`discord.tenant_cap_waiting_card` defaults to false. When enabled, an initial
+`discord.tenant_cap_waiting_card` defaults to true. While on, an initial
 mention's admitted ticket shows “Queued — waiting for a free slot…” on its
 existing progress card while it waits behind the tenant cap. The same card
 returns to ordinary progress when the slot is granted. Stop, queue limits and

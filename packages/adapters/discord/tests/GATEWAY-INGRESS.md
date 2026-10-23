@@ -134,8 +134,8 @@ are PENDING until an explicit owned native capture binding can pass the same
 dependency guard; their fixtures skip before ingress allocation. The Anthropic
 records are not independent QA recipe/oracle pins, and do not prove execution
 of the requested bash sleep. All whole-cell verdicts remain PENDING. The
-NEW6 probe retains a full 15-second real waiting-card history under both default
-and explicit `discord.tenant_cap_waiting_card=True` settings. The default product
+NEW6 probe retains a full 15-second real waiting-card history under both explicit
+`discord.tenant_cap_waiting_card=False` and `=True` settings. The flag-off
 path still accepts its ordinary card and fails the queue-copy predicate. The
 opted-in initial mention renders queue wording on that same card while its real
 ticket waits at the owned tenant cap, then edits the same ID to ordinary progress

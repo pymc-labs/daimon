@@ -107,8 +107,8 @@ Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
 `dict[UUID, bool]` · optional · default `{}`
 
 Per-tenant table rendering, keyed by tenant UUID. Discord renders final Markdown tables
-as PNG unless the tenant is set to false. Slack renders native tables only when set to
-true. Set DAIMON_TABLE_RENDERING to a JSON object.
+as PNG and Slack as native tables unless the tenant is set to false. Set
+DAIMON_TABLE_RENDERING to a JSON object.
 
 ### `DAIMON_PRIVACY_POLICY_URL`
 
@@ -548,14 +548,14 @@ is answered with a visible error reply.
 
 ### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
 React with 🔔 to a person's reply that does not @mention the bot in a thread the bot
 opened, as a hint that only mentions start a turn. The message itself is never answered.
 At most once per thread per unmentioned_reply_hint_cooldown_h, never on a message that
 mentions someone else, never to any bot, never where the agent may not post, and never
-while the thread is followed (thread participation on). Off by default: the cooldown is
-kept in memory, so each restart allows one more hint per thread.
+while the thread is followed (thread participation on). The cooldown is kept in memory,
+so each restart allows one more hint per thread.
 
 ### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H`
 
@@ -582,11 +582,11 @@ once. Caps one noisy guild from starving others on the shared Anthropic key.
 
 ### `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
-Opt in to queue wording on the existing initial Discord mention card while its admitted
-turn waits behind the tenant concurrency cap. The same card returns to ordinary progress
-when the turn starts. Admission, Stop and queue limits are unchanged; no other tenant
+Show queue wording on the existing initial Discord mention card while its admitted turn
+waits behind the tenant concurrency cap. The same card returns to ordinary progress when
+the turn starts. Admission, Stop and queue limits are unchanged; no other tenant
 information is displayed.
 
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS`

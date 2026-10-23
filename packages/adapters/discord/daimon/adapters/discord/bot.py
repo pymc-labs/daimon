@@ -5209,10 +5209,10 @@ class DaimonBot(commands.Bot):
         # Over a cap the turn waits here, behind its ordinary card, with the
         # same ⌛ a mention queued behind its thread's turn gets (a drained
         # follow-up already carries one). Stop ends the wait like any turn; the
-        # max wait is a safeguard that ends the card with the ordinary error.
+        # max wait is a safeguard that ends the card saying Daimon is busy.
         # The ⌛ add and remove are background tasks, never awaited here, so a
         # slow reaction call cannot hold up Stop, the max wait or a granted slot.
-        # Queue wording on the card itself stays opt-in (tenant_cap_waiting_card).
+        # Queue wording on the card itself follows tenant_cap_waiting_card.
         assert self.runtime.settings.discord is not None
         marked: list[asyncio.Task[None]] = []
 

@@ -34,7 +34,6 @@ class McpFlags(BaseModel):
 class DiscordFlags(BaseModel):
     credential_form_expiry: bool = False
     writers_none_notice: bool = False
-    tenant_cap_waiting_card: bool = False
 
 
 class TurnFlags(BaseModel):
@@ -57,7 +56,6 @@ def apply_flags(profile):
     assert configured.mcp.require_routine_destination is True
     assert configured.discord.credential_form_expiry is True
     assert configured.discord.writers_none_notice is True
-    assert configured.discord.tenant_cap_waiting_card is True
     for service in ("notebook", "report"):
         host = HostFlags()
         assert profile.apply(host, service=service) is host
@@ -369,7 +367,7 @@ def test_six_flag_receipt_cannot_certify_the_seven_switch_profile():
     opt_in = board(first="PASS", profile="opt-in-product")
     data = opt_in.model_dump(exclude={"scored_counts"})
     data["applied_flags"] = tuple(
-        flag for flag in opt_in.applied_flags if flag != "core.discord.tenant_cap_waiting_card"
+        flag for flag in opt_in.applied_flags if flag != "core.discord.writers_none_notice"
     )
     for cell in data["cells"]:
         cell.pop("status")

@@ -1344,7 +1344,7 @@ async def test_a_queued_submit_that_never_runs_collapses_its_card_and_leaves_not
             expected = (
                 "Stopped.\nSend a message to start again."
                 if ending == "stopped"
-                else "Something went wrong. Mention me to try again."
+                else "Daimon is too busy right now. @mention Daimon again in a moment."
             )
             assert [c.kwargs.get("content") for c in card.edit.await_args_list] == [expected]
             assert await list_orphaned_turns(db_session, platform="discord") == []

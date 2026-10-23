@@ -4317,7 +4317,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
     assert captured_deadlines.get("bind") is not None, (
         "bind_session must receive a non-None deadline"
     )
-    assert render_tables == [False], "Slack tables stay plain text without a tenant entry"
+    assert render_tables == [True], "Slack renders tables without a tenant entry, like Discord"
     assert captured_deadlines.get("run") is not None, (
         "run_prepared_turn must receive a non-None deadline"
     )

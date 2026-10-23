@@ -3495,7 +3495,7 @@ class TestOverCapQueue:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
-    async def test_the_max_wait_ends_the_card_with_the_ordinary_error(
+    async def test_the_max_wait_ends_the_card_saying_daimon_is_busy(
         self,
         mock_resolve: AsyncMock,
         mock_create_session: AsyncMock,
@@ -3524,7 +3524,9 @@ class TestOverCapQueue:
 
         await asyncio.wait_for(bot.on_message(message), 5)
 
-        assert self._card_texts(card) == ["Something went wrong. Mention me to try again."]
+        assert self._card_texts(card) == [
+            "Daimon is too busy right now. @mention Daimon again in a moment."
+        ]
         mock_create_session.assert_not_called()
         assert bot.turn_queue.depth() == 0
         assert bot.turn_queue.in_flight() == 1, "only the other guild's turn holds a slot"

@@ -1291,17 +1291,17 @@ the action and logs only the boundary name. Foreign dead sessions remain failed
 outcomes; native replacement with its corresponding binding, accounting and
 approval context requires a provider-specific recovery path. Anthropic recovery
 continues to use its existing tool confirmation surface.
-### Opt-in table rendering
+### Table rendering
 
 Table rendering uses the same per-tenant setting for Anthropic, OpenAI and Gemini
-turns. Enable it for an existing tenant UUID in the application's environment:
+turns. It is on unless a tenant is turned off in the application's environment:
 
 ```bash
-DAIMON_TABLE_RENDERING='{"11111111-1111-1111-1111-111111111111":true}'
+DAIMON_TABLE_RENDERING='{"11111111-1111-1111-1111-111111111111":false}'
 ```
 
-Replace the example UUID with the tenant's UUID. Missing tenants and `false`
-retain plain-text delivery. On Discord, supported final-answer Markdown tables
+Replace the example UUID with the tenant's UUID. `false` retains plain-text
+delivery. On Discord, supported final-answer Markdown tables
 become PNG attachments with a marker at their position in the answer; Slack uses
 native table blocks. Teams already renders tables natively. Provider text in the
 journal remains unchanged. Streaming previews and fenced examples remain text;

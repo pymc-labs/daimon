@@ -1,5 +1,14 @@
+import uuid
+
 import pytest
-from daimon.adapters.slack.tables import render_slack_tables
+from daimon.adapters.slack.tables import render_slack_tables, tables_enabled
+
+
+def test_tables_render_unless_the_tenant_opts_out() -> None:
+    tenant = uuid.uuid4()
+    assert tables_enabled({}, tenant) is True
+    assert tables_enabled({tenant: True}, tenant) is True
+    assert tables_enabled({tenant: False}, tenant) is False
 
 
 async def test_slack_url_links_render_as_standard_markdown_without_enabling_broadcasts():

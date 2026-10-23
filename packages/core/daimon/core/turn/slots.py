@@ -33,6 +33,7 @@ from daimon.core.turn_queue import TurnTicket
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "QUEUE_TIMED_OUT_DM_TEXT",
     "QUEUE_TIMED_OUT_TEXT",
     "SlotResult",
     "holding",
@@ -52,8 +53,10 @@ _REASONS = {
     "queue_full": TerminationReason.ADMISSION_CONCURRENCY_SHED,
 }
 
-# The ordinary approved error: nothing about queues.
-QUEUE_TIMED_OUT_TEXT = "Something went wrong. Mention me to try again."
+# A turn that waited too long behind the caps: busy, not broken. The words of
+# ADMISSION_CONCURRENCY_SHED's notice; a direct message has nobody to @mention.
+QUEUE_TIMED_OUT_TEXT = "Daimon is too busy right now. @mention Daimon again in a moment."
+QUEUE_TIMED_OUT_DM_TEXT = "Daimon is too busy right now. Send your message again in a moment."
 
 
 class _Holder:
@@ -108,8 +111,9 @@ async def wait_for_slot(
     "started" at once when it already holds one or when no ticket is held
     (paths that claim no slot). A follow-up takes a fresh ticket; when the
     queue is full that is "queue_full". The adapter ends the card as Stopped
-    on "cancelled", with `QUEUE_TIMED_OUT_TEXT` on "timed_out", and with its
-    balance or capacity refusal on "balance_depleted" or "queue_full". Each
+    on "cancelled", with `QUEUE_TIMED_OUT_TEXT` (`QUEUE_TIMED_OUT_DM_TEXT` in a
+    direct message) on "timed_out", and with its balance or capacity refusal
+    on "balance_depleted" or "queue_full". Each
     records the turn's outcome. Adapters pass their configured `default_cap`
     so a follow-up reads the current tenant override (or its cleared default)
     before taking a new ticket. `on_queued` is called once, synchronously, when

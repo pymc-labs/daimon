@@ -68,6 +68,6 @@ async def test_global_only_wait_and_cancelled_ticket_are_not_tenant_cap_wording(
     assert queue.depth() == queue.in_flight() == 0
 
 
-def test_queue_card_flag_is_declared_default_off() -> None:
-    assert DiscordSettings.model_fields["tenant_cap_waiting_card"].default is False
-    assert not DiscordSettings(bot_token=SecretStr("offline")).tenant_cap_waiting_card
+def test_queue_card_flag_is_declared_default_on() -> None:
+    assert DiscordSettings.model_fields["tenant_cap_waiting_card"].default is True
+    assert DiscordSettings(bot_token=SecretStr("offline")).tenant_cap_waiting_card

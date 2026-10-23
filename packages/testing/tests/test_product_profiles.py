@@ -51,12 +51,11 @@ def install_declarations(monkeypatch):
     monkeypatch.setattr(profiles, "import_module", module)
 
 
-def test_exact_five_flags_and_unknown_profile_are_closed() -> None:
+def test_exact_four_flags_and_unknown_profile_are_closed() -> None:
     expected = {
         "core.mcp.require_routine_destination": True,
         "core.discord.credential_form_expiry": True,
         "core.discord.writers_none_notice": True,
-        "core.discord.tenant_cap_waiting_card": True,
         "core.turn.native_footer_cost": True,
     }
     assert profiles.OPT_IN_PRODUCT_PROFILE.flags == expected
@@ -81,13 +80,13 @@ def test_copy_preserves_secrets_backend_and_unrelated_flags_without_constructor_
     assert enabled.mcp.require_routine_destination is True
     assert enabled.discord is not None and enabled.discord.credential_form_expiry is True
     assert enabled.discord.writers_none_notice is True
-    assert enabled.discord.tenant_cap_waiting_card is True
+    # The waiting card is on by default now: no longer a granted switch.
+    assert enabled.discord.tenant_cap_waiting_card is base.discord.tenant_cap_waiting_card
     assert enabled.discord.table_rendering is False and enabled.backend == base.backend
     assert enabled.discord.bot_token is base.discord.bot_token
     assert base.mcp.require_routine_destination is False
     assert base.discord.credential_form_expiry is False
     assert base.discord.writers_none_notice is False
-    assert base.discord.tenant_cap_waiting_card is False
     for service in ("notebook", "report"):
         # The notebook and report hosts have no granted switch: their settings pass through.
         assert profiles.OPT_IN_PRODUCT_PROFILE.apply(host, service=service) is host
@@ -96,7 +95,6 @@ def test_copy_preserves_secrets_backend_and_unrelated_flags_without_constructor_
     assert disabled.mcp.require_routine_destination is False
     assert disabled.discord.credential_form_expiry is False
     assert disabled.discord.writers_none_notice is False
-    assert disabled.discord.tenant_cap_waiting_card is False
     constructor.assert_not_called()
 
 
@@ -162,7 +160,6 @@ def test_flag_application_receipt_is_scoped_and_not_an_outcome(monkeypatch):
             "core.mcp.require_routine_destination",
             "core.discord.credential_form_expiry",
             "core.discord.writers_none_notice",
-            "core.discord.tenant_cap_waiting_card",
             "core.turn.native_footer_cost",
         }
         profiles.OPT_IN_PRODUCT_PROFILE.apply(Host(_env_file=None), service="notebook")
@@ -206,16 +203,14 @@ def test_missing_granted_declarations_are_named_without_partial_application(monk
         profiles.OPT_IN_PRODUCT_PROFILE.require_available()
     assert set(refused.value.missing) == {
         "core.discord.writers_none_notice",
-        "core.discord.tenant_cap_waiting_card",
         "core.turn.native_footer_cost",
     }
     profiles.DEFAULT_PRODUCT_PROFILE.require_available()
 
 
-def test_missing_queue_card_field_refuses_without_modifying_existing_settings():
+def test_missing_granted_field_refuses_without_modifying_existing_settings():
     class EarlierDiscord(BaseModel):
         credential_form_expiry: bool = False
-        writers_none_notice: bool = False
 
     class EarlierCore(BaseModel):
         mcp: Mcp = Mcp()
@@ -225,7 +220,7 @@ def test_missing_queue_card_field_refuses_without_modifying_existing_settings():
     original = EarlierCore()
     snapshot = original.model_dump()
     with pytest.raises(
-        profiles.ProductProfileUnavailable, match="core.discord.tenant_cap_waiting_card"
+        profiles.ProductProfileUnavailable, match="core.discord.writers_none_notice"
     ):
         profiles.OPT_IN_PRODUCT_PROFILE.apply(original, service="core")
     assert original.model_dump() == snapshot

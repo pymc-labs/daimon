@@ -130,7 +130,11 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
-from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
+from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_DM_TEXT,
+    QUEUE_TIMED_OUT_TEXT,
+    wait_for_ticket,
+)
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
@@ -155,6 +159,8 @@ _log = structlog.get_logger()
 _CALLBACK_FAILED = "Something went wrong.\n\nTry again."
 _CHECK_FAILED = "Something went wrong.\n\nTry again."
 _DRAINING = "Daimon is restarting.\n\nPress Submit again in a minute."
+# A session that would not bind: the ordinary error, not the busy one.
+_BIND_FAILED_TEXT = "Something went wrong. Mention me to try again."
 _OVER_CAP = (
     f"Your answers were recorded, but this {words_for('discord').space} has too many "
     "chats at once right now -- ask again in the thread in a moment."
@@ -679,14 +685,19 @@ async def run_wizard_submit_turn_observed(
             ticket, cancel, sessionmaker=bot.runtime.sessionmaker, tenant_id=row.tenant_id
         )
         if slot != "started":
+            busy = (
+                QUEUE_TIMED_OUT_DM_TEXT
+                if isinstance(interaction.channel, discord.DMChannel)
+                else QUEUE_TIMED_OUT_TEXT
+            )
             await _end_card(
                 {
                     "cancelled": "Stopped.\nSend a message to start again.",
-                    "timed_out": QUEUE_TIMED_OUT_TEXT,
+                    "timed_out": busy,
                     "balance_depleted": admission_refusal_message(
                         "balance_depleted", bot.runtime.settings
                     ),
-                }.get(slot, QUEUE_TIMED_OUT_TEXT)
+                }.get(slot, busy)
             )
             return
 
@@ -717,7 +728,7 @@ async def run_wizard_submit_turn_observed(
                 deadline=turn_deadline_at,
             )
         except Exception:
-            await _end_card(QUEUE_TIMED_OUT_TEXT)
+            await _end_card(_BIND_FAILED_TEXT)
             raise
 
         _log.info(

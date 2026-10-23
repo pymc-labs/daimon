@@ -108,9 +108,9 @@ Focused verification: `uv run pytest tests/judge/test_catalog_runner.py`.
 
 The matrix report separates the ordinary product profile from an explicit
 `opt-in-product` QA profile. `daimon.testing.product_profiles` controls exactly
-five settings: MCP
-`require_routine_destination`, Discord `credential_form_expiry` / `writers_none_notice` /
-`tenant_cap_waiting_card`, and turn `native_footer_cost`. It copies
+four settings: MCP
+`require_routine_destination`, Discord `credential_form_expiry` / `writers_none_notice`,
+and turn `native_footer_cost`. It copies
 declared fields without reconstructing settings from the environment, changing
 product defaults, enabling table rendering, or constructing clients. Actual QA
 fixture factories consume `current_product_profile().apply(settings, service=...)`;

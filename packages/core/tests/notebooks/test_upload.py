@@ -246,10 +246,10 @@ def test_upload_tokens_carry_the_tenant() -> None:
     assert _payload(att["upload_url"])["tenant"] == "t-1"
 
 
-def test_a_scratch_notebook_is_kept_one_day_by_default() -> None:
+def test_a_scratch_notebook_is_kept_two_weeks_by_default() -> None:
     out = create_notebook_upload(notebook_settings=_settings(), now=_NOW)
-    assert _payload(out["upload_url"])["notebook_ttl_seconds"] == 86400, (
-        "the agent's default lifetime is one day, whatever the host's own TTL"
+    assert _payload(out["upload_url"])["notebook_ttl_seconds"] == 14 * 86400, (
+        "the agent's default lifetime is two weeks, whatever the host's own TTL"
     )
 
 
