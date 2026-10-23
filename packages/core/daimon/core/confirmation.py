@@ -656,7 +656,13 @@ def settings_line(settings: Mapping[str, object]) -> str:
 
 
 class CardRefusal(ValueError):
-    """A card refused for a reason worded for the person; its text is shown as is."""
+    """A card refused for a reason worded for the person; its text is shown as is.
+
+    Like the tool's own refusals, it says that nothing changed.
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__(f"{text} Nothing changed.")
 
 
 def backend_switch_callbacks(
