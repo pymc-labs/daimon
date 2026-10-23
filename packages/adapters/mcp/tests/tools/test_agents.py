@@ -6099,3 +6099,34 @@ def test_native_create_refuses_ambiguous_family_typos_before_writing(typo):
             mcp_servers=None,
             skill_repos=None,
         )
+
+
+@pytest.mark.parametrize("who", ["owner", "member"])
+async def test_the_owner_sees_the_setup_they_edit(
+    db_session_factory: async_sessionmaker[AsyncSession], who: str
+) -> None:
+    tenant_id, owner_id, member_id = await _owned_scoped_agent(db_session_factory)
+    _, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    auth = AuthIdentity(
+        account_id=owner_id if who == "owner" else member_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id=who,
+    )
+    runtime = _runtime(client, session_factory=db_session_factory)
+    if who == "member":
+        # Someone else's agent that answers nowhere they are stays out of sight.
+        with pytest.raises(ToolError, match="missing or changed"):
+            await _get_agent_impl(runtime, auth, "scoped-agent", expected_ma_agent_id="ag_scoped")
+        assert await _list_agents_impl(runtime, auth, None, mine=True) == []
+        return
+    info = await _get_agent_impl(runtime, auth, "scoped-agent", expected_ma_agent_id="ag_scoped")
+    assert info.owned_by_you is True
+    assert info.system is not None and info.mcp_servers is not None
+    mine = await _list_agents_impl(runtime, auth, None, mine=True)
+    assert [(a.name, a.owned_by_you) for a in mine] == [("scoped-agent", True)]
+    assert mine[0].mcp_servers is not None

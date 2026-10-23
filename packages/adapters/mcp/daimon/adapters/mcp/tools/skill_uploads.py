@@ -292,7 +292,6 @@ async def require_skill_change(
         agent_names=(agent_name, *agent_pin_names(agent.name, agent.metadata)),
         ma_agent_id=agent.id,
         is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-        owner_counts=True,
     )
     if decide_operation(operation, is_admin=auth.is_admin, target=facts) == "allow":
         return

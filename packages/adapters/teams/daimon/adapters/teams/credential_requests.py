@@ -38,6 +38,7 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import (
     FormPinRefused,
     agent_pin_names,
@@ -157,11 +158,11 @@ _REPO_KINDS = ("repo", "skill_repo")
 _MAX_GITHUB_TOKEN_CHARS = 255
 _COLLISION_LINES_SHOWN = 3
 _SHARED_AGENT = (
-    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Connecting a repo to this agent needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _SHARED_AGENT_SKILLS = (
-    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Adding skills from a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _WRONG_ORG = "This request isn't for this organisation — ask again where it was posted."
@@ -642,7 +643,18 @@ class TeamsCredentialRequests:
                         caller_account_id=row.account_id,
                         caller_platform_user_id=row.requester_platform_user_id,
                     )
-        facts = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=reachable)
+        owned = False
+        if not is_admin and not managed:
+            async with self._runtime.sessionmaker() as session:
+                owned = await owns_agent(
+                    session,
+                    tenant_id=row.tenant_id,
+                    ma_agent_id=str(agent.id),
+                    account_id=row.account_id,
+                )
+        facts = TargetFacts(
+            is_daimon_managed=managed, is_reachable_in_tenant=reachable, owned_by_caller=owned
+        )
         return decide_operation("key_replace", is_admin=is_admin, target=facts) != "allow"
 
     async def _save_env(

@@ -79,15 +79,15 @@ MANAGED_AGENT_MESSAGE: Final[str] = (
     "Ask me to make you a new agent, or ask an admin to copy this one."
 )
 
-#: A spec edit by a member against an agent the workspace currently depends on.
+#: A spec edit by someone who neither owns the agent nor is an admin.
 NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
-    f"This agent answers for other people here, so this change needs {ADMIN_NOUN}. "
+    f"Changing this agent needs its owner or {ADMIN_NOUN}. "
     "Ask me and I'll write the request for them. Making your own agent is not restricted."
 )
 
-#: A skill added or removed by a member on an agent someone else also uses.
+#: A skill added or removed by someone who neither owns the agent nor is an admin.
 NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
-    f"Others use this agent, so changing its skills needs {ADMIN_NOUN}."
+    f"Changing this agent's skills needs its owner or {ADMIN_NOUN}."
 )
 
 #: An attachment write (repo binding, keys, MCP server) by a member against a
@@ -95,14 +95,15 @@ NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
 #: purpose: which limb fired says nothing the caller can act on, and the fix
 #: is the same either way.
 SHARED_AGENT_MESSAGE: Final[str] = (
-    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Changing this agent's keys or connections needs its owner or an admin, "
+    "and connecting a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
 #: A skill-repo import by a member onto a shared agent: the imported skills
 #: would reach everyone it answers.
 SHARED_AGENT_SKILLS_MESSAGE: Final[str] = (
-    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Adding skills from a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
@@ -354,7 +355,7 @@ def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
     if operation in ("skill_add", "skill_remove"):
         if outcome == "managed_agent":
             return MANAGED_AGENT_MESSAGE
-        return f"Others use this agent, so changing its skills needs {ADMIN_NOUN}."
+        return NEEDS_ADMIN_SKILL_MESSAGE
     if operation == "skill_repo_connect":
         return SHARED_AGENT_SKILLS_MESSAGE
     return SHARED_AGENT_MESSAGE

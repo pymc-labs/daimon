@@ -143,3 +143,34 @@ def test_details_names_the_channels_an_agent_answers_in_and_never_their_ids() ->
     expected = "this chat, Research, Channel name unavailable, the organisation default"
     assert f"**Answers in:** {expected}" in text
     assert "19:" not in text and "`" not in text, "no id and no code span"
+
+
+def test_the_agents_owner_is_offered_add_skill_and_a_member_is_not() -> None:
+    details = AgentDetails(
+        ma_agent_id="ag_helper",
+        name="Helper",
+        model_id="model",
+        model_display_name="Model",
+        daimon_managed=False,
+        created_by_is_workspace=True,
+        created_at=datetime.now(UTC),
+        answers_here=False,
+        applies_note="Changes apply next turn.",
+        answers_in=(),
+    )
+
+    def text(*, owned: bool) -> str:
+        card = setup_card.details_card(
+            details,
+            here="19:x@thread.tacv2",
+            page=0,
+            coding_tools=True,
+            is_admin=False,
+            owned=owned,
+        )
+        return json.dumps(card.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False)
+
+    assert "Add skill" in text(owned=True)
+    assert "Add skill" not in text(owned=False)
+    # The coding-tool token stays an admin's.
+    assert "coding tools" not in text(owned=True)

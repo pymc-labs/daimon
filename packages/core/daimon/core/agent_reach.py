@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection, Iterable, Sequence
 
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.native_admins import AdminCaller
 from daimon.core.operation_policy import OperationKind, TargetFacts
 from daimon.core.scope import (
@@ -188,8 +189,28 @@ async def load_target_facts(
     caller_account_id: uuid.UUID | None = None,
     caller_platform_user_id: str | None = None,
 ) -> TargetFacts:
-    """Shared-agent mutations only need to know whether the target is managed."""
-    return TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    """Whether the target is managed, and whether the caller owns it.
+
+    The caller is the person acting: `caller_platform_user_id` (or the
+    `caller`'s) on `platform`, the one who actually clicked or submitted.
+    `caller_account_id` counts only when no platform user is known, since some
+    submit paths pass the requester's account while someone else submits.
+    Callers pass only a person, never an agent key.
+    """
+    platform_user_id = caller_platform_user_id or caller.platform_user_id
+    return TargetFacts(
+        is_daimon_managed=is_daimon_managed,
+        is_reachable_in_tenant=False,
+        owned_by_caller=not is_daimon_managed
+        and await owns_agent(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id=ma_agent_id,
+            account_id=caller_account_id if platform_user_id is None else None,
+            platform=platform,
+            platform_user_id=platform_user_id,
+        ),
+    )
 
 
 __all__ = [

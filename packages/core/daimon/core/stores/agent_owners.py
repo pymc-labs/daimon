@@ -86,3 +86,15 @@ async def clear_owner(session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: 
         .returning(AgentOwner.agent_id)
     )
     return result.scalar_one_or_none() is not None
+
+
+async def owned_by(
+    session: AsyncSession, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> frozenset[uuid.UUID]:
+    """Every agent id the account owns in this tenant."""
+    rows = await session.scalars(
+        select(AgentOwner.agent_id).where(
+            AgentOwner.tenant_id == tenant_id, AgentOwner.owner_account_id == account_id
+        )
+    )
+    return frozenset(rows)

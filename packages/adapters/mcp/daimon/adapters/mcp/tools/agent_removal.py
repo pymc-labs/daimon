@@ -117,7 +117,6 @@ async def _detach_mcp_server_impl(
         agent_names=_agent_names(agent, agent_name),
         ma_agent_id=str(agent.id),
         is_daimon_managed=is_daimon_managed,
-        owner_counts=True,
     )
     outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
@@ -328,7 +327,6 @@ async def _remove_agent_key_impl(
         agent_names=_agent_names(agent, agent_name),
         ma_agent_id=str(agent.id),
         is_daimon_managed=is_daimon_managed,
-        owner_counts=True,
     )
     outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
