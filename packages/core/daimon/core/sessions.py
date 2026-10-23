@@ -12,7 +12,7 @@ import functools
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from decimal import Decimal, localcontext
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anthropic as anthropic_pkg
 import httpx
@@ -58,6 +58,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
 )
 from daimon.core.errors import StoreError
+from daimon.core.fleet_credentials import login_key_of
 from daimon.core.github_app_session import (
     REQUESTER_CACHE,
     AppSessionAccess,
@@ -499,6 +500,15 @@ def native_session_budget_cents(value: object) -> int | None:
         return int(cents)
 
 
+def _other_resources(resources: list[Any]) -> list[Any]:
+    """A worker session's read-back resources other than its shared-keys .env file."""
+    return [
+        item
+        for item in resources
+        if not (isinstance(item, dict) and cast(dict[str, Any], item).get("type") == "file")
+    ]
+
+
 async def create_session(
     anthropic: AsyncAnthropic,
     *,
@@ -721,19 +731,31 @@ async def create_session(
         # Source authority is refreshed before resource effects and at the existing final fence.
         await before_create()
         memoryless = "memory" in worker.spec.declared_drops
+        shared = worker.permissions.shared_logins
+        # Only the logins its requester shared, frozen with the run, reach a worker.
+        kept = worker_source_ceiling(
+            resource_source, shared=shared, shared_servers=worker.permissions.shared_servers
+        ).resource_requirements
+        handed_logins = frozenset(
+            key for binding in worker.resources if (key := login_key_of(binding)) is not None
+        )
         if (
             (resource_source.memory_store_id is None and not memoryless)
             # A native session always runs in its environment: a sandbox loss
             # has no proven native form, so it still refuses here.
             or "sandbox" in worker.spec.declared_drops
-            or worker_source_ceiling(resource_source).resource_requirements
+            or any(login_key_of(binding) not in shared for binding in kept)
+            or not handed_logins <= shared
             or resource_source.repository_sources
             or extra_resources
         ):
             raise UnsupportedCapability(
                 ("native_worker_resource_projection",), worker.backend.profile
             )
-        if len(worker.resources) != (0 if memoryless else 1):
+        worker_mounts = tuple(
+            binding for binding in worker.resources if login_key_of(binding) is None
+        )
+        if len(worker_mounts) != (0 if memoryless else 1):
             raise ScopeViolation(
                 "worker-resources",
                 "a worker that dropped memory mounts nothing"
@@ -745,7 +767,8 @@ async def create_session(
         scope = resource_source.resource_scope
         assert scope is not None
         expected = memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
-        binding = worker.resources[0]
+        # The memory mount; any shared-login bindings beside it were checked above.
+        binding = next(item for item in worker.resources if login_key_of(item) is None)
         native, ref = binding.native, binding.resource
         if (
             native is None
@@ -763,6 +786,12 @@ async def create_session(
             or native.value != {"resource": expected}
         ):
             raise ScopeViolation("worker-resources", "grant differs from source memory intent")
+    # The logins this worker's requester shared with it (frozen with the run).
+    worker_logins: frozenset[str] = (
+        frozenset(key for binding in worker.resources if (key := login_key_of(binding)) is not None)
+        if worker is not None
+        else frozenset()
+    )
     app_mode = False
     # A fleet worker's agent_uuid is its root's: it never gets the root's per-agent
     # credentials (GitHub app vault, mirrored MCP logins, the stored .env). Its ceiling
@@ -910,10 +939,24 @@ async def create_session(
                 )
 
         resources: list[Resource] = list(extra_resources)
+        # The one .env file a worker got (its shared keys only), checked on readback.
+        worker_env_file: str | None = None
         app_access: AppSessionAccess | None = None
         provisional_session_id = f"pending:{uuid.uuid4()}"
         if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-            # Never the root's stored .env on a worker (see app_mode above).
+            # Never the root's stored .env on a worker (see app_mode above), only the
+            # stored keys its requester shared, by name.
+            # Each shared key at the version its requester approved (frozen with the run).
+            approved = dict(worker.permissions.shared_versions) if worker is not None else {}
+            shared_keys: dict[str, str] = {
+                key.removeprefix("env:"): approved[key]
+                for key in worker_logins
+                if key.startswith("env:") and key in approved
+            }
+            if worker is not None and len(shared_keys) != sum(
+                1 for key in worker_logins if key.startswith("env:")
+            ):
+                raise ScopeViolation("worker-resources", "a shared key has no approved version")
             mount = (
                 await upload_env_and_mount(
                     anthropic,
@@ -923,10 +966,22 @@ async def create_session(
                     exclude_github=app_mode,
                 )
                 if worker is None
+                else await upload_env_and_mount(
+                    anthropic,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    # Never GitHub's tokens, even if approved (refused upstream too).
+                    exclude_github=True,
+                    keys=shared_keys,
+                )
+                if shared_keys
                 else None
             )
             if mount is not None:
                 resources.append(mount)
+                if worker is not None:
+                    worker_env_file = mount["file_id"]
 
             # Memory stores (agent memory feature): degrade-not-block. A memory
             # outage must never take down chat — the session just runs without
@@ -1369,18 +1424,26 @@ async def create_session(
                 if (
                     not owned_created
                     or observed.get("archived_at") is not None
+                    or not isinstance(native_resources, list)
+                    # Exactly the .env of its shared keys, or none.
+                    or [
+                        item.get("file_id")
+                        for item in native_resources
+                        if isinstance(item, dict) and item.get("type") == "file"
+                    ]
+                    != ([worker_env_file] if worker_env_file is not None else [])
                     or (
-                        # A memoryless worker's session reads back with no resources at
-                        # all. The API always returns the list (a required field of
-                        # BetaManagedAgentsSession), so a missing one is malformed too.
-                        native_resources != []
+                        # A memoryless worker's session reads back with no other
+                        # resources at all. The API always returns the list (a required
+                        # field of BetaManagedAgentsSession), so a missing one is
+                        # malformed too.
+                        _other_resources(native_resources) != []
                         if memoryless
                         else (
-                            not isinstance(native_resources, list)
-                            or len(native_resources) != 1
-                            or not isinstance(native_resources[0], dict)
+                            len(_other_resources(native_resources)) != 1
+                            or not isinstance(_other_resources(native_resources)[0], dict)
                             or any(
-                                native_resources[0].get(key) != value
+                                _other_resources(native_resources)[0].get(key) != value
                                 for key, value in readback.items()
                             )
                         )
