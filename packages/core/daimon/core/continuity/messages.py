@@ -466,8 +466,10 @@ def render_handoff_acknowledged(
     lines = [
         f"{target_name} will handle your next message.",
         "Send a message to continue.",
-        f"Your conversation and files carry over. {target_name} uses its own "
-        "connections and memory.",
+        f"Your conversation and files carry over while {target_name} stays on this "
+        f"model provider. {target_name} uses its own connections and memory.",
+        f"Switching {target_name} to another provider starts it fresh here: earlier "
+        "messages and files don't carry over.",
     ]
     if requested_work is not None:
         # The person's own words may already end a sentence; never double the stop.

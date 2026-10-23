@@ -650,6 +650,7 @@ def backend_switch_callbacks(
     place_word: str = "server",
     pin_channel: ChannelRef | None = None,
     answering_agent_name: str | None = None,
+    handoff_thread: tuple[str, str, str] | None = None,
 ) -> tuple[
     Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
     Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
@@ -857,6 +858,29 @@ def backend_switch_callbacks(
             raise ValueError("This permission changed. Preview and confirm again.")
         return action, details
 
+    async def _answering_here(turn_agent: str | None) -> str | None:
+        """Who answers this conversation next: a hand-off's agent, else this turn's.
+
+        The approved switch moves the conversation of the agent answering here (the
+        hand-off's, once one was made), so the card must say so for that agent.
+        """
+        if handoff_thread is None:
+            return turn_agent
+        from daimon.core.stores import thread_agent_bindings
+
+        platform, parent_channel_id, thread_id = handoff_thread
+        async with sessionmaker() as session:
+            handed = await thread_agent_bindings.get_binding(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                parent_channel_id=parent_channel_id,
+                thread_id=thread_id,
+            )
+        if handed is not None and handed.kind == "handoff":
+            return handed.responder_name
+        return turn_agent
+
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
         if prompt.configuration is not None:
             action, details = await verified_configuration(
@@ -894,6 +918,7 @@ def backend_switch_callbacks(
             if preview.declared_drops
             else ""
         )
+        answering = await _answering_here(answering_agent_name)
         reach = (
             f"Affects new conversations in every channel on this {place_word}"
             if default_agent_name is not None and agent.name == default_agent_name
@@ -912,7 +937,7 @@ def backend_switch_callbacks(
                         f" This conversation moves to {provider} from your next message "
                         "(unless it's shared or this channel pins its provider); earlier "
                         "messages here aren't carried over."
-                        if answering_agent_name == agent.name
+                        if answering == agent.name
                         else ""
                     )
                     + (

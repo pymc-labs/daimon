@@ -1039,3 +1039,47 @@ async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers
     moves = "This conversation moves to OpenAI from your next message"
     assert (moves in prepared.consequence) == (answering == "Researcher")
     assert "other existing threads keep their model" in prepared.consequence
+
+
+@pytest.mark.parametrize("handed_to", ["Researcher", "someone-else", None])
+async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_preview, handed_to):
+    """J2: the turn's agent hands the thread to the copy, then switches the copy.
+
+    The approved switch moves the copy's conversation here and drops its history,
+    so the card must say so even though the turn's own agent is someone else.
+    """
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+    from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    if handed_to is not None:
+        async with sessions.begin() as session:
+            await upsert_responder_binding(
+                session,
+                tenant_id=agent.tenant_id,
+                platform="discord",
+                parent_channel_id="parent-1",
+                thread_id="thread-1",
+                responder_ma_agent_id=f"agent_{handed_to}",
+                responder_name=handed_to,
+                created_by_account_id=actor.account_id,
+                now=datetime.now(UTC),
+            )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        answering_agent_name="daimon",
+        handoff_thread=("discord", "parent-1", "thread-1"),
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    moves = "This conversation moves to OpenAI from your next message"
+    assert (moves in prepared.consequence) == (handed_to == "Researcher")
+    if handed_to == "Researcher":
+        assert "earlier messages here aren't carried over" in prepared.consequence
