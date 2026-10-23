@@ -1694,6 +1694,10 @@ async def test_run_watch_survives_ended_cohort_and_cancels_a_later_workers_usage
 async def test_run_watch_timeout_still_cancels_every_registered_worker_and_retains_holds(
     sm, monkeypatch
 ):
+    from daimon.core import channel_budget as _cb
+
+    # The fail-closed limits themselves, without the 30 s read-failure window.
+    monkeypatch.setattr(_cb, "BUDGET_READ_FAILURE_WINDOW_S", 0.0)
     from daimon.core import channel_budget
 
     parent, _ = await setup(sm)
@@ -2428,6 +2432,10 @@ async def test_run_watch_takes_the_tenant_lock_only_every_locked_refresh(sm, mon
 
 
 async def test_run_watch_fails_closed_when_the_tenant_lock_stays_busy(sm, monkeypatch):
+    from daimon.core import channel_budget as _cb
+
+    # The fail-closed limits themselves, without the 30 s read-failure window.
+    monkeypatch.setattr(_cb, "BUDGET_READ_FAILURE_WINDOW_S", 0.0)
     from daimon.core import channel_budget
 
     parent, _ = await setup(sm)
@@ -2579,6 +2587,10 @@ async def test_fleet_r8_slow_admissions_holding_the_lock_in_turn_do_not_cancel_t
 async def test_run_watch_contended_by_changing_holders_still_fails_closed_at_its_limit(
     sm, monkeypatch
 ):
+    from daimon.core import channel_budget as _cb
+
+    # The fail-closed limits themselves, without the 30 s read-failure window.
+    monkeypatch.setattr(_cb, "BUDGET_READ_FAILURE_WINDOW_S", 0.0)
     from daimon.core import channel_budget
 
     parent, _ = await setup(sm)
