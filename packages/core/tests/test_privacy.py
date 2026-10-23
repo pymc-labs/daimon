@@ -864,6 +864,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     purged: dict[str, str] = {
         "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
         "selfhosted_resource_operations": "account UUID stored as account_id text",
+        "long_job": "accounts.id FK cascade; cancellation audit cascades from the job",
         "neutral_agent_revisions": "accounts.id FK cascade",
         "neutral_skill_versions": "accounts.id FK cascade",
         "cli_principals": "account_id FK -> accounts.id",

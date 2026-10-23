@@ -415,6 +415,7 @@ async def test_a_session_for_an_agent_with_daimon_rules_asks_on_call_tool_and_th
         "hubspot_update_objects",
         "resume_watch",
         "rotate_watch_key",
+        "start_long_job",
     ]
 
 
@@ -432,6 +433,7 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
         "create_watch",
         "resume_watch",
         "rotate_watch_key",
+        "start_long_job",
     ]
 
 

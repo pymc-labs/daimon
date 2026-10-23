@@ -918,3 +918,22 @@ async def test_cancel_audit_is_content_free_and_tenant_scoped(db_engine, db_clea
     }
     assert audit["id"] == str(job.id)
     assert "secret" not in str(audit)
+
+
+async def test_account_purge_cascades_owned_jobs_and_cancel_audit(db_engine, db_clean):
+    from daimon.core.purge import purge_account
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job, other = await seed(sm), await seed(sm)
+    async with sm.begin() as db:
+        await store.register(db, job, ceilings=LIMITS)
+        await store.register(db, other, ceilings=LIMITS)
+        await store.request_cancel(
+            db, job.id, tenant_id=job.tenant_id, owner_account_id=job.owner_account_id
+        )
+    report = await purge_account(sm=sm, account_id=job.owner_account_id)
+    assert report.db.accounts == 1
+    assert await read(sm, job) is None
+    assert await read(sm, other) is not None
+    async with sm.begin() as db:
+        assert await store.list_cancel_audits(db, tenant_id=job.tenant_id, job_id=job.id) == []

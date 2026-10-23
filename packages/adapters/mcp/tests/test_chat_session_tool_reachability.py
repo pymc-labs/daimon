@@ -355,6 +355,9 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
         "search_tools",
         # Backend selection and Microsoft accounts are off; routine sandbox
         # configuration stays hidden from these non-admin credentials.
+        # Completion wakes can read this directly without discovery/call_tool.
+        "get_long_job",
+        # Unregistered here: backend selection and Microsoft accounts are off.
         *(
             APPROVAL_TOOLS
             - backend_switch_tools(enabled=True)
