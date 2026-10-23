@@ -148,7 +148,10 @@ async def _refusals_logged(
             operation_key=operation_key,
             reason=error.reason,
         )
-        raise ToolError(f"Fleet refused this worker: {error.reason.replace('_', ' ')}.") from None
+        raise ToolError(
+            f"Fleet refused this worker: {error.reason.replace('_', ' ')}."
+            + (f" {error.plain}" if error.plain else "")
+        ) from None
 
 
 class AgentWorker(BaseModel):

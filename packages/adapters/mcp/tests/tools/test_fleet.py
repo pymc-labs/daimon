@@ -1512,6 +1512,21 @@ async def test_core_refusals_reach_the_root_as_plain_text_and_are_logged_by_cate
             "Fleet refused this worker: run limit reached.",
             "fleet",
         ),
+        # J7: the real limits and the user's fix reach the root, not just the code.
+        (
+            FleetRefused(
+                "over_fleet_limits", detail="This fleet is limited to 4 workers and $2 a run."
+            ),
+            "Fleet refused this worker: over fleet limits. This fleet is limited to 4 workers "
+            "and $2 a run. Ask for at most that many workers.",
+            "fleet",
+        ),
+        (
+            FleetRefused("financial_admission_refused"),
+            "Use fewer or cheaper workers, or ask the agent's owner or an admin to raise the "
+            "fleet budget.",
+            "fleet",
+        ),
     ]
     async with Client(registered(bridge)) as client:
         for error, text, category in cases:
