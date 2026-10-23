@@ -846,6 +846,15 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             plan.holds_path, namespace=namespace, hold_usd=plan.hold_usd, cap_usd=plan.cap_usd
         )
 
+    prices = MappingProxyType(
+        {model: price for (_, model), price in pricing.provider_prices(PROFILE).items()}
+    )
+    from daimon.core.turn.daily_model_cap import CappedFlashAccounting
+
+    # Every attempt (the Flash chain may fall back to other models) checks the cap.
+    accounting = CappedFlashAccounting(
+        accounting, request, prices, request.deps.gemini_daily_model_cap_usd
+    )
     runtime = TurnRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
@@ -857,12 +866,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             request.deps.state_store,
             deployment,
         ),
-        usage_store=GeminiUsageRuntime(
-            accounting,
-            MappingProxyType(
-                {model: price for (_, model), price in pricing.provider_prices(PROFILE).items()}
-            ),
-        ),
+        usage_store=GeminiUsageRuntime(accounting, prices),
     )
 
     return runtime

@@ -83,6 +83,18 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     ):
         raise UnsupportedCapability(("gemini_durable_runtime",), PROFILE)
     journal, usage = runtime.journal, runtime.usage_store
+    # Gemini usage reaches no ledger debit, and a root interaction has no token
+    # envelope: the daily model cap refuses plainly here, before anything is
+    # created. A fallback of the first request is checked too (`CappedFlashAccounting`).
+    from daimon.core.turn.daily_model_cap import check_daily_model_cap
+
+    await check_daily_model_cap(
+        request,
+        provider=config.backend,
+        model=config.model,
+        price=usage.prices.get(config.model) if config.model is not None else None,
+        cap=request.deps.gemini_daily_model_cap_usd,
+    )
     deployment = journal.deployment
     if request.worker is not None or admission.backend_revision_origin == "agent":
         from daimon.core.turn.gemini_deployment import load_gemini_deployment
@@ -254,6 +266,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
             raise ScopeViolation(observation.id, "Gemini billing received foreign usage")
+        _warn_on_grounding(observation, tenant_id=request.tenant_id, binding_id=binding_id)
         # A moving alias has no verified resolved-price identity in this slice.
         # Preserve its counts in the outbox; never settle it using a guessed tariff.
         price = (
@@ -302,6 +315,33 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
     )
+
+
+def _warn_on_grounding(
+    observation: UsageObservation, *, tenant_id: object, binding_id: str
+) -> None:
+    """Grounding (search) calls carry a per-query price no tariff or daily cap counts.
+
+    Agent requests never offer them, so any count here is a leak to look at. The
+    usage reports them as a list of `{type, count}` (google-genai `GroundingToolCount`).
+    """
+    raw = observation.native_meter.get("grounding_tool_count")
+    entries = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    counts = {
+        str(item.get("type")): count
+        for item in entries
+        if isinstance(count := item.get("count"), int) and not isinstance(count, bool)
+    }
+    total = sum(counts.values())
+    if total > 0:
+        structlog.get_logger(__name__).warning(
+            "turn.gemini_grounding_unexpected",
+            tenant_id=str(tenant_id),
+            binding_id=binding_id,
+            observation_id=observation.id,
+            grounding_tool_count=total,
+            grounding_types=sorted(counts),
+        )
 
 
 async def _settle_hold(

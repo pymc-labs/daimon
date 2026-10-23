@@ -37,6 +37,9 @@ AdmissionDenialReason = Literal[
     # A tenant's daily spend cap on one OpenAI model is used up; it resets at
     # midnight UTC. `AdmissionDenied.provider` carries the model id for the copy.
     "provider_daily_cap_reached",
+    # No tariff is current for the model, so its spend can't be counted against the
+    # daily cap: refused rather than run uncounted. `provider` carries the model id.
+    "provider_price_unavailable",
     # A provider resource this turn needs is still being set up (the tenant's
     # first GPT environment): nothing is wrong; the same request works shortly.
     "provider_setup_pending",

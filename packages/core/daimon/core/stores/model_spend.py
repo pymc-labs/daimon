@@ -1,9 +1,9 @@
-"""What a tenant spent today on one OpenAI model, for the daily model cap.
+"""What a tenant spent today on one native model (OpenAI, Gemini), for the daily cap.
 
-OpenAI turns write no ledger debit (their infrastructure cost is unknown), so
-today's spend is priced from the observed token usage at list price, plus the
-reservations of fleet workers on that model that are still running. Counted in
-provider dollars (no markup), from midnight UTC.
+Native OpenAI and Gemini turns write no ledger debit (their infrastructure cost is
+unknown), so today's spend is priced from the observed token usage at list price,
+plus the reservations of fleet workers on that model that are still running.
+Counted in provider dollars (no markup), from midnight UTC.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def utc_midnight(now: datetime) -> datetime:
     return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-async def openai_spend_today(
+async def model_spend_today(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
@@ -80,7 +80,7 @@ async def openai_spend_today(
             if cost is None:
                 cost = minimum_cost_of(effective, rates)
         except ValueError:
-            log.warning("openai_spend.usage_row_skipped", tenant_id=str(tenant_id), model=model)
+            log.warning("model_spend.usage_row_skipped", tenant_id=str(tenant_id), model=model)
             continue
         spent += cost or Decimal(0)
     # A running worker's reservation is customer dollars (with markup). Counted in

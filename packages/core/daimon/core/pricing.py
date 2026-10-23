@@ -632,6 +632,8 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
             # Intro tariff only (GA 2026-10-13, through 2026-11-30). The post-intro
             # price is unpublished here, so from 2026-12-01 Argon is unpriced and
             # refused at admission until a dated row is added. Cached input: 95% off.
+            # FOLLOW-UP before 2026-12-01: add the post-intro row, or the daily model
+            # cap also refuses every Argon turn and worker (provider_price_unavailable).
             ProviderPrice(
                 INLINE_REUSE.provider,
                 "gemini-4-argon",

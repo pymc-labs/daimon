@@ -369,51 +369,16 @@ async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
 async def _check_daily_model_cap(
     request: ProviderPreparationRequest, runtime: OpenAIHostRuntime, revision: ConfigRevision
 ) -> None:
-    """Refuse once the tenant's daily spend on this model reaches its cap.
+    """OpenAI sessions carry no native spend limit on this project: the daily model cap."""
+    from daimon.core.turn.daily_model_cap import check_daily_model_cap
 
-    OpenAI sessions carry no native spend limit on this project, so this is the
-    guard, checked before any native call of an agent turn or a fleet worker. A
-    worker's own reservation already counts toward today's spend, so it may use
-    the cap up exactly; an agent turn starts only while some of it remains.
-    """
-    from daimon.core.stores.openai_spend import SpendUnpriced, openai_spend_today
-
-    cap = request.deps.openai_daily_model_cap_usd
-    if cap is None or revision.model is None:
-        return
-    price = runtime.price
-    try:
-        async with request.deps.sessionmaker() as session:
-            spent = await openai_spend_today(
-                session,
-                tenant_id=request.tenant_id,
-                provider=revision.backend,
-                model=revision.model,
-                now=request.now(),
-                rates=price,
-                markup=request.deps.markup,
-            )
-    except SpendUnpriced:
-        # No current tariff: today's spend can't be known, so the cap can't be honoured.
-        import structlog
-
-        structlog.get_logger(__name__).warning(
-            "turn.daily_model_cap_unpriced", tenant_id=str(request.tenant_id), model=revision.model
-        )
-        raise AdmissionDenied(
-            reason="provider_daily_cap_reached", provider=revision.model
-        ) from None
-    over = spent > cap if request.worker is not None else spent >= cap
-    if over:
-        import structlog
-
-        structlog.get_logger(__name__).warning(
-            "turn.daily_model_cap_reached",
-            tenant_id=str(request.tenant_id),
-            model=revision.model,
-            cap_usd=str(cap),
-        )
-        raise AdmissionDenied(reason="provider_daily_cap_reached", provider=revision.model)
+    await check_daily_model_cap(
+        request,
+        provider=revision.backend,
+        model=revision.model,
+        price=runtime.price,
+        cap=request.deps.openai_daily_model_cap_usd,
+    )
 
 
 async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
