@@ -1704,7 +1704,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         admin: setup details are
         for admins, capabilities (name, description, model, skills) are not. Members
         see the channel/thread responders and agents explicitly allowed to run
-        here; unrouted agents and other channels' agents are hidden.
+        here; unrouted agents and other channels' agents are hidden. get_agent
+        finds a hidden agent the user names exactly, if it may run here.
         Pass this turn's ``origin_context_id`` to verify its location. Without
         a verified location a member cannot list unrestricted agents. Admins
         retain their existing visibility. ``page`` is reserved for pagination.
@@ -1726,9 +1727,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Non-admin callers get null ``mcp_servers`` and ``created_at``.
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
-        Pass this turn's ``origin_context_id`` so its channel counts. An agent the
-        user names that list_agents doesn't show may still be found here by its
-        exact name, if it may run in this channel."""
+        Pass this turn's ``origin_context_id`` so its channel counts."""
         return await _get_agent_impl(
             runtime,
             await _auth(ctx),

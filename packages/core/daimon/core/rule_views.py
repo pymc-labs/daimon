@@ -308,7 +308,7 @@ class RuleViewer:
         )
 
     def sees_named(self, agent_names: tuple[str | None, ...]) -> bool:
-        """An agent the reader names exactly: seen wherever it may run, routed here or not.
+        """An agent the reader names by its exact name: seen wherever it may run, routed or not.
 
         The roster (`sees_names`) still hides unrouted agents; a name only finds
         an agent the reader already knows of. A member with no verified location
