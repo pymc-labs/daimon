@@ -1,9 +1,10 @@
 """A typed "stop" in a thread whose reply is running: the same stop as the card's Stop button.
 
 Deterministic, no model call: only a message that is nothing but a stop phrase
-(after the bot mention, case and trailing punctuation are removed), sent in the
-thread of a running turn by the person who asked or a server admin, sets that
-turn's cancel event. Anything longer is an ordinary message.
+(after the bot's own mention, case and trailing punctuation are removed), sent in
+the thread of a running turn by the person who asked or a server admin, sets that
+turn's cancel event. Anything longer is an ordinary message. A live fleet run is
+stopped only by an explicit @mention of the bot (`DaimonBot._typed_stop`).
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ STOP_PHRASES = frozenset(
     }
 )
 
-_MENTION = re.compile(r"<@!?\d+>")
 _SPACES = re.compile(r"\s+")
 
 StopOutcome = Literal["stopped", "already_stopping", "not_allowed", "no_running_turn"]
@@ -42,9 +42,14 @@ STOPPED = "Stopping this reply."
 ALREADY_STOPPING = "This reply is already stopping."
 
 
-def is_stop_request(text: str) -> bool:
-    """Whether `text` is only a stop phrase, e.g. "stop", "@Daimon cancel that!", "please stop"."""
-    words = _SPACES.sub(" ", _MENTION.sub(" ", text)).strip().casefold().rstrip(".!")
+def is_stop_request(text: str, *, bot_id: int | None) -> bool:
+    """Whether `text` is only a stop phrase, e.g. "stop", "@Daimon cancel that!", "please stop".
+
+    Only the bot's own mention is removed: "@Alice stop" is a message to Alice.
+    """
+    if bot_id is not None:
+        text = re.sub(rf"<@!?{bot_id}>", " ", text)
+    words = _SPACES.sub(" ", text).strip().casefold().rstrip(".!")
     words = words.removeprefix("please ").removesuffix(" please").strip(" ,")
     return words in STOP_PHRASES
 

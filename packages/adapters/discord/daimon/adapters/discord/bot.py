@@ -958,9 +958,14 @@ class DaimonBot(commands.Bot):
         return await self._fleet_card_from_post(thread, message, run_id=run_id)
 
     async def _live_fleet_card(
-        self, thread: discord.Thread
-    ) -> tuple[DiscordFleetCard, discord.Message] | None:
-        """The card of this thread's still-running fleet run, rebuilt from its post."""
+        self, thread: discord.Thread, *, author_id: int, is_admin: bool
+    ) -> tuple[DiscordFleetCard, discord.Message] | Literal["not_allowed"] | None:
+        """The card of this thread's still-running fleet run, rebuilt from its post.
+
+        "not_allowed" when the author neither started it nor is a server admin: read
+        from the stored card post, before any Discord call. The card's own control
+        path still proves authority for the rest.
+        """
         from daimon.core.stores import fleet as fleet_store
 
         if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
@@ -975,6 +980,18 @@ class DaimonBot(commands.Bot):
         if live is None:
             return None
         run_id, message_id = live
+        async with self.runtime.sessionmaker() as session:
+            post = await get_post(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id=str(thread.id),
+                message_id=message_id,
+            )
+        if post is None:
+            return None
+        if post.requester_platform_user_id != str(author_id) and not is_admin:
+            return "not_allowed"
         try:
             message = await thread.fetch_message(int(message_id))
         except discord.HTTPException:
@@ -2591,7 +2608,7 @@ class DaimonBot(commands.Bot):
         thread = message.channel
         thread_id = thread.id
         # A typed stop from someone allowed stops the running reply or fleet.
-        if await self._typed_stop(message, thread, reply_when_refused=False):
+        if await self._typed_stop(message, thread, mentioned=False):
             return
         if thread_id in self._processing:
             # The in-flight turn's delta context already carries this message.
@@ -3261,7 +3278,7 @@ class DaimonBot(commands.Bot):
             thread_id = message.channel.id
             # "@Daimon stop" stops the running reply or fleet instead of waiting behind it.
             if isinstance(message.channel, discord.Thread) and await self._typed_stop(
-                message, message.channel, reply_when_refused=True
+                message, message.channel, mentioned=True
             ):
                 return
             if thread_id in self._processing:
@@ -3411,58 +3428,75 @@ class DaimonBot(commands.Bot):
             await session.commit()
 
     async def _typed_stop(
-        self, message: discord.Message, thread: discord.Thread, *, reply_when_refused: bool
+        self, message: discord.Message, thread: discord.Thread, *, mentioned: bool
     ) -> bool:
-        """A typed stop phrase in a thread: the Stop buttons' paths.
+        """A typed stop phrase in a thread: the Stop buttons' paths. True when answered.
 
-        With a still-running fleet run in the thread, the fleet card's Stop-all (the
-        same authority as the button: its starter or a server admin), and the running
-        reply's Stop too. Otherwise the running reply's Stop: its asker or a server
-        admin. True when the message was a stop request and was answered; a plain
-        (unmentioned) stop from someone not allowed is left alone, an @-mentioned
-        one is told who can stop.
+        - @-mentioned, with a still-running fleet run in the thread: the fleet card's
+          Stop-all (its starter or a server admin, as the button), and the author's
+          own running reply too. Refused there, the author can still stop a reply
+          they may stop.
+        - Otherwise the running reply's Stop: its asker or a server admin. An
+          unmentioned stop phrase never touches a fleet, and one from someone who
+          may not stop the reply is left alone; an @-mentioned one is told who can.
         """
-        if not is_stop_request(message.content):
+        bot_id = self.user.id if self.user is not None else None
+        if not is_stop_request(message.content, bot_id=bot_id):
             return False
-        from daimon.adapters.discord.posted_controls.fleet import FLEET_STOPPING, TypedPresser
+        from daimon.adapters.discord.posted_controls.fleet import (
+            FLEET_STOP_NOT_ALLOWED,
+            FLEET_STOPPING,
+            TypedPresser,
+        )
 
-        thread_id = thread.id
+        thread_id, author_id = thread.id, message.author.id
         is_admin = isinstance(message.author, discord.Member) and (
             admin_caller(message.author).is_server_admin
         )
-        fleet = await self._live_fleet_card(thread)
+        fleet = (
+            await self._live_fleet_card(thread, author_id=author_id, is_admin=is_admin)
+            if mentioned
+            else None
+        )
         if fleet is not None:
-            card, card_message = fleet
-            text = await card.stop_typed(
-                TypedPresser(user=message.author, guild_id=thread.guild.id, channel_id=thread_id),
-                message=card_message,
+            if fleet == "not_allowed":
+                text = FLEET_STOP_NOT_ALLOWED
+            else:
+                card, card_message = fleet
+                text = await card.stop_typed(
+                    TypedPresser(
+                        user=message.author, guild_id=thread.guild.id, channel_id=thread_id
+                    ),
+                    message=card_message,
+                )
+            reply_outcome = self._typed_stops.stop(
+                thread_id, author_id=author_id, is_admin=is_admin
             )
-            stopped = text == FLEET_STOPPING
-            if stopped:
-                # The root reply, if one is still running, stops with its workers.
-                self._typed_stops.stop(thread_id, author_id=message.author.id, is_admin=True)
+            fleet_stopped = text == FLEET_STOPPING
             log.info(
                 "turn.stop_typed",
                 platform="discord",
                 thread_id=str(thread_id),
-                pressed_by=str(message.author.id),
-                outcome="fleet_stopped" if stopped else "fleet_refused",
+                pressed_by=str(author_id),
+                outcome="fleet_stopped" if fleet_stopped else "fleet_refused",
+                reply_outcome=reply_outcome,
             )
-            if not stopped and not reply_when_refused:
-                return False
+            if not fleet_stopped and reply_outcome in ("stopped", "already_stopping"):
+                # Not their fleet to stop, but their own reply: that much stops.
+                text = STOPPED if reply_outcome == "stopped" else ALREADY_STOPPING
             await self._reply_quietly(message, text)
             return True
         if thread_id not in self._processing:
             return False
-        outcome = self._typed_stops.stop(thread_id, author_id=message.author.id, is_admin=is_admin)
+        outcome = self._typed_stops.stop(thread_id, author_id=author_id, is_admin=is_admin)
         log.info(
             "turn.stop_typed",
             platform="discord",
             thread_id=str(thread_id),
-            pressed_by=str(message.author.id),
+            pressed_by=str(author_id),
             outcome=outcome,
         )
-        if outcome == "no_running_turn" or (outcome == "not_allowed" and not reply_when_refused):
+        if outcome == "no_running_turn" or (outcome == "not_allowed" and not mentioned):
             return False
         reply = {
             "stopped": STOPPED,
@@ -3632,6 +3666,8 @@ class DaimonBot(commands.Bot):
             return groups
 
         async def run(messages: list[discord.Message]) -> None:
+            # The turn before this one is over; this group's turn registers its own Stop.
+            self._typed_stops.release(thread_id)
             if self._thread_stops.get(thread_id) is not None:
                 # Checked before every group, so a thread lost mid-drain starts nothing more.
                 for message in messages:

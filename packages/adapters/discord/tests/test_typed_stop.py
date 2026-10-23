@@ -38,15 +38,22 @@ STRANGER = 222
     ],
 )
 def test_a_bare_stop_phrase_is_a_stop_request(text: str) -> None:
-    assert is_stop_request(text)
+    assert is_stop_request(text, bot_id=999)
 
 
 @pytest.mark.parametrize(
     "text",
-    ["stop using tables in your answer", "can you cancel my subscription?", "stopwatch", ""],
+    [
+        "stop using tables in your answer",
+        "can you cancel my subscription?",
+        "stopwatch",
+        "",
+        "<@123> stop",  # a message to someone else
+        "<@999> <@123> stop",
+    ],
 )
 def test_a_longer_message_is_not_a_stop_request(text: str) -> None:
-    assert not is_stop_request(text)
+    assert not is_stop_request(text, bot_id=999)
 
 
 def test_only_the_requester_or_an_admin_stops_once() -> None:
@@ -63,7 +70,7 @@ def test_only_the_requester_or_an_admin_stops_once() -> None:
 
 
 async def _running_turn(
-    bot: DaimonBot,
+    bot: DaimonBot, *, requester: int = REQUESTER
 ) -> tuple[asyncio.Task[None], asyncio.Event, asyncio.Event, list[str]]:
     """A thread's turn: it stops when its cancel event is set, winding down until `finish`."""
     started, calls = asyncio.Event(), []
@@ -79,7 +86,9 @@ async def _running_turn(
         await finish.wait()
 
     bot._handle_mention = turn  # type: ignore[method-assign]
-    task = asyncio.create_task(bot.on_message(_make_thread_message(content="write a long story")))
+    task = asyncio.create_task(
+        bot.on_message(_make_thread_message(content="write a long story", author_id=requester))
+    )
     await started.wait()
     return task, cancel, finish, calls
 
@@ -193,3 +202,82 @@ async def test_a_member_who_did_not_start_the_fleet_is_told_who_can_stop_it(
     cancel.set()
     finish.set()
     await task
+
+
+@pytest.mark.asyncio
+async def test_the_fleet_s_starter_cannot_stop_someone_else_s_reply(queued_bot: DaimonBot) -> None:
+    """A stops their fleet; member B's running reply in the thread keeps going."""
+    from daimon.adapters.discord.posted_controls.fleet import FLEET_STOPPING
+
+    task, cancel, finish, _ = await _running_turn(queued_bot, requester=STRANGER)
+    stop_typed = _live_fleet(queued_bot, FLEET_STOPPING)
+    stop = _typed("<@999> stop the fleet", REQUESTER)
+    await queued_bot.on_message(stop)
+    stop_typed.assert_awaited_once()
+    assert not cancel.is_set(), "B's reply is B's (or an admin's) to stop"
+    stop.reply.assert_awaited_once_with(FLEET_STOPPING, mention_author=False)  # type: ignore[attr-defined]
+    cancel.set()
+    finish.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_someone_refused_the_fleet_still_stops_their_own_reply(queued_bot: DaimonBot) -> None:
+    """B didn't start the fleet, so it keeps running; B's own reply stops."""
+    task, cancel, finish, _ = await _running_turn(queued_bot, requester=STRANGER)
+    _live_fleet(
+        queued_bot, "Only the person who started this fleet, or a server admin, can stop it."
+    )
+    stop = _typed("<@999> stop", STRANGER)
+    await queued_bot.on_message(stop)
+    assert cancel.is_set()
+    stop.reply.assert_awaited_once_with(STOPPED, mention_author=False)  # type: ignore[attr-defined]
+    finish.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_a_non_starter_is_refused_from_the_stored_card_before_any_discord_call(
+    queued_bot: DaimonBot,
+) -> None:
+    from daimon.adapters.discord.posted_controls.fleet import FLEET_STOP_NOT_ALLOWED
+
+    queued_bot._live_fleet_card = AsyncMock(return_value="not_allowed")  # type: ignore[method-assign]
+    stop = _typed("<@999> stop the fleet", STRANGER)
+    await queued_bot.on_message(stop)
+    stop.reply.assert_awaited_once_with(FLEET_STOP_NOT_ALLOWED, mention_author=False)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_an_unmentioned_stop_never_touches_a_fleet(queued_bot: DaimonBot) -> None:
+    """ "never mind" between people stops at most the speaker's own running reply."""
+    from daimon.adapters.discord.posted_controls.fleet import FLEET_STOPPING
+
+    task, cancel, finish, _ = await _running_turn(queued_bot)
+    stop_typed = _live_fleet(queued_bot, FLEET_STOPPING)
+    stop = _typed("never mind", REQUESTER)
+    assert await queued_bot._typed_stop(stop, stop.channel, mentioned=False)  # pyright: ignore[reportPrivateUsage]
+    stop_typed.assert_not_awaited()
+    queued_bot._live_fleet_card.assert_not_awaited()  # type: ignore[attr-defined]
+    assert cancel.is_set()
+    other = _typed("never mind", STRANGER)
+    assert not await queued_bot._typed_stop(other, other.channel, mentioned=False)  # pyright: ignore[reportPrivateUsage]
+    other.reply.assert_not_called()  # type: ignore[attr-defined]
+    finish.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_a_stop_addressed_to_someone_else_is_an_ordinary_message(
+    queued_bot: DaimonBot,
+) -> None:
+    task, cancel, finish, calls = await _running_turn(queued_bot)
+    to_alice = _typed("<@999> <@123> stop", REQUESTER)
+    await queued_bot.on_message(to_alice)
+    assert not cancel.is_set()
+    to_alice.reply.assert_not_called()  # type: ignore[attr-defined]
+    to_alice.add_reaction.assert_awaited_with("⌛")  # type: ignore[attr-defined]
+    cancel.set()
+    finish.set()
+    await task
+    assert len(calls) == 2

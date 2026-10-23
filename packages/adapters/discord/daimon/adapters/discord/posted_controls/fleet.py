@@ -689,6 +689,8 @@ class DiscordFleetCardFactory:
 
 _NOT_CONTROLLER = f"Only the person who started this fleet, or {ADMIN_NOUN}, can {{verb}} it."
 FLEET_STOPPING = "Stopping this fleet and its workers."
+FLEET_STOP_NOT_ALLOWED = _NOT_CONTROLLER.format(verb="stop")
+_WAITING = "This action is waiting for its dependencies."
 _ALREADY_ENDED = "This fleet has already stopped."
 _WORKER_ENDED = "This worker has already finished."
 _UNREACHABLE = "Couldn't reach the fleet just now. Try again in a moment."
@@ -914,9 +916,7 @@ class DiscordFleetCard:
                     now=self._clock(),
                 )
                 if reply.get("accepted") is not True:
-                    await interaction.response.send_message(
-                        "This action is waiting for its dependencies.", ephemeral=True
-                    )
+                    await interaction.response.send_message(_WAITING, ephemeral=True)
                     return False
                 log.info(
                     "fleet.control_pressed",
@@ -975,7 +975,7 @@ class DiscordFleetCard:
                     now=self._clock(),
                 )
                 if reply.get("accepted") is not True:
-                    return _IN_FLIGHT
+                    return _WAITING
                 log.info(
                     "fleet.control_typed",
                     run_id=str(run.id),
@@ -983,13 +983,17 @@ class DiscordFleetCard:
                     pressed_by=str(presser.user.id),
                     presser_is_admin=parent.subject.is_admin,
                 )
+            except (FleetRefused, WorkerSpecRefused) as refused:
+                return _refusal_text(refused, "kill")
+            # The kill stands whether or not the card can be redrawn now.
+            try:
                 run, workers = await self._service.read_snapshot(parent, policy, run.id)
                 if message is not None:
                     self._message = message
                 await self._display(self._render(run, workers))
-                return FLEET_STOPPING
-            except (FleetRefused, WorkerSpecRefused) as refused:
-                return _refusal_text(refused, "kill")
+            except Exception:
+                log.warning("fleet.control_typed_redraw_failed", run_id=str(run.id), exc_info=True)
+            return FLEET_STOPPING
 
     async def allow_sealed_responses(self) -> bool:
         """Ordinary delivery only for no run, or a run nothing was spawned into yet.
