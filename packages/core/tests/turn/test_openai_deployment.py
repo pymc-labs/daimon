@@ -13,7 +13,13 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    FleetSettings,
+    Settings,
+    TurnSettings,
+)
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.mux_state import PostgresStateStore
@@ -61,6 +67,7 @@ async def application(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
         turn=TurnSettings(path="mux", channel_backends=True),
+        fleet=FleetSettings(enabled=False),
     )
     native = ScriptedTransport()
     async with native.client() as client:

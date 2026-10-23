@@ -235,7 +235,9 @@ async def test_search_messages_slack_caller_no_longer_hits_unsupported_branch(
     assert "search_messages isn't available here yet" not in output_text, (
         "search_messages must no longer hit the Slack-unsupported branch"
     )
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), (
         f"Slack caller's search_messages must hit the Slack-only crypto-keys error; "
         f"got {output_text!r}"
     )
@@ -278,10 +280,9 @@ async def test_send_message_slack_caller_no_longer_hits_unsupported_branch(
     assert "send_message isn't available here yet" not in output_text, (
         "send_message must no longer hit the Slack-unsupported branch"
     )
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"Slack caller's send_message must hit the Slack-only crypto-keys error; "
-        f"got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"Slack caller's send_message must hit the Slack-only crypto-keys error; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -293,7 +294,7 @@ async def test_read_channel_slack_caller_routes_to_slack_impl_and_fails_on_missi
 
     With no DAIMON_CRYPTO__KEYS configured on the runtime, the Slack impl's
     ``slack_web_client`` fails with a Slack-specific error the Discord impl
-    could never produce ("slack tools require DAIMON_CRYPTO__KEYS"). That
+    could never produce ("Slack tools are unavailable: …no encryption key"). That
     error only surfaces past the identity gates, so the caller needs a linked
     PlatformPrincipal (platform_user_id) for the tenant's platform.
     """
@@ -316,9 +317,9 @@ async def test_read_channel_slack_caller_routes_to_slack_impl_and_fails_on_missi
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"Slack caller's read_channel must hit the Slack-only crypto-keys error; got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"Slack caller's read_channel must hit the Slack-only crypto-keys error; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -523,9 +524,9 @@ async def test_read_channel_slack_caller_treats_empty_pagination_params_as_absen
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -591,9 +592,9 @@ async def test_read_thread_slack_caller_treats_empty_before_as_absent(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"an empty before must read as absent, not as misuse; got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"an empty before must read as absent, not as misuse; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -630,7 +631,9 @@ async def test_create_thread_slack_caller_routes_to_slack_impl_and_fails_on_miss
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), (
         f"Slack caller's create_thread must hit the Slack-only crypto-keys error; got {output_text!r}"
     )
 

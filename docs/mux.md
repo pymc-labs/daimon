@@ -110,7 +110,7 @@ channel to the default. Both refuse a selection that does not hold
 together (`InvalidConfig`).
 
 Admission reads it only when `DAIMON_TURN__CHANNEL_BACKENDS` is on; it is
-off by default, and then nothing is read. With it on, a channel nobody
+on by default. Setting it false is an emergency stop, and then nothing is read. With it on, a channel nobody
 configured has no revision and admits exactly as before. A configured
 channel is checked after the config cascade and before any provider call:
 its profile must meet the configuration (`admit` above), and this release
@@ -879,10 +879,11 @@ successful unsupported migration, public handles and undeclared extensions.
 The registration context closes streams and SDK clients. This adds no provider
 discovery or host activation and makes no live calls.
 
-### Experimental turn bridge
+### Turn bridge
 
-`DAIMON_TURN__PATH=legacy` remains the default, including an empty value.
-Setting `mux` opts into Events/Sessions ports for turn input, confirmed stream
+`DAIMON_TURN__PATH=mux` is the default, including an empty value. Setting
+`legacy` is an emergency stop that returns every turn to the Managed Agents-only
+path. `mux` uses Events/Sessions ports for turn input, confirmed stream
 opening and status checks. The host keeps its existing authorization, billing,
 rendering and lifecycle policies. Prepared turns derive the scope from the
 admitted tenant and account; direct callers must supply their authorized scope.
@@ -1477,8 +1478,8 @@ Install the `daimon-mux[openai]` extra in deployments that explicitly enable
 OpenAI channels. The default application dependency remains unchanged.
 
 The application resolves `openai.persistent_workspace` per admitted turn when
-`DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` are explicitly
-enabled. Injected runtimes remain supported. Without an injection, export
+`DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` (both defaults)
+are in effect. Injected runtimes remain supported. Without an injection, export
 `DAIMON_TURN__PROVIDER_RUNTIME_FILE` in the application's process environment
 pointing to an operator-owned JSON file. Its entries authorize provisioned native
 resources for one exact tenant, account, channel and backend configuration digest:
@@ -2272,8 +2273,8 @@ resources refuse. A final catalog read detects
 changes during native readback; it does not claim an atomic provider revision
 pin. This component returns the existing retained catalog revision.
 
-Agent-origin native execution remains refused, including when
-`DAIMON_TURN__AGENT_BACKENDS=true`. The flag is default off and retains the
+`DAIMON_TURN__AGENT_BACKENDS` is on by default; setting it false is an
+emergency stop that refuses agent-origin native execution. The flag retains the
 readback groundwork; it does not turn a catalog component into complete source
 preservation authority. The existing admission and preparation origin guards
 refuse before publishing an agent-origin effective revision, constructing a
@@ -3194,7 +3195,7 @@ root-and-workers run.
 
 ### Fleet runtime composition and draining
 
-With `DAIMON_FLEET__ENABLED=true`, the ordinary Discord `build_runtime(settings)`
+With `DAIMON_FLEET__ENABLED=true` (the default), the ordinary Discord `build_runtime(settings)`
 and MCP `create_mcp_app` factories construct the existing fleet orchestrator,
 worker pool and scoped host ports. They use the process's real sessions, client,
 markup and turn dependencies. No permission loader needs to be injected: root

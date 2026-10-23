@@ -580,9 +580,11 @@ async def _request_agent_key_impl(
         # Fail closed before anyone is asked for a value that could not be stored
         # encrypted. Tell the model plainly so it relays the operator step.
         raise ToolError(
-            "Daimon has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
-            "can't be saved and no card was posted. Tell them the operator must set "
-            "DAIMON_CRYPTO__KEYS first. Do not ask for the value in chat."
+            "This Daimon install has no encryption key yet, so agent keys can't be "
+            "saved and no card was posted. Tell them in plain words: nothing was "
+            "saved, and whoever runs this Daimon install must add an encryption key "
+            "first. Do not name settings or environment variables, and do not ask for "
+            "the value in chat."
         )
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(

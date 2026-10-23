@@ -34,6 +34,8 @@ def test_native_loader_independently_refuses_missing_or_unproven_origin(
     origin_plan, monkeypatch, origin
 ):
     selected, loader, _ = origin_plan
+    # Agent backends are on by default; an agent origin is refused under the operator stop.
+    selected = replace(selected, deps=replace(selected.deps, agent_backends=False))
     # Simulate a stale external producer that bypasses the constructor guard.
     object.__setattr__(selected.admission, "backend_revision_origin", origin)
     monkeypatch.setattr(

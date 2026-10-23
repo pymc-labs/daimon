@@ -268,8 +268,9 @@ async def test_disallowed_retained_backend_is_refused_by_same_admission_gate(own
 
 
 def test_factory_uses_existing_flags() -> None:
-    assert not make_backend_service(None, TurnSettings()).enabled
-    assert not make_backend_service(None, TurnSettings(path="mux")).enabled
+    assert make_backend_service(None, TurnSettings()).enabled, "on by default"
+    assert not make_backend_service(None, TurnSettings(path="legacy")).enabled
+    assert not make_backend_service(None, TurnSettings(channel_backends=False)).enabled
     assert make_backend_service(None, TurnSettings(path="mux", channel_backends=True)).enabled
 
 

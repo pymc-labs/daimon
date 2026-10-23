@@ -382,8 +382,10 @@ async def test_complete_native_component_still_cannot_unlock_agent_origin_execut
     path.write_text(json.dumps([owned.plan.model_dump(mode="json")]))
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
     before = len(owned.wire.requests)
+    # Agent backends are on by default; this is the operator stop.
+    stopped = replace(owned.request, deps=replace(owned.request.deps, agent_backends=False))
     with pytest.raises(AdmissionDenied):
-        build_runtime(owned.wire.provider, owned.request)
+        build_runtime(owned.wire.provider, stopped)
     assert len(owned.wire.requests) == before
 
 

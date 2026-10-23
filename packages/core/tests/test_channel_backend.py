@@ -72,8 +72,9 @@ def test_shared_threads_on_anthropic_are_runnable() -> None:
     check_backend(_revision(BackendConfig(thread_mode="shared")))
 
 
-def test_turn_settings_leave_channel_backends_off() -> None:
-    assert TurnSettings().channel_backends is False
+def test_turn_settings_turn_channel_backends_on_by_default() -> None:
+    assert TurnSettings().channel_backends is True
+    assert TurnSettings(channel_backends=False).channel_backends is False, "the operator stop"
 
 
 def _revision(config: BackendConfig) -> ConfigRevision:

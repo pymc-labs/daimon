@@ -1270,7 +1270,7 @@ after Stop never runs anything. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
 
-With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
+With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` (the defaults),
 an active chat admin can request an agent backend change through that same
 confirmation hook. The card shows the server's current compatibility and cost
 preview. Confirm rechecks the requester and current admin permission, then
@@ -1535,8 +1535,9 @@ one entry in its own journal; the worker row keeps only a pointer to it, with it
 digest and a short excerpt. Every status change is a compare-and-swap on the
 row's version. Worker turns have a concurrency pool of their own, counted from
 these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
-per process, so a fan-out never takes the chat turns' slots. Fleets are off by
-default (`DAIMON_FLEET__ENABLED`).
+per process, so a fan-out never takes the chat turns' slots. Fleets are on by
+default; `DAIMON_FLEET__ENABLED=false` is an emergency stop that refuses new
+workers before they are funded.
 
 ### Same-thread handoff
 

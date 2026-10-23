@@ -1,9 +1,11 @@
 """The turn leg a test run selects: one real `TurnSettings` read from the environment.
 
-CI runs the turn-relevant suites twice. The legacy leg is the default and sets
-nothing. The mux leg sets ``DAIMON_TURN__PATH=mux`` and
-``DAIMON_TURN__CHANNEL_BACKENDS=true``. Fixtures that build turn dependencies
-(`daimon.testing.turn_fakes.deps_for`, the parity drivers) take their path and
+CI runs the turn-relevant suites twice. The legacy leg sets nothing, and
+`daimon.testing.stop_leg_default` then selects the emergency stop (legacy, backend
+flags off). The mux leg sets ``DAIMON_TURN__PATH=mux`` and
+``DAIMON_TURN__CHANNEL_BACKENDS=true``: the production default. Fixtures that
+build turn dependencies (`daimon.testing.turn_fakes.deps_for`, the parity drivers)
+take their path and
 backend flags from `turn_leg()` instead of hard-coding them, so the environment
 moves them with the product settings loader and not around it.
 
@@ -17,7 +19,8 @@ from __future__ import annotations
 from daimon.core.config import TurnSettings, load_turn_settings
 from mux.contracts.ids import Scope
 
-LEGACY_LEG = TurnSettings(path="legacy")
+# The legacy leg is the emergency stop: every turn flag off, as an operator sets it.
+LEGACY_LEG = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
 MUX_LEG = TurnSettings(path="mux", channel_backends=True)
 
 

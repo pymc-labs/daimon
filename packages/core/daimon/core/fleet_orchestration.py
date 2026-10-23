@@ -1924,6 +1924,16 @@ class HostFleetPorts:
 
         if self._dispatch is None or session is not None or run_id != parent.fleet.run_id:
             raise FleetRefused("prerequisites_unavailable")
+        deps = self._deps
+        if deps is not None and (
+            not deps.fleet_enabled
+            or deps.turn_path != "mux"
+            or not deps.channel_backends
+            or not deps.agent_backends
+        ):
+            # An operator stop: refuse before the worker is funded or claims a slot,
+            # instead of failing it later in `run_worker`.
+            raise FleetRefused("prerequisites_unavailable")
         if (reviewer_of is None) != (reviewed_result is None):
             raise FleetRefused("review_evidence_invalid")
         self.prices = MappingProxyType(

@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -462,7 +463,7 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
         assert len((tmp_path / "updates").read_text().splitlines()) == 1
 
 
-def test_mux_leg_is_a_blocking_ratchet_outside_the_deploy_gate() -> None:
+def test_mux_leg_is_a_blocking_ratchet_inside_the_deploy_gate() -> None:
     """The mux leg selects mux through the environment and ratchets its known failures."""
     jobs = _workflow("ci.yml")["jobs"]
     job = jobs["pytest-mux-leg"]
@@ -470,10 +471,15 @@ def test_mux_leg_is_a_blocking_ratchet_outside_the_deploy_gate() -> None:
     assert job["env"]["DAIMON_TURN__PATH"] == "mux"
     assert job["env"]["DAIMON_TURN__CHANNEL_BACKENDS"] == "true"
     assert all("-p daimon.testing.mux_leg_known" in c for c in _pytest_commands(job))
-    # Production defaults to legacy, so a mux failure must not hold back the staging deploy.
-    assert "pytest-mux-leg" not in jobs["deploy-gcp"]["needs"]
+    # Production defaults to mux, so a mux failure holds back the staging deploy.
+    assert "pytest-mux-leg" in jobs["deploy-gcp"]["needs"]
     assert (_ROOT / "tests" / "mux_leg_known_failures.txt").is_file()
-    # The legacy legs never load the ratchet or select mux.
+    # The other legs never load the ratchet or select a path: the root addopts run
+    # them on the emergency-stop leg (daimon.testing.stop_leg_default).
+    addopts = tomllib.loads((_ROOT / "pyproject.toml").read_text())["tool"]["pytest"][
+        "ini_options"
+    ]["addopts"]
+    assert "-p daimon.testing.stop_leg_default" in addopts
     for name in ("pytest-db", "pytest-discord"):
         assert "mux_leg_known" not in " ".join(_pytest_commands(jobs[name]))
         assert "DAIMON_TURN__PATH" not in jobs[name]["env"]

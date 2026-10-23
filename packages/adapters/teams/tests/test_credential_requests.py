@@ -299,7 +299,9 @@ async def test_an_env_value_is_refused_without_encryption_keys(
         async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
             refused = await post_activity(service, _submit(row.token))
             await service.turns.drain(5)
-    assert "DAIMON_CRYPTO__KEYS" in refused["task"]["value"]
+    message = refused["task"]["value"]
+    assert "no encryption key" in message and "Nothing was saved" in message
+    assert "DAIMON_" not in message, "no operator setting is shown to the person"
     async with db_session_factory() as session:
         live = await peek_credential_request(session, token=row.token)
     assert live is not None and live.used_at is None, "the request stays live for a retry"

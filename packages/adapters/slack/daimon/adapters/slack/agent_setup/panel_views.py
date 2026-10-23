@@ -300,8 +300,7 @@ OPERATOR_TOKENS_LABEL: Final = "Operator tokens"
 MAX_OPERATOR_TOKEN_LINES: Final = 25
 OPERATOR_TOKENS_NOTE: Final = (
     f"An operator token lets an integration use Daimon as you for "
-    f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here or with "
-    "`daimon mcp revoke-token`."
+    f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here."
 )
 PERMISSIONS_LABEL: Final = "Permissions"
 RULE_COPY_LABEL: Final = "Keep it to a copy"
