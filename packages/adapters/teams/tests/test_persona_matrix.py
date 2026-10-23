@@ -47,7 +47,7 @@ from mux.testing.drivers.anthropic.ma import (
     sse_response,
 )
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     ADMIN_TEAM,
@@ -329,10 +329,19 @@ async def test_a_guest_owner_of_the_admin_team_is_an_admin(
 @pytest.mark.parametrize("requester", PERSONAS, ids=lambda persona: persona.name)
 @pytest.mark.usefixtures("instant_output_settle")
 async def test_tool_confirmation_only_requester_can_answer(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_clean: None,
+    db_committing_engine: AsyncEngine,
     requester: Persona,
 ) -> None:
-    """Mocked permission tests route a real pending card through ingress."""
+    """Mocked permission tests route a real pending card through ingress.
+
+    Its sessions get their own connections, as in production. On one shared
+    connection the external path's activity-notice lookup (an autobegun read,
+    rolled back on close) could own the transaction the decision batch's
+    operation joined, and roll that operation back before its claim (KeyError
+    "no operation ... :actions:...").
+    """
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     await provision_tenant(
         db_session_factory,
         platform="teams",
