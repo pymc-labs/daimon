@@ -746,6 +746,27 @@ async def test_waiting_collect_ends_the_turn_card_without_the_premature_answer()
     assert lifecycle.was_answered and lifecycle._terminal
 
 
+async def test_a_plain_turn_posts_no_fleet_card():
+    # smoke-1 D: every turn holds a fleet run; one nothing was spawned into
+    # rendered "Fleet — no workers started" on every turn.
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), ())
+    assert await card.refresh() is False
+    send.assert_not_awaited()
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    state = TurnState(content=[TextBlock(kind="text", text="Just an answer.")])
+    await lifecycle.on_render(state)
+    await lifecycle.on_terminal_success(state)
+    assert sum("Just an answer." in text for text in _texts(send, edit)) == 1
+    assert not _headlines(send, edit)
+    # A run with a worker still gets its card.
+    owner.read_run.return_value = (run(), (worker(),))
+    assert await card.refresh() is True
+    assert _headlines(send, edit)
+
+
 @pytest.mark.parametrize("render_first", [False, True])
 async def test_zero_worker_run_delivers_the_roots_answer_and_ends_the_fleet_card(render_first):
     # r2/r3/r4: the root spawned nothing, so "Working on it…" and
@@ -765,11 +786,8 @@ async def test_zero_worker_run_delivers_the_roots_answer_and_ends_the_fleet_card
     assert lifecycle.was_answered and lifecycle._terminal
     owner.settle_run.assert_awaited_once()
     assert owner.settle_run.await_args.args[2] == "cancelled"
-    headlines = _headlines(send, edit)
-    if render_first:
-        assert headlines[-1] == "**Fleet — no workers started**"
-    else:
-        assert not headlines
+    # Nothing was spawned, so no fleet card was ever posted (smoke-1 D).
+    assert not _headlines(send, edit)
     owner.wait.assert_not_awaited()
     owner.read_result.assert_not_awaited()
 
@@ -949,7 +967,7 @@ async def test_root_turn_error_ends_the_fleet_card_and_still_owes_the_result(wor
     headlines = _headlines(send, edit)
     if workers == "none":
         assert owner.settle_run.await_args.args[2] == "cancelled"
-        assert headlines[-1] == "**Fleet — no workers started**"
+        assert not headlines
         owner.wait.assert_not_awaited()
     else:
         owner.settle_run.assert_not_awaited()
@@ -1826,6 +1844,25 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
             recorder.sender(thread, turn_card_intent_id=intent.id),
             AsyncMock(),
             turn_card_intent_id=intent.id,
+        )
+        # A run nothing was spawned into posts no card (smoke-1 D): spawn one.
+        frozen_run, _ = await fleet.run_status(
+            deps.sessionmaker, tenant_id=TENANT, run_id=original.fleet.run_id
+        )
+        await fleet.add_worker(
+            deps.sessionmaker,
+            tenant_id=TENANT,
+            run_id=frozen_run.id,
+            ordinal=1,
+            role="research",
+            spec={},
+            spec_digest="spec-1",
+            backend="openai",
+            profile="openai.conversation_only",
+            model="gpt-6-luna",
+            budget_usd=Decimal("0.01"),
+            deadline_at=frozen_run.deadline_at,
+            max_turns=1,
         )
         assert card is not None and await card.refresh()
         assert card.run_id == original.fleet.run_id

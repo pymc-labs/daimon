@@ -709,6 +709,10 @@ class DiscordFleetCard:
             if snapshot is None:
                 return False
             _, _, run, workers = snapshot
+            if not workers and self._message is None:
+                # Every turn holds a fleet run; one nothing was spawned into is
+                # not a fleet, so the turn renders as a plain turn.
+                return False
             view = self._render(run, workers)
             await self._display(view)
             return True
