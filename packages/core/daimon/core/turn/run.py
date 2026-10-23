@@ -64,7 +64,7 @@ from daimon.core.turn.approvals import (
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.driver import run_turn
+from daimon.core.turn.driver import SEND_ATTEMPTED, run_turn
 from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
@@ -817,6 +817,79 @@ async def _replace_dead_session_locked(
     )
 
 
+async def _with_handoff_summary(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    user_message: str,
+) -> tuple[str, tuple[str, str] | None]:
+    """The person's message, after the summary a cross-provider hand-off left here.
+
+    Taken once, for the agent the thread was handed to and the person who
+    handed it: quoted and escaped in the user message (never system text),
+    since another model wrote it. Also returns what was taken, so a turn that
+    fails can put it back (`_restore_handoff_summary`).
+    """
+    from daimon.core.handoff_context import render_handoff_summary
+    from daimon.core.stores.thread_agent_bindings import take_handoff_summary
+
+    parent = getattr(prepared.admission, "origin_channel_id", None)
+    if parent is None:
+        return user_message, None
+    async with deps.sessionmaker.begin() as db:
+        taken = await take_handoff_summary(
+            db,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent,
+            thread_id=thread_id,
+            responder_ma_agent_id=prepared.admission.agent.id,
+            account_id=prepared.admission.account_id,
+        )
+    if taken is None:
+        return user_message, None
+    from_name, summary = taken
+    log.info("turn.handoff_summary_seeded", thread_id=thread_id, chars=len(summary))
+    seeded = f"{render_handoff_summary(summary, from_agent_name=from_name)}\n\n{user_message}"
+    return seeded, taken
+
+
+async def _restore_handoff_summary(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    taken: tuple[str, str],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> None:
+    """Put a taken summary back after its turn failed, so the next one still has it."""
+    from daimon.core.stores.thread_agent_bindings import set_handoff_summary
+
+    parent = getattr(prepared.admission, "origin_channel_id", None)
+    if parent is None:
+        return
+    from_name, summary = taken
+    try:
+        async with deps.sessionmaker.begin() as db:
+            await set_handoff_summary(
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                parent_channel_id=parent,
+                thread_id=thread_id,
+                responder_ma_agent_id=prepared.admission.agent.id,
+                account_id=prepared.admission.account_id,
+                from_name=from_name,
+                summary=summary,
+            )
+    except Exception as error:  # a lost summary must never mask the turn's own outcome
+        log.warning("turn.handoff_summary_restore_failed", error=type(error).__name__)
+
+
 async def run_prepared_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -849,6 +922,19 @@ async def run_prepared_turn(
         or current_outcome.get()
         or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
     )
+    seeded: tuple[str, str] | None = None
+    # Marked by the driver once the message is handed to the provider: a summary
+    # goes back only if this turn never sent it (`_restore_handoff_summary`).
+    sent: list[bool] = []
+    if origin in _CHAT_RENDERED_ORIGINS:
+        user_message, seeded = await _with_handoff_summary(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            user_message=user_message,
+        )
     observation.thread_id = thread_id
     observation.account_id = prepared.admission.account_id
     observation.agent_id = prepared.admission.agent.id
@@ -859,6 +945,7 @@ async def run_prepared_turn(
         if prepared.admission.backend_footer_profile is not None and deps.backend_selection_enabled
         else None
     )
+    marking = SEND_ATTEMPTED.set(sent)
     try:
         with observation.activate(), deps.running_turns.track():
             result = await run_prepared_turn_impl(
@@ -889,8 +976,13 @@ async def run_prepared_turn(
             )
     except BaseException as exc:
         observation.finish(error=exc)
+        if seeded is not None and not sent:
+            await _restore_handoff_summary(
+                deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+            )
         raise
     finally:
+        SEND_ATTEMPTED.reset(marking)
         finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
         if finalize is not None:
             # Credential revocation must survive a second cancel of this task:
@@ -904,6 +996,10 @@ async def run_prepared_turn(
                 log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
+    if seeded is not None and not sent and result.state.error is not None:
+        await _restore_handoff_summary(
+            deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+        )
     return result
 
 

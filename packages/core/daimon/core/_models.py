@@ -2491,6 +2491,9 @@ class ThreadAgentBinding(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # A cross-provider hand-off's summary (JSON: from, summary), taken once by the
+    # destination's first turn here; cleared when the binding is replaced or released.
+    handoff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TurnOrigin(Base):

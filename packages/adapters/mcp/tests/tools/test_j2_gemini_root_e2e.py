@@ -331,6 +331,9 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
             chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
         )
     assert "post its switch card now" in str(early.value)
+    # The conversation's summary goes with the switch request: the card's approval
+    # hands the thread over, and the copy on Gemini starts from it.
+    summary = "Carlos asked for a copy on Argon to compare answers; nothing else is open."
     # 4. The copy switches to Argon: the preview, then the confirmed call the card runs.
     preview = await _request_agent_backend_switch_impl(
         chat.runtime,
@@ -339,6 +342,7 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         target_backend="gemini",
         model="argon",
         origin_context_id=str(chat.origin.id),
+        handoff_summary=summary,
     )
     # A readable catalogue keeps Daimon's MCP on Gemini; only the tool that needs a
     # confirmation card (Gemini has none) stays behind. Unreadable declares the drop.
@@ -354,6 +358,7 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         target_backend="gemini",
         model="argon",
         origin_context_id=str(chat.origin.id),
+        handoff_summary=summary,
         expected_revision=preview.expected_revision,
         preview_digest=preview.preview_digest,
         accepted_drops=preview.declared_drops,
@@ -441,6 +446,10 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
     assert outcome.state.error is None
     assert extract_final_response(outcome.state.content) == "answer"
     assert posts and posts[-1]["agent_config"]["model"] == ARGON
+    # The copy starts on Argon from the hand-off's summary, quoted as untrusted text.
+    sent = json.dumps(posts[-1])
+    assert "<handoff_summary" in sent and summary in sent
+    assert sum(json.dumps(body).count("<handoff_summary") for body in posts) == 1, "once"
     # Daimon's tools reach Gemini when they could be represented; otherwise only the
     # inert no-tools sentinel (#1428), never [] (Gemini's built-ins).
     kinds = [tool.get("type") for tool in posts[-1]["tools"]]
