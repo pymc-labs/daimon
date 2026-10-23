@@ -9,7 +9,13 @@ import httpx
 import mux.drivers.gemini as gemini_transport
 import mux.drivers.openai as openai_transport
 import pytest
-from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    FleetSettings,
+    Settings,
+    TurnSettings,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.turn import gemini_deployment, openai_deployment
 from daimon.core.turn.deps import build_turn_deps
@@ -259,6 +265,7 @@ async def test_explicit_execution_setting_reaches_real_dependencies_without_allo
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
         turn=TurnSettings(agent_backends=enabled),
+        fleet=FleetSettings(enabled=False),
     )
     deps = build_turn_deps(
         settings,
@@ -269,7 +276,8 @@ async def test_explicit_execution_setting_reaches_real_dependencies_without_allo
         billing_config=None,
     )
     assert deps.agent_backends is enabled
-    assert deps.turn_path == "legacy" and deps.channel_backends is False
+    # The other turn flags keep their own (on) defaults: each one is a separate stop.
+    assert deps.turn_path == "mux" and deps.channel_backends is True
     assert deps.turn_runtimes == {} and deps.state_store is None
 
 

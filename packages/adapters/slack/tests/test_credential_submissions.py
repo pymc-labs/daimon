@@ -1498,7 +1498,8 @@ async def test_env_submission_without_crypto_keys_tells_the_person_and_keeps_the
     assert rows == [], "nothing is stored without encryption keys"
     assert row is not None and row.used_at is None, "the request stays live for a retry"
     texts = _ephemeral_texts(fake_slack_web_client)
-    assert texts and "DAIMON_CRYPTO__KEYS" in texts[-1], "the person learns the operator step"
+    assert texts and "no encryption key" in texts[-1], "the person learns the cause"
+    assert "DAIMON_" not in texts[-1], "no operator setting is shown to the person"
 
 
 @pytest.mark.asyncio
@@ -1525,7 +1526,8 @@ async def test_env_file_submission_without_crypto_keys_tells_the_person_and_keep
     assert rows == [], "nothing is stored without encryption keys"
     assert row is not None and row.used_at is None, "the request stays live for a retry"
     texts = _ephemeral_texts(fake_slack_web_client)
-    assert texts and "DAIMON_CRYPTO__KEYS" in texts[-1], "the person learns the operator step"
+    assert texts and "no encryption key" in texts[-1], "the person learns the cause"
+    assert "DAIMON_" not in texts[-1], "no operator setting is shown to the person"
 
 
 @pytest.mark.parametrize(

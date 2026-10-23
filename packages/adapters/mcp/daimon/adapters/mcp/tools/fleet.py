@@ -1,4 +1,4 @@
-"""Opt-in fleet tools over the authorized host orchestration service.
+"""Fleet tools (on by default) over the authorized host orchestration service.
 
 These tools accept resource handles, never authority. The host service resolves
 current root membership, authorization, attenuation, reservations and operations;
@@ -653,7 +653,8 @@ def register_fleet_tools(
     """
     if not enabled:
         return
-    if runtime.settings.turn.path != "mux" or not runtime.settings.turn.channel_backends:
+    turn = runtime.settings.turn
+    if turn.path != "mux" or not turn.channel_backends or not turn.agent_backends:
         return
 
     def owner() -> FleetToolService:

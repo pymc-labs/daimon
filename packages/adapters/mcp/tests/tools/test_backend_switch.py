@@ -333,9 +333,8 @@ async def test_no_verified_native_card_refuses_before_source_agent_reads(active_
         frozen["agent"]["tools"][0]["configs"] = []
         gate()
     else:
-        runtime = replace(
-            runtime, settings=runtime.settings.model_copy(update={"turn": TurnSettings()})
-        )
+        stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+        runtime = replace(runtime, settings=runtime.settings.model_copy(update={"turn": stopped}))
     with pytest.raises(ToolError):
         await _request_agent_backend_switch_impl(
             runtime,

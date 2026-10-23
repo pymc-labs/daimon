@@ -712,7 +712,8 @@ async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_th
     summary = preview.summary
     assert "open helper and use Add skill" in summary and "content_hash=" not in summary
     assert "approval cards are turned off here" in summary
-    assert "tool_safety.enabled" in summary, "the operator is told which setting"
+    assert "whoever runs this Daimon install can turn them on" in summary, "who can fix it"
+    assert "tool_safety" not in summary, "no operator setting is shown"
     assert "this conversation can't show one" not in summary
     with pytest.raises(ToolError, match="approval cards are turned off here"):
         await add(content_hash=preview.preview.content_hash)

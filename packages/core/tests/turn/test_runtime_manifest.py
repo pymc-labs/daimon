@@ -107,15 +107,12 @@ def test_host_scoped_references_validate_without_key_or_persistence(
 
 
 @pytest.mark.parametrize("loader", [load_settings, load_turn_settings])
-@pytest.mark.parametrize("selection", ["default", "legacy-enabled", "mux-disabled"])
+@pytest.mark.parametrize("selection", ["legacy-enabled", "mux-disabled"])
 def test_inactive_path_does_not_discover_or_read_a_manifest(
     loader, selection: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings_env(monkeypatch)
-    if selection == "default":
-        monkeypatch.delenv("DAIMON_TURN__PATH")
-        monkeypatch.delenv("DAIMON_TURN__CHANNEL_BACKENDS")
-    elif selection == "legacy-enabled":
+    if selection == "legacy-enabled":
         monkeypatch.setenv("DAIMON_TURN__PATH", "legacy")
     else:
         monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "false")

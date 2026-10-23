@@ -230,7 +230,7 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
         prices=prices,
         markup=Decimal(1),
         preparation=preparation,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
     )
     owner = FleetOrchestrator(ports)
@@ -434,7 +434,7 @@ async def test_falsey_injected_dispatch_remains_selected_without_native_fallback
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2)
         if dependencies
         else None,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         terms = _spawn_terms(request, root, resolved, "falsey-dispatch")
@@ -471,7 +471,7 @@ async def test_falsey_preparation_and_pool_run_the_actual_worker(worker_root):
         markup=Decimal(1),
         preparation=Preparation(),
         pool=Pool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         reply = await FleetOrchestrator(ports).spawn(
@@ -528,7 +528,7 @@ async def test_loader_is_bounded_before_and_after_admission_without_native_effec
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         async with asyncio.timeout(5):
@@ -618,7 +618,7 @@ async def test_dispatcher_ends_only_its_known_pre_native_claim_and_allows_a_heal
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     owner = FleetOrchestrator(ports)
     try:
@@ -724,7 +724,7 @@ async def test_pre_native_cleanup_refuses_a_changed_claim_without_overwriting_it
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     owner = FleetOrchestrator(ports)
     policy = await _policy(request)
@@ -867,7 +867,7 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     owner = FleetOrchestrator(ports)
     try:
@@ -967,7 +967,7 @@ async def test_wedged_preparation_fails_promptly_and_releases_its_claim(paused_s
         markup=Decimal(1),
         preparation=preparation,
         pool=pool,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         reply = await FleetOrchestrator(ports).spawn(
@@ -1032,7 +1032,7 @@ async def test_worker_failure_log_retains_closed_refusal_without_private_payload
         prices=prices,
         markup=Decimal(1),
         preparation=preparation,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
     )
     try:
@@ -1110,7 +1110,7 @@ async def test_dispatch_failure_ends_claim_and_preserves_siblings_and_collection
         markup=Decimal(1),
         preparation=preparation,
         pool=pool,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         with capture_logs() as logs:
@@ -1220,7 +1220,7 @@ async def test_fleet_r7_retry_reuses_defaulted_limits_instead_of_conflicting(wor
         prices=prices,
         markup=Decimal(1),
         dispatch=Dispatch(),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     owner = FleetOrchestrator(ports)
     try:
@@ -1290,7 +1290,7 @@ async def test_a_bug_while_running_a_worker_is_recorded_as_a_setup_error(worker_
         markup=Decimal(1),
         preparation=preparation,
         pool=pool,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         reply = await FleetOrchestrator(ports).spawn(

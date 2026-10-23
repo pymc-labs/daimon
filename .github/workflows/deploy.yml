@@ -214,6 +214,8 @@ jobs:
       # the initial cutover. All later deployments keep strict admission.
       - name: Deploy MCP registered minters
         id: mcp_minters
+        env:
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           SERVICE=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" --format=json) || {
             echo "MCP service must be provisioned first; see the manual cutover runbook" >&2
@@ -242,9 +244,17 @@ jobs:
           fi
           echo "window=$LEGACY" >> "$GITHUB_OUTPUT"
           echo "MCP bounded non-internal legacy window=$LEGACY cutoff=$CUTOFF"
+          # Production keeps today's behaviour until Carlos approves the new
+          # defaults: the four emergency stops, pinned on every prod deploy.
+          # To flip: delete PROD_PIN (and the matching daimon-infra pins).
+          PROD_PIN=""
+          if [ "${DEPLOY_ENVIRONMENT:-}" = production ]; then
+            PROD_PIN=",DAIMON_TURN__PATH=legacy,DAIMON_TURN__CHANNEL_BACKENDS=false"
+            PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false,DAIMON_FLEET__ENABLED=false"
+          fi
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}" \
-            --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF"
+            --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF$PROD_PIN"
           # Old revision requests may finish preparation and mint after traffic
           # has switched. Bound their last possible mint by the old request timeout.
           echo "$(( $(date +%s) + REQUEST_TIMEOUT ))" > "$RUNNER_TEMP/mcp-legacy-minters-until"
@@ -414,6 +424,14 @@ jobs:
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
               sudo chmod 755 /usr/local/bin/daimon-refresh-env
               sudo /usr/local/bin/daimon-refresh-env
+              # Production keeps the four emergency stops until Carlos approves
+              # the new defaults; the last env_file entry wins. To flip: delete
+              # this block (and the MCP PROD_PIN and the daimon-infra pins).
+              if [ "${{ inputs.environment }}" = production ]; then
+                printf "%s\n" DAIMON_TURN__PATH=legacy DAIMON_TURN__CHANNEL_BACKENDS=false \
+                  DAIMON_TURN__AGENT_BACKENDS=false DAIMON_FLEET__ENABLED=false \
+                  | sudo tee -a /etc/daimon/daimon.env >/dev/null
+              fi
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml
               cd /etc/daimon
               sudo -E docker compose -f compose.worker.yml pull

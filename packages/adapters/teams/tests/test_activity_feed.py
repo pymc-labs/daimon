@@ -334,7 +334,7 @@ async def test_a_turns_cards_notify_the_inbound_team_without_a_lookup(card: str)
         runtime=runtime,
         inbound=dataclasses.replace(inbound, team_group_id="g-inbound"),
         prepared=SimpleNamespace(session_ref=SESSION),
-        admission=SimpleNamespace(account_id=uuid.uuid4()),
+        admission=SimpleNamespace(account_id=uuid.uuid4(), origin_channel_id=None),
         tenant_id=uuid.uuid4(),
     )
     now = datetime.now(UTC)

@@ -95,7 +95,12 @@ def isolated_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(Settings.model_config, "env_prefix", "N11_FLEET_TEST_UNUSED_")
 
 
-def runtime(*, path: Literal["legacy", "mux"] = "mux", channel_backends: bool = True) -> McpRuntime:
+def runtime(
+    *,
+    path: Literal["legacy", "mux"] = "mux",
+    channel_backends: bool = True,
+    agent_backends: bool = True,
+) -> McpRuntime:
     # No SDK constructor or DB engine is needed at this thin adapter boundary.
     return McpRuntime(
         session_factory=cast(Any, None),
@@ -104,7 +109,9 @@ def runtime(*, path: Literal["legacy", "mux"] = "mux", channel_backends: bool = 
         settings=Settings(
             anthropic=AnthropicSettings(api_key=SecretStr("offline")),
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://unused/unused")),
-            turn=TurnSettings(path=path, channel_backends=channel_backends),
+            turn=TurnSettings(
+                path=path, channel_backends=channel_backends, agent_backends=agent_backends
+            ),
             mcp=McpSettings(public_url=HttpUrl("https://offline.invalid/mcp")),
         ),
     )
@@ -173,12 +180,16 @@ async def test_disabled_fleet_never_inspects_runtime_or_registers_tools() -> Non
     assert await mcp.list_tools() == []
 
 
-@pytest.mark.parametrize("path,channels", [("legacy", True), ("mux", False)])
+@pytest.mark.parametrize(
+    "path,channels,agents", [("legacy", True, True), ("mux", False, True), ("mux", True, False)]
+)
 async def test_existing_neutral_flags_gate_fleet_registration(
-    path: Literal["legacy", "mux"], channels: bool
+    path: Literal["legacy", "mux"], channels: bool, agents: bool
 ) -> None:
     mcp = FastMCP("off")
-    register_fleet_tools(mcp, runtime(path=path, channel_backends=channels), enabled=True)
+    register_fleet_tools(
+        mcp, runtime(path=path, channel_backends=channels, agent_backends=agents), enabled=True
+    )
     assert await mcp.list_tools() == []
 
 
@@ -625,22 +636,23 @@ async def test_factory_registers_only_for_explicit_fleet_and_neutral_flags(
     assert (names & NAMES) == (NAMES if enabled and path == "mux" and channel_backends else set())
 
 
-async def test_default_factory_does_not_import_or_discover_a_fleet_service(
+async def test_stopped_fleet_factory_does_not_import_or_discover_a_fleet_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Fleets are on by default; DAIMON_FLEET__ENABLED=false keeps the tools out entirely."""
     import builtins
 
     original_import = builtins.__import__
 
     def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
         assert name != "daimon.adapters.mcp.tools.fleet", (
-            "default factory imported opt-in fleet tools"
+            "a stopped fleet factory imported the fleet tools"
         )
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     app = create_mcp_app(
-        settings=runtime().settings,
+        settings=runtime().settings.model_copy(update={"fleet": FleetSettings(enabled=False)}),
         sessionmaker=async_sessionmaker(class_=AsyncSession),
         auth=StaticTokenVerifier(tokens={}),
         anthropic=build_stub_anthropic(),

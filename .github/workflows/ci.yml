@@ -147,16 +147,16 @@ jobs:
           path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
 
-  # The mux leg: the turn-relevant suites again with the turn path on mux and
-  # channel backends on. The legacy legs above are unchanged and stay the
-  # default; each test also asserts which path it ran (daimon.testing.turn_leg).
+  # The mux leg: the turn-relevant suites on the production default (mux, with
+  # channel and agent backends on). The legs above set nothing, so
+  # daimon.testing.stop_leg_default runs them on the emergency-stop leg (legacy,
+  # backend flags off), which proves the stop still works. Each test also asserts
+  # which path it ran (daimon.testing.turn_leg).
   # Blocking, as a ratchet: tests/mux_leg_known_failures.txt lists the failures
   # that exist today and daimon.testing.mux_leg_known marks exactly those
   # xfail(strict), so a new failure fails the leg and so does a listed test that
-  # starts passing (delete its line). The list shrinks until the mux-leg failures
-  # are fixed. This job is deliberately NOT in the deploy job's `needs`: the
-  # production default path is legacy, so a mux regression fails the pull request
-  # check but does not hold back the staging deploy of a legacy build.
+  # starts passing (delete its line). Production runs mux by default, so this
+  # job is in the deploy job's `needs`.
   # Suites carry a `-mux` suffix so shard-check proves each one is covered once.
   # The whole core suite is not doubled: most of its ~6 shards never read the
   # turn path, so a second pass would spend minutes without testing a new path.
@@ -642,7 +642,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, docker-publish-candidate]
+    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-mux-leg, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

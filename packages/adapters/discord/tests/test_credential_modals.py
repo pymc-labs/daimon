@@ -674,7 +674,10 @@ async def test_env_modal_without_crypto_keys_tells_the_person_and_keeps_the_requ
     assert rows == [], "nothing is stored without encryption keys"
     spent = await peek_credential_request(db_session, token=row.token)
     assert spent is not None and spent.used_at is None, "the request stays live for a retry"
-    assert "DAIMON_CRYPTO__KEYS" in _sent_message(interaction), "the operator step is named"
+    sent = _sent_message(interaction)
+    assert "no encryption key" in sent and "Nothing was saved" in sent, "the cause is named"
+    assert "whoever runs this Daimon install" in sent, "the fix names who can do it"
+    assert "DAIMON_" not in sent, "no operator setting is shown to the person"
     _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
 
 

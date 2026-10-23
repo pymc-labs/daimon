@@ -48,13 +48,16 @@ def test_deps_for_follows_the_environment_both_legs(
     assert (deps.turn_path, deps.channel_backends) == (leg.path, leg.channel_backends)
 
 
-def test_deps_for_defaults_to_legacy_without_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_deps_for_follows_the_product_default_without_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("DAIMON_TURN__PATH", raising=False)
     monkeypatch.delenv("DAIMON_TURN__CHANNEL_BACKENDS", raising=False)
+    monkeypatch.delenv("DAIMON_TURN__AGENT_BACKENDS", raising=False)
 
     deps = deps_for()
 
-    assert (deps.turn_path, deps.channel_backends) == ("legacy", False)
+    assert (deps.turn_path, deps.channel_backends, deps.agent_backends) == ("mux", True, True)
 
 
 def test_explicit_leg_overrides_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

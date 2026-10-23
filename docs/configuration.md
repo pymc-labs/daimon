@@ -1328,14 +1328,18 @@ JSON object.
 
 Read from `daimon.core.config.TurnSettings`. Prefix `DAIMON_TURN__`.
 
-Experimental neutral turn ports; legacy remains the default.
+Neutral turn ports. mux and backend selection are on by default.
+
+`path`, `channel_backends` and `agent_backends` are emergency stops, not setup: a fresh
+install needs none of them. Setting one off stops new turns at admission and queued or
+retried work before it is sent again.
 
 ### `DAIMON_TURN__PATH`
 
-`'legacy' | 'mux'` · optional · default `legacy`
+`'legacy' | 'mux'` · optional · default `mux`
 
-Experimental turn I/O path. legacy (the default) preserves the current behavior; mux
-opts into neutral Events/Sessions ports. Off by default.
+Turn I/O path. mux (the default) runs turns through the neutral Events/Sessions ports.
+Emergency stop only: legacy returns every turn to the Managed Agents-only path.
 
 ### `DAIMON_TURN__NATIVE_FOOTER_COST`
 
@@ -1348,20 +1352,22 @@ unchanged with either value.
 
 ### `DAIMON_TURN__CHANNEL_BACKENDS`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
-Read each channel's backend configuration at admission. Off by default: no channel's
-configuration is read and every turn runs as before. On: a channel with no backend
-configuration is unchanged; a configured one is checked against its profile and refused
-(backend_unsupported) if the profile cannot meet it or this release cannot run it yet.
+Read each agent's and channel's backend configuration at admission. On by default: a
+channel with no backend configuration is unchanged; a configured one is checked against
+its profile and refused (backend_unsupported) if the profile cannot meet it or this
+release cannot run it yet. Emergency stop only: false reads no backend configuration and
+every turn runs on Anthropic as before.
 
 ### `DAIMON_TURN__AGENT_BACKENDS`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
 Capture complete scoped source and resource intent for an agent-selected native backend.
 Unproved obligations are refused; counterpart identity readback alone never authorizes
-execution. Requires mux and channel_backends; off by default.
+execution. Requires mux and channel_backends; on by default. Emergency stop only: false
+refuses agent-selected native backends.
 
 ### `DAIMON_TURN__STATUS_LOG`
 
@@ -1450,17 +1456,21 @@ queue and its card ends with the ordinary error.
 
 Read from `daimon.core.config.FleetSettings`. Prefix `DAIMON_FLEET__`.
 
-Orchestrated worker fleets (``DAIMON_FLEET__*``). Off by default.
+Orchestrated worker fleets (``DAIMON_FLEET__*``). On by default.
 
 An orchestrator turn fans out to worker turns on any enabled backend. Their concurrency
 is a pool of its own, counted from the durable worker rows, so a fan-out never takes the
-chat turns' slots.
+chat turns' slots. Each agent still needs its own fleet grant and stays inside the
+tenant's budgets.
 
 ### `DAIMON_FLEET__ENABLED`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
-Allow orchestrator turns to start worker fleets. Off by default.
+Allow orchestrator turns to start worker fleets. On by default. Emergency stop only:
+false refuses new fleets and new workers before they are funded, and holds finished-
+worker wakes until it is on again; the run's deadline sweep ends what is left. Fleets
+also stop when the turn path or either backend flag is off.
 
 ### `DAIMON_FLEET__MAX_WORKERS_PER_RUN`
 

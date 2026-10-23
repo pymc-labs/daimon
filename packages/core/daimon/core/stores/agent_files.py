@@ -36,8 +36,9 @@ class AgentEnvEncryptionRequiredError(StoreError):
 
     def __init__(self) -> None:
         super().__init__(
-            "Daimon has no encryption keys, so agent keys can't be saved. "
-            "Ask the operator to set DAIMON_CRYPTO__KEYS. Nothing was saved."
+            "Nothing was saved: this Daimon install has no encryption key yet, so it "
+            "can't store secrets safely. Ask whoever runs this Daimon install to add "
+            "an encryption key, then send the key again."
         )
 
 
