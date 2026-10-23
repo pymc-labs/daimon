@@ -768,8 +768,9 @@ class DiscordFleetCard:
     ) -> None:
         self._run_id = run_id
         self._service = service
-        # An ended run's cost in words, read once (`_read`).
+        # An ended run's cost in words: read once when known, retried while not (`_read`).
         self._costs: dict[uuid.UUID, str] = {}
+        self._uncosted: dict[uuid.UUID, str] = {}
         self._load_parent = load_parent
         self._send = send
         self._edit = edit
@@ -826,7 +827,14 @@ class DiscordFleetCard:
         """
         run, workers = await self._service.read_snapshot(parent, policy, run_id)
         if run.status not in RUN_TRANSITIONS and run.id not in self._costs:
-            self._costs[run.id] = fleet_cost_words(await self._service.run_cost(parent, run))
+            cost = await self._service.run_cost(parent, run)
+            if cost is None:
+                # Shown as "not available yet" now, but tried again on the next
+                # update: a slow first read must not outlast the reply's real figure.
+                self._uncosted[run.id] = fleet_cost_words(None)
+            else:
+                self._uncosted.pop(run.id, None)
+                self._costs[run.id] = fleet_cost_words(cost)
         return run, workers
 
     def _render(
@@ -845,7 +853,9 @@ class DiscordFleetCard:
             collected=collected,
             blocked=blocked,
             partial=partial,
-            cost=self._costs.get(run.id) if run.status not in RUN_TRANSITIONS else None,
+            cost=self._costs.get(run.id, self._uncosted.get(run.id))
+            if run.status not in RUN_TRANSITIONS
+            else None,
         )
 
     async def refresh(self) -> bool:
