@@ -239,6 +239,40 @@ async def test_a_tenant_with_its_own_init_row_keeps_it(provisioning):
     assert environments.creates == 0
 
 
+async def test_a_tenant_row_scoped_elsewhere_provisions_nothing(provisioning):
+    """The operator configured this profile, just not for this channel: selection never
+    falls back to the code defaults there, so no environment is made for them."""
+    request, environments, manifest = provisioning
+    revision = request.admission.backend_revision
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "profile": "openai.persistent_workspace",
+                    "tenant_id": request.scope.tenant_id,
+                    "platform": "*",
+                    "channel_id": "another-channel",
+                    "account_id": "*",
+                    "configuration_grant": {
+                        "profiles": ["openai.persistent_workspace"],
+                        "models": [revision.model or "gpt-6-luna"],
+                        "thread_modes": ["per_caller"],
+                        "requires": {},
+                    },
+                    "project": "proj_operator",
+                    "root_materialization": True,
+                    "spend_limit_usd_cents": 50,
+                    "environment_id": "envtmpl_operator",
+                    "api_key_env": "DAIMON_CHANNEL_OPENAI_KEY",
+                }
+            ]
+        )
+    )
+    assert revision.channel.channel_id != "another-channel"
+    assert await openai_deployment.prepare_tenant_environment(request) is request
+    assert environments.creates == 0
+
+
 async def test_an_install_without_an_openai_key_provisions_nothing(provisioning, monkeypatch):
     request, environments, _ = provisioning
     monkeypatch.delenv("DAIMON_CHANNEL_OPENAI_KEY")

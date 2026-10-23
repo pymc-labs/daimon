@@ -3289,11 +3289,13 @@ def select_runtime_manifest[Plan: CounterpartPlan](
 
 
 def manifest_has_row(request: ProviderPreparationRequest) -> bool:
-    """Whether the operator's runtime file has any row for this turn (exact or wildcard).
+    """Whether the operator's runtime file has any row for this tenant's profile.
 
-    A tenant's own row always wins over anything provisioned on its behalf, so
-    this reads only the file, never the code defaults. A configured file that
-    can't be read counts as having a row: never provision around a
+    The same rule selection uses before it consults the code defaults
+    (`_operator_configured`): where the operator configured the profile at all,
+    its rows alone decide, so nothing is provisioned for a turn the defaults will
+    never serve. This reads only the file, never the code defaults. A configured
+    file that can't be read counts as having a row: never provision around a
     configuration the operator meant to install.
     """
     revision = request.admission.backend_revision
@@ -3303,7 +3305,7 @@ def manifest_has_row(request: ProviderPreparationRequest) -> bool:
         rows = _configured_rows()
     except AdmissionDenied:
         return True
-    return bool(_matching_rows(rows, revision, request, allow_wildcard=True))
+    return _operator_configured(rows, request.scope.tenant_id, revision)
 
 
 def _worker_template(plan: CounterpartPlan) -> bool:
