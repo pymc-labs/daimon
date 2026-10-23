@@ -633,9 +633,17 @@ def configuration_refusal(reason: str) -> str:
             "The provider caps add up to more than the run budget. "
             "Lower them or raise the run budget before saving."
         ),
+        "fleet_admin_decision": (
+            "An admin turned fleet off for this agent, so only an admin can turn it back on."
+        ),
+        "fleet_admin_expired": (
+            "The fleet limits an admin set for this agent have expired, so only an admin "
+            "can set new ones."
+        ),
         "fleet_raise_admin_required": (
-            "Only an admin can raise fleet limits above the default (4 workers, $2 a run) "
-            "or above what an admin set. You can lower them, or turn fleet off."
+            "Only an admin can raise fleet limits above what an admin set for this agent, "
+            "or above the default (4 workers, $2 a run) if no admin did. You can lower "
+            "them, or turn fleet off."
         ),
         "invalid_fleet_grant": (
             "These fleet limits cannot be used. "

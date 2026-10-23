@@ -763,3 +763,180 @@ async def test_a_slack_turns_preparation_never_captures_a_default_fleet_source(
         current_origin_id.reset(token)
     assert result._source is None
     assert len(captured) == (1 if platform == "discord" else 0)
+
+
+# --- Admin decisions stick (LEAD, follow-up to #1351) --------------------------------
+
+
+async def test_an_admins_off_can_not_be_turned_back_on_by_the_owner(people_default):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    off = await put(service, agent, actors["admin"], None)
+    assert off.fleet_off and off.admin_fleet_ceiling == FLEET_OFF
+    for value in (default, default.model_copy(update={"max_workers": 1})):
+        with pytest.raises(AgentBackendRefused) as refused:
+            await put(service, agent, actors["owner"], value)
+        assert refused.value.reason == "fleet_admin_decision"
+    # The owner's own changes carry the admin's decision on.
+    switched = await service.set_backend(agent, "openai", off.local, actors["owner"])
+    assert switched.admin_fleet_ceiling == FLEET_OFF
+    with pytest.raises(AgentBackendRefused, match="admin"):
+        await put(service, agent, actors["owner"], default)
+    # An admin may turn it on again.
+    await put(service, agent, actors["admin"], default)
+    assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).grant
+
+
+async def test_review_bypass_a_owner_revoking_again_never_lifts_an_admins_off(people_default):
+    """#1361 review, sequence A: admin off -> owner revokes again -> owner sets the default."""
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    await put(service, agent, actors["admin"], None)
+    again = await put(service, agent, actors["owner"], None)  # revoke stays allowed
+    assert again.admin_fleet_ceiling == FLEET_OFF
+    with pytest.raises(AgentBackendRefused) as refused:
+        await put(service, agent, actors["owner"], default)
+    assert refused.value.reason == "fleet_admin_decision"
+    assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).kind == "off"
+
+
+async def test_review_bypass_b_owner_tightening_never_lowers_the_admins_ceiling(people_default):
+    """#1361 review, sequence B: admin 2 -> owner 1 -> owner 4 must not undo the admin."""
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    admin = await put(
+        service, agent, actors["admin"], default.model_copy(update={"max_workers": 2})
+    )
+    assert admin.admin_fleet_ceiling is not None
+    lower = await put(
+        service, agent, actors["owner"], default.model_copy(update={"max_workers": 1})
+    )
+    assert lower.admin_fleet_ceiling == admin.admin_fleet_ceiling  # the owner never moves it
+    with pytest.raises(AgentBackendRefused) as refused:
+        await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 4}))
+    assert refused.value.reason == "fleet_raise_admin_required"
+    # Back up to the admin's ceiling is fine; past it is not.
+    await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 2}))
+    with pytest.raises(AgentBackendRefused):
+        await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 3}))
+
+
+async def test_an_admin_raise_lets_the_owner_go_up_to_it_and_the_default_clears_it(
+    people_default,
+):
+    service, agent, actors, _, default = people_default
+    await put(service, agent, actors["admin"], default.model_copy(update={"max_workers": 8}))
+    await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 6}))
+    await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 8}))
+    # An admin setting exactly the default clears the ceiling: the owner's is the default.
+    cleared = await put(service, agent, actors["admin"], default)
+    assert cleared.admin_fleet_ceiling is None
+
+
+async def test_an_owners_own_off_can_be_turned_back_on_by_the_owner(people_default):
+    service, agent, actors, _, default = people_default
+    off = await put(service, agent, actors["owner"], None)
+    assert off.fleet_off and off.admin_fleet_ceiling is None
+    await put(service, agent, actors["owner"], default)
+
+
+async def test_an_expired_admin_ceiling_needs_an_admin(people_default):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    soon = default.model_copy(
+        update={
+            "max_workers": 2,
+            "limits": default.limits.model_copy(update={"deadline": NOW + timedelta(hours=1)}),
+        }
+    )
+    await put(service, agent, actors["admin"], soon)
+    later = NOW + timedelta(hours=2)
+    lower = default.model_copy(
+        update={
+            "max_workers": 1,
+            "limits": default.limits.model_copy(update={"deadline": later + timedelta(hours=1)}),
+        }
+    )
+    with pytest.raises(AgentBackendRefused) as refused:
+        await service.check_owner_fleet_ceiling(agent, lower, actors["owner"], now=later)
+    assert refused.value.reason == "fleet_admin_expired"
+
+
+async def test_the_migration_backfills_existing_grants_and_revokes_as_admin_ceilings(
+    people_default,
+):
+    """0124: rows from before it are fail closed (their writer is unknown)."""
+    import importlib.util
+    from pathlib import Path
+
+    from alembic.operations import Operations
+    from alembic.runtime.migration import MigrationContext
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.stores import agent_backends
+    from sqlalchemy import text
+
+    service, agent, actors, sessions, default = people_default
+    tight = default.model_copy(update={"max_workers": 2, "epoch": 1})
+    other = agent.model_copy(update={"agent_id": uuid.uuid4(), "name": "other"})
+    async with sessions.begin() as db:
+        # Agent 1: a stored grant. Agent 2: a grant, then the old NULL revoke.
+        await agent_backends.put_revision(
+            db,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            local=1,
+            backend=None,
+            digest="legacy",
+            previous_local=None,
+            agent_name=agent.name,
+            preview_digest="legacy",
+            fleet_grant=tight.model_dump(mode="json"),
+        )
+        for local, grant in ((1, tight.model_dump(mode="json")), (2, None)):
+            await agent_backends.put_revision(
+                db,
+                tenant_id=other.tenant_id,
+                agent_id=other.agent_id,
+                local=local,
+                backend=None,
+                digest=f"legacy-{local}",
+                previous_local=None,
+                agent_name=other.name,
+                preview_digest="legacy",
+                fleet_grant=grant,
+            )
+    path = Path(__file__).parents[2] / "alembic" / "versions" / "0124_admin_fleet_ceiling.py"
+    spec = importlib.util.spec_from_file_location("admin_fleet_ceiling_backfill", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    async with sessions.begin() as db:
+        connection = await db.connection()
+
+        def rerun(sync):
+            with Operations.context(MigrationContext.configure(sync)):
+                module.downgrade()
+                module.upgrade()
+
+        await connection.run_sync(rerun)
+    async with sessions() as db:
+        rows = {
+            (row.agent_id, row.local): row.admin_fleet_ceiling
+            for row in await db.execute(
+                text(
+                    "SELECT agent_id, local, admin_fleet_ceiling FROM agent_backend_revision "
+                    "WHERE tenant_id = :tenant"
+                ),
+                {"tenant": agent.tenant_id},
+            )
+        }
+    assert rows[(agent.agent_id, 1)]["max_workers"] == 2
+    assert rows[(other.agent_id, 1)]["max_workers"] == 2
+    assert rows[(other.agent_id, 2)] == FLEET_OFF
+    # So neither owner can loosen what may have been an admin's decision.
+    with pytest.raises(AgentBackendRefused):
+        await put(service, agent, actors["owner"], default)

@@ -1250,6 +1250,10 @@ class AgentBackendRevision(_BackendConsentFacts):
     previous_local: int | None
     created_at: datetime
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The limit an admin set: the off marker or a grant; None when no admin set one.
+    admin_fleet_ceiling: JsonValue | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
 
     @model_validator(mode="after")

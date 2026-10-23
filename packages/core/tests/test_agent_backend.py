@@ -437,11 +437,17 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert owner_spec is not None and owner_spec.loader is not None
     owner_module = importlib.util.module_from_spec(owner_spec)
     owner_spec.loader.exec_module(owner_module)
+    set_by_path = path.with_name("0124_admin_fleet_ceiling.py")
+    set_by_spec = importlib.util.spec_from_file_location("admin_fleet_ceiling_restore", set_by_path)
+    assert set_by_spec is not None and set_by_spec.loader is not None
+    set_by_module = importlib.util.module_from_spec(set_by_spec)
+    set_by_spec.loader.exec_module(set_by_module)
     async with sessions.begin() as session:
         connection = await session.connection()
 
         def downgrade(sync):
             with Operations.context(MigrationContext.configure(sync)):
+                set_by_module.downgrade()
                 owner_module.downgrade()
                 model_module.downgrade()
                 consent_module.downgrade()
@@ -473,6 +479,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
                     consent_module.upgrade()
                     model_module.upgrade()
                     owner_module.upgrade()
+                    set_by_module.upgrade()
 
             await connection.run_sync(upgrade)
     async with sessions() as session:

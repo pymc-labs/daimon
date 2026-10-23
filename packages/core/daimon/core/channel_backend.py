@@ -475,6 +475,8 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "feature_disabled",
         "invalid_fleet_grant",
         "fleet_raise_admin_required",
+        "fleet_admin_decision",
+        "fleet_admin_expired",
         "fleet_provider_limits_exceed_budget",
         "fleet_root_credentials",
         "fleet_root_mcp",
@@ -1026,12 +1028,18 @@ class AgentBackendService:
                 model = current.model if current else None
                 previous_local = current.previous_local if current else None
                 retained_grant = preview.fleet_grant
+                admin_ceiling = (
+                    await self._admin_ceiling(session, agent, retained_grant)
+                    if admin
+                    else (current.admin_fleet_ceiling if current else None)
+                )
             else:
                 preview = await self._preview(session, agent, backend, model, settings)
                 if not preview.allowed:
                     raise AgentBackendRefused("backend_not_allowed")
                 previous_local = local or None
                 retained_grant = current.fleet_grant if current else None
+                admin_ceiling = current.admin_fleet_ceiling if current else None
             consent = (
                 current.drop_consent
                 if grant_operation and current is not None
@@ -1093,6 +1101,8 @@ class AgentBackendService:
                     ),
                     preview_digest=preview.digest,
                     fleet_grant=retained_grant,
+                    # Only an admin's fleet change moves the admin ceiling; all else keeps it.
+                    admin_fleet_ceiling=admin_ceiling,
                     drop_consent=consent_json,
                     model=model,
                     profile=settings.profile,
@@ -1121,6 +1131,24 @@ class AgentBackendService:
             )
             return revision
 
+    async def _admin_ceiling(
+        self, session: AsyncSession, agent: BackendAgent, written: JsonValue | None
+    ) -> JsonValue | None:
+        """What an admin's fleet change leaves as the owner's ceiling.
+
+        Off stays off; a grant becomes the ceiling, unless it is exactly the
+        default, which clears it (the owner's ceiling is the default again).
+        """
+        from daimon.core.fleet_configuration import default_fleet_grant
+
+        if written is None or written == FLEET_OFF:
+            return dict(FLEET_OFF)
+        default = default_fleet_grant(await self._policy(session, agent.tenant_id))
+        grant = AgentFleetGrant.model_validate_json(json.dumps(written))
+        if default is not None and grant.model_copy(update={"epoch": 0}) == default:
+            return None
+        return written
+
     async def _require_owner_ceiling(
         self,
         session: AsyncSession,
@@ -1130,19 +1158,27 @@ class AgentBackendService:
         *,
         now: datetime,
     ) -> None:
+        """A non-admin owner stays within the admin's ceiling, or the default if none."""
         from daimon.core.fleet_configuration import default_fleet_grant, fleet_grant_within
 
         if value is None:
             raise AgentBackendRefused("invalid_fleet_grant")
-        ceilings: list[AgentFleetGrant] = []
-        default = default_fleet_grant(await self._policy(session, agent.tenant_id))
-        if default is not None:
-            ceilings.append(default)
-        if current is not None and current.fleet_grant is not None and not current.fleet_off:
-            stored = AgentFleetGrant.model_validate_json(json.dumps(current.fleet_grant))
-            if stored.expires_at > now:
-                ceilings.append(stored)
-        if not any(fleet_grant_within(value, ceiling) for ceiling in ceilings):
+        stored = current.admin_fleet_ceiling if current is not None else None
+        if stored == FLEET_OFF:
+            raise AgentBackendRefused("fleet_admin_decision")
+        if stored is not None:
+            try:
+                ceiling: AgentFleetGrant | None = AgentFleetGrant.model_validate_json(
+                    json.dumps(stored)
+                )
+            except ValueError:
+                # An unreadable admin ceiling is no room at all (fail closed).
+                raise AgentBackendRefused("fleet_admin_decision") from None
+            if ceiling.expires_at <= now:
+                raise AgentBackendRefused("fleet_admin_expired")
+        else:
+            ceiling = default_fleet_grant(await self._policy(session, agent.tenant_id))
+        if ceiling is None or not fleet_grant_within(value, ceiling):
             raise AgentBackendRefused("fleet_raise_admin_required")
 
     async def check_owner_fleet_ceiling(
