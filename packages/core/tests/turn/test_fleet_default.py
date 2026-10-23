@@ -352,8 +352,14 @@ async def test_a_default_root_refusal_never_fails_the_turn(root_turn, monkeypatc
         raise WorkerSpecRefused("backend", "unsupported")
 
     monkeypatch.setattr(neutral_resources, "fleet_root_permissions", refused)
-    await freeze(root_turn)  # no raise: the turn answers with fleet off
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        await freeze(root_turn)  # no raise: the turn answers with fleet off
     assert root_refusal(origin.id) == "unavailable"
+    skipped = [entry for entry in logs if entry["event"] == "fleet.default_root_skipped"]
+    assert skipped and skipped[0]["log_level"] == "warning"
+    assert skipped[0]["cause"] == "WorkerSpecRefused"
     with pytest.raises((WorkerSpecRefused, Exception)):
         await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
 

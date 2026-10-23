@@ -720,6 +720,8 @@ async def freeze_prepared_root(
         # A lost fence or binding means another writer moved on: worth an error line.
         (log.error if isinstance(error, (StaleFence, BindingSuperseded)) else log.warning)(
             "fleet.default_root_skipped",
+            # One stable field to group by: the setup obstacle, else the error's class.
+            cause=obstacle if obstacle != "unavailable" else type(error).__name__,
             error_type=type(error).__name__,
             field=getattr(error, "field", None),
             reason=getattr(error, "reason", None),
@@ -852,6 +854,7 @@ async def _freeze_root(
             raise
         log.warning(
             "fleet.root_freeze_refused",
+            cause=obstacle,
             field=error.field,
             reason=error.reason,
             obstacle=obstacle,

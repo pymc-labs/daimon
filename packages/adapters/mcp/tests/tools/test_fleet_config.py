@@ -514,3 +514,36 @@ def test_the_status_says_plainly_where_the_default_fleet_cant_start(platform):
     assert "Discord" not in line and "Slack" not in line and "Teams" not in line
     assert fleet_status_summary("default", "discord").startswith("Fleet is on with the default")
     assert fleet_status_summary("custom", platform) == "Current fleet limits (custom)."
+
+
+def test_the_status_never_says_on_when_this_agent_cant_run_a_fleet():
+    from daimon.adapters.mcp.tools.fleet_config import fleet_status_summary
+
+    line = fleet_status_summary("default", "discord", obstacle="credentials")
+    assert line == (
+        "Fleet would be on with these limits, but this agent can't run one yet: "
+        "it uses a connected tool or repository with its own login."
+    )
+    assert "on with the default" not in line
+
+
+async def test_the_obstacle_check_classifies_the_captured_source_and_never_raises(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools import fleet_config
+    from daimon.core import neutral_resources
+
+    async def captured(runtime, auth, agent):
+        return SimpleNamespace(kind="captured")
+
+    monkeypatch.setattr(fleet_config, "_capture_fleet_target", captured)
+    monkeypatch.setattr(neutral_resources, "fleet_root_obstacle", lambda source: "credentials")
+    assert await fleet_config.fleet_root_obstacle_for(None, None, None) == "credentials"
+
+    async def broken(runtime, auth, agent):
+        raise RuntimeError("capture failed")
+
+    monkeypatch.setattr(fleet_config, "_capture_fleet_target", broken)
+    assert await fleet_config.fleet_root_obstacle_for(None, None, None) is None

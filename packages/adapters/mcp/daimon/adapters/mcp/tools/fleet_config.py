@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from functools import partial
 
+import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
@@ -34,11 +35,14 @@ from daimon.core.fleet_configuration import (
     fleet_worker_names,
     provider_preview_digest,
 )
+from daimon.core.neutral_resources import FLEET_ROOT_OBSTACLE_DEFAULT, FLEET_ROOT_OBSTACLES
 from daimon.core.stores.domain import BackendAgent
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, ValidationError
+
+log = structlog.get_logger(__name__)
 
 
 class FleetConfigInfo(BaseModel):
@@ -114,8 +118,29 @@ async def _capture_fleet_target(
     )
 
 
-def fleet_status_summary(kind: str, platform: str | None) -> str:
-    """The current-settings line; it says plainly where the default fleet can't start."""
+async def fleet_root_obstacle_for(
+    runtime: McpRuntime, auth: AuthIdentity, agent: BackendAgent
+) -> str | None:
+    """What in this agent's own setup keeps its turns from running a fleet, if anything.
+
+    Asked here, in the MCP process: the turn that refused its root ran in the chat
+    adapter's process, whose in-memory reason (`root_refusal`) this one can't see.
+    A failed capture is no answer (None), never an error.
+    """
+    from daimon.core.neutral_resources import fleet_root_obstacle
+
+    try:
+        return fleet_root_obstacle(await _capture_fleet_target(runtime, auth, agent))
+    except Exception as error:  # an explanation must never fail the tool call
+        log.warning("fleet.obstacle_check_failed", cause=type(error).__name__)
+        return None
+
+
+def fleet_status_summary(kind: str, platform: str | None, *, obstacle: str | None = None) -> str:
+    """The current-settings line; it says plainly where or why a fleet can't start."""
+    if obstacle is not None:
+        reason = FLEET_ROOT_OBSTACLES.get(obstacle, FLEET_ROOT_OBSTACLE_DEFAULT)
+        return f"Fleet would be on with these limits, but this agent can't run one yet: {reason}."
     if kind != "default":
         return "Current fleet limits (custom)."
     if platform not in FLEET_LIFECYCLE_PLATFORMS:
@@ -194,7 +219,12 @@ async def _request_fleet_config_impl(
                 expected_revision=preview.setting_revision,
                 preview_digest=preview.digest,
                 details=fleet_detail_lines(preview, worker_names=saved.worker_agents),
-                summary=fleet_status_summary(setting.kind, auth.platform),
+                # Say "on" only when this agent's turns can actually start one.
+                summary=fleet_status_summary(
+                    setting.kind,
+                    auth.platform,
+                    obstacle=await fleet_root_obstacle_for(runtime, auth, agent),
+                ),
             )
         if config is not None:
             config = await complete_fleet_config(

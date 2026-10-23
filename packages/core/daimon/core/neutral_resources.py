@@ -1551,12 +1551,12 @@ FLEET_ROOT_OBSTACLES: Mapping[str, str] = {
     "shared_thread": "this is a shared thread, and fleets run only in your own thread",
     "unavailable": "this conversation couldn't start one. Ask again in a new thread",
 }
-_FLEET_ROOT_OBSTACLE_DEFAULT = "its setup includes something fleet workers can't carry yet"
+FLEET_ROOT_OBSTACLE_DEFAULT = "its setup includes something fleet workers can't carry yet"
 
 
 def fleet_root_obstacle_text(obstacle: str) -> str:
     """The sentence a person sees when an agent can't run a fleet."""
-    reason = FLEET_ROOT_OBSTACLES.get(obstacle, _FLEET_ROOT_OBSTACLE_DEFAULT)
+    reason = FLEET_ROOT_OBSTACLES.get(obstacle, FLEET_ROOT_OBSTACLE_DEFAULT)
     return f"This agent can't run a fleet yet: {reason}."
 
 

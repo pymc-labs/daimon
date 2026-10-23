@@ -1618,3 +1618,73 @@ async def test_a_slack_root_with_no_fleet_is_told_fleets_arent_available_here(ro
             assert "root_unavailable" in message
         else:
             assert message == "Fleets aren't available here yet."
+
+
+@pytest.mark.parametrize("same_agent", [True, False])
+async def test_a_root_refused_in_another_process_is_explained_by_its_own_setup(
+    root_turn, monkeypatch, same_agent
+):
+    """J4 (staging 09:2xZ): the chat adapter refused the root (obstacle=credentials) in its
+    own process; the MCP fleet tools must still say why, not root_unavailable."""
+    from daimon.adapters.mcp.tools import fleet_config
+    from daimon.core import channel_backend
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.domain import BackendAgent
+    from daimon.core.turn_origin import turn_origin
+
+    deps, prepared, _, _, seed, _, _, _ = root_turn
+    agent_id = derive_agent_uuid(tenant_id=seed.tenant_id, ma_agent_id=prepared.admission.agent.id)
+    looked_up = BackendAgent(
+        tenant_id=seed.tenant_id,
+        agent_id=agent_id if same_agent else uuid.uuid4(),
+        name=prepared.admission.agent.name,
+        configuration_digest="c",
+    )
+
+    async def load(client, sessions, *, tenant_id, agent_name, **kwargs):
+        assert agent_name == prepared.admission.agent.name
+        return looked_up
+
+    async def obstacle(runtime, auth, agent):
+        assert agent is looked_up
+        return "credentials"
+
+    monkeypatch.setattr(channel_backend, "load_backend_agent", load)
+    monkeypatch.setattr(fleet_config, "fleet_root_obstacle_for", obstacle)
+    bridge = HostFleetToolService(
+        FleetOrchestrator(
+            HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal(1), deps=deps)
+        ),
+        runtime=replace(runtime(), session_factory=deps.sessionmaker, client=deps.anthropic),
+        deps=deps,
+    )
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="discord",
+        parent_channel_id="fresh-channel",
+        thread_id="fresh-thread",
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
+        keep_fleet_root=True,
+    ) as fresh:
+        caller = replace(
+            AUTH,
+            tenant_id=fresh.tenant_id,
+            account_id=fresh.account_id,
+            platform="discord",
+            chat_agent_id=agent_id,
+        )
+        with pytest.raises(ToolError) as refused:
+            await bridge.status(caller, run_id=None, origin_context_id=fresh.id)
+    if same_agent:
+        assert str(refused.value) == (
+            "This agent can't run a fleet yet: it uses a connected tool or repository "
+            "with its own login."
+        )
+    else:
+        assert "root_unavailable" in str(refused.value)

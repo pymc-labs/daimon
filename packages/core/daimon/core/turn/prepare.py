@@ -1430,7 +1430,9 @@ async def bind_session_impl(
                         if not is_default_fleet(fleet_grant):
                             raise
                         log.warning(
-                            "fleet.default_capture_skipped", error_type=type(error).__name__
+                            "fleet.default_capture_skipped",
+                            cause=type(error).__name__,
+                            error_type=type(error).__name__,
                         )
                         source = None
                     remaining_s(effective_deadline, now=now(), refuse_expired=True)
