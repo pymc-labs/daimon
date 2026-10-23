@@ -465,6 +465,79 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
         assert len((tmp_path / "updates").read_text().splitlines()) == 1
 
 
+@pytest.mark.parametrize("environment", ["production", "staging"])
+def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
+    tmp_path: Path, environment: str
+) -> None:
+    """Prod keeps today's stops until a promote is approved; staging runs code defaults."""
+    import json
+
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    step = next(step for step in steps if step.get("id") == "mcp_minters")
+    assert step["env"]["DEPLOY_ENVIRONMENT"] == "${{ inputs.environment }}"
+    receipt = {"spec": {"template": {"spec": {"timeoutSeconds": 300, "containers": [{}]}}}}
+    (tmp_path / "service.json").write_text(json.dumps(receipt))
+    gcloud = tmp_path / "gcloud"
+    gcloud.write_text(
+        '#!/bin/sh\nif [ "$3" = describe ]; then cat "$RUNNER_TEMP/service.json"; '
+        'else echo "$*" >> "$RUNNER_TEMP/updates"; fi\n'
+    )
+    gcloud.chmod(0o700)
+    script = (
+        step["run"]
+        .replace("${{ vars.GCP_AR_REPO }}", "offline")
+        .replace("${{ steps.images.outputs.daimon }}", "offline/image")
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(tmp_path / "outputs"),
+            "REGION": "offline",
+            "DEPLOY_ENVIRONMENT": environment,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    updates = (tmp_path / "updates").read_text()
+    pins = (
+        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__CHANNEL_BACKENDS=false",
+        "DAIMON_TURN__AGENT_BACKENDS=false",
+        "DAIMON_FLEET__ENABLED=false",
+    )
+    if environment == "production":
+        assert all(pin in updates for pin in pins), updates
+    else:
+        assert "TURN__" not in updates and "FLEET__" not in updates, updates
+
+
+def test_production_worker_refresh_pins_the_old_turn_behaviour() -> None:
+    """The prod worker env gets the four stops after every env refresh, staging none."""
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    script = next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Refresh worker VM containers (recreate in place)"
+    )
+    refresh = script.index("sudo /usr/local/bin/daimon-refresh-env")
+    pin = script.index('if [ "${{ inputs.environment }}" = production ]; then', refresh)
+    assert pin < script.index("docker compose -f compose.worker.yml pull"), "before recreate"
+    block = script[pin : script.index("fi", pin)]
+    for line in (
+        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__CHANNEL_BACKENDS=false",
+        "DAIMON_TURN__AGENT_BACKENDS=false",
+        "DAIMON_FLEET__ENABLED=false",
+    ):
+        assert line in block
+    assert "tee -a /etc/daimon/daimon.env" in block
+
+
 def test_mux_leg_is_a_blocking_ratchet_inside_the_deploy_gate() -> None:
     """The mux leg selects mux through the environment and ratchets its known failures."""
     jobs = _workflow("ci.yml")["jobs"]
