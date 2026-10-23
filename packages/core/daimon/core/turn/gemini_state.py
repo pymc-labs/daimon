@@ -382,6 +382,35 @@ class _FlashAccounting:
         await self._update(apply)
         return settled
 
+    async def release_unbilled(self, *, interaction_id: str) -> bool:
+        """Release the hold of an attempt whose interaction ended with no usage at all.
+
+        A cancelled interaction Gemini never started (or cancelled before it ran)
+        reports no usage, so `settle` never runs and its hold would wait out
+        HOLD_TTL. Only while no cost was ever measured: a settled attempt keeps its
+        actual cost, and a later usage reading still settles normally. Idempotent.
+        """
+        released = False
+
+        def apply(rows: dict[str, JsonValue]) -> None:
+            nonlocal released
+            for row in rows.values():
+                if (
+                    not isinstance(row, dict)
+                    or row.get("interaction_id") != interaction_id
+                    or row.get("outcome") != "accepted"
+                    or row.get("actual_usd") is not None
+                ):
+                    continue
+                held = _held(row)
+                if held > 0:
+                    row.update(held_usd="0", released_usd=str(held))
+                    released = True
+                return
+
+        await self._update(apply)
+        return released
+
 
 class SQLiteGeminiStorage(_GeminiStorage):
     """Full Records transactions in the explicitly selected local SQLite file."""

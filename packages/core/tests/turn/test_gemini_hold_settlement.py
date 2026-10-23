@@ -331,3 +331,38 @@ def test_report_never_echoes_an_unparseable_database_url(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "not a valid database URL" in captured.err
     assert "hunter2" not in captured.err + captured.out
+
+
+async def test_a_cancelled_unbilled_interaction_releases_its_hold_at_once(postgres_state):
+    sessions, scope, _, _ = postgres_state
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    # cap 0.10 = one hold: the leaked hold of a never-started run blocks the next.
+    owner = holds(sessions, scope, cap="0.10")
+    await accepted(owner, model, "never-ran")
+    with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
+        await holds(sessions, scope, cap="0.10").before_attempt(model=model, attempt=1)
+    assert await owner.release_unbilled(interaction_id="never-ran")
+    assert not await owner.release_unbilled(interaction_id="never-ran")
+    (row,) = (await ledger(sessions)).values()
+    assert row["held_usd"] == "0" and row["released_usd"] == "0.10"
+    await accepted(holds(sessions, scope, cap="0.10"), model, "next")
+
+
+async def test_release_never_touches_a_measured_cost_and_a_late_reading_still_settles(
+    postgres_state,
+):
+    sessions, scope, _, _ = postgres_state
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    owner = holds(sessions, scope)
+    await accepted(owner, model, "billed")
+    await owner.settle(interaction_id="billed", model=FLASH_PRIMARY, actual_usd=Decimal("0.02"))
+    assert not await owner.release_unbilled(interaction_id="billed")
+    await accepted(holds(sessions, scope), model, "late")
+    assert await owner.release_unbilled(interaction_id="late")
+    assert await owner.settle(
+        interaction_id="late", model=FLASH_PRIMARY, actual_usd=Decimal("0.004")
+    )
+    rows = {row["interaction_id"]: row for row in (await ledger(sessions)).values()}
+    assert rows["billed"]["actual_usd"] == "0.02" and "released_usd" not in rows["billed"]
+    assert rows["late"]["actual_usd"] == "0.004" and rows["late"]["held_usd"] == "0"
+    assert not await owner.release_unbilled(interaction_id="unknown")

@@ -56,6 +56,7 @@ from daimon.testing.db import build_test_engine
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Scope
+from mux.errors import UnsupportedCapability
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
@@ -3165,6 +3166,33 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
         "the session the rolled-back recovery created must be archived; "
         "a failing archive call is logged, not raised (this one answers 500)"
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "event"),
+    [
+        (
+            UnsupportedCapability(("session_archive",), "gemini.inline_reuse"),
+            "turn.recovery_orphan_archive_skipped",
+        ),
+        (
+            UnsupportedCapability(("session_delete",), "gemini.inline_reuse"),
+            "turn.recovery_orphan_archive_failed",
+        ),
+        (RuntimeError("archive 500"), "turn.recovery_orphan_archive_failed"),
+    ],
+)
+async def test_a_profile_without_an_archive_skips_the_orphan_cleanup_quietly(
+    error: Exception, event: str
+) -> None:
+    async def archive() -> object:
+        raise error
+
+    with structlog.testing.capture_logs() as logs:
+        await run_module._archive_orphaned_session(
+            cast(anthropic.AsyncAnthropic, None), session_id="sess_orphan", archive=archive
+        )
+    assert [e["event"] for e in logs if "orphan" in e["event"]] == [event]
 
 
 async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(

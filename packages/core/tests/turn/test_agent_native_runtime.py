@@ -1374,7 +1374,10 @@ async def test_worker_expiry_attempts_cleanup_of_the_actual_prepared_session_onc
         archived[0]._scope, archived[0].session_ref
     )
     assert session.state == "idle"
-    assert "session_archive" in capsys.readouterr().out
+    # Gemini has no native archive: the cleanup is attempted once and skipped quietly.
+    output = capsys.readouterr().out
+    assert "turn.recovery_orphan_archive_skipped" in output
+    assert "turn.recovery_orphan_archive_failed" not in output
     assert not transport.requests
 
 
@@ -2290,8 +2293,9 @@ async def test_worker_cleanup_uses_prepared_ports_and_preserves_the_original_fai
     assert len(entered) == 1
     assert len([call for call in calls if call.method == "POST"]) == 1
     output = capsys.readouterr().out
-    assert output.count("turn.recovery_orphan_archive_failed") == 1
-    assert "session_archive" in output
+    # Gemini has no native archive: the orphan cleanup is a quiet skip, not a failure.
+    assert "turn.recovery_orphan_archive_failed" not in output
+    assert output.count("turn.recovery_orphan_archive_skipped") == 1
     from daimon.core.stores import fleet
 
     async with request.deps.sessionmaker.begin() as db:
