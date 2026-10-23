@@ -8,6 +8,8 @@ applies to the next call.
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.ma_identity import derive_agent_uuid
@@ -43,3 +45,40 @@ async def caller_owned_ids(runtime: McpRuntime, auth: AuthIdentity) -> frozenset
 
 def owned_in(owned: frozenset[str], auth: AuthIdentity, ma_agent_id: str) -> bool:
     return str(derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id)) in owned
+
+
+#: An owner with no stored name on this platform: still someone to ask.
+OWNER_UNNAMED = "another member"
+
+
+async def owner_labels(
+    runtime: McpRuntime, auth: AuthIdentity, ma_agent_ids: Collection[str]
+) -> dict[str, str]:
+    """Who owns each owned agent, said for the caller: "you", their name, or another member.
+
+    Agents without an owner are left out (only an admin changes them). Names come
+    from the stored names of people seen on the caller's platform; no lookup runs.
+    """
+    from daimon.core.stores.platform_names import get_user_names
+
+    by_uuid = {
+        derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id): ma_agent_id
+        for ma_agent_id in ma_agent_ids
+    }
+    platform = auth.platform or ""
+    async with runtime.session_factory() as session:
+        owners = await agent_owners.owner_identities(
+            session, auth.tenant_id, by_uuid, platform=platform
+        )
+        users = {external for _, external in owners.values() if external is not None}
+        names = await get_user_names(
+            session, tenant_id=auth.tenant_id, platform=platform, user_ids=users
+        )
+    labels: dict[str, str] = {}
+    for agent_id, (account_id, external) in owners.items():
+        if may_own(auth) and account_id == auth.account_id:
+            labels[by_uuid[agent_id]] = "you"
+            continue
+        name = names.get(external) if external is not None else None
+        labels[by_uuid[agent_id]] = (name.label if name is not None else None) or OWNER_UNNAMED
+    return labels

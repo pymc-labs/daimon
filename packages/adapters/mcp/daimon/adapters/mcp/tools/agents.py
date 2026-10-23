@@ -38,6 +38,7 @@ from daimon.adapters.mcp.tools._owner import (
     caller_owns_agent,
     may_own,
     owned_in,
+    owner_labels,
 )
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools._rule_view import (
@@ -161,6 +162,10 @@ class AgentInfo(BaseModel):
     owned_by_you: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     """Set by ``get_agent`` and ``list_agents``: whether the caller owns this agent
     (created it, or an admin named them), so may change it without an admin."""
+    owner: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Set by ``get_agent`` and ``list_agents``: who to ask about changing this agent:
+    ``"you"``, the owner's name, or ``"another member"`` when no name is known.
+    Absent when the agent has no owner: then only an admin changes it."""
 
     @classmethod
     def from_ma(
@@ -412,9 +417,10 @@ async def _list_agents_impl(
     skill_titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
     )
+    owners = await owner_labels(runtime, auth, [a.id for a in rows])
     infos = [
         AgentInfo.from_ma(a, skill_titles=skill_titles).model_copy(
-            update={"owned_by_you": owned_in(owned, auth, a.id)}
+            update={"owned_by_you": owned_in(owned, auth, a.id), "owner": owners.get(a.id)}
         )
         for a in rows
     ]
@@ -452,7 +458,8 @@ async def _get_agent_impl(
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
         info = info.for_member()
-    return info.model_copy(update={"owned_by_you": owned})
+    owner = (await owner_labels(runtime, auth, [agent.id])).get(agent.id)
+    return info.model_copy(update={"owned_by_you": owned, "owner": owner})
 
 
 def _reject_unknown_model(model: ModelSelection) -> None:
@@ -1763,7 +1770,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """List agents visible here, including their attached ``mcp_servers`` and ``skills``.
 
         Each agent says ``owned_by_you``: the caller owns it and may change it without
-        an admin. ``mine=true`` lists only the caller's own agents ("which agents do I
+        an admin, and ``owner``: who to ask about changing it (absent: admins only).
+        ``mine=true`` lists only the caller's own agents ("which agents do I
         own?"), wherever they answer, including ones that answer nowhere yet.
         ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
         admin nor its owner: setup details are for them, capabilities (name,
