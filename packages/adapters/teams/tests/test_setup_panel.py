@@ -471,7 +471,9 @@ async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_can
         revoked = await post_activity(service, _dialog("submit", revoke))
 
     assert refused["task"]["value"] == setup_panel.OPERATOR_NEEDS_ADMIN
-    assert "mint-operator-token" in json.dumps(forged), "the deployment scope stays with the CLI"
+    assert "can't be granted from here" in json.dumps(forged), (
+        "the deployment scope stays with the operator"
+    )
     assert "Shown once" in json.dumps(minted) and row.kind == "operator"
     assert set(row.scopes) == {"tenant:read", "promo:redeem"}
     listed = json.dumps(listing)

@@ -961,8 +961,9 @@ print(json.dumps({"groups": [name for name in command.list_commands(context)
     return json.loads(result.stdout)
 
 
+# Unset now means on (the default); each case here is an operator stop.
 @pytest.mark.parametrize(
-    "path,enabled", [(None, None), ("legacy", "false"), ("mux", "false"), ("legacy", "true")]
+    "path,enabled", [("legacy", "false"), ("mux", "false"), ("legacy", "true")]
 )
 def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path, enabled):
     actual = cli_registration_probe(tmp_path, path=path, enabled=enabled)

@@ -471,6 +471,37 @@ async def test_actual_fixture_refuses_ambient_sdk_settings(
         await setup(db_session, db_session_factory)
 
 
+async def test_default_path_refuses_a_new_thread_pinned_outside_the_allowlist(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """On the shipped defaults, a channel pin to a provider the tenant hasn't allowed refuses."""
+    app, dispatch, wire = await setup(db_session, db_session_factory)
+    app.runtime = dataclasses.replace(
+        app.runtime,
+        turn_deps=dataclasses.replace(
+            app.runtime.turn_deps, turn_path="mux", channel_backends=True, agent_backends=True
+        ),
+    )
+    try:
+        first = await dispatch(THREAD, USER)
+        async with db_session_factory.begin() as session:
+            await set_channel_backend(
+                session,
+                channel_ref(tenant_id_from(first), "discord", CHANNEL),
+                BackendConfig(
+                    backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"
+                ),
+            )
+        before = len(wire.requests)
+        with pytest.raises(AdmissionDenied) as denied:
+            await dispatch(NEW_THREAD, USER)
+        assert denied.value.reason == "backend_unsupported"
+        assert not any(request.method != "GET" for request in wire.requests[before:])
+    finally:
+        await app.runtime.anthropic.close()
+
+
 async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

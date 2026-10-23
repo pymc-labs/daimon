@@ -1926,10 +1926,14 @@ class HostFleetPorts:
             raise FleetRefused("prerequisites_unavailable")
         deps = self._deps
         if deps is not None and (
-            deps.turn_path != "mux" or not deps.channel_backends or not deps.agent_backends
+            not deps.fleet_enabled
+            or deps.turn_path != "mux"
+            or not deps.channel_backends
+            or not deps.agent_backends
         ):
             # An operator stop: refuse before the worker is funded or claims a slot,
-            # instead of failing it later in `run_worker`. A fleet stop builds no ports.
+            # instead of failing it later in `run_worker`. A fleet stop also builds no
+            # ports; this check is the second line of defence.
             raise FleetRefused("prerequisites_unavailable")
         if (reviewer_of is None) != (reviewed_result is None):
             raise FleetRefused("review_evidence_invalid")

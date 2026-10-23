@@ -644,7 +644,8 @@ async def test_flag_off_refuses_before_source_or_dependency_construction(operato
     from daimon.core.errors import StoreError
 
     rt, *rest = operator
-    rt = replace(rt, settings=rt.settings.model_copy(update={"turn": TurnSettings()}))
+    stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+    rt = replace(rt, settings=rt.settings.model_copy(update={"turn": stopped}))
     operator[-1].clear()
     with pytest.raises(StoreError, match="disabled"):
         await run((rt, *rest), accept_drops="memory,sandbox")
@@ -832,7 +833,8 @@ def test_disabled_revert_command_refuses_before_runtime_construction(monkeypatch
     from daimon.core.config import TurnSettings
     from daimon.core.errors import StoreError
 
-    monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace(turn=TurnSettings()))
+    stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+    monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace(turn=stopped))
 
     def forbidden_runtime(*args, **kwargs):
         pytest.fail("A disabled new command must not construct a runtime")

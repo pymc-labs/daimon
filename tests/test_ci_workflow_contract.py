@@ -90,6 +90,8 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     assert set(deploy["needs"]) == {
         "lint",
         "shard-check",
+        # The production default path (mux) gates the deploy.
+        "pytest-mux-leg",
         "pytest-db",
         "pytest-discord",
         "pytest-light",

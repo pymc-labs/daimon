@@ -2075,7 +2075,7 @@ async def test_request_agent_key_refuses_before_posting_when_no_crypto_keys(
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9501", posted=posted)
 
-    with pytest.raises(ToolError, match="DAIMON_CRYPTO__KEYS"):
+    with pytest.raises(ToolError, match="no encryption key yet"):
         await _request_agent_key_impl(
             runtime,
             auth,

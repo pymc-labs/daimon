@@ -350,7 +350,7 @@ async def test_read_channel_discord_caller_routes_to_discord_impl_and_fails_on_m
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+    assert "Discord tools are unavailable" in output_text, (
         f"Discord caller's read_channel must hit the Discord-side bot-token error; got {output_text!r}"
     )
 
@@ -557,7 +557,7 @@ async def test_read_channel_discord_caller_treats_empty_cursor_as_absent(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+    assert "Discord tools are unavailable" in output_text, (
         f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
     )
 
@@ -673,7 +673,7 @@ async def test_create_thread_discord_caller_routes_to_discord_impl_and_fails_on_
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+    assert "Discord tools are unavailable" in output_text, (
         f"Discord caller's create_thread must hit the Discord-side bot-token error; got {output_text!r}"
     )
 
