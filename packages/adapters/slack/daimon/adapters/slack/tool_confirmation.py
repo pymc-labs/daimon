@@ -46,6 +46,7 @@ from daimon.core.posted_controls.confirmation import (
     parse_details_custom_id,
 )
 from daimon.core.posted_controls.lifecycle import (
+    STILL_WAITING_MESSAGE,
     PostedConfirmations,
     check_confirmation_admin,
     edit_card_within,
@@ -268,8 +269,19 @@ class SlackConfirmationCards:
                 posted.retired.set()
                 await _edit(posted, state, answered_by=None)
 
+            async def remind() -> None:
+                # Once, after a while: the requester is pinged in the card's thread.
+                card_ts = posted_cards[0].ts if posted_cards else None
+                await post_as_agent(
+                    client,
+                    identity,
+                    channel=channel,
+                    thread_ts=thread_ts or card_ts,
+                    text=f"<@{prompt.requester_platform_user_id}> {STILL_WAITING_MESSAGE}",
+                )
+
             result = await self._controls.confirm(
-                prompt, post=post, retire=retire, post_errors=(SlackApiError,)
+                prompt, post=post, retire=retire, post_errors=(SlackApiError,), remind=remind
             )
             if result == "approved" and posted_cards:
                 answered_posted = posted_cards[0]

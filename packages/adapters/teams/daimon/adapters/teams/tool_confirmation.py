@@ -42,6 +42,7 @@ from daimon.core.posted_controls.confirmation import (
     confirmation_card_text,
 )
 from daimon.core.posted_controls.lifecycle import (
+    STILL_WAITING_MESSAGE,
     PostedConfirmations,
     check_confirmation_admin,
     edit_card_within,
@@ -358,8 +359,30 @@ class TeamsConfirmationCards:
                 posted.retired.set()
                 await self._edit(posted, state)
 
+            async def remind() -> None:
+                # Once, after a while: a line in the conversation, and the
+                # requester's activity feed (what reaches them in Teams).
+                sent = await self._sender.send(
+                    conversation_id,
+                    MessageActivityInput(text=STILL_WAITING_MESSAGE),
+                    service_url=service_url,
+                )
+                if self._feed is not None:
+                    self._feed.notify(
+                        conversation_id,
+                        sent.id,
+                        recipient_id=prompt.requester_platform_user_id,
+                        text=STILL_WAITING_MESSAGE,
+                        preview=prompt.title,
+                        group_id=team_group_id,
+                    )
+
             result = await self._controls.confirm(
-                prompt, post=post, retire=retire, post_errors=TEAMS_SEND_ERRORS
+                prompt,
+                post=post,
+                retire=retire,
+                post_errors=TEAMS_SEND_ERRORS,
+                remind=remind,
             )
             if result == "approved" and posted_cards:
                 answered_posted = posted_cards[0]

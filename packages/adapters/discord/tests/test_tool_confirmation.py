@@ -865,3 +865,22 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
     )
     discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
     assert factory.call_args.kwargs["pin_channel"] is None, "no admitted channel, no pin card"
+
+
+async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monkeypatch) -> None:
+    """ROOT 2: a long card pings its requester once in the card's thread."""
+    from daimon.core.posted_controls import lifecycle
+
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    prompt = _prompt(expires_in=timedelta(seconds=0.3))
+    message = SimpleNamespace(id=7, edit=AsyncMock(), reply=AsyncMock())
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=message)
+    answer = await discord_confirmation_hook(channel)(prompt)
+    assert answer == "expired"
+    (call,) = message.reply.await_args_list
+    assert call.args[0] == (
+        f"<@{prompt.requester_platform_user_id}> This is still waiting for your click."
+    )
+    mentions = call.kwargs["allowed_mentions"].to_dict()
+    assert mentions.get("parse") == ["users"] and call.kwargs["mention_author"] is False

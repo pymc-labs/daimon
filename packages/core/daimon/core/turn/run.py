@@ -1447,7 +1447,15 @@ async def run_prepared_turn_impl(
                 continuity=continuity_cell[0],
             )
 
-    outcome = await _run_within_ceiling()
+    from daimon.core.turn.ceiling import current_turn_deadline
+
+    # wait_for's task copies this context: a card posted inside the turn sees the
+    # deadline and never promises a time past it.
+    deadline_token = current_turn_deadline.set(effective_deadline)
+    try:
+        outcome = await _run_within_ceiling()
+    finally:
+        current_turn_deadline.reset(deadline_token)
     # Turn end: anything this session billed nowhere -- calls MA made while no
     # worker was streaming it (an earlier turn whose worker died), while no
     # stream generation was attached, or before a ceiling cut the turn off.
