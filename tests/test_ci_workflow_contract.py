@@ -107,6 +107,8 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "mux-standalone",
         "pytest-notebook-host",
         "pytest-staging-config",
+        # A red offline journey (J1-J10) blocks the staging deploy.
+        "journeys-offline",
         "docker-publish-candidate",
     }
     assert {leg["suite"] for leg in jobs["pytest-light"]["strategy"]["matrix"]["include"]} == {
@@ -133,11 +135,17 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
         "pytest-staging-config",
         "pytest-light",
         "pytest-notebook-host",
+        "journeys-offline",
     }
     for name, job in pytest_jobs.items():
         for command in _pytest_commands(job):
             assert "-n auto" not in command
-            if name in ("pytest-discord", "pytest-mux-leg", "pytest-staging-config"):
+            if name in (
+                "pytest-discord",
+                "pytest-mux-leg",
+                "pytest-staging-config",
+                "journeys-offline",
+            ):
                 assert " -n 2 " in command
             elif "-m slow" not in command:
                 assert " -n 4 --dist worksteal " in command

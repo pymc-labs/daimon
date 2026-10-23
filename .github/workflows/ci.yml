@@ -291,6 +291,72 @@ jobs:
           path: staging-config-${{ matrix.configuration }}.xml
           if-no-files-found: ignore
 
+  # The offline journey end-to-ends (TARGET-V2 J1-J10): each is a user's plain ask
+  # driven through the real production path with fake providers and code defaults
+  # only. A dedicated, named job so a broken journey is visible as such, on both
+  # turn legs, and blocks the staging deploy (it is in deploy-gcp's `needs`).
+  # Files are found by name, test_j<N>_<what>.py anywhere under packages/ or tests/
+  # (the journey end-to-ends, test_j<N>_..._e2e.py, and journey guards such as J1's
+  # test_j1_switch_card_guard.py), so a new journey file joins without editing this
+  # job; none found fails.
+  journeys-offline:
+    name: journeys-offline (${{ matrix.leg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { leg: mux, path: mux, channel_backends: "true" }
+          - { leg: stop, path: "", channel_backends: "" }
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      TMPDIR: /dev/shm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
+        with:
+          database: "true"
+      - name: pytest (journeys, ${{ matrix.leg }} leg)
+        env:
+          # The mux leg is the production default; the stop leg leaves both unset
+          # (daimon.testing.stop_leg_default), as the other pytest jobs do.
+          LEG_PATH: ${{ matrix.path }}
+          LEG_CHANNEL_BACKENDS: ${{ matrix.channel_backends }}
+        run: |
+          if [ -n "$LEG_PATH" ]; then export DAIMON_TURN__PATH="$LEG_PATH"; fi
+          if [ -n "$LEG_CHANNEL_BACKENDS" ]; then
+            export DAIMON_TURN__CHANNEL_BACKENDS="$LEG_CHANNEL_BACKENDS"
+          fi
+          mapfile -t journeys < <(find packages tests -name 'test_j[0-9]*_*.py' | sort)
+          if [ "${#journeys[@]}" -eq 0 ]; then
+            echo "::error::no journey test files (test_j<N>_*.py) found"
+            exit 1
+          fi
+          printf 'journey file: %s\n' "${journeys[@]}"
+          uv run pytest "${journeys[@]}" -n 2 -rfE --tb=short --durations=20 \
+            --junitxml=journeys-${{ matrix.leg }}.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: journeys-${{ matrix.leg }}-junit
+          path: journeys-${{ matrix.leg }}.xml
+          if-no-files-found: ignore
+
   # Sharded like pytest-db (same plugin, same duration table, checked by
   # shard-check), but with two xdist workers per leg and the hang diagnostics
   # on every leg.
@@ -642,7 +708,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-mux-leg, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, docker-publish-candidate]
+    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-mux-leg, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators
