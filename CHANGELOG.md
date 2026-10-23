@@ -15,8 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retain their gates on every host, including unrelated name collisions. Direct
   messages, deny rules and unattended writes retain their existing behavior.
   Rollback caveat: older builds reject the stored approval fields as unknown and
-  refuse that tenant's policy. Remove those fields or restore a compatible policy
-  backup before rollback; disabling the deployment flag does not remove them.
+  refuse that tenant's policy. Before rollback, while this build still runs, a
+  native server/workspace admin must use `/here` (Teams: `here`) to choose
+  **Inherit** for Server and for every channel/thread with a saved override.
+  Alternatively, restore a policy backup from before overrides were saved.
+  Disabling the deployment flag does not remove the stored fields.
 
 - Hide saved routine triggers/results from MCP, CLI and Discord controls when
   their source or destination becomes reserved for recruitment, including

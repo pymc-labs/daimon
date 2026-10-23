@@ -511,6 +511,15 @@ async def test_own_endpoint_alias_deny_is_read_without_reserved_rule_index() -> 
         set(CONFIRMED_DAIMON_TOOLS)
         | set(PUBLISH_TOOLS)
         | {
+            "attach_mcp_server",
+            "detach_mcp_server",
+            "update_agent",
+            "request_agent_key",
+            "remove_agent_key",
+            "create_routine",
+            "update_routine",
+            "set_display_identity",
+            "set_setup_target",
             "set_approval_gate",
             "set_channel_rule",
             "set_agent_rule",

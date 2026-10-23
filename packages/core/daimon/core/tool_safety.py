@@ -233,6 +233,15 @@ APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({*CONFIRMED_DAIMON_TOOLS, *PUB
 # These names are protected even on unrecognised hosts or unrelated servers.
 PERMISSION_SETTER_TOOLS: Final[frozenset[str]] = frozenset(
     {
+        "attach_mcp_server",
+        "detach_mcp_server",
+        "update_agent",
+        "request_agent_key",
+        "remove_agent_key",
+        "create_routine",
+        "update_routine",
+        "set_display_identity",
+        "set_setup_target",
         "set_approval_gate",
         "set_channel_rule",
         "set_agent_rule",
@@ -847,7 +856,12 @@ def decide_tool_call(
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
-    if attended and call.server_name not in trusted_servers and gate_protected_tool(call.tool_name):
+    if (
+        policy.allow_gate_overrides
+        and attended
+        and call.server_name not in trusted_servers
+        and gate_protected_tool(call.tool_name)
+    ):
         # Endpoint comparison cannot prove another hostname is third-party.
         # Protected names cannot be widened by annotations, operator read hints,
         # an agent allow rule, or a scoped approval switch. Denials still win.
