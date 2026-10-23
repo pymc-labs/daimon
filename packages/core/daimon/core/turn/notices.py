@@ -233,7 +233,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     ),
     "provider_daily_cap_reached": _Copy(
         "Today's {model} budget for this {scope} is used up.",
-        "It resets at midnight UTC; ask {who} to raise it, or use another model.",
+        "It resets at midnight UTC; use another model until then.",
     ),
 }
 # A provider refusal names its real cause and the chat words that fix it.

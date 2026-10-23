@@ -12,14 +12,20 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import structlog
 from daimon.core._models import FleetWorker, UsageObservation
-from daimon.core.pricing import ModelRates, ProviderPrice, minimum_cost_of
+from daimon.core.pricing import ProviderPrice, minimum_cost_of, provider_cost_of
 from mux.state.usage_ledger import AppliedUsage
 from pydantic import ValidationError
 from sqlalchemy import DateTime, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _ACTIVE = ("pending", "starting", "running")
+log = structlog.get_logger(__name__)
+
+
+class SpendUnpriced(Exception):
+    """Today's spend on this model can't be priced (no current tariff): fail closed."""
 
 
 def utc_midnight(now: datetime) -> datetime:
@@ -34,10 +40,18 @@ async def openai_spend_today(
     provider: str,
     model: str,
     now: datetime,
-    rates: ModelRates | ProviderPrice | None,
+    rates: ProviderPrice | None,
     markup: Decimal,
 ) -> Decimal:
-    """Observed usage today on `model` at list price, plus its running workers' holds."""
+    """Observed usage today on `model` at list price, plus its running workers' holds.
+
+    Each observation is priced at its upper bound (`provider_cost_of`, so long-context
+    rates count) and falls back to its token floor while it is still partial. Without
+    a tariff current today the spend can't be known: `SpendUnpriced`, never $0. A
+    malformed usage row is skipped and logged; it never stops a turn from starting.
+    """
+    if rates is None or not rates.current_on(now.date()):
+        raise SpendUnpriced(model)
     observation = UsageObservation.applied["observation"]
     latest = (
         select(UsageObservation.applied)
@@ -61,7 +75,14 @@ async def openai_spend_today(
         except ValidationError:
             continue
         effective = usage.observation.model_copy(update=dict(usage.tokens))
-        spent += minimum_cost_of(effective, rates) or Decimal(0)
+        try:
+            cost = provider_cost_of(effective, rates, infrastructure_usd=Decimal(0))
+            if cost is None:
+                cost = minimum_cost_of(effective, rates)
+        except ValueError:
+            log.warning("openai_spend.usage_row_skipped", tenant_id=str(tenant_id), model=model)
+            continue
+        spent += cost or Decimal(0)
     # A running worker's reservation is customer dollars (with markup). Counted in
     # full, even where some of its usage is already observed: never under-counts.
     held = await session.scalar(

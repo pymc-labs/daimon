@@ -209,3 +209,36 @@ def test_the_refusal_names_the_model_and_when_it_resets():
     )
     assert "Today's GPT-6 Astra budget for this server is used up." in text
     assert "midnight UTC" in text and "DAIMON_" not in text
+
+
+async def test_an_expired_or_missing_tariff_refuses_instead_of_counting_nothing(sessions):
+    expired = ProviderPrice(
+        "openai",
+        "gpt-6-astra",
+        NOW.date() - timedelta(days=30),
+        Decimal(10),
+        Decimal(50),
+        Decimal(1),
+        Decimal(10),
+        valid_before=NOW.date() - timedelta(days=1),
+    )
+    for price in (expired, None):
+        with pytest.raises(AdmissionDenied) as refused:
+            await _check_daily_model_cap(
+                _request(sessions, cap=Decimal(100)),
+                cast(Any, SimpleNamespace(price=price)),
+                _revision("gpt-6-astra"),
+            )
+        assert refused.value.reason == "provider_daily_cap_reached"
+
+
+async def test_a_malformed_usage_row_is_skipped_not_fatal(sessions, monkeypatch):
+    from daimon.core.stores import openai_spend
+
+    await record(sessions, "astra", usage(BINDINGS["astra"][1], "gpt-6-astra"))
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("cached tokens exceed input")
+
+    monkeypatch.setattr(openai_spend, "provider_cost_of", broken)
+    assert await spent(sessions, "gpt-6-astra") == 0

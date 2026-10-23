@@ -376,21 +376,33 @@ async def _check_daily_model_cap(
     worker's own reservation already counts toward today's spend, so it may use
     the cap up exactly; an agent turn starts only while some of it remains.
     """
-    from daimon.core.stores.openai_spend import openai_spend_today
+    from daimon.core.stores.openai_spend import SpendUnpriced, openai_spend_today
 
     cap = request.deps.openai_daily_model_cap_usd
     if cap is None or revision.model is None:
         return
-    async with request.deps.sessionmaker() as session:
-        spent = await openai_spend_today(
-            session,
-            tenant_id=request.tenant_id,
-            provider=revision.backend,
-            model=revision.model,
-            now=request.now(),
-            rates=runtime.price,
-            markup=request.deps.markup,
+    price = runtime.price
+    try:
+        async with request.deps.sessionmaker() as session:
+            spent = await openai_spend_today(
+                session,
+                tenant_id=request.tenant_id,
+                provider=revision.backend,
+                model=revision.model,
+                now=request.now(),
+                rates=price,
+                markup=request.deps.markup,
+            )
+    except SpendUnpriced:
+        # No current tariff: today's spend can't be known, so the cap can't be honoured.
+        import structlog
+
+        structlog.get_logger(__name__).warning(
+            "turn.daily_model_cap_unpriced", tenant_id=str(request.tenant_id), model=revision.model
         )
+        raise AdmissionDenied(
+            reason="provider_daily_cap_reached", provider=revision.model
+        ) from None
     over = spent > cap if request.worker is not None else spent >= cap
     if over:
         import structlog
