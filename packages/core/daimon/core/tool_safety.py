@@ -424,6 +424,15 @@ class ToolSafetyPolicy(BaseModel):
             "Off by default; stored rules remain editable but inactive until enabled."
         ),
     )
+    allow_gate_overrides: bool = Field(
+        default=False,
+        description=(
+            "Let server admins override asking before third-party MCP writes at server, "
+            "channel or thread scope. The most specific explicit on/off setting wins. "
+            "Stored settings are ignored while off. Fixed Daimon confirmations, admin "
+            "prompts, deny rules and unattended_writes are unaffected."
+        ),
+    )
     effects: dict[str, ToolEffect] = Field(
         default_factory=dict,
         description=(

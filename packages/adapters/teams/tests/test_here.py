@@ -101,3 +101,27 @@ def test_the_here_card_shows_names_as_literal_text() -> None:
 
     assert "\\\\*\\\\*bold\\\\*\\\\*" in rendered, "markdown in a name is escaped"
     assert "<at>" not in rendered, "a name cannot become a mention"
+
+
+@pytest.mark.parametrize("target", [CHANNEL_ID, f"{CHANNEL_ID};messageid=root"])
+async def test_approval_card_rechecks_admin_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from daimon.adapters.teams import here
+    from daimon.adapters.teams.card_actions import Actor
+    from daimon.core.authz import Subject
+
+    runtime = MagicMock()
+    runtime.sessionmaker = MagicMock()
+    actor = Actor(user_id="user", tenant_id=TENANT, is_admin=True, conversation_id=DIRECT_CHAT_ID)
+    monkeypatch.setattr(here, "card_actor", AsyncMock(return_value=actor))
+    monkeypatch.setattr(
+        here, "approval_admin", AsyncMock(return_value=Subject(platform_user_id="user"))
+    )
+    context = MagicMock()
+    context.activity.value.action.data = {"op": "off", "target": target}
+    response = await here.HereApprovals(runtime).on_action(context)
+    runtime.sessionmaker.assert_not_called()
+    assert "admin" in str(response)

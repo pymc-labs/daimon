@@ -35,6 +35,7 @@ from daimon.core import channel_backend
 from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
+from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -172,6 +173,7 @@ class AdmissionGrant:
     channel_id: str
     thread_id: str | None
     is_dm: bool
+    platform: str = "discord"
     cold_dm: bool = False
     act_for_creator: bool = False
     # Set by the DM path: the conversation's source, whose seal is re-checked.
@@ -198,6 +200,8 @@ class Admission:
     # The turn's agent may not publish freely (`AgentPermissions.publishes`): its
     # session's publish tools wait for the requester's Approve on a card.
     asks_before_publishing: bool = False
+    # The decider changes; the provider session keeps the same approval pauses.
+    approval_gate: ApprovalGate | None = field(default=None, compare=False)
     # Daimon tools this agent has an ask or deny rule on, read when the turn is
     # admitted (empty while rules are off): their session tools wait for the
     # driver's decision, so the set is part of the tools the session is bound to.
@@ -945,6 +949,7 @@ async def admit_impl(
         channel_id=channel_id,
         thread_id=thread_id,
         is_dm=is_dm,
+        platform=platform,
         cold_dm=cold_dm or dm_agent_name is not None,
         hold=hold,
         platform=platform,
@@ -998,6 +1003,7 @@ async def admit_impl(
             grant=grant,
             memory_read_only=memory_read_only,
             asks_before_publishing=_asks_before_publishing(policy, grant),
+            approval_gate=_approval_gate_for(deps, policy, grant),
             daimon_rule_tools=daimon_rules.tools,
             daimon_rules_need_driver=daimon_rules.needs_driver,
             source_sealed=source_sealed,
@@ -1242,6 +1248,7 @@ async def admit_impl(
         backend=backend,
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
+        approval_gate=_approval_gate_for(deps, policy, grant),
         daimon_rule_tools=daimon_rules.tools,
         daimon_rules_need_driver=daimon_rules.needs_driver,
         source_sealed=source_sealed,
@@ -1387,6 +1394,17 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
         raise AdmissionDenied(
             reason="own_agents_only" if decision.reason == "own_agents_only" else "runs_elsewhere"
         )
+
+
+def _approval_gate_for(
+    deps: TurnDeps, policy: TenantAccessPolicy, grant: AdmissionGrant
+) -> ApprovalGate | None:
+    if not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides):
+        return None
+    gate = resolve_approval_gate(
+        policy, platform=grant.platform, channel_id=grant.channel_id, thread_id=grant.thread_id
+    )
+    return replace(gate, tenant_id=grant.tenant_id)
 
 
 def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
@@ -1548,6 +1566,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         policy, grant, bool(seal_ids)
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
+    approval_gate = _approval_gate_for(deps, policy, grant)
     # The agent's rules on daimon's own tools, as they are now (one query, and
     # none unless tool safety and agent rules are both on). A rule added or
     # cleared since admission reaches the decider of this turn and a fleet
@@ -1561,6 +1580,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         and seal_ids == admission.origin_seal_ids
         and memory_read_only == admission.memory_read_only
         and asks_before_publishing == admission.asks_before_publishing
+        and approval_gate == admission.approval_gate
         and rules.tools == admission.daimon_rule_tools
         and rules.needs_driver == admission.daimon_rules_need_driver
     ):
@@ -1574,6 +1594,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         source_sealed=admission.source_sealed or bool(seal_ids),
         memory_read_only=memory_read_only,
         asks_before_publishing=asks_before_publishing,
+        approval_gate=approval_gate,
         daimon_rule_tools=rules.tools,
         daimon_rules_need_driver=rules.needs_driver,
     )
@@ -1822,6 +1843,7 @@ async def capture_backend_source(
                 channel_id=context.channel_id or "",
                 thread_id=context.thread_id,
                 is_dm=is_dm,
+                platform=context.platform or account.platform,
             )
             if (
                 place.category_unresolved
@@ -1861,6 +1883,7 @@ async def capture_backend_source(
                 grant=grant,
                 memory_read_only=_memory_read_only(policy, grant, bool(seals)),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
+                approval_gate=_approval_gate_for(deps, policy, grant),
                 daimon_rule_tools=rule_set.tools,
                 daimon_rules_need_driver=rule_set.needs_driver,
                 source_sealed=bool(seals),

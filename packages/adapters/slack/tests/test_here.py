@@ -545,3 +545,30 @@ async def test_whole_here_info_failure_uses_outsider_note_and_hides_details(
     assert "Guest check skipped" not in attachment
     assert "ResearchBot" not in attachment
     assert "Make confidential" not in attachment
+
+
+async def test_approval_card_rejects_requester_before_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.slack import here
+    from daimon.core.authz import Subject
+
+    runtime = MagicMock()
+    runtime.sessionmaker = MagicMock()
+    client = MagicMock()
+    client.chat_postEphemeral = AsyncMock()
+    monkeypatch.setattr(here, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(
+        here, "approval_admin", AsyncMock(return_value=Subject(platform_user_id="U1"))
+    )
+    await here.handle_here_approvals(
+        runtime,
+        {
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "user": {"id": "U1"},
+            "actions": [{"selected_option": {"value": "off"}}],
+        },
+    )
+    runtime.sessionmaker.assert_not_called()
+    assert "admin" in client.chat_postEphemeral.await_args.kwargs["text"]

@@ -122,11 +122,12 @@ Channel environment tools: which environment a channel's turns run in.
 
 ## `channel_rules`
 
-Rule tools: who reads a channel and who posts there, and where an agent runs.
+Channel and agent rules, and the attended third-party write approval gate.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_agent_rule` | admin only, operator tokens with channels:write | Set where an agent runs: only in the ``runs_in`` channels and their threads, or, with null, wherever it is set to answer; an empty list runs it nowhere. |
+| `set_approval_gate` | admin only | Set asking before third-party MCP writes: on, off, or inherit. |
 | `set_channel_rule` | admin only, operator tokens with channels:write | Set who can read a channel and who can post there. |
 
 ## `channel_skills`

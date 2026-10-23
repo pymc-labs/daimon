@@ -3330,13 +3330,26 @@ async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
         await anthropic_client.close()
 
 
+@pytest.mark.parametrize(
+    "gate_scope,overrides_enabled",
+    [
+        (None, True),
+        ("server", True),
+        ("channel:chan-1", True),
+        ("thread:thread-hook-threading", True),
+        ("server", False),
+    ],
+)
 async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrapper(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    gate_scope: str | None,
+    overrides_enabled: bool,
 ) -> None:
     """SYS-038 x SYS-081: `run_prepared_turn` observes, `run_prepared_turn_impl`
     runs; the adapter's card hook and `attended` must survive the hop."""
+    from daimon.core.approval_gate import ApprovalGate
     from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
     from daimon.core.turn.posture import PolicyApproval
@@ -3355,14 +3368,17 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
     router = _router(session_bodies=[], dead_session_ids=set())
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        tool_safety=ToolSafetyPolicy(enabled=True),
+        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=overrides_enabled),
     )
     prepared = _prepared_turn(
         deps=deps,
-        admission=_admission(
-            account_id=account.id,
-            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
-            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        admission=dataclasses.replace(
+            _admission(
+                account_id=account.id,
+                agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+                env=ma_environment(id="env_1", tenant_id=tenant.id),
+            ),
+            approval_gate=ApprovalGate("off", gate_scope, "admin") if gate_scope else None,
         ),
         tenant_id=tenant.id,
         external_user_id="user-1",
@@ -3404,7 +3420,8 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
     result = await posture.decide(
         ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
     )
-    assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"
+    assert result.allow
+    assert len(prompts) == (0 if gate_scope is not None and overrides_enabled else 1)
 
 
 @pytest.mark.parametrize("attended", [True, False], ids=["chat", "unattended"])

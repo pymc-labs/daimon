@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routines retain verified parent/thread provenance and use the parent channel's
   budget; unresolved sources are refused.
 
+- Add opt-in server-admin overrides for third-party MCP write approvals at
+  server, channel and thread scope, with audited CLI/MCP and `/here` controls.
+  Fixed confirmations, deny rules and unattended writes retain their gates.
+
 ### Fixed
 
 - Explain queued mentions once a previous turn has run for three minutes on Discord,

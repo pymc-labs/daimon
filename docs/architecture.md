@@ -1284,6 +1284,15 @@ OpenAI persistent workers that require automatic `bash` are refused.
 Conversation-only workers without those tools remain supported. Selfhosted
 execution inspects every declared tool at the host boundary, even with tool
 safety off, so it can permit allowed reads while refusing sandbox calls.
+
+Approval gate overrides are resolved from the tenant access policy at admission,
+then passed to `chat_tool_confirmation`. Only `interactive_decider` can relax a
+third-party write verdict, and only with the deployment opt-in enabled. Fixed
+Daimon gates and unattended decisions keep their existing paths. The shared
+`approval_gate` setter authorizes the `SET_APPROVAL_GATE` action and atomically
+writes the policy and audit event; CLI, MCP and `/here` adapters obtain fresh
+native admin evidence before invoking it.
+
 Tool rules come from the session's
 conversation channel (`session_rules_channel`), never its budget channel. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write

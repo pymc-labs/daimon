@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationEventParams
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
+from daimon.core.approval_gate import ApprovalGate
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     CardRefusal,
@@ -566,6 +567,7 @@ def interactive_decider(
     rule_card_for: RuleCardFor | None = None,
     daimon_rules: bool = False,
     annotations_for: AnnotationLookup | None = None,
+    approval_gate: ApprovalGate | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -596,6 +598,32 @@ def interactive_decider(
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=True)
+        if (
+            policy.enabled
+            and policy.allow_gate_overrides
+            and approval_gate is not None
+            and approval_gate.value == "off"
+            and approval_gate.set_by
+            and not read_error
+            and verdict.outcome == "ask"
+            and verdict.reason == "write_needs_confirmation"
+            and bool(call.server_name)
+            and call.server_name not in trusted_servers
+            and "/" not in call.server_name
+        ):
+            log.info(
+                "tool_safety.gate_override_allowed",
+                tool=call.key,
+                outcome="allow",
+                reason="approval_gate_off",
+                attended=True,
+                scope=approval_gate.scope,
+                set_by=approval_gate.set_by,
+                tenant_id=str(approval_gate.tenant_id)
+                if approval_gate.tenant_id is not None
+                else None,
+            )
+            return ToolConfirmationResult(allow=True)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -693,6 +721,7 @@ def chat_tool_confirmation(
     annotations_for: AnnotationLookup | None = None,
     daimon_rules: bool = False,
     provider_permissions: bool = False,
+    approval_gate: ApprovalGate | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -719,6 +748,7 @@ def chat_tool_confirmation(
             rule_card_for=rule_card_for,
             annotations_for=annotations_for,
             daimon_rules=daimon_rules,
+            approval_gate=approval_gate,
         )
         if attended
         else unattended_decider(

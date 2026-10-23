@@ -24,7 +24,10 @@ from daimon.adapters.cli.runtime import (
     build_runtime,
     request_resource_host,
 )
+from daimon.core.access_policy import Approvals
 from daimon.core.agent_identity import ensure_agent_face
+from daimon.core.approval_admin import approval_admin
+from daimon.core.approval_gate import set_approval_gate
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.channel_budget import (
@@ -80,6 +83,8 @@ skills_app = typer.Typer(
 channels_app.add_typer(skills_app, name="skills")
 rule_app = typer.Typer(help="A channel's rule: who can read it and who can post there.")
 channels_app.add_typer(rule_app, name="rule")
+approvals_app = typer.Typer(help="Admin approval settings for server, channel or thread.")
+channels_app.add_typer(approvals_app, name="approvals")
 channels_app.command("answerable")(channels_answerable_command)
 agent_rule_app = typer.Typer(help="An agent's rule: which channels it runs in.")
 
@@ -1051,3 +1056,113 @@ async def agents_rule_set(
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
         raise typer.Exit(1) from exc
     console.print(f"{platform}:{workspace_id} {escape(' '.join(change.notes))}")
+
+
+async def channels_approvals_set(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    value: Approvals,
+    admin_user_id: str,
+    channel_id: str | None = None,
+    thread: bool = False,
+    http_client: httpx.AsyncClient | None = None,
+) -> None:
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    subject = await approval_admin(
+        rt.sessionmaker,
+        rt.settings,
+        tenant_id=tenant_id,
+        user_id=admin_user_id,
+        http_client=http_client,
+    )
+    if not subject.is_admin:
+        raise DaimonError("Only a current server or workspace admin can change approval settings.")
+    if thread and channel_id is None:
+        raise typer.BadParameter("--thread needs --channel-id")
+    target = None
+    if channel_id is not None:
+        if thread and platform == "teams":
+            if ";messageid=" not in channel_id:
+                raise typer.BadParameter("Pass the full Teams thread id.")
+            target = channel_id.strip()
+        else:
+            target = (
+                thread_rule_key(platform, channel_id) if thread else _channel(platform, channel_id)
+            )
+    await set_approval_gate(
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        target=target,
+        value=value,
+        subject=subject,
+    )
+    active = rt.settings.tool_safety.enabled and rt.settings.tool_safety.allow_gate_overrides
+    console.print(f"{platform}:{workspace_id} {target or 'server'} approvals: {value}.")
+    if not active:
+        console.print("Saved but ignored: the deployment has not enabled gate overrides.")
+
+
+@approvals_app.command("set")
+def channels_approvals_set_command(
+    platform: str,
+    workspace_id: str,
+    value: str,
+    admin_user_id: Annotated[
+        str, typer.Option(help="Platform user id; native server admin authority is checked live.")
+    ],
+    channel_id: Annotated[
+        str | None, typer.Option(help="Omit for the server; exact id for a channel or thread.")
+    ] = None,
+    thread: bool = False,
+) -> None:
+    """Set on or off; a more specific channel or thread setting wins."""
+    if value not in ("on", "off"):
+        raise typer.BadParameter("value must be on or off")
+    choice: Approvals = "on" if value == "on" else "off"
+    console = Console(highlight=False)
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_approvals_set(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                value=choice,
+                admin_user_id=admin_user_id,
+                channel_id=channel_id,
+                thread=thread,
+            )
+
+    run_cli(run(), console=console)
+
+
+@approvals_app.command("clear")
+def channels_approvals_clear_command(
+    platform: str,
+    workspace_id: str,
+    admin_user_id: Annotated[str, typer.Option(help="Platform admin user id, checked live.")],
+    channel_id: str | None = None,
+    thread: bool = False,
+) -> None:
+    """Clear a server/channel/thread setting to inherit its parent's choice."""
+    console = Console(highlight=False)
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await channels_approvals_set(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                value="inherit",
+                admin_user_id=admin_user_id,
+                channel_id=channel_id,
+                thread=thread,
+            )
+
+    run_cli(run(), console=console)

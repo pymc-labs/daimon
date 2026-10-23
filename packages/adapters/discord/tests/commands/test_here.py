@@ -137,3 +137,30 @@ def test_unconfigured_internal_roles_hint_on_here() -> None:
         text="",
     )
     assert INTERNAL_ROLES_HINT in str(build_here_embed(card).to_dict())
+
+
+@pytest.mark.parametrize("target", ["channel", "thread"])
+async def test_approval_card_checks_live_admin_before_write(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    from daimon.adapters.discord.commands import here
+    from daimon.core.authz import Subject
+
+    tenant_id = uuid.uuid4()
+    runtime = MagicMock()
+    runtime.sessionmaker = MagicMock()
+    monkeypatch.setattr(here, "resolve_tenant_for_interaction", AsyncMock(return_value=tenant_id))
+    monkeypatch.setattr(
+        here, "approval_admin", AsyncMock(return_value=Subject(platform_user_id="requester"))
+    )
+    interaction = MagicMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    interaction.data = {"values": ["off"]}
+    view = here.ApprovalGateView(runtime, tenant_id, target)
+    await view.change(interaction)
+    runtime.sessionmaker.assert_not_called()
+    assert "admin" in interaction.followup.send.await_args.args[0]

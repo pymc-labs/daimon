@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import cast
 
 from daimon.adapters.discord.checks import (
@@ -13,8 +14,11 @@ from daimon.adapters.discord.confidential import MakeConfidentialView
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.outsiders import channel_outsiders
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import Approvals
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.approval_admin import approval_admin
+from daimon.core.approval_gate import set_approval_gate
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card, render_here_card_text
 from daimon.core.platform_words import DESCRIPTIONS
@@ -43,6 +47,77 @@ def build_here_embed(card: HereCard) -> discord.Embed:
     if shown.extras:
         embed.add_field(name="\u200b", value="\n".join(shown.extras), inline=False)
     return embed
+
+
+class ApprovalGateView(discord.ui.View):
+    """An ephemeral, server-bound control; authority is re-read on every click."""
+
+    def __init__(self, runtime: DiscordRuntime, tenant_id: uuid.UUID, target: str) -> None:
+        super().__init__(timeout=300)
+        self.runtime = runtime
+        self.tenant_id = tenant_id
+        self.target = target
+        select: discord.ui.Select[ApprovalGateView] = discord.ui.Select(
+            placeholder="Third-party write approvals here",
+            options=[
+                discord.SelectOption(label=label, value=value)
+                for label, value in (
+                    ("Ask before writes", "on"),
+                    ("Allow writes without asking", "off"),
+                    ("Inherit parent setting", "inherit"),
+                )
+            ],
+        )
+        select.callback = self.change
+        self.add_item(select)
+
+    async def change(self, interaction: BotInteraction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        tenant = await resolve_tenant_for_interaction(interaction.client, interaction)
+        if tenant != self.tenant_id:
+            await interaction.followup.send(
+                "This control belongs to another server.", ephemeral=True
+            )
+            return
+        subject = await approval_admin(
+            self.runtime.sessionmaker,
+            self.runtime.settings,
+            tenant_id=self.tenant_id,
+            user_id=str(interaction.user.id),
+        )
+        data = interaction.data or {}
+        values = data.get("values", [])
+        raw: object = (
+            cast("list[object]", values)[0] if isinstance(values, list) and values else None
+        )
+        value: Approvals
+        if raw == "on":
+            value = "on"
+        elif raw == "off":
+            value = "off"
+        elif raw == "inherit":
+            value = "inherit"
+        else:
+            return
+        try:
+            await set_approval_gate(
+                self.runtime.sessionmaker,
+                tenant_id=self.tenant_id,
+                platform="discord",
+                target=self.target,
+                value=value,
+                subject=subject,
+            )
+            active = (
+                self.runtime.settings.tool_safety.enabled
+                and self.runtime.settings.tool_safety.allow_gate_overrides
+            )
+            message = f"Third-party write approvals: {value}."
+            if not active:
+                message += " Saved but ignored: deployment overrides are disabled."
+        except DaimonError as exc:
+            message = str(exc)
+        await interaction.followup.send(message, ephemeral=True)
 
 
 @app_commands.guild_only()
@@ -135,6 +210,10 @@ class HereCog(commands.Cog):
                         app_configured=runtime.settings.github_app.app_id is not None
                         and runtime.settings.github_app.private_key is not None,
                     ),
+                    gate_overrides_active=(
+                        runtime.settings.tool_safety.enabled
+                        and runtime.settings.tool_safety.allow_gate_overrides
+                    ),
                     public_mcp_url=str(runtime.settings.mcp.public_url)
                     if runtime.settings.mcp.public_url is not None
                     else None,
@@ -163,6 +242,13 @@ class HereCog(commands.Cog):
                 and is_guild_admin(interaction)
                 else None
             )
+            if is_guild_admin(interaction):
+                approval_view = ApprovalGateView(runtime, tenant_id, thread_id or str(channel.id))
+                if view is not None:
+                    for item in tuple(view.children):
+                        view.remove_item(item)
+                        approval_view.add_item(item)
+                view = approval_view
             await interaction.edit_original_response(
                 embed=build_here_embed(card),
                 view=view,
