@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add opt-in server-admin overrides for third-party MCP write approvals at
+  server, channel and thread scope, through audited native `/here` controls on
+  Discord, Slack and Teams. Every click/submission rechecks native admin authority.
+  Changes apply to the next write in prepared and running turns; failed setting
+  reads require confirmation. Fixed confirmation and permission-setter names
+  retain their gates on every host, including unrelated name collisions. Direct
+  messages, deny rules and unattended writes retain their existing behavior.
+  Rollback caveat: older builds reject the stored approval fields as unknown and
+  refuse that tenant's policy. Before rollback, while this build still runs, a
+  native server/workspace admin must use `/here` (Teams: `here`) to choose
+  **Inherit** for Server and for every channel/thread with a saved override.
+  Alternatively, restore a policy backup from before overrides were saved.
+  Disabling the deployment flag does not remove the stored fields.
+
 - Hide saved routine triggers/results from MCP, CLI and Discord controls when
   their source or destination becomes reserved for recruitment, including
   unknown legacy provenance. Restore this bot's `/recruitment` status, refresh,

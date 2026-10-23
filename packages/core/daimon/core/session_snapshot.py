@@ -520,7 +520,9 @@ def session_tools(
     gated = session_tools_for_policy(
         tool_safety,
         [tool.model_dump(mode="json") for tool in visible],
-        trusted_servers=trusted_servers_for(public_url),
+        trusted_servers=trusted_servers_for(
+            public_url, {s.name: s.url for s in visible_mcp_servers(agent, hidden_mcp_server_names)}
+        ),
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,

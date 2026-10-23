@@ -98,7 +98,9 @@ def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
     A Slack thread (``channel:ts``) only takes readers ``inside``: who writes
     there, and a channel kept to its own agents, follow its channel.
     """
-    if _SLACK_THREAD_KEY.fullmatch(channel_id) and rule not in (
+    if _SLACK_THREAD_KEY.fullmatch(channel_id) and rule.model_copy(
+        update={"approvals": "inherit", "approvals_set_by": None}
+    ) not in (
         OPEN_RULE,
         ChannelRule(readers="inside"),
     ):

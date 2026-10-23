@@ -56,7 +56,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Final, Literal, cast
 
-from daimon.core.mcp_server_url import is_session_mcp_url
+from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_endpoint
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
@@ -66,6 +66,7 @@ __all__ = [
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
     "PUBLISH_TOOLS",
+    "PERMISSION_SETTER_TOOLS",
     "SERVER_SEPARATOR",
     "PermissionPolicyType",
     "ToolAnnotations",
@@ -81,6 +82,7 @@ __all__ = [
     "daimon_endpoint",
     "decide_tool_call",
     "has_confirmation_gate",
+    "gate_protected_tool",
     "heal_reserved_server",
     "needs_annotations",
     "proxy_refusal",
@@ -102,6 +104,7 @@ WILDCARD_TOOL = "*"
 ToolEffect = Literal["read", "write"]
 PermissionPolicyType = Literal["always_allow", "always_ask"]
 VerdictReason = Literal[
+    "protected_tool_name",
     #: Enforcement is off for this deployment.
     "disabled",
     #: Not a third-party MCP tool (sandbox tools, daimon's own server).
@@ -225,6 +228,68 @@ PUBLISH_TOOLS: Final[frozenset[str]] = frozenset(
 
 #: Daimon's tools a session can hold on `always_ask` by their own name.
 APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS})
+
+# Permission changes cannot be delegated by switching off write confirmation.
+# These names are protected even on unrecognised hosts or unrelated servers.
+PERMISSION_SETTER_TOOLS: Final[frozenset[str]] = frozenset(
+    {
+        "attach_mcp_server",
+        "detach_mcp_server",
+        "update_agent",
+        "request_agent_key",
+        "remove_agent_key",
+        "create_routine",
+        "update_routine",
+        "set_display_identity",
+        "set_setup_target",
+        "set_approval_gate",
+        "set_channel_rule",
+        "set_agent_rule",
+        "set_agent_tool_rule",
+        "clear_agent_tool_rule",
+        "set_channel_agent_tool_rule",
+        "clear_channel_agent_tool_rule",
+        "set_routine_sandbox_tools",
+        "set_channel_environment",
+        "clear_channel_environment",
+        "set_channel_skills",
+        "add_channel_skill",
+        "remove_channel_skill",
+        "set_channel_budget",
+        "clear_channel_budget",
+        "set_agent_backend",
+        "set_agent_default",
+        "clear_agent_default",
+        "set_thread_participation",
+        "set_plain_text_mentions",
+        "grant_admin",
+        "revoke_admin",
+        "set_access_policy",
+        "clear_access_policy",
+    }
+)
+
+
+def gate_protected_tool(tool_name: str) -> bool:
+    """Names that never receive automatic authority from a gate override.
+
+    Endpoint identity is additional protection, not proof that another host
+    serves a third party. The proxy is protected so it cannot wrap a setter.
+    """
+    return (
+        tool_name in CONFIRMED_DAIMON_TOOLS
+        or tool_name in PUBLISH_TOOLS
+        or tool_name in PERMISSION_SETTER_TOOLS
+        or tool_name == PROXY_TOOL_NAME
+        or (
+            tool_name.startswith(("set_", "clear_", "grant_", "revoke_", "configure_"))
+            and any(
+                part in tool_name
+                for part in ("permission", "approval", "policy", "rule", "admin", "gate")
+            )
+        )
+    )
+
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
@@ -395,6 +460,17 @@ class ToolSafetyPolicy(BaseModel):
             "Apply workspace-admin tool rules for individual agents and MCP tools: third-party "
             "tools, and Daimon's own daimon-mcp/<tool> (ask and deny). "
             "Off by default; stored rules remain editable but inactive until enabled."
+        ),
+    )
+    allow_gate_overrides: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        description=(
+            "Let native server admins change third-party MCP write approvals from /here "
+            "at server, channel or thread scope. The most specific explicit on/off setting wins. "
+            "Stored settings are ignored while off. Fixed confirmation and permission-setter "
+            "names never receive an override, regardless of server host. Deny rules, direct "
+            "messages and unattended_writes retain their existing behavior."
         ),
     )
     effects: dict[str, ToolEffect] = Field(
@@ -590,15 +666,20 @@ def needs_annotations(
 
 
 def _confirmed_daimon_write(
-    call: ToolCall, *, confirmed_tools: frozenset[str] = frozenset()
+    call: ToolCall,
+    *,
+    trusted_servers: frozenset[str],
+    confirmed_tools: frozenset[str] = frozenset(),
 ) -> bool:
     field = (
         CONFIRMED_DAIMON_TOOLS.get(call.tool_name)
         if call.tool_name in _always_confirmed_tools() or call.tool_name in confirmed_tools
         else None
     )
+    # Keep the reserved-name unattended refusal even without a binding. Aliases
+    # require endpoint identity; the name alone never grants an exemption.
     return (
-        call.server_name == DAIMON_SERVER_NAME
+        (call.server_name == DAIMON_SERVER_NAME or call.server_name in trusted_servers)
         and field is not None
         and call.input.get(field) is not None
     )
@@ -659,18 +740,20 @@ def daimon_endpoint(public_url: str | None) -> dict[str, str]:
     return {DAIMON_SERVER_NAME: public_url} if public_url else {}
 
 
-def trusted_servers_for(public_url: str | None) -> frozenset[str]:
-    """The servers exempt from gating in a session: the built-in daimon server,
-    and only when this deployment runs one (`public_url` set).
+def trusted_servers_for(
+    public_url: str | None, server_urls: Mapping[str, str] | None = None
+) -> frozenset[str]:
+    """Own-server identities in the effective session endpoint bindings.
 
-    The exemption is by verified identity, not by name alone: with the policy
-    on, `create_session` re-points a `daimon-mcp` entry that names any other
-    URL at `public_url` (`heal_reserved_server`) before the session exists, so
-    in every session this set is used for, `daimon-mcp` IS the deployment's
-    own endpoint. Without a `public_url` there is no built-in server, and an
-    entry carrying the reserved name is gated like any third party.
+    The reserved name is healed before session creation. Legacy aliases of
+    the same endpoint must retain every fixed Daimon confirmation as well.
+    This exclusion comparison never grants credentials to an alias.
     """
-    return frozenset({DAIMON_SERVER_NAME}) if public_url else frozenset()
+    if not public_url:
+        return frozenset()
+    return frozenset({DAIMON_SERVER_NAME}) | frozenset(
+        name for name, url in (server_urls or {}).items() if same_mcp_endpoint(url, public_url)
+    )
 
 
 def heal_reserved_server(
@@ -721,7 +804,8 @@ def decide_tool_call(
 
     `attended` is whether a person started this turn and can answer a card
     (chat) or not (routines, wakes, smoke runs). `trusted_servers` is
-    `trusted_servers_for(public_url)`; empty (the default) gates every server.
+    `trusted_servers_for(public_url, effective_server_urls)`; empty (the default)
+    gates every server.
     A trusted server's call is a write only when `CONFIRMED_DAIMON_TOOLS` says so.
     A trusted `PUBLISH_TOOLS` call pauses only in a session that asks before
     publishing, so it asks (or, unattended, is refused) even with the policy off.
@@ -736,7 +820,9 @@ def decide_tool_call(
     trusted = call.server_name is not None and call.server_name in trusted_servers
     trusted_rule = agent_rule if trusted and policy.enabled and policy.agent_rules else None
     if trusted_rule is not None and trusted_rule.rule == "deny":
-        confirmed = _confirmed_daimon_write(call, confirmed_tools=confirmed_tools)
+        confirmed = _confirmed_daimon_write(
+            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+        )
         assert call.server_name is not None
         if confirmed and _listed(
             policy.denied, server_name=call.server_name, tool_name=call.tool_name
@@ -757,7 +843,9 @@ def decide_tool_call(
         not policy.enabled
         and call.server_name in trusted_servers
         and call.tool_name in confirmed_tools
-        and _confirmed_daimon_write(call, confirmed_tools=confirmed_tools)
+        and _confirmed_daimon_write(
+            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+        )
     ):
         return ToolVerdict(
             outcome="ask" if attended else "deny",
@@ -768,6 +856,20 @@ def decide_tool_call(
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
+    if (
+        policy.allow_gate_overrides
+        and attended
+        and call.server_name not in trusted_servers
+        and gate_protected_tool(call.tool_name)
+    ):
+        # Endpoint comparison cannot prove another hostname is third-party.
+        # Protected names cannot be widened by annotations, operator read hints,
+        # an agent allow rule, or a scoped approval switch. Denials still win.
+        if _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name):
+            return ToolVerdict(outcome="deny", effect="write", reason="denied_by_operator")
+        if policy.agent_rules and agent_rule is not None and agent_rule.rule == "deny":
+            return ToolVerdict(outcome="deny", effect="write", reason="agent_rule_deny")
+        return ToolVerdict(outcome="ask", effect="write", reason="protected_tool_name")
     if SERVER_SEPARATOR in call.server_name and _gated(call.server_name, trusted_servers):
         # Its keys alias another server's tools, so neither an operator
         # override nor a rule can be trusted to mean it: always a write.
@@ -783,7 +885,9 @@ def decide_tool_call(
         effect = classify_tool(
             policy, server_name=call.server_name, tool_name=call.tool_name, annotations=annotations
         )
-    elif _confirmed_daimon_write(call, confirmed_tools=confirmed_tools):
+    elif _confirmed_daimon_write(
+        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+    ):
         effect = "write"
     elif trusted_rule is not None and trusted_rule.rule == "ask":
         return ToolVerdict(
@@ -810,7 +914,9 @@ def decide_tool_call(
         return ToolVerdict(outcome="allow", effect=effect, reason="read")
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
-    if not _confirmed_daimon_write(call, confirmed_tools=confirmed_tools) and (
+    if not _confirmed_daimon_write(
+        call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+    ) and (
         ANY_KEY in policy.unattended_writes
         or _listed(policy.unattended_writes, server_name=call.server_name, tool_name=call.tool_name)
     ):
@@ -893,7 +999,9 @@ def session_tools_for_policy(
             wanted = toolset_permission_policy(
                 policy,
                 server_name=server_name if isinstance(server_name, str) else "",
-                trusted_servers=trusted_servers,
+                # Preserve the pause on legacy aliases: their name-bound agent
+                # rules are not covered by the reserved server's rule index.
+                trusted_servers=trusted_servers & {DAIMON_SERVER_NAME},
             )
             if default_config.get("permission_policy") != wanted:
                 default_config["permission_policy"] = wanted
@@ -905,7 +1013,7 @@ def session_tools_for_policy(
                     changed = changed or config.get("permission_policy") != wanted
                     configs.append({**config, "permission_policy": wanted})
                 entry["configs"] = configs
-        if server_name == DAIMON_SERVER_NAME and server_name in trusted_servers:
+        if server_name in trusted_servers:
             entry["configs"], asking = _ask_for(
                 entry.get("configs") or [], asked, enabled=default_config.get("enabled", True)
             )

@@ -410,6 +410,10 @@
       "count": 1,
       "boundary": "dm"
     },
+    "packages/adapters/discord/daimon/adapters/discord/commands/here.py:ApprovalGateView:persistent_control:0dfa486c2a7a": {
+      "count": 1,
+      "boundary": "controls"
+    },
     "packages/adapters/discord/daimon/adapters/discord/commands/here.py:HereCog.here:fetch_channel:5b79bc56cf5c": {
       "count": 1,
       "boundary": "here"
@@ -846,11 +850,11 @@
       "boundary": "stored_internal",
       "note": "Creator/execution/mutation bookkeeping only; not a stored trigger/result projection."
     },
-    "packages/core/daimon/core/turn/run.py:run_prepared_turn_impl._run:run_turn:9a6f29e3f2d6": {
+    "packages/core/daimon/core/turn/run.py:run_prepared_turn_impl._run:run_turn:6e5d2ba87a94": {
       "count": 1,
       "boundary": "driver"
     },
-    "packages/core/daimon/core/turn/run.py:run_prepared_turn_impl._run:run_turn:b5101aabdc58": {
+    "packages/core/daimon/core/turn/run.py:run_prepared_turn_impl._run:run_turn:d0cae0462326": {
       "count": 1,
       "boundary": "driver"
     },

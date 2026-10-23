@@ -119,7 +119,7 @@ Channel environment tools: which environment a channel's turns run in.
 
 ## `channel_rules`
 
-Rule tools: who reads a channel and who posts there, and where an agent runs.
+Channel and agent rules.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |

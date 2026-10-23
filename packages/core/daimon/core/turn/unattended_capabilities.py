@@ -884,7 +884,7 @@ async def constrain_capabilities(
     gated = session_tools_for_policy(
         policy,
         tools,
-        trusted_servers=trusted_servers_for(public_url),
+        trusted_servers=trusted_servers_for(public_url, {s["name"]: s["url"] for s in servers}),
         confirmed_tools=protected,
         daimon_rule_tools=rules,
     )

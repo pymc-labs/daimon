@@ -50,6 +50,7 @@ from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import lock_preparation
+from daimon.core.session_snapshot import session_mcp_servers
 from daimon.core.stores.domain import TaskContinuationRow, TransferKind
 from daimon.core.stores.thread_session_lineage import link_replacement
 from daimon.core.stores.thread_sessions import (
@@ -61,7 +62,12 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.stores.turn_origins import bind_origin_session
 from daimon.core.thread_models import MODEL_FALLBACK_NOTICE
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
-from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
+from daimon.core.turn.admission import (
+    Admission,
+    decide_before_send,
+    reauthorize,
+    refresh_approval_gate,
+)
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
     channel_for_tool_rules,
@@ -1045,7 +1051,7 @@ async def run_prepared_turn_impl(
             platform=platform,
             thread_id=thread_id,
         )
-        await decide_before_send(deps, admission)()
+        await decide_before_send(deps, admission, attended=not unattended)()
         await require_current_spend(
             deps,
             tenant_id=watch_row.tenant_id,
@@ -1252,7 +1258,7 @@ async def run_prepared_turn_impl(
     root_intent = turn_card_intent_id if deps.fleet_enabled and origin != "worker" else None
 
     async def checked_send() -> None:
-        await decide_before_send(deps, prepared.admission)()
+        await decide_before_send(deps, prepared.admission, attended=not unattended)()
         if worker_finished is not None:
             from daimon.core.neutral_resources import WorkerSpecRefused
             from daimon.core.turn.runtime_manifest import resume_prepared_root
@@ -1278,6 +1284,17 @@ async def run_prepared_turn_impl(
                 and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
             ):
                 confirmed_tools = frozenset()
+        server_urls = {
+            s.name: s.url
+            for s in session_mcp_servers(
+                prepared.admission.agent,
+                frozenset(),
+                tool_safety=deps.tool_safety,
+                public_url=deps.public_url,
+                confirmed_tools=confirmed_tools,
+            )
+        }
+        trusted_servers = trusted_servers_for(deps.public_url, server_urls)
         prepared_source = prepared._source  # pyright: ignore[reportPrivateUsage]
         annotations_for = (
             mcp_annotation_lookup(
@@ -1325,7 +1342,7 @@ async def run_prepared_turn_impl(
             tool_confirmation = PolicyApproval(
                 decide=unattended_decider(
                     deps.tool_safety,
-                    trusted_servers=trusted_servers_for(deps.public_url),
+                    trusted_servers=trusted_servers,
                     confirmed_tools=confirmed_tools | protected_tools(deps.tool_safety),
                     daimon_rules=True,
                     annotations_for=annotations_for,
@@ -1339,8 +1356,10 @@ async def run_prepared_turn_impl(
                 deps.tool_safety,
                 requester_platform_user_id=external_user_id,
                 confirm=confirm_write,
-                trusted_servers=trusted_servers_for(deps.public_url),
+                trusted_servers=trusted_servers,
                 asks_before_publishing=prepared.admission.asks_before_publishing,
+                approval_gate_for=lambda: refresh_approval_gate(deps, prepared.admission),
+                server_urls=server_urls,
                 confirmed_tools=confirmed_tools,
                 daimon_rules=bool(prepared.admission.daimon_rule_tools),
                 rules_for=(
@@ -1474,7 +1493,7 @@ async def run_prepared_turn_impl(
                         if before_send is not None
                         or root_intent is not None
                         or worker_finished is not None
-                        else decide_before_send(deps, prepared.admission),
+                        else decide_before_send(deps, prepared.admission, attended=not unattended),
                         send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
                     )
                     if delivery is not None:
@@ -1641,7 +1660,7 @@ async def run_prepared_turn_impl(
                         # Reseeding and opening the stream await platform and MA
                         # calls after recovery's last decision.
                         before_send=decide_before_send(
-                            deps, recovery.admission or prepared.admission
+                            deps, recovery.admission or prepared.admission, attended=not unattended
                         ),
                         send_guard=lambda: session_mutation_fence(
                             deps.sessionmaker, recovery.ma_session_id

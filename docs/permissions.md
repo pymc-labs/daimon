@@ -1,5 +1,72 @@
 # Permissions
 
+## Approval gate overrides
+
+Server or workspace admins can change whether attended chat asks before a
+third-party MCP write, at server, channel or thread scope. Values are `on`
+(ask), `off` (allow without a card), and `inherit`. The most specific explicit
+value wins: a thread can turn asking back on beneath a server set to `off`,
+and can turn it off beneath a channel set to `on`. There is no category scope.
+A thread's requester has no special permission to change this setting.
+
+Overrides are inactive by default. The operator must enable both
+`DAIMON_TOOL_SAFETY__ENABLED` and `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`.
+Settings can be saved while inactive; the controls report that they are
+stored but ignored. Every change is audited, and each write allowed by an
+`off` setting logs the applied scope and the administrator who set it.
+
+Only third-party `write_needs_confirmation` decisions can be relaxed. Deny
+rules still deny, explicit agent `ask` rules still ask, and failed rule reads
+still require confirmation. Names in the confirmed Daimon and publishing sets,
+admin-confirmed actions, and gate or permission setters never receive an
+approval override, whatever server exposes them. This includes watch actions,
+skill addition, lead resolution, backend switches, Microsoft sends/writes,
+publishing and channel/agent permission changes. With overrides enabled, an
+unrelated third-party tool with a protected name conservatively asks too.
+A second hostname, HTTP URL,
+IP address or proxy cannot turn those names into ordinary third-party writes.
+Endpoint-binding checks also retain fixed gates for recognized own-endpoint
+aliases; attaching such aliases is refused.
+
+Settings can only be changed by humans through the native admin controls on
+`/here` (Teams: `here`). There is no CLI command or MCP tool for changing them.
+Each click and modal submission checks current native server/workspace admin
+authority; channel ownership, thread ownership, agent credentials and cached
+admin claims confer no authority.
+
+- **Discord:** use `/here` in a server channel or thread. Select **Server**,
+  **Channel**, or **Thread** and choose ask, allow writes, or inherit. A thread
+  card offers all three scopes, with Channel referring to its parent.
+- **Slack:** use `/here` in the channel. Server and Channel choices apply
+  directly. A Thread choice opens a native modal; paste the root message link
+  from that channel or its timestamp. Daimon checks admin authority again and
+  verifies the root in that workspace and channel before saving.
+- **Teams:** type `here` in a channel post. The card offers Server, Channel
+  and Thread controls, each with ask, allow writes and inherit.
+
+The card displays the effective choice and its source. An inherited server
+default asks; disabled deployment overrides are displayed as stored but ignored.
+Direct messages do not consume any server, channel or thread override, including
+a server set to `off`; their third-party writes keep their existing confirmation
+behavior. Routines, wakes and other unattended runs still use `unattended_writes`.
+
+The effective setting is read again before every prospective automatic allowance,
+including in prepared and running turns. Switching `off` to `on`, or clearing it
+to an asking parent, applies to the next write. An unreadable setting requires
+confirmation. A send prepared with a stale looser gate is refused; retrying
+requires a fresh admission, rather than repeatedly sending the stale grant.
+The generic `tenants access-policy set --clear` refuses while approval overrides
+remain; clear them using the native admin controls first.
+
+Before rolling back to an older build, keep this build running while a native
+server/workspace admin opens `/here` (Teams: `here`) and chooses **Inherit** for
+Server and for every channel/thread with a saved setting. Alternatively, restore
+a policy backup from before approval overrides were saved. Older policy readers
+reject unknown fields, so stored `approvals` and `approvals_set_by` fields make
+the policy unreadable and refuse
+that tenant's turns. Disabling deployment overrides alone does not remove those
+stored fields.
+
 ## Agent tool rules
 
 A current human workspace admin can set `allow`, `ask` or `deny` for one

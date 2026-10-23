@@ -1486,6 +1486,16 @@ Apply workspace-admin tool rules for individual agents and MCP tools: third-part
 and Daimon's own daimon-mcp/&lt;tool&gt; (ask and deny). Off by default; stored rules
 remain editable but inactive until enabled.
 
+### `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`
+
+`bool` · optional · default `False`
+
+Let native server admins change third-party MCP write approvals from /here at server,
+channel or thread scope. The most specific explicit on/off setting wins. Stored settings
+are ignored while off. Fixed confirmation and permission-setter names never receive an
+override, regardless of server host. Deny rules, direct messages and unattended_writes
+retain their existing behavior.
+
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 
 `dict[str, 'read' | 'write']` · optional · default `{}`
