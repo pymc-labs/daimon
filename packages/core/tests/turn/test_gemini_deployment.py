@@ -61,7 +61,7 @@ from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgent
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord, Storage
-from mux.drivers.gemini.transport import Transport
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Transport
 from mux.errors import ScopeViolation
 from mux.profiles import selectable_models
 from mux.profiles.gemini import ARGON_MODEL
@@ -326,7 +326,7 @@ def test_resolved_drops_compile_remote_without_execution_or_memory(
     deployment = plan.worker_deployment(worker, revision)
     assert deployment.agent == worker.spec
     assert deployment.config_digest == revision.digest
-    assert compile_agent(deployment.agent)["tools"] == []
+    assert compile_agent(deployment.agent)["tools"] == [NO_TOOLS_TOOL]
     assert compile_environment(deployment.environment) == {"type": "remote", "sources": []}
     assert worker.resources == ()
     assert worker.spec.system is not None
@@ -352,7 +352,7 @@ def test_worker_materialization_compiles_the_canonical_spec_under_operator_ceili
     assert deployment.agent.name != enabled.agent_name
     assert deployment.agent.system != enabled.system
     assert deployment.agent.system == worker.permissions.spec.system
-    assert compile_agent(deployment.agent)["tools"] == []
+    assert compile_agent(deployment.agent)["tools"] == [NO_TOOLS_TOOL]
 
 
 def test_worker_materialization_cannot_add_an_unreviewed_non_execution_tool(
@@ -752,7 +752,7 @@ async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected
             key="worker-input",
         )
         assert transport.requests[0]["agent"] == checked.agent.ref.id
-        assert transport.requests[0]["tools"] == []
+        assert transport.requests[0]["tools"] == [NO_TOOLS_TOOL]
         assert transport.requests[0]["environment"] == {"type": "remote", "sources": []}
         async with storage.transaction() as records:
             assert records.sessions[prepared.session_ref.id].spec.resources == ()
@@ -983,7 +983,7 @@ async def test_only_explicit_tools_compile_and_scope_is_pinned(
     runtime = build_channel_runtime(selected)
     assert isinstance(runtime.journal, GeminiJournal) and runtime.journal.deployment is not None
     native = compile_agent(runtime.journal.deployment.agent)
-    assert native["tools"] == ([{"type": "google_search"}] if tools else [])
+    assert native["tools"] == ([{"type": "google_search"}] if tools else [NO_TOOLS_TOOL])
     assert runtime.journal.state_store is selected.deps.state_store
     assert isinstance(runtime.usage_store, GeminiUsageRuntime)
     expected = {model: price for (_, model), price in pricing.provider_prices(PROFILE).items()}
@@ -1267,7 +1267,8 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
         assert request.headers["x-goog-api-key"] == "offline-selected-key"
         if request.method == "POST":
             body = json.loads(request.content)
-            assert body["tools"] == []
+            # A capped model request has no built-ins; an agent allows the sentinel.
+            assert body["tools"] == ([NO_TOOLS_TOOL] if output_cap is None else [])
             if output_cap is None:
                 assert body["agent_config"]["model"] == model
                 assert "generation_config" not in body
@@ -1422,7 +1423,7 @@ async def test_worker_materialization_runs_the_real_headless_driver(
     assert body["system_instruction"] == selected.worker.spec.system
     inputs = [call for call in calls if call.method == "POST"]
     assert len(inputs) == 1 and json.loads(inputs[0].content)["agent"] == body["id"]
-    assert json.loads(inputs[0].content)["tools"] == []
+    assert json.loads(inputs[0].content)["tools"] == [NO_TOOLS_TOOL]
     assert json.loads(inputs[0].content)["agent_config"] == {
         "type": "antigravity",
         "model": selected.worker.spec.model.id,

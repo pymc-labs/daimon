@@ -346,7 +346,11 @@ class _FlashAccounting:
             # (no interaction returned). Kept stranded, one 503 storm across the
             # Flash fallback chain would block the account's Gemini calls for the TTL.
             rejected = status is not None and (400 <= status < 500 or status == 503)
-            if receipt.outcome == "refused" and (rejected or not receipt.sent):
+            if (
+                receipt.outcome == "refused"
+                and receipt.interaction_id is None
+                and (rejected or not receipt.sent)
+            ):
                 # Google rejected or refused the request, or it never reached Google
                 # (the connection failed): no interaction, nothing to bill. Release
                 # the hold instead of stranding it as unknown.

@@ -1,6 +1,7 @@
 """Explicit host Flash policy; no client creation, retry or implicit selection."""
 
 import logging
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
@@ -210,7 +211,20 @@ class FlashTransport:
             # Awaited in this task, never shielded: the owner's per-attempt marker is
             # context-local, and a shielded task would clear only its own copy. A
             # create cancelled once still completes this await.
-            await self.accounting.after_attempt(receipt=receipt)
+            unwinding = sys.exc_info()[1]
+            try:
+                await self.accounting.after_attempt(receipt=receipt)
+            except Exception:
+                # A failed receipt never replaces a cancel or timeout in flight (the
+                # hold stays for the TTL); beside a provider error, or on success,
+                # it still stops the chain.
+                if unwinding is None or isinstance(unwinding, ProviderError):
+                    raise
+                log.warning(
+                    "gemini_attempt_receipt_failed attempt=%s outcome=%s",
+                    attempt,
+                    receipt.outcome,
+                )
 
     def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
         digests = getattr(self.source, "mount_echo_digests", None)

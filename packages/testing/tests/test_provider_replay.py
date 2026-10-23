@@ -13,6 +13,7 @@ from daimon.testing.provider_fixtures import (
     FixturePack,
     NativeTurn,
     ScenarioFixture,
+    gemini_native_contract,
     load_provider_fixtures,
     scenario_tape,
     turn_tape,
@@ -133,7 +134,8 @@ async def test_every_authored_native_turn_traverses_sdk_or_reports_explicit_auth
                     assert refused.value.missing == ("unbound_mcp_authentication",)
                     assert replay.wire.requests == [] and replay.wire.violations == []
                     return
-                created = await replay.transport.create(turn.request)
+                # Sent as the driver now sends it (the no-tools sentinel, not []).
+                created = await replay.transport.create(gemini_native_contract(turn.request))
                 assert created["id"] == turn.root_id
                 stream = await replay.transport.open_stream(turn.root_id)
                 frames = [f async for f in stream]

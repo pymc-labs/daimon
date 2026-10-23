@@ -16,7 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 import httpx
@@ -60,6 +60,7 @@ from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import (
     FLASH_PRIMARY,
+    NO_TOOLS_FUNCTION,
     AgentCatalogTransport,
     FlashAccounting,
     FlashTransport,
@@ -297,6 +298,12 @@ class GeminiTurnIO:
         self._streams: list[_LazyStream] = []
         self._tool_ids: dict[tuple[str | None, str], str] = {}
         self._actions: dict[str, str] = {}
+        # The inert no-tools sentinel (`NO_TOOLS_FUNCTION`): its calls (call id ->
+        # display event id), the calls already answered, and how many answers this
+        # turn sent. Kept here, not per stream, so a reconnect never answers twice.
+        self._sentinel_calls: dict[str, str] = {}
+        self._sentinel_answered: set[str] = set()
+        self._no_tools_replies = 0
         # Consecutive stream failures without a delivered event (backoff step).
         self.stream_failures = 0
 
@@ -511,6 +518,73 @@ class GeminiTurnIO:
             # Preserve saved cancellation across the SDK-only replay edge.
             raise InterruptedDuringRecovery(phase="replay")
 
+    @property
+    def no_tools_answers(self) -> int:
+        """How many sentinel answers this turn sent (a stream reopens after one)."""
+        return self._no_tools_replies
+
+    def no_tools(self, event: Event) -> Literal["hide", "pending"] | None:
+        """How the host shows an event of the no-tools sentinel: never.
+
+        "hide" for the sentinel's own call and result, "pending" for a pause that
+        names only sentinel calls (answered by `answer_no_tools`). A pause that
+        mixes a sentinel call with a real one stays a real `requires_action`: the
+        host can't answer the real call, and the turn ends as it always has.
+        """
+        payload = event.typed_payload()
+        if isinstance(payload, ToolUsePayload) and payload.tool_name == NO_TOOLS_FUNCTION:
+            self._sentinel_calls[payload.call_id] = event.id
+            return "hide"
+        if isinstance(payload, ToolResultPayload) and payload.call_id in self._sentinel_calls:
+            return "hide"
+        if (
+            isinstance(payload, RequiresActionPayload)
+            and payload.actions
+            and all((a.call_id or a.id) in self._sentinel_calls for a in payload.actions)
+        ):
+            return "pending"
+        return None
+
+    async def answer_no_tools(self, event: Event) -> None:
+        """Answer the sentinel calls a pause names: once per turn, never twice per call.
+
+        The model was told the sentinel is not to be called; if it is, it gets "no
+        tools are available here; answer directly" and the same turn continues. A
+        second batch is still answered (so the interaction is never left waiting
+        on an action the next message would trip over; the failed turn's abandon
+        then cancels the continuation) and ends the turn in plain words.
+        """
+        payload = event.typed_payload()
+        if not isinstance(payload, RequiresActionPayload):
+            return
+        calls = [a.call_id or a.id for a in payload.actions]
+        fresh = [call for call in calls if call not in self._sentinel_answered]
+        if not fresh:
+            return
+        looping = self._no_tools_replies > 0
+        self._no_tools_replies += 1
+        self._sentinel_answered.update(fresh)
+        log.warning(
+            "turn.gemini_no_tools_loop" if looping else "turn.gemini_no_tools_called",
+            session_id=self.session.id,
+            calls=len(fresh),
+        )
+        await self.send(
+            [
+                cast(
+                    BetaManagedAgentsEventParams,
+                    {
+                        "type": "user.custom_tool_result",
+                        "custom_tool_use_id": self._sentinel_calls[call],
+                        "content": [{"type": "text", "text": NO_TOOLS_REPLY}],
+                    },
+                )
+                for call in fresh
+            ]
+        )
+        if looping:
+            raise ProviderError("upstream", retryable=False, native_code="gemini_no_tools_loop")
+
     async def replay_turn_events(
         self, *, timeout_s: float = REPLAY_TIMEOUT_S, reconcile: bool = True
     ) -> list[TurnEvent]:
@@ -531,7 +605,16 @@ class GeminiTurnIO:
                     )
                 for event in records:
                     self.check_terminal(event)
-                return [self.frame(event, usages) for event in records]
+                frames: list[TurnEvent] = []
+                for index, event in enumerate(records):
+                    frame = self.frame(event, usages)  # registers display/action ids
+                    kind = self.no_tools(event)
+                    if kind == "pending" and index == len(records) - 1:
+                        # Still waiting on the answer (nothing after it): give it.
+                        await self.answer_no_tools(event)
+                    if kind is None:
+                        frames.append(frame)
+                return frames
         except TimeoutError as error:
             raise TurnError(kind="upstream", message="Gemini replay deadline expired") from error
 
@@ -755,6 +838,9 @@ def _transient_stream_error(error: ProviderError) -> bool:
     )
 
 
+NO_TOOLS_REPLY = "No tools are available here; answer directly."
+
+
 class _LazyStream(AsyncIterator[TurnEvent]):
     def __init__(self, io: GeminiTurnIO, timeout_s: float) -> None:
         self.io, self.timeout_s = io, timeout_s
@@ -786,25 +872,7 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                 if self._closed:
                     raise StopAsyncIteration
                 if self._source is None:
-                    self._root = self.io.root
-                    try:
-                        self._source = await self.io.backend.events.open_stream(
-                            self.io.scope, self.io.session
-                        )
-                    except ProviderError as error:
-                        raise _StreamFailure("open", error) from error
-                    if self._closed:
-                        source, self._source = self._source, None
-                        close = getattr(source, "aclose", None)
-                        if close is not None:
-                            await close()
-                        raise StopAsyncIteration
-                    frames = await self.io.replay_turn_events(reconcile=False)
-                    if self._root is None and frames:
-                        self._root = self.io.root
-                    self._buffer.extend(
-                        f for f in frames if f.normalized and f.normalized.turn_id == self._root
-                    )
+                    await self._open()
                 while True:
                     if self._buffer:
                         frame = self._buffer.popleft()
@@ -812,6 +880,8 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                         if self._ended:
                             await self.close()
                             raise StopAsyncIteration
+                        # Opened above, or reopened by `_no_tools` on a continuation.
+                        assert self._source is not None
                         try:
                             event = await self._source.__anext__()
                         except ProviderError as error:
@@ -830,6 +900,8 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                         raise ProviderError(
                             "upstream", retryable=False, native_code="foreign_stream_root"
                         )
+                    if await self._no_tools(normalized):
+                        continue
                     self._seen.add(normalized.id)
                     if self.io.persistence is not None:
                         await self.io.persistence.record(self.io.session, normalized)
@@ -876,6 +948,57 @@ class _LazyStream(AsyncIterator[TurnEvent]):
             raise
         finally:
             self._reader = None
+
+    async def _open(self) -> None:
+        self._root = self.io.root
+        try:
+            self._source = await self.io.backend.events.open_stream(self.io.scope, self.io.session)
+        except ProviderError as error:
+            raise _StreamFailure("open", error) from error
+        if self._closed:
+            source, self._source = self._source, None
+            close = getattr(source, "aclose", None)
+            if close is not None:
+                await close()
+            raise StopAsyncIteration
+        answered = self.io.no_tools_answers
+        frames = await self.io.replay_turn_events(reconcile=False)
+        if self.io.no_tools_answers != answered:
+            # The replay answered a pending sentinel call: this stream belongs to
+            # the interaction that asked. Follow the continuation instead of
+            # waiting out the read timeout on a stream that will never speak.
+            source, self._source = self._source, None
+            close = getattr(source, "aclose", None)
+            if close is not None:
+                await close()
+            try:
+                self._source = await self.io.backend.events.open_stream(
+                    self.io.scope, self.io.session
+                )
+            except ProviderError as error:
+                raise _StreamFailure("open", error) from error
+            frames = await self.io.replay_turn_events(reconcile=False)
+        if self._root is None and frames:
+            self._root = self.io.root
+        self._buffer.extend(
+            f for f in frames if f.normalized and f.normalized.turn_id == self._root
+        )
+
+    async def _no_tools(self, event: Event) -> bool:
+        """Consume a no-tools sentinel event (see `GeminiTurnIO.no_tools`)."""
+        kind = self.io.no_tools(event)
+        if kind is None:
+            return False
+        self._seen.add(event.id)
+        if kind == "pending":
+            await self.io.answer_no_tools(event)
+            # The answer continues as a new interaction of the same root turn.
+            source, self._source = self._source, None
+            close = getattr(source, "aclose", None)
+            if close is not None:
+                await close()
+            await self._open()
+        return True
 
     async def close(self) -> None:
         if self._closed:

@@ -27,6 +27,7 @@ from mux.contracts.resources import EnvironmentSpec, MCPConnection, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.deployment import configured_catalog_transport, configured_transport
 from mux.drivers.gemini.flash import FLASH_PRIMARY
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
@@ -254,7 +255,8 @@ async def assert_ordinary_native_preparation_and_turns(ordinary, *, first_reuse=
     for body in posts:
         assert body["agent"] == native["id"]
         assert body["agent_config"] == {"type": "antigravity", "model": FLASH_PRIMARY}
-        assert body["tools"] == []
+        # Every interaction allows only the no-tools sentinel: no built-in runs.
+        assert body["tools"] == [NO_TOOLS_TOOL]
         assert body["system_instruction"] == canonical.target_spec.system
         assert "generation_config" not in body
     assert posts[0]["environment"] == {"type": "remote", "sources": []}

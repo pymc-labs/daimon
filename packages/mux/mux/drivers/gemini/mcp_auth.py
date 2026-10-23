@@ -444,6 +444,22 @@ async def refresh_bound_request(request: Object) -> Object:
     return fresh
 
 
+def _gained_no_tools_sentinel(persisted: Object, expected: Object) -> bool:
+    """A session saved before the no-tools sentinel: the same intent, but `tools: []`.
+
+    Its next send uses the fresh compilation, which closes Gemini's built-ins; the
+    empty list it was saved with meant they were open. Nothing else may differ.
+    """
+    from mux.drivers.gemini.transport import NO_TOOLS_TOOL
+
+    return (
+        persisted.get("tools") == []
+        and expected.get("tools") == [NO_TOOLS_TOOL]
+        and {k: v for k, v in persisted.items() if k != "tools"}
+        == {k: v for k, v in expected.items() if k != "tools"}
+    )
+
+
 def validate_intent(
     persisted: Object, expected: Object, connections: Sequence[MCPConnection], *, enabled: bool
 ) -> None:
@@ -455,5 +471,5 @@ def validate_intent(
     matches = [t for t in native if isinstance(t, dict) and t.get("type") == "mcp_server"]
     if matches != compiled:
         refuse("changed_mcp_request_intent")
-    if persisted != expected:
+    if persisted != expected and not _gained_no_tools_sentinel(persisted, expected):
         refuse("changed_mcp_request_intent")

@@ -23,7 +23,7 @@ from mux.contracts.events import NativePart, TextPart, ToolResultPayload, ToolUs
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, MCPConnection, Session, SessionSpec, ToolSpec
-from mux.drivers.gemini import GeminiManagedAgents, MCPSecretResolver
+from mux.drivers.gemini import NO_TOOLS_TOOL, GeminiManagedAgents, MCPSecretResolver
 from mux.drivers.gemini.flash import FlashAttempt, FlashTransport
 from mux.drivers.gemini.mcp_auth import authenticated_template
 from mux.drivers.gemini.transport import Object, SDKTransport, Transport
@@ -535,14 +535,15 @@ async def test_exactly_one_server_not_one_bound_plus_anonymous(
 
 
 @pytest.mark.asyncio
-async def test_explicit_empty_tools_remain_valid_without_mcp(
+async def test_a_tool_free_agent_without_mcp_sends_only_the_no_tools_sentinel(
     sdk_wire: tuple[SDKTransport, Wire],
 ) -> None:
     sdk, wire = sdk_wire
     driver, _, _, session = await gemini_auth_session(sdk, None, authenticated=False, tools=())
     await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="empty")
     post = OBJECT.validate_json(wire.requests[0].content)
-    assert post["tools"] == []
+    # An empty agent list would mean Gemini's built-ins: only the inert sentinel.
+    assert post["tools"] == [NO_TOOLS_TOOL]
 
 
 @pytest.mark.asyncio

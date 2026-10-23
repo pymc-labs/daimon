@@ -4,8 +4,13 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from daimon.testing.provider_fixtures import load_provider_fixtures, turn_tape
+from daimon.testing.provider_fixtures import (
+    gemini_native_contract,
+    load_provider_fixtures,
+    turn_tape,
+)
 from daimon.testing.provider_replay import provider_replay
+from mux.drivers.gemini import NO_TOOLS_TOOL
 from mux.drivers.gemini.transport import SDKTransport
 from mux.errors import ProviderError
 
@@ -18,6 +23,8 @@ async def test_current_request_matches_only_the_explicit_tools_tape(stale: bool)
     pack = load_provider_fixtures(DATA / "index.json", catalog_root=DATA / "catalog")
     scenario, fixture = pack.select("QA-NEW37-MARKDOWN-TABLE-READABLE", "gemini")
     turn = fixture.turns[0]
+    # As the driver sends it now: the no-tools sentinel, never an empty agent list.
+    current = gemini_native_contract(turn.request)
     tape = turn_tape(scenario, fixture, turn, key="qa-send")
     send = tape.replies[0]
     if stale:
@@ -35,12 +42,12 @@ async def test_current_request_matches_only_the_explicit_tools_tape(stale: bool)
         assert isinstance(replay.transport, SDKTransport)
         if stale:
             with pytest.raises((AssertionError, ProviderError)):
-                await asyncio.wait_for(replay.transport.create(turn.request), timeout=5)
+                await asyncio.wait_for(replay.transport.create(current), timeout=5)
             assert replay.wire.violations
         else:
-            created = await asyncio.wait_for(replay.transport.create(turn.request), timeout=5)
+            created = await asyncio.wait_for(replay.transport.create(current), timeout=5)
             assert created["id"] == turn.root_id
             replay.wire.assert_consumed()
         assert len(replay.wire.requests) == 1
         body = replay.wire.requests[0].json()
-        assert isinstance(body, dict) and body["tools"] == []
+        assert isinstance(body, dict) and body["tools"] == [NO_TOOLS_TOOL]

@@ -424,6 +424,15 @@ def render_termination_notice(
         )
     elif quota is not None:
         copy = _Copy(*quota)
+    elif any(
+        isinstance(cause, ProviderError) and cause.native_code == "gemini_no_tools_loop"
+        for cause in _error_chain(failure)
+    ):
+        # The model kept reaching for a tool this agent doesn't have.
+        copy = _Copy(
+            "Daimon couldn't answer that without tools.",
+            "Ask again, a little more directly.",
+        )
     elif spend_limit_error(failure) is not None:
         copy = _Copy(
             "Daimon has reached its usage limit.",

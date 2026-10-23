@@ -15,7 +15,11 @@ from daimon.testing.anthropic_fixtures import (
     anthropic_turn_tape,
     load_anthropic_fixtures,
 )
-from daimon.testing.provider_fixtures import load_provider_fixtures, turn_tape
+from daimon.testing.provider_fixtures import (
+    gemini_native_contract,
+    load_provider_fixtures,
+    turn_tape,
+)
 from daimon.testing.provider_replay import (
     Backend,
     GateWait,
@@ -265,7 +269,8 @@ async def test_owned_native_sdk_stream_reaches_gate_and_closes_without_env_reads
             await edge.request("POST", path + "/events", body=turn.request, key="gate-control")
             stream = await edge.open_stream(path + "/events")
         else:
-            await edge.create(turn.request)
+            # As the driver sends it now: the no-tools sentinel, never [].
+            await edge.create(gemini_native_contract(turn.request))
             stream = await edge.open_stream(turn.root_id)
         seen: list[Object] = []
 

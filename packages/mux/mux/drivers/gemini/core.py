@@ -1,6 +1,7 @@
 """Inline configuration and logical sessions over documented Interactions calls."""
 
 import asyncio
+import copy
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -55,6 +56,8 @@ from mux.drivers.gemini.mcp_auth import (
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
 from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner
 from mux.drivers.gemini.transport import (
+    NO_TOOLS_FUNCTION,
+    NO_TOOLS_TOOL,
     Object,
     OwnedStream,
     Transport,
@@ -503,7 +506,7 @@ def compile_agent(
         "agent": BASE_AGENT,
         "agent_config": {"type": "antigravity", "model": spec.model.id},
         # Omission would enable provider defaults, including billable web tools.
-        "tools": [],
+        "tools": [],  # filled below; never sent empty
     }
     if max_total_tokens is not None:
         if type(max_total_tokens) is not int or max_total_tokens <= 0:
@@ -529,6 +532,9 @@ def compile_agent(
                 # emits the native tool once and applies auth/policy validation.
                 continue
             elif tool.kind == "custom":
+                if tool.name == NO_TOOLS_FUNCTION:
+                    # Reserved: the host answers a call to it as "no tools here".
+                    refuse("reserved_tool_name")
                 tools.append(
                     {
                         "type": "function",
@@ -541,6 +547,12 @@ def compile_agent(
                 refuse("tool")
         tools.extend(compile_mcp(spec.mcp_servers or (), enabled=authenticated_mcp))
         result["tools"] = tools
+    if not result["tools"]:
+        # An agent's tool list is an allowlist, but an EMPTY one means Gemini's
+        # defaults (code_execution, google_search, url_context; measured
+        # 2026-10-23). With no tool of its own the agent allows only the inert
+        # sentinel, so no built-in (billable search among them) ever runs.
+        result["tools"] = [copy.deepcopy(NO_TOOLS_TOOL)]
     return result
 
 
