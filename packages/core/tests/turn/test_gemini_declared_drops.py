@@ -716,3 +716,56 @@ def test_an_mcp_template_serves_an_agent_that_never_had_mcp(ordinary, tmp_path, 
 
     assert deployment.agent == canonical.target_spec
     assert deployment.agent.mcp_servers == ()
+
+
+async def test_an_mcp_template_turn_runs_an_agent_with_no_mcp_through_read(
+    ordinary, tmp_path, monkeypatch
+):
+    """J2 smoke-4 (gemini_deployment.read:787): the compile serves a target that
+    carries no MCP server on the MCP agent template; the runtime's read must agree
+    and run it with no MCP, not look for a representation that can't exist."""
+    request, plan, canonical, native, calls, posts, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    assert canonical.target_spec.mcp_servers == ()
+    assert "mcp" not in canonical.target_spec.declared_drops
+    template = _as_template(plan, tmp_path, monkeypatch).model_copy(
+        update={"template_capabilities": "mcp"}
+    )
+    path = tmp_path / "template.json"
+    path.write_text(json.dumps([template.model_dump(mode="json")]))
+    await service.clear_backend(source, accepted.local, actor)
+
+    scoped, _ = scope_channel_runtimes(request)
+    selected = await read_preparation_counterpart(scoped)
+    assert selected.verified_counterpart == selected.counterpart
+    assert selected.target_spec.mcp_servers == ()
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=True,
+    )
+
+    async def no_recovery():
+        pytest.fail("the template turn changed its admitted source/session")
+
+    outcome = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        thread_id=request.thread_id,
+        external_user_id=request.external_user_id,
+        user_message="Question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=no_recovery,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        operation_key="template-no-mcp:0",
+    )
+    assert outcome.state.error is None and extract_final_response(outcome.state.content) == "answer"
+    assert all(t.get("type") != "mcp_server" for body in posts for t in body.get("tools", []))
