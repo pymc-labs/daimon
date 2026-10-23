@@ -36,7 +36,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger()
 
-NOT_CONFIGURED_MESSAGE: Final = "Operator tokens aren't set up yet. Ask whoever runs Daimon."
+NOT_CONFIGURED_MESSAGE: Final = (
+    "Operator tokens aren't set up on this Daimon install yet; ask the team running Daimon."
+)
 
 
 @dataclasses.dataclass(frozen=True)

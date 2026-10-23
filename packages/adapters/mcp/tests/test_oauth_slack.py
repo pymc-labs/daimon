@@ -339,7 +339,7 @@ def test_error_html_unconfigured_copy() -> None:
     response = _error_html(kind="unconfigured")
     body = response.body.decode()
     assert "isn't set up here" in body, "unconfigured error should explain setup missing"
-    assert "operator" in body, "unconfigured error should reference the operator"
+    assert "team running Daimon" in body, "unconfigured error should say who can fix it"
 
 
 def test_error_html_exchange_failed_copy() -> None:

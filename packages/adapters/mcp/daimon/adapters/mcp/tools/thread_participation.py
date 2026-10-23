@@ -57,7 +57,7 @@ _PLATFORMS: Final = frozenset({"discord", "teams"})
 _WRONG_PLATFORM = "Following threads isn't available here yet, so there is nothing to turn on."
 _DEPLOYMENT_DISABLED = (
     "Following is turned off for all of Daimon and cannot be turned on. "
-    "I only reply when @mentioned; the operator would have to change that."
+    "I only reply when @mentioned; the team running Daimon would have to change that."
 )
 _DISABLED_NEEDS_A_WIDER_SCOPE = (
     "'disabled' is not a thread-level setting — use mode='off' to stop "

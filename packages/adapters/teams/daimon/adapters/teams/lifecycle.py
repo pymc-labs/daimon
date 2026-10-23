@@ -727,6 +727,7 @@ class TeamsTurnLifecycle:
                 setup_verb=nouns.verb,
                 admin=nouns.who,
                 agent_name=self._agent_name,
+                nouns=nouns,
             )
             if notice is not None:
                 text = card.termination_text(notice)

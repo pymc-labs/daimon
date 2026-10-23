@@ -844,7 +844,7 @@ async def test_mcp_modal_unconfigured_mcp_reports_misconfiguration_no_consume_no
     await modal.on_submit(interaction)
 
     message = interaction.followup.send.call_args.args[0]
-    assert "Ask the operator to finish setup" in message, "must name who can fix setup"
+    assert "ask the team running Daimon" in message, "must name who can fix setup"
     assert "Nothing was saved" in message, "the guard runs before any value is written"
     assert "public_url" not in message and "jwt_secret" not in message, (
         "internal setting names must not be shown to people"

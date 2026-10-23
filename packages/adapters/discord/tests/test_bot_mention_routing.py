@@ -154,8 +154,9 @@ class TestAgentResolveMiss:
         message.channel.send.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
         sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
         assert sent_text == (
-            "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
-        ), "should render the plain 'out of date' notice"
+            "This channel's agent `legacy-bot` no longer exists.\n\n"
+            "Ask an admin to pick another in `/agent-setup`."
+        ), "should name the deleted agent and where to pick another"
 
 
 class TestPerMessageTenantResolution:

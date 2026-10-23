@@ -91,7 +91,7 @@ async def get_setup_responder(
     except DaimonError as error:
         raise UserFacingError(
             "This setup conversation's Daimon agent is missing. "
-            "Ask the operator to restore it, then open a new setup conversation."
+            "Ask the team running Daimon to restore it, then open a new setup conversation."
         ) from error
     if (
         responder.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
@@ -117,7 +117,8 @@ async def resolve_setup_agents(
     ]
     if len(responders) != 1:
         raise UserFacingError(
-            "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."
+            "The built-in Daimon is unavailable. "
+            "Ask the team running Daimon to restore it, then retry setup."
         )
     target = None
     if target_ma_agent_id is not None:

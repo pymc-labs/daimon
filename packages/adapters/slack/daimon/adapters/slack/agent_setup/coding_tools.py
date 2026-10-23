@@ -64,8 +64,8 @@ __all__ = [
 log = structlog.get_logger()
 
 NOT_CONFIGURED_MESSAGE: Final[str] = (
-    "Coding-tool access isn't set up yet. Ask the operator to finish "
-    "setup, then try again. Nothing was saved."
+    "Coding-tool access isn't set up on this Daimon install yet; ask the team "
+    "running Daimon. Nothing was saved."
 )
 
 REVOKE_BUTTON_LABEL: Final[str] = "🗑 Revoke this token"

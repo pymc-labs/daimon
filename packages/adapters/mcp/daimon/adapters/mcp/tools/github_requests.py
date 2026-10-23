@@ -276,7 +276,9 @@ async def request_github_access_impl(
             link_url=url,
         )
         return GitHubRequestResult(
-            status="waiting", message="I've asked an admin.", request_id=request.id
+            status="waiting",
+            message="I sent you a link to connect your GitHub.",
+            request_id=request.id,
         )
     connected_names = (connected.repo_full_name,) if connected is not None else ()
     ability: Literal["write"] = "write"

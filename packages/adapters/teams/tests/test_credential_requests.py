@@ -385,7 +385,7 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
     row = await _request(db_session_factory, account_id, kind="mcp")
     async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
         unconfigured = await post_activity(service, _submit(row.token))
-    assert "isn't fully set up" in unconfigured["task"]["value"]
+    assert "isn't set up on this Daimon install" in unconfigured["task"]["value"]
 
     accepted = False
     metadata = "https://mcp.example/.well-known/oauth-protected-resource"

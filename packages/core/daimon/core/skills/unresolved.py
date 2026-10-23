@@ -69,15 +69,12 @@ def skill_unavailable(
         label = f'"{skill_id}"'
     if from_channel:
         where = "this channel adds"
-        fix = (
-            "Ask an admin to remove it from this channel's skills "
-            "(remove_channel_skill, or `daimon channels skills remove`), then ask again."
-        )
+        fix = "Ask an admin to remove it from this channel's skills, then ask again."
     else:
         where = f"{agent.name} uses"
         fix = (
-            f"Ask an admin to remove it from {agent.name}'s skills "
-            "(remove_skill), or add it again, then ask again."
+            f"Ask {agent.name}'s owner or an admin to remove it from its skills, "
+            "or to add it again, then ask again."
         )
     return SkillUnavailable(
         f"Daimon couldn't start this conversation: the skill {label} that {where} "

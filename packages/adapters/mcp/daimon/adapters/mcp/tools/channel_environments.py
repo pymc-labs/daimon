@@ -3,9 +3,8 @@
 ``register_channel_environment_tools(mcp, runtime)`` wires the ``@mcp.tool``
 closures; each delegates to a module-private ``_*_impl`` that tests call
 without a FastMCP Context. `authorize` decides who may pick
-(SET_CHANNEL_ENVIRONMENT): the workspace default needs a server admin; a
-channel's also admits that channel's admins, as its default agent does, except
-an environment with unrestricted networking in a sealed channel. An operator
+(SET_CHANNEL_ENVIRONMENT): a server admin, for the workspace default and for
+each channel. An operator
 token with ``channels:write`` sets channels' environments, never the workspace
 default.
 """

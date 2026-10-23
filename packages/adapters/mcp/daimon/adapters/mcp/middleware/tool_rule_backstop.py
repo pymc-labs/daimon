@@ -25,6 +25,7 @@ from typing import Final
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.stores import agent_tool_rules
@@ -134,9 +135,17 @@ def _denied(identity: AuthIdentity, key: str, agent: uuid.UUID, *, wildcard: boo
         agent=str(agent),
         wildcard=wildcard,
     )
+    # Only an admin sets an agent's tool rules (`Action.SET_AGENT_TOOL_RULE`), owner or not.
+    admin = admin_noun(identity.platform)
     if wildcard:
-        return "Refused: this agent's tool rules deny all Daimon tools. Nothing was done."
-    return f"Refused: this agent's tool rule denies {key.partition('/')[2]}. Nothing was done."
+        return (
+            "Refused: a tool rule set on this agent blocks all Daimon tools. Nothing was "
+            f"done. Only {admin} can change this agent's tool rules."
+        )
+    return (
+        f"Refused: a tool rule set on this agent blocks {key.partition('/')[2]}. Nothing was "
+        f"done. Only {admin} can change this agent's tool rules."
+    )
 
 
 def _prefix(tenant_id: uuid.UUID) -> str:

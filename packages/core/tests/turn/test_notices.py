@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
+from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.turn import TerminationReason, render_termination_notice
-from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.notices import (
     RefusalNouns,
     admission_refusal_text,
     fit_notice,
+    resolver_miss_text,
     short_ref,
 )
 from daimon.core.turn.state import McpServerFailure, ToolUseBlock, TurnState
@@ -354,3 +357,74 @@ def test_an_unknown_provider_is_named_generically():
         "backend_unsupported", _NOUNS, cause="agent_backend", provider=None
     )
     assert rendered.startswith("This agent runs on a model provider,")
+
+
+def test_a_gemini_hold_says_it_is_temporary_and_names_no_one_to_ask() -> None:
+    text = admission_refusal_text("provider_hold_cap_reached", _NOUNS)
+    assert "temporary" in text and "few minutes" in text
+    assert "admin" not in text and "release" not in text
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["backend_unsupported", "provider_hold_cap_reached", "invoker_not_allowed", "client_requester"],
+)
+def test_a_denial_with_no_reason_of_its_own_keeps_its_specific_copy_mid_turn(
+    reason: AdmissionDenialReason,
+) -> None:
+    """A denial raised after the turn started reads as at admission, never the generic one."""
+    notice = render_termination_notice(
+        TerminationReason.ADMISSION_DENIED,
+        error=AdmissionDenied(reason=reason),
+        agent_name="team-020-analyst",
+        request_id="01a7c3qx2",
+    )
+    assert notice is not None
+    expected = admission_refusal_text(
+        reason, RefusalNouns.for_caller(None), agent_name="team-020-analyst"
+    )
+    assert f"{notice.title}\n\n{notice.next_step}" == expected
+    assert "couldn't accept this request" not in notice.plain_text()
+    assert notice.ref_line == "Ref 7C3QX2"
+
+
+def test_a_pinned_agent_names_its_channels_where_the_platform_links_them() -> None:
+    discord = admission_refusal_text(
+        "runs_elsewhere",
+        RefusalNouns.for_platform("discord"),
+        agent_name="analyst",
+        channels=("111", "222"),
+    )
+    assert discord == "analyst only works in <#111>, <#222>.\n\nAsk it there."
+    many = admission_refusal_text(
+        "runs_elsewhere",
+        RefusalNouns.for_platform("slack"),
+        agent_name="analyst",
+        channels=("C1", "C2", "C3", "C4"),
+    )
+    assert many.startswith("analyst only works in <#C1>, <#C2>, <#C3> and 1 more.")
+    teams = admission_refusal_text(
+        "runs_elsewhere",
+        RefusalNouns.for_platform("teams"),
+        agent_name="analyst",
+        channels=("19:x",),
+    )
+    assert teams == "analyst only works in other channels.\n\nAsk it there."
+
+
+def test_a_deleted_agent_is_named_with_where_to_pick_another() -> None:
+    nouns = RefusalNouns.for_platform("discord")
+    assert resolver_miss_text(nouns, kind="agent", name="re`search") == (
+        "This channel's agent `research` no longer exists.\n\n"
+        "Ask an admin to pick another in `/agent-setup`."
+    )
+    assert resolver_miss_text(nouns, kind="environment", name="py") == (
+        "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
+    )
+    notice = render_termination_notice(
+        TerminationReason.RESOLVER_MISS,
+        error=MAResolverMissError(kind="agent", tenant_id=uuid.uuid4(), daimon_tag="research"),
+        nouns=nouns,
+    )
+    assert notice is not None
+    assert notice.title == "This channel's agent `research` no longer exists."

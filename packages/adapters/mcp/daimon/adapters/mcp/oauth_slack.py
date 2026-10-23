@@ -237,7 +237,7 @@ _ERROR_COPY: dict[str, tuple[str, str, int]] = {
     ),
     "unconfigured": (
         "daimon's Slack install isn't set up here",
-        "the operator needs to finish configuring daimon's Slack app.",
+        "ask the team running Daimon to finish setting up its Slack app.",
         500,
     ),
     "exchange_failed": (

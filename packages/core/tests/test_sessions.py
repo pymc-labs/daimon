@@ -549,7 +549,8 @@ async def test_create_session_names_a_deleted_agent_skill() -> None:
     message = str(refused.value)
     assert isinstance(refused.value, UserFacingError), "every adapter shows this copy as written"
     assert '"skill_01PBRj"' in message and "qa-fork uses" in message
-    assert "remove_skill" in message
+    assert "qa-fork's owner or an admin" in message
+    assert "remove_skill" not in message, "copy names who fixes it, not a tool"
     assert "couldn't accept the request" not in message
 
 
@@ -608,7 +609,9 @@ async def test_create_session_names_a_deleted_channel_skill_from_its_rule(
 
     assert "this channel adds" in str(refused.value)
     assert '"qa-haiku-canary" (skill_chan)' in str(refused.value)
-    assert "remove_channel_skill" in str(refused.value)
+    assert "remove it from this channel's skills" in str(refused.value)
+    assert "remove_channel_skill" not in str(refused.value)
+    assert "daimon channels" not in str(refused.value), "no CLI command in chat copy"
 
 
 async def test_create_session_keeps_other_400s_unchanged() -> None:

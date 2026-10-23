@@ -1637,6 +1637,7 @@ class DiscordTurnLifecycle:
                 setup_command=nouns.setup,
                 billing_command=nouns.billing,
                 agent_name=self._agent_name,
+                nouns=nouns,
             )
             if notice is not None:
                 label, body = notice.headline, format_termination_notice(notice)

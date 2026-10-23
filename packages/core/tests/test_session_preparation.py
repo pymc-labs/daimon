@@ -1722,7 +1722,7 @@ async def test_a_replacement_for_a_deleted_channel_skill_names_it_instead_of_ret
 
     message = str(refused.value)
     assert "this channel adds" in message
-    assert '"qa-haiku-canary"' in message and "remove_channel_skill" in message
+    assert '"qa-haiku-canary"' in message and "this channel's skills" in message
     assert "Ask again to retry" not in message
     still_live = await _live_row(db_session_factory, tenant=tenant, account=account)
     assert still_live is not None and still_live.ma_session_id == first.ma_session_id

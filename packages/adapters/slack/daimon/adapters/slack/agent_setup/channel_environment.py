@@ -1,6 +1,6 @@
 """This channel's environment, picked on Who answers where.
 
-Workspace admins and this channel's admins get a select there. A pick
+Workspace admins get a select there. A pick
 re-checks both live through `authorize` (which keeps an unrestricted network
 member the channel's grant names, directly or through a user group.
 """
@@ -45,9 +45,7 @@ MAX_ENVIRONMENT_OPTIONS: Final = 99
 """A static select holds 100 options; the first is always Use the default."""
 _MAX_OPTION_VALUE: Final = 150
 """Slack's limit on an option's value."""
-ENVIRONMENT_NEED_ADMIN_MESSAGE: Final = (
-    "Only a workspace admin or this channel's admin can change this."
-)
+ENVIRONMENT_NEED_ADMIN_MESSAGE: Final = "Only a workspace admin can change this."
 
 
 async def load_picker_subject(

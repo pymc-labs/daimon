@@ -30,13 +30,29 @@ class MaErrorMiddleware(Middleware):
         try:
             return await call_next(context)
         except anthropic.APIStatusError as exc:
-            raise ToolError(
-                f"The Managed Agents API returned an error (HTTP {exc.status_code}). "
-                f"Please try again shortly."
-            ) from exc
+            raise ToolError(_status_message(exc.status_code)) from exc
         except anthropic.APIError as exc:
             # APIConnectionError / APITimeoutError and other non-status SDK errors.
             raise ToolError(
-                "Could not reach the Managed Agents API (connection error). "
-                "Please try again shortly."
+                "Couldn't reach Daimon's AI service (connection error). Try again shortly."
             ) from exc
+
+
+def _status_message(status: int) -> str:
+    """Plain words for an HTTP status: only a busy or failing service is worth retrying."""
+    if status == 429 or status >= 500:
+        return f"Daimon's AI service is busy or failing (HTTP {status}). Try again shortly."
+    if status in (401, 403):
+        return (
+            f"The AI provider rejected Daimon's request (HTTP {status}). Trying again won't "
+            "help: the team running Daimon needs to check its key for this provider."
+        )
+    if status == 404:
+        return (
+            f"Daimon's AI service couldn't find what this asked for (HTTP {status}); "
+            "it may have been deleted. Trying again won't help."
+        )
+    return (
+        f"Daimon's AI service refused this request (HTTP {status}). Trying again won't "
+        "help; change the request first."
+    )

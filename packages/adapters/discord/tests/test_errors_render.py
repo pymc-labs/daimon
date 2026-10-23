@@ -87,6 +87,24 @@ def test_known_local_errors_never_publish_exception_bodies() -> None:
         assert result.endswith(f"\n\n{REF}")
 
 
+_REFUSED = (
+    "Daimon's AI service couldn't accept the request.\n\n"
+    "Try again, or start a new thread. If it keeps happening, tell the team running Daimon."
+)
+_TOO_LARGE = (
+    "That was too much for Daimon's AI service to take in at once.\n\n"
+    "Shorten it, or start a new thread."
+)
+_KEY_REJECTED = (
+    "The AI provider rejected Daimon's request.\n\n"
+    "The team running Daimon needs to check its key for this provider."
+)
+_MODEL_GONE = (
+    "The model this agent uses isn't offered any more.\n\n"
+    "Switch the agent's model, or ask its owner or an admin to."
+)
+
+
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
@@ -94,10 +112,11 @@ def test_known_local_errors_never_publish_exception_bodies() -> None:
         (529, "Daimon's AI service is busy.\n\nTry again in a minute."),
         (500, "Daimon couldn't reach its AI service.\n\nTry again in a minute."),
         (503, "Daimon couldn't reach its AI service.\n\nTry again in a minute."),
-        (400, "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it."),
-        (401, "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it."),
-        (403, "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it."),
-        (404, "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it."),
+        (400, _REFUSED),
+        (401, _KEY_REJECTED),
+        (403, _KEY_REJECTED),
+        (404, _REFUSED),
+        (413, _TOO_LARGE),
     ],
 )
 def test_anthropic_failures_map_to_their_cause(status: int, expected: str) -> None:
@@ -240,7 +259,7 @@ async def test_missing_setup_responder_keeps_shared_helper_guidance(status: int)
         await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_private")
     assert render_error(caught.value, request_id=TEST_RID) == (
         "This setup conversation's Daimon agent is missing. "
-        "Ask the operator to restore it, then open a new setup conversation."
+        "Ask the team running Daimon to restore it, then open a new setup conversation."
         f"\n\n{REF}"
     )
 
@@ -271,7 +290,8 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
 
     text = render_error(exc, request_id="")
 
-    assert '"skill_01PBRj"' in text and "remove_skill" in text
+    assert '"skill_01PBRj"' in text and "qa's owner or an admin" in text
+    assert "remove_skill" not in text
     assert "couldn't accept the request" not in text
 
 
@@ -293,12 +313,15 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
         ),
         (
             ("permission", False, "gcs_token_echo"),
-            "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it.",
+            _KEY_REJECTED,
         ),
         (
             ("upstream", False, "malformed_interaction"),
-            "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it.",
+            _REFUSED,
         ),
+        (("upstream", False, "413"), _TOO_LARGE),
+        (("auth", False, "401"), _KEY_REJECTED),
+        (("not_found", False, "404"), _REFUSED),
     ],
 )
 def test_neutral_provider_failures_map_to_their_cause(
@@ -314,3 +337,20 @@ def test_neutral_provider_failures_map_to_their_cause(
     assert code is None or code not in result
     wrapped = TurnError(kind="upstream", cause=failure)
     assert render_error(wrapped, request_id=TEST_RID) == f"{expected}\n\n{REF}"
+
+
+def test_a_not_found_naming_the_model_says_to_switch_it() -> None:
+    from mux.errors import ProviderError
+
+    failure = ProviderError("not_found", retryable=False, native_code="404", native_param="model")
+    assert render_error(failure, request_id=TEST_RID) == f"{_MODEL_GONE}\n\n{REF}"
+
+
+def test_a_deleted_agent_is_named_with_where_to_pick_another() -> None:
+    from daimon.adapters.discord.errors import setup_out_of_date_notice
+
+    assert setup_out_of_date_notice(kind="agent", name="research") == (
+        "This channel's agent `research` no longer exists.\n\n"
+        "Ask an admin to pick another in `/agent-setup`."
+    )
+    assert setup_out_of_date_notice(kind="environment", name="py") == SETUP_OUT_OF_DATE_NOTICE

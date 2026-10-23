@@ -24,7 +24,7 @@ from daimon.core.platform_words import words_for
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
-from daimon.core.turn.notices import short_ref
+from daimon.core.turn.notices import RefusalNouns, resolver_miss_text, short_ref
 from mux.errors import ProviderError
 from ulid import ULID
 
@@ -55,6 +55,13 @@ NOT_SET_UP_NOTICE = (
 SETUP_OUT_OF_DATE_NOTICE = (
     "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
 )
+
+
+def setup_out_of_date_notice(*, kind: str, name: str | None) -> str:
+    """What a channel whose agent or environment is gone is told; a gone agent is named."""
+    return resolver_miss_text(RefusalNouns.for_platform("discord"), kind=kind, name=name)
+
+
 USAGE_LIMIT_LINES = (
     "Daimon has reached its usage limit.",
     "Ask the team running it to check the limit.",
@@ -62,7 +69,22 @@ USAGE_LIMIT_LINES = (
 
 _AI_BUSY = ("Daimon's AI service is busy.", "Try again in a minute.")
 _AI_UNREACHABLE = ("Daimon couldn't reach its AI service.", "Try again in a minute.")
-_AI_REFUSED = ("Daimon's AI service couldn't accept the request.", "Ask an admin to check it.")
+_AI_REFUSED = (
+    "Daimon's AI service couldn't accept the request.",
+    "Try again, or start a new thread. If it keeps happening, tell the team running Daimon.",
+)
+_AI_TOO_LARGE = (
+    "That was too much for Daimon's AI service to take in at once.",
+    "Shorten it, or start a new thread.",
+)
+_AI_KEY_REJECTED = (
+    "The AI provider rejected Daimon's request.",
+    "The team running Daimon needs to check its key for this provider.",
+)
+_AI_MODEL_GONE = (
+    "The model this agent uses isn't offered any more.",
+    "Switch the agent's model, or ask its owner or an admin to.",
+)
 _PLATFORM_REFUSED = ("Discord didn't accept that.", "Try again.")
 _OUR_SIDE = (
     "Something went wrong on our side.",
@@ -113,6 +135,28 @@ def _guidance(exc: BaseException) -> str | None:
     return None
 
 
+def _provider_lines(exc: ProviderError) -> tuple[str, str]:
+    """Any provider behind the neutral driver layer (Gemini, OpenAI...), by category."""
+    if exc.category in {"rate_limited", "overloaded"}:
+        return _AI_BUSY
+    if exc.category == "transient_network" or (exc.category == "upstream" and exc.retryable):
+        return _AI_UNREACHABLE
+    if exc.native_code == "413" or (exc.native_code or "").endswith("_too_large"):
+        return _AI_TOO_LARGE
+    if exc.category in {"auth", "permission"}:
+        return _AI_KEY_REJECTED
+    if exc.category == "not_found" and _names_the_model(exc):
+        return _AI_MODEL_GONE
+    return _AI_REFUSED
+
+
+def _names_the_model(exc: ProviderError) -> bool:
+    """Whether a not-found is about the model: other ids (a past reply, a file) miss too."""
+    return exc.native_param == "model" or any(
+        "model" in (field or "").lower() for field in (exc.native_error_code, exc.native_message)
+    )
+
+
 def _cause_lines(exc: BaseException) -> tuple[str, str]:
     """What happened and what to do, by cause. Never the exception's text."""
     if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
@@ -122,19 +166,20 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, anthropic.APIStatusError):
         if exc.status_code in {429, 529}:
             return _AI_BUSY
+        if exc.status_code == 413:
+            return _AI_TOO_LARGE
+        if exc.status_code in {401, 403}:
+            return _AI_KEY_REJECTED
         if 400 <= exc.status_code < 500:
+            # A 404 here is a missing session or agent as often as a model, so it
+            # keeps the general wording.
             return _AI_REFUSED
         return _AI_UNREACHABLE
     if isinstance(exc, anthropic.APIError):
         # Connection failures, timeouts and errors with no status.
         return _AI_UNREACHABLE
     if isinstance(exc, ProviderError):
-        # Any provider behind the neutral driver layer (Gemini, OpenAI...).
-        if exc.category in {"rate_limited", "overloaded"}:
-            return _AI_BUSY
-        if exc.category == "transient_network" or (exc.category == "upstream" and exc.retryable):
-            return _AI_UNREACHABLE
-        return _AI_REFUSED
+        return _provider_lines(exc)
     if isinstance(exc, discord.HTTPException):
         return _PLATFORM_REFUSED
     return _OUR_SIDE

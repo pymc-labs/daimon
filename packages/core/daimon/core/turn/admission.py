@@ -1281,9 +1281,20 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
         hold=grant.hold,
     )
     if not decision:
-        raise AdmissionDenied(
-            reason="own_agents_only" if decision.reason == "own_agents_only" else "runs_elsewhere"
-        )
+        if decision.reason == "own_agents_only":
+            raise AdmissionDenied(reason="own_agents_only")
+        raise AdmissionDenied(reason="runs_elsewhere", channels=_runs_in(policy, grant))
+
+
+def _runs_in(policy: TenantAccessPolicy, grant: AdmissionGrant) -> tuple[str, ...]:
+    """The channels every rule on the agent allows, for the refusal to name."""
+    rules = agent_permissions(policy, grant.agent.names).runs_in
+    if not rules:
+        return ()
+    allowed = set(rules[0])
+    for rule in rules[1:]:
+        allowed &= rule
+    return tuple(sorted(allowed))
 
 
 def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:

@@ -320,7 +320,8 @@ async def test_request_collects_repos_and_is_asker_bound(db_session: AsyncSessio
             ability="read",
             admin_status="unseen",
         ).text
-        == "No admin can see this channel. Ask an admin to run /github."
+        == "None of the admins can see this channel, so none was asked. "
+        "Ask one directly to run /github."
     )
     assert (
         requester_card(

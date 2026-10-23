@@ -916,8 +916,8 @@ async def run_mcp_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                "Daimon isn't fully set up yet. Ask the operator to finish "
-                "setup, then try again. Nothing was saved."
+                "This isn't set up on this Daimon install yet; ask the team "
+                "running Daimon. Nothing was saved."
             ),
         )
         return

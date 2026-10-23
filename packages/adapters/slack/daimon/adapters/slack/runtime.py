@@ -94,6 +94,7 @@ def admission_refusal_message(
     foreign: bool = False,
     cause: BackendRefusalCause | None = None,
     provider: str | None = None,
+    channels: tuple[str, ...] = (),
 ) -> str:
     """The shared admission refusal in Slack's nouns, naming this deployment's bot.
 
@@ -107,6 +108,7 @@ def admission_refusal_message(
         in_dm=in_dm,
         cause=cause,
         provider=provider,
+        channels=channels,
     )
     # A provider refusal with a cause already names its fix in the foreign nouns
     # (the people at the workspace that added Daimon): keep its two lines together.

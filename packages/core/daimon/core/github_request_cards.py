@@ -36,7 +36,8 @@ def requester_card(
     if not asker_is_admin:
         if admin_status == "unseen":
             return RequestCard(
-                "No admin can see this channel. Ask an admin to run /github.",
+                "None of the admins can see this channel, so none was asked. "
+                "Ask one directly to run /github.",
                 None,
                 ("Cancel request",),
             )
@@ -48,7 +49,7 @@ def requester_card(
             )
         if request.admin_notified_at is None:
             return RequestCard(
-                "No admin is available. Ask an admin to run /github.",
+                "I couldn't reach an admin for this. Ask one directly to run /github.",
                 None,
                 ("Cancel request",),
             )

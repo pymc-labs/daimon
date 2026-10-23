@@ -696,7 +696,7 @@ async def test_a_configured_client_with_a_wrong_secret_sends_the_person_to_the_o
         r = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
 
     assert r.status_code == 502 and "not set up correctly" in r.text, r.text
-    assert "Ask the operator" in r.text, "retrying cannot fix a wrong secret"
+    assert "Ask the team running Daimon" in r.text, "retrying cannot fix a wrong secret"
     assert created == [] and updates == [], "a refused client stores and attaches nothing"
     async with db_session_factory() as session:
         request = await requests_store.peek_credential_request(session, token=flow.request_token)

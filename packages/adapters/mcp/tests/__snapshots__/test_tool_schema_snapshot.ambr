@@ -1449,8 +1449,8 @@
         Always send the full intended list for every ecosystem you care about.
         <blank line>
         The new environment is inert until an admin picks it for a channel or
-        the workspace, or a channel's admin picks it for their channel, with
-        ``set_channel_environment``; creating one here changes nothing yet.
+        the workspace with ``set_channel_environment``; creating one here
+        changes nothing yet.
       ''',
       'parameters': dict({
         '$defs': dict({

@@ -1,6 +1,6 @@
 """This channel's environment, picked on Who answers where.
 
-Server admins and this channel's admins get a select that runs the channel in
+Server admins get a select that runs the channel in
 one of the server's environments or hands it back to the default. What the
 panel rendered is a hint: the select re-checks the caller live through
 reach in a sealed channel), and the pick is checked against the environments
@@ -49,7 +49,7 @@ MAX_ENVIRONMENT_OPTIONS: Final = 24
 """A select holds 25 options; the first is always Use the default."""
 _MAX_OPTION_VALUE: Final = 100
 """Discord's limit on a select option's value."""
-REFUSED_MESSAGE: Final = "Only a server admin or this channel's admin can change this."
+REFUSED_MESSAGE: Final = "Only a server admin can change this."
 
 
 def build_environment_select(
