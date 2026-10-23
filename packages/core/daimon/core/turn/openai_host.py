@@ -62,6 +62,9 @@ from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
+#: HTTP answers that reject a session create outright: no session exists afterwards.
+_DEFINITE_REJECTIONS = frozenset({"400", "401", "403", "404", "422"})
+
 
 async def unknown_infrastructure(observation: UsageObservation) -> Decimal | None:
     return None
@@ -302,6 +305,17 @@ async def _create(
                 min(120, (request.deadline - request.now()).total_seconds())
             ):
                 native = await backend.sessions.create(request.scope, spec, key=key)
+        except ProviderError as error:
+            # A definite rejection created no session: the slot's next turn may send again.
+            # Anything else may have reached OpenAI and is never resent blindly.
+            await store.advance_operation(
+                request.scope,
+                key,
+                "pending" if error.native_code in _DEFINITE_REJECTIONS else "outcome_unknown",
+                now=request.now(),
+                fence=lease,
+            )
+            raise
         except BaseException:
             await store.advance_operation(
                 request.scope, key, "outcome_unknown", now=request.now(), fence=lease

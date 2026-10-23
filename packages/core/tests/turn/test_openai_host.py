@@ -88,6 +88,7 @@ class Wire:
         self.sent = asyncio.Event()
         self.sources: list[Stream] = []
         self.fail_create = False
+        self.reject_create = False
         self.bad_model = False
         self.cancelled = False
         self.deleted = False
@@ -146,6 +147,19 @@ class Wire:
                 assert body["spend_control"] == {"limit": self.expected_spend_limit}
             if self.fail_create:
                 raise httpx.ReadError("offline lost acknowledgment")
+            if self.reject_create:
+                # The staging answer to a session create carrying `spend_control`.
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": "Unknown parameter: 'spend_control'.",
+                            "type": "invalid_request_error",
+                            "param": "spend_control",
+                            "code": "unknown_parameter",
+                        }
+                    },
+                )
             return httpx.Response(200, json=self.session())
         assert path.startswith("/agents/sessions/" + self.session_id)
         if path.endswith("/events"):
@@ -338,6 +352,21 @@ async def test_creation_unknown_is_never_resent(composed):
     with pytest.raises(UncertainSend):
         await prepare_openai(request)
     assert len([r for r in wire.requests if r.method == "POST"]) == 1
+
+
+async def test_a_rejected_creation_lets_the_next_turn_create(composed):
+    """A definite 400 created no session, so it never wedges the thread (Ref 4F7RXA)."""
+    request, wire, _, _, _ = composed
+    wire.reject_create = True
+    from mux.errors import ProviderError
+
+    with pytest.raises(ProviderError) as rejected:
+        await prepare_openai(request)
+    assert rejected.value.native_code == "400"
+    wire.reject_create = False
+    prepared = await prepare_openai(request)
+    assert prepared.session_ref is not None and prepared.session_ref.id == SESSION_ID
+    assert len([r for r in wire.requests if r.method == "POST"]) == 2
 
 
 async def test_wrong_native_model_cannot_run(composed):
@@ -1136,7 +1165,7 @@ async def test_host_runtime_allows_omitted_optional_spend_control(composed):
     wire.expected_spend_limit = None
     request = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
     prepared = await prepare_openai(request)
-    assert prepared.session_ref.id == SESSION_ID
+    assert prepared.session_ref is not None and prepared.session_ref.id == SESSION_ID
     body = json.loads(next(r.content for r in wire.requests if r.method == "POST"))
     assert "spend_control" not in body
     assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}

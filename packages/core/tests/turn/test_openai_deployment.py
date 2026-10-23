@@ -236,7 +236,8 @@ async def test_plan_is_scoped_and_credential_access_is_deferred(
 
     assert runtime.account_scope_id == "project"
     assert runtime.price is provider_prices(PROFILE)[("openai", REVISION.model)]
-    assert runtime.controls.spend_limit_usd_cents == 4
+    # Our OpenAI project rejects `spend_control`: Luna never asks for a native cap.
+    assert runtime.controls.spend_limit_usd_cents is None
     assert runtime.controls.require_spend_control_echo is False
     plan = await runtime.session_plan(application)
     assert plan.agent.id == "native-agent" and plan.agent.id != application.admission.agent.id
@@ -272,40 +273,36 @@ async def test_omitted_native_spend_control_is_preserved(
 
 
 @pytest.mark.parametrize("budget", [None, Decimal("0.20")])
-@pytest.mark.parametrize("echo", ["same", "missing", "different"])
-async def test_root_native_budget_compiles_wire_and_requires_exact_echo(
-    application, monkeypatch, tmp_path, budget, echo
+async def test_a_luna_root_sends_no_native_spend_control(
+    application, monkeypatch, tmp_path, budget
 ):
+    """Our OpenAI project rejects `spend_control` on every create (HTTP 400, Ref Y7D94P).
+
+    Luna may run under the host's own budget guard, so its creates never carry the
+    field, with or without a native budget, and no echo is required.
+    """
     row = entry()
     del row["spend_limit_usd_cents"]
     manifest(monkeypatch, tmp_path / "runtime.json", [row])
     monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline-only")
     wire = Wire()
-    wire.expected_spend_limit = 20 if echo == "same" else None if echo == "missing" else 21
+    wire.expected_spend_limit = None
 
     def handle(request):
         if request.method == "POST" and request.url.path.endswith("/agents/sessions"):
-            body = json.loads(request.content)
-            if budget is None:
-                assert "spend_control" not in body
-            else:
-                assert body["spend_control"] == {"limit": 20}
+            assert "spend_control" not in json.loads(request.content)
             wire.requests.append(request)
             return httpx.Response(200, json=wire.session())
         return wire.handle(request)
 
     monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handle))
     runtime = build_openai_runtime(replace(application, native_budget_usd=budget))
-    assert runtime.controls.require_spend_control_echo is (budget is not None)
+    assert runtime.controls.spend_limit_usd_cents is None
+    assert runtime.controls.require_spend_control_echo is False
     spec = await runtime.session_plan(application)
     backend = openai_host.driver(runtime, REVISION, SCOPE)
     acknowledged = await backend.sessions.create(SCOPE, spec, key="root-controlled-create")
-    # Actual host creation persists this acknowledged object before validation.
-    if budget is not None and echo != "same":
-        with pytest.raises(ContinuityLost):
-            backend.sessions.validate_spend_control(acknowledged)
-    else:
-        backend.sessions.validate_spend_control(acknowledged)
+    backend.sessions.validate_spend_control(acknowledged)
     assert len([call for call in wire.requests if call.method == "POST"]) == 1
     assert not wire.turns
 
