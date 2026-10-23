@@ -1469,7 +1469,7 @@ class AgentBackendService:
                 raise AgentBackendRefused("stale_revision")
             policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
             updated = type(policy).model_validate(
-                {**policy.model_dump(), "enabled_backends": backends}
+                {**policy.model_dump(), "enabled_backends": backends, "backends_explicit": True}
             )
             if dry_run:
                 return current.model_copy(update={"enabled_backends": updated.enabled_backends})

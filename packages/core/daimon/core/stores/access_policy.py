@@ -17,6 +17,7 @@ from typing import Any, cast
 from daimon.core._models import Tenant, TenantAccessPolicyRecord
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
@@ -134,6 +135,13 @@ async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     ).scalar_one()
 
 
+def _with_default_backends(policy: TenantAccessPolicy) -> TenantAccessPolicy:
+    default = default_enabled_backends()
+    if policy.enabled_backends == default:
+        return policy
+    return policy.model_copy(update={"enabled_backends": default})
+
+
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
     # Select the row, not just its payload: a JSON `null` payload would
     # otherwise read as "no row" and fall open.
@@ -143,12 +151,19 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
         )
     ).scalar_one_or_none()
     if record is None:
-        return OPEN_ACCESS_POLICY
+        return _with_default_backends(OPEN_ACCESS_POLICY)
     payload = cast(object, record.policy)
     if isinstance(payload, dict):
-        if "enabled_backends" in payload:
+        if "enabled_backends" in payload or "backends_explicit" in payload:
             raise AccessPolicyUnreadable(tenant_id=tenant_id)
-        payload = {**cast("dict[str, Any]", payload), "enabled_backends": record.enabled_backends}
+        explicit = record.enabled_backends_explicit
+        payload = {
+            **cast("dict[str, Any]", payload),
+            "enabled_backends": record.enabled_backends
+            if explicit
+            else list(default_enabled_backends()),
+            "backends_explicit": explicit,
+        }
     try:
         # JSON null, an array or a string fail validation like a bad field does.
         return TenantAccessPolicy.model_validate(payload)
@@ -162,7 +177,11 @@ async def set_access_policy(
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     payload = policy.model_dump(mode="json")
-    backends = payload.pop("enabled_backends")
+    explicit = payload.pop("backends_explicit")
+    # A tenant on the deployment default keeps following it: its loaded default is
+    # never written back as a choice, and older builds read Anthropic only.
+    chosen = payload.pop("enabled_backends")
+    backends = chosen if explicit else ["anthropic"]
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
     for key in ("channel_rules", "category_rules", "agent_rules"):
@@ -170,10 +189,20 @@ async def set_access_policy(
             payload.pop(key, None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
-        .values(tenant_id=tenant_id, policy=payload, enabled_backends=backends)
+        .values(
+            tenant_id=tenant_id,
+            policy=payload,
+            enabled_backends=backends,
+            enabled_backends_explicit=explicit,
+        )
         .on_conflict_do_update(
             index_elements=[TenantAccessPolicyRecord.tenant_id],
-            set_={"policy": payload, "enabled_backends": backends, "updated_at": func.now()},
+            set_={
+                "policy": payload,
+                "enabled_backends": backends,
+                "enabled_backends_explicit": explicit,
+                "updated_at": func.now(),
+            },
         )
     )
     await session.flush()
