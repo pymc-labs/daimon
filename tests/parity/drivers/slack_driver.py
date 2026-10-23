@@ -117,7 +117,7 @@ _REACTIONS_ADD_PATTERN = re.compile(r"https://slack\.com/api/reactions\.add.*")
 _CONVERSATIONS_REPLIES_PATTERN = re.compile(r"https://slack\.com/api/conversations\.replies.*")
 
 _BALANCE_BLOCKED_TEXT = (
-    "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
+    "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
 )
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 

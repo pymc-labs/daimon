@@ -89,7 +89,7 @@ _POSTED_MESSAGE_ID = "1700000000200"
 _LIFECYCLE_TENANT = str(uuid.UUID(int=0xA11CE))
 _LIFECYCLE_USER = str(uuid.UUID(int=0xB0B))
 
-_BALANCE_BLOCKED_TEXT = "Your team's Daimon credit has run out.\n\nAn admin can top up with `billing` in a 1:1 chat with me."
+_BALANCE_BLOCKED_TEXT = "Your team has no Daimon credit yet.\n\nAn admin can add some with `billing` in a 1:1 chat with me."
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 
 #: The label each `PanelAction` wears on the Teams card, once emoji are stripped.
