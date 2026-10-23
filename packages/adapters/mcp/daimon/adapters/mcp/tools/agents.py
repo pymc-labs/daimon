@@ -74,6 +74,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_SETUP_HIDDEN,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
@@ -349,16 +350,22 @@ def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
         return (
             f"agent '{agent.name}' is managed by defaults; chat tools cannot modify it. "
-            "An admin can make an editable copy with fork_agent; a member can create_agent "
-            "a new one instead."
+            "Anyone talking to it can make their own editable copy with fork_agent (an "
+            "admin can copy it from anywhere), or create_agent a new one."
         )
     if agent.metadata.get(MA_METADATA_KEY_ACCOUNT) is None:
         return (
             f"agent '{agent.name}' is a system agent; chat tools cannot modify it. "
-            "An admin can make an editable copy with fork_agent; a member can create_agent "
-            "a new one instead."
+            "Anyone talking to it can make their own editable copy with fork_agent (an "
+            "admin can copy it from anywhere), or create_agent a new one."
         )
     return None
+
+
+def _setup_hidden(agent: BetaManagedAgentsAgent, auth: AuthIdentity) -> bool:
+    """A member's own copy of an agent they talked to: its inherited setup stays an
+    admin's to read, as on the source, though they own it."""
+    return not auth.is_admin and agent.metadata.get(MA_METADATA_KEY_SETUP_HIDDEN) == "true"
 
 
 async def _reject_guild_name_collision(
@@ -426,7 +433,10 @@ async def _list_agents_impl(
     ]
     if auth.is_admin:
         return infos
-    return [info if info.owned_by_you else info.for_member() for info in infos]
+    hidden = {row.id for row in rows if _setup_hidden(row, auth)}
+    return [
+        info if info.owned_by_you and info.id not in hidden else info.for_member() for info in infos
+    ]
 
 
 async def _get_agent_impl(
@@ -453,7 +463,7 @@ async def _get_agent_impl(
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
     owned = await caller_owns_agent(runtime, auth, agent.id)
-    sees_setup = auth.is_admin or owned
+    sees_setup = auth.is_admin or (owned and not _setup_hidden(agent, auth))
     if sees_setup and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
@@ -930,6 +940,9 @@ async def _update_agent_impl(
             ) from exc
         raise
     result = await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
+    if _setup_hidden(updated, auth):
+        # The owner's edit answers with capabilities only: never the inherited setup.
+        result = result.for_member()
     applies_lines: list[str] = []
     if model is not None:
         applies_lines.append(
@@ -1056,7 +1069,27 @@ async def _attach_mcp_server_impl(
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
-    return await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
+    info = await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
+    return info.for_member() if _setup_hidden(updated, auth) else info
+
+
+async def _require_member_copy_room(runtime: McpRuntime, auth: AuthIdentity) -> None:
+    """A member may own only so many copies they made by talking to an agent."""
+    limit = runtime.settings.mcp.member_copy_limit
+    owned = await caller_owned_ids(runtime, auth)
+    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    mine = [
+        agent
+        for agent in agents
+        if owned_in(owned, auth, agent.id)
+        and agent.metadata.get(MA_METADATA_KEY_SETUP_HIDDEN) == "true"
+    ]
+    if len(mine) >= limit:
+        raise ToolError(
+            f"You already have {len(mine)} copies of your own (the most is {limit}). "
+            "Archive one you no longer use, or ask an admin to make this copy. "
+            "Nothing was created."
+        )
 
 
 async def _fork_agent_impl(
@@ -1111,6 +1144,8 @@ async def _fork_agent_impl(
         )
         if not auth.is_admin and not answering:
             _require_admin(auth)
+        if not auth.is_admin:
+            await _require_member_copy_room(runtime, auth)
         try:
             copy = await copy_agent(
                 runtime.client,
@@ -1132,10 +1167,15 @@ async def _fork_agent_impl(
                 if origin is not None
                 else None,
                 answering=answering,
+                hold=auth.hold,
+                # A member's copy keeps the source's setup an admin's to read.
+                hide_setup=not auth.is_admin,
             )
         except DaimonError as exc:
             raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
     info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
+    if _setup_hidden(copy.agent, auth):
+        info = info.for_member()
     if copy.dropped_skills:
         info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
     if copy.copied_skills:
@@ -2049,7 +2089,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Make a copy of Daimon or another agent that you can edit under a new name.
         Anyone may copy you (the agent answering them), and owns that copy; copying
         any other agent is admin-only. Only for a saved, named copy someone asked
-        to keep. Running
+        to keep. The copy keeps its source's tool rules, and starts on the server's
+        default fleet (the source's own fleet settings don't carry over). Running
         copies of yourself on several models at once is not this: that is a fleet
         of task workers (fleet_spawn), which needs no admin.
         Copies its prompt, model, skills and the MCP servers that need

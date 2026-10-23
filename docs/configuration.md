@@ -279,6 +279,13 @@ Both fields are optional so deployments that don't run the MCP adapter keep work
 
 Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter.
 
+### `DAIMON_MCP__MEMBER_COPY_LIMIT`
+
+`int` · optional · default `5`
+
+How many live copies one member may own of agents they copied while talking to them
+(fork_agent without admin). Admins are not limited. 0 turns member copies off.
+
 ### `DAIMON_MCP__LEGACY_TOKEN_CUTOFF`
 
 `AwareDatetime | None` · optional · default unset

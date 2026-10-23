@@ -42,6 +42,7 @@ from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_defau
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_SETUP_HIDDEN,
     build_metadata,
     strip_tenant_prefix,
 )
@@ -55,10 +56,11 @@ from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
 from daimon.core.specs import merge_default_agent_toolset
-from daimon.core.stores import agent_owners
+from daimon.core.stores import agent_owners, agent_tool_rules
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.resources import Agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -244,6 +246,8 @@ async def copy_agent(
     extra_metadata: Mapping[str, str] | None = None,
     owner: uuid.UUID | Literal["source"] | None = None,
     answering: bool = False,
+    hold: TurnHold | None = None,
+    hide_setup: bool = False,
 ) -> AgentCopy:
     """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
 
@@ -253,6 +257,10 @@ async def copy_agent(
     the source agent's owner (a channel's copy); None leaves it admin-only.
     `answering`: `source` is the agent answering the subject's own chat turn
     (host-verified), which any person may copy; any other agent needs an admin.
+    `hold` is the calling turn's hold, if any. `hide_setup` marks a copy whose
+    inherited setup its non-admin owner may not read (`MA_METADATA_KEY_SETUP_HIDDEN`).
+    The copy gets every tool rule its source has, so it runs no looser. Its fleet
+    settings are not copied: it starts on the tenant's default fleet.
     """
     async with sessionmaker() as session:
         try:
@@ -268,6 +276,7 @@ async def copy_agent(
         action=Action.FORK,
         agent=build_agent_ref(source.name, source.metadata),
         answering=answering,
+        hold=hold,
     )
     if decision.reason == "agent_has_rule":
         # The copy would run anywhere with the prompt and skills of one that may not.
@@ -285,6 +294,8 @@ async def copy_agent(
     fork_params["metadata"] = build_metadata(
         tenant_id=tenant_id, name=new_name, account_id=derive_guild_account_uuid(tenant_id)
     ) | dict(extra_metadata or {})
+    if hide_setup:
+        fork_params["metadata"][MA_METADATA_KEY_SETUP_HIDDEN] = "true"
     fork_params["mcp_servers"] = merge_default_mcp_server(
         cast("list[BetaManagedAgentsURLMCPServerParams] | None", fork_params.get("mcp_servers")),
         public_url,
@@ -320,6 +331,15 @@ async def copy_agent(
     await _record_copy_owner(
         sessionmaker, tenant_id=tenant_id, source_id=str(source.id), copy_id=created.id, owner=owner
     )
+    async with sessionmaker.begin() as session:
+        await agent_tool_rules.copy_rules(
+            session,
+            tenant_id=tenant_id,
+            source_agent_id=str(source.id),
+            agent_id=created.id,
+            agent_name=new_name,
+            set_by=f"copy-of:{source.id}",
+        )
     queue_agent_face(
         sessionmaker,
         tenant_id=tenant_id,
