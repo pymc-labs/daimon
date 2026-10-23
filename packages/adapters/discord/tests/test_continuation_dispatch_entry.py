@@ -1317,3 +1317,101 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         str(_THREAD_ID - 1),
         str(_THREAD_ID),
     )
+
+
+@pytest.mark.parametrize("refused", [False, True])
+async def test_a_fleet_wake_prepares_inside_its_origin_and_a_refused_wake_ends_its_card(
+    db_session_factory, refused
+):
+    """A fleet root's wake binds with its turn origin open, as a mention does.
+
+    Preparation captures the root's source only under an origin (prepare's
+    default-fleet skip), so a wake bound before its origin could never resume.
+    A wake refused at send ends its own "Working on it" card in plain words and
+    settles its row, instead of leaving the card spinning.
+    """
+    from dataclasses import replace
+
+    from daimon.adapters.discord.errors import WAKE_REFUSED_LINES
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from daimon.core.turn_origin import current_origin_id
+
+    run, rows, _store, _slot = await _seed_completion_root(db_session_factory)
+    bot, thread = _wake_bot(db_session_factory, run.tenant_id, fleet_enabled=True)
+    bot.get_channel = MagicMock(return_value=thread)
+    base = _make_prepared_turn(account_id=run.orchestrator_account_id)
+    prepared = replace(
+        base,
+        admission=replace(
+            base.admission,
+            agent=ma_agent(id="ag_target", name="target-agent", tenant_id=run.tenant_id),
+        ),
+    )
+    bound_under: list[uuid.UUID | None] = []
+    ran_under: list[uuid.UUID | None] = []
+
+    async def bind_spy(*_args, **_kwargs):
+        bound_under.append(current_origin_id.get())
+        return prepared
+
+    async def native_boundary(deps, actual, **kwargs):
+        ran_under.append(current_origin_id.get())
+        if refused:
+            raise WorkerSpecRefused("origin", "unbound")
+        await kwargs["before_send"]()
+        return RunOutcome(
+            state=TurnState(), ma_session_id=actual.ma_session_id, mapping_id=None, recovered=False
+        )
+
+    p_config, p_agent, p_env, p_bind, p_run = _admission_patches()
+    with (
+        p_config as config,
+        p_agent as agent,
+        p_env as environment,
+        p_bind as bind,
+        p_run as runner,
+        patch(
+            "daimon.core.turn.runtime_manifest.read_agent_fleet_grant_or_off",
+            new_callable=AsyncMock,
+            return_value=object(),
+        ),
+    ):
+        config.return_value = ResolvedConfig(
+            agent_name="target-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        agent.return_value = "ag_target"
+        environment.return_value = "env_test"
+        bind.side_effect = bind_spy
+        runner.side_effect = native_boundary
+        for _ in range(2):
+            await poll_wakes_once(
+                db_session_factory,
+                platform="discord",
+                open_thread=bot._open_wake_thread,
+                now=datetime.now(UTC),
+            )
+            for task in list(bot._bg_tasks):
+                await task
+
+    assert bound_under and all(origin is not None for origin in bound_under)
+    assert ran_under == bound_under
+    card = thread.send.return_value
+    shown = [
+        str(call.kwargs.get("content") or (call.args[0] if call.args else ""))
+        for call in [*thread.send.await_args_list, *card.edit.await_args_list]
+    ]
+    async with db_session_factory() as db:
+        retained = [await get_continuation(db, idempotency_key=row.idempotency_key) for row in rows]
+    if refused:
+        assert any(WAKE_REFUSED_LINES[0] in text for text in shown)
+        assert all("Ref " in text for text in shown if WAKE_REFUSED_LINES[0] in text)
+        attempted = [row for row in retained if row.attempts]
+        assert attempted and all(
+            row.status == "skipped" and row.skip_reason == "dispatch_failed" for row in attempted
+        )
+    else:
+        assert not any(WAKE_REFUSED_LINES[0] in text for text in shown)
+        assert all(row.status == "delivered" for row in retained)
