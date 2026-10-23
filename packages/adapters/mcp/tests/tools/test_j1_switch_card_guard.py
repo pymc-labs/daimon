@@ -5,7 +5,8 @@ No runtime rows: only code defaults (each provider's deployment key is set). The
 agent's MCP tools are called as its model would call them; everything behind them is
 the production path, with fake provider HTTP edges: the built-in Daimon refuses to
 switch the whole server and offers a copy; "yes" makes a NEW copy (owned by whoever
-asked), hands this thread to it, and switches it to GPT; the next message is
+asked), and its approved switch card hands this thread to it and switches it to GPT,
+in one step (a hand-off first is refused); the next message is
 admitted to the copy on OpenAI. Any refusal on this path is a product bug.
 """
 
@@ -308,6 +309,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
         "Daimon",
         expected_ma_agent_id="agent_daimon",
         new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id),
     )
     assert copy.name == "Daimon-2"
     # 3. The BAD order (smoke-6 J1): handing this thread to the copy before its switch.
@@ -473,3 +475,167 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
     assert outcome.state.error is None
     (session_create,) = wire.posts
     assert "spend_control" not in session_create  # a GPT agent's own turn (#1394)
+
+
+async def _new_copy(chat: Chat, *, here: bool = True):
+    return await _fork_agent_impl(
+        chat.runtime,
+        chat.auth,
+        "Daimon",
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id) if here else None,
+    )
+
+
+async def _switch(chat: Chat, name: str, **confirm):
+    return await _request_agent_backend_switch_impl(
+        chat.runtime,
+        chat.auth,
+        agent_name=name,
+        target_backend="openai",
+        origin_context_id=str(chat.origin.id),
+        **confirm,
+    )
+
+
+async def _handed_to(chat: Chat) -> str | None:
+    from daimon.core.stores.thread_agent_bindings import get_binding
+
+    async with chat.runtime.session_factory() as session:
+        handed = await get_binding(
+            session,
+            tenant_id=chat.auth.tenant_id,
+            platform="discord",
+            parent_channel_id="fresh-channel",
+            thread_id="thread",
+        )
+    return handed.responder_name if handed is not None else None
+
+
+async def _provider_of(chat: Chat, name: str) -> str | None:
+    from daimon.core.channel_backend import AgentBackendService, load_backend_agent
+
+    agent = await load_backend_agent(
+        chat.runtime.client,
+        chat.runtime.session_factory,
+        tenant_id=chat.auth.tenant_id,
+        agent_name=name,
+    )
+    current = await AgentBackendService(chat.runtime.session_factory, enabled=True).current(agent)
+    return current.backend if current is not None else None
+
+
+@pytest.mark.parametrize("stale", ("revision", "digest"))
+async def test_a_refused_switch_card_leaves_the_thread_with_the_root(fresh_chat, stale):
+    """The hand-off the card promises comes with its switch or not at all: a stale or
+    changed card changes nothing, so the thread stays with the root (#1463 review 1)."""
+    chat = fresh_chat
+    copy = await _new_copy(chat)
+    preview = await _switch(chat, copy.name)
+    with pytest.raises(ToolError):
+        await _switch(
+            chat,
+            copy.name,
+            expected_revision=preview.expected_revision + (stale == "revision"),
+            preview_digest=preview.preview_digest if stale == "revision" else "0" * 64,
+            accepted_drops=preview.declared_drops,
+        )
+    assert await _handed_to(chat) is None
+    assert await _provider_of(chat, copy.name) in (None, "anthropic")
+
+
+async def test_a_repo_bound_thread_answers_the_unsaved_work_question_before_the_card(
+    fresh_chat,
+):
+    """A thread with a repo bound: the uncommitted-work question comes with the preview,
+    before any card, and its answer rides the confirmed call (#1463 review 2)."""
+    from daimon.core.session_snapshot import SessionSnapshot
+    from daimon.core.stores.thread_sessions import get_live_thread_session
+    from sqlalchemy import text
+
+    chat = fresh_chat
+    snapshot = SessionSnapshot(
+        ma_agent_id="agent_daimon",
+        model_id="claude-sonnet-5",
+        system_sha256=None,
+        skills_sha256="skills",
+        environment_id="env_1",
+        repo_url="https://github.com/acme/data",
+        repo_branch="main",
+        memory_store_id=None,
+        vault_id=None,
+        tools_sha256="tools",
+        mcp_servers_sha256="mcp",
+        env_sha256=None,
+        agent_version=1,
+        agent_name="Daimon",
+    )
+    async with chat.runtime.session_factory.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE thread_sessions SET effective_config = CAST(:config AS jsonb) "
+                "WHERE ma_session_id = 'sess_daimon'"
+            ),
+            {"config": snapshot.model_dump_json()},
+        )
+    copy = await _new_copy(chat)
+    with pytest.raises(ToolError, match="uncommitted changes in https://github.com/acme/data"):
+        await _switch(chat, copy.name)
+    preview = await _switch(chat, copy.name, unsaved_work="leave")
+    changed = await _switch(
+        chat,
+        copy.name,
+        expected_revision=preview.expected_revision,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+        unsaved_work="leave",
+    )
+    assert "This conversation moves to OpenAI from the next message" in changed.summary
+    assert await _handed_to(chat) == copy.name
+    async with chat.runtime.session_factory() as session:
+        live = await get_live_thread_session(
+            session,
+            tenant_id=chat.auth.tenant_id,
+            platform="discord",
+            thread_id="thread",
+            account_id=chat.auth.account_id,
+        )
+    assert live is not None and live.pending_unsaved_work == "leave"
+
+
+@pytest.mark.parametrize("made", ("elsewhere", "unstamped"))
+async def test_switching_an_older_copy_never_moves_this_thread(fresh_chat, made):
+    """Only a copy made in this conversation for its switch is handed it: an older copy,
+    made in another thread or before the stamp (a channel rule's copy has none), is an
+    ordinary agent, handed off by hand_off_task as before (#1463 review 3)."""
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    chat = fresh_chat
+    copy = await _new_copy(chat, here=made == "elsewhere")
+    if made == "elsewhere":
+        stamp = chat.ma.agents[copy.id]["metadata"]
+        assert stamp["daimon_forked_from"] == "agent_daimon"
+        stamp["daimon_forked_in"] = stamp["daimon_forked_in"].replace("thread", "other-thread")
+    else:
+        assert "daimon_forked_from" not in chat.ma.agents[copy.id]["metadata"]
+    preview = await _switch(chat, copy.name)
+    changed = await _switch(
+        chat,
+        copy.name,
+        expected_revision=preview.expected_revision,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert "isn't the one answering here" in changed.summary
+    assert await _handed_to(chat) is None
+    # And hand_off_task treats it as any agent: no switch-card refusal (it's on OpenAI
+    # now, so the other-provider rule speaks instead).
+    with pytest.raises(ToolError) as refused:
+        await _hand_off_task_impl(
+            chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
+        )
+    assert "post its switch card now" not in str(refused.value)

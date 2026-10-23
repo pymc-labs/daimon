@@ -322,6 +322,7 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         "Daimon",
         expected_ma_agent_id="agent_daimon",
         new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id),
     )
     # 3. Handing this thread to the copy before its switch is refused (J1's coin-toss
     #    order): the card's approval hands it over and switches it, in one step.

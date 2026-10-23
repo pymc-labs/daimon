@@ -18,11 +18,11 @@ writes the switch under the tenant policy lock.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
-from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
@@ -45,8 +45,10 @@ from daimon.core.continuity.tool_messages import (
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_FORKED_FROM,
+    MA_METADATA_KEY_FORKED_IN,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    forked_in,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
@@ -72,6 +74,7 @@ from daimon.core.thread_handoff import (
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -119,49 +122,60 @@ class TaskFreshStartResult:
     """What to do with `confirmation`."""
 
 
-async def _refuse_a_copy_mid_switch(
+def forked_in_value(origin: TurnOriginRow) -> str:
+    """This conversation, as a copy made in it records it (`MA_METADATA_KEY_FORKED_IN`)."""
+    return forked_in(origin.platform, origin.parent_channel_id, origin.thread_id)
+
+
+async def copy_awaiting_its_switch(
     runtime: McpRuntime,
     auth: AuthIdentity,
     origin: TurnOriginRow,
-    destination: BetaManagedAgentsAgent,
-    destination_name: str,
     *,
-    keep_provider: bool,
-) -> None:
-    """A fresh copy of this responder, still on its provider, gets the thread from
-    its switch card's approval, which hands over and switches in one step (J1).
+    ma_agent_id: str,
+    metadata: Mapping[str, str] | None,
+) -> bool:
+    """A copy fork_agent made of this conversation's responder, in this conversation,
+    still on the responder's provider and not answering here yet (J1).
 
-    The model chose the order before: sometimes it handed the thread to the copy and
-    stopped, and the copy's next turn posted the switch card instead of answering.
-    A copy meant to stay on this provider says so with `keep_provider`.
+    Its switch card's approval hands it this conversation and switches it in one
+    step; any other copy (an older one, a channel rule's) is an ordinary agent.
     """
-    if keep_provider or destination.metadata.get(MA_METADATA_KEY_FORKED_FROM) != (
-        origin.responder_ma_agent_id
+    from daimon.core.stores import thread_agent_bindings
+
+    stamp = metadata or {}
+    if (
+        ma_agent_id == origin.responder_ma_agent_id
+        or stamp.get(MA_METADATA_KEY_FORKED_FROM) != origin.responder_ma_agent_id
+        or stamp.get(MA_METADATA_KEY_FORKED_IN) != forked_in_value(origin)
     ):
-        return
+        return False
     async with runtime.session_factory() as session:
-        revisions = [
-            await agent_backends.current(
-                session,
-                auth.tenant_id,
-                derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id),
-            )
-            for ma_agent_id in (destination.id, origin.responder_ma_agent_id)
-        ]
-    copy, source = (
-        (revision.backend if revision is not None and revision.backend else "anthropic")
-        for revision in revisions
-    )
-    if copy != source:
-        return
-    raise ToolError(
-        f"{destination_name} is a new copy of you, still on your model provider. If the "
-        "person asked for it on another provider, post its switch card now instead "
-        f"(request_agent_backend_switch for {destination_name}, with the preview's "
-        "digest): approving the card hands this thread to it and switches it, in one "
-        "step. If the copy should stay on this provider, call hand_off_task again with "
-        "keep_provider=true. Nothing was changed."
-    )
+        handed = await thread_agent_bindings.get_binding(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=origin.platform,
+            parent_channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+        )
+        if handed is not None and handed.responder_ma_agent_id == ma_agent_id:
+            return False
+        copy, source = (
+            (revision.backend if revision is not None else None) or DEFAULT_BACKEND
+            for revision in [
+                await agent_backends.current(
+                    session,
+                    auth.tenant_id,
+                    derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent),
+                )
+                for agent in (ma_agent_id, origin.responder_ma_agent_id)
+            ]
+        )
+    return copy == source
+
+
+class _HandOffChecked(Exception):
+    """Rolls back a hand-off that was only checked (`switch="check"`)."""
 
 
 async def _hand_off_task_impl(
@@ -173,12 +187,18 @@ async def _hand_off_task_impl(
     continuation: str | None = None,
     unsaved_work: Literal["copy", "leave"] | None = None,
     keep_provider: bool = False,
+    switch: Literal["check", "commit"] | None = None,
 ) -> TaskHandoffResult:
     """Bind this thread's responder to another agent, optionally queueing work.
 
     Every check runs before anything is written, so a refused handoff leaves
     the conversation exactly as it was — including the uncommitted-work
     question, which is a refusal the caller answers and retries.
+
+    `switch` is a confirmed backend switch handing this thread to a copy awaiting
+    it (`copy_awaiting_its_switch`): "check" runs every check and writes nothing,
+    before the switch; "commit" hands over after it, when the copy is already on
+    the provider the switch moves this thread to.
     """
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     # `require_turn_origin` already refused any non-chat platform.
@@ -202,9 +222,24 @@ async def _hand_off_task_impl(
             "That agent has no configuration name, so nobody can reach it by name. "
             "Choose a named agent here. Nothing was changed."
         )
-    await _refuse_a_copy_mid_switch(
-        runtime, auth, origin, destination, destination_name, keep_provider=keep_provider
-    )
+    if (
+        switch is None
+        and not keep_provider
+        and await copy_awaiting_its_switch(
+            runtime, auth, origin, ma_agent_id=destination.id, metadata=destination.metadata
+        )
+    ):
+        # J1: the model chose the order before. Sometimes it handed the thread to the
+        # copy and stopped, and the copy's next turn posted the switch card instead
+        # of answering.
+        raise ToolError(
+            f"{destination_name} is a new copy of you, still on your model provider. If "
+            "the person asked for it on another provider, post its switch card now "
+            f"instead (request_agent_backend_switch for {destination_name}, with the "
+            "preview's digest): approving the card hands this thread to it and switches "
+            "it, in one step. If the copy should stay on this provider, call "
+            "hand_off_task again with keep_provider=true. Nothing was changed."
+        )
     continuation = sanitize_requested_work(continuation, echoes=(destination_name,))
     if continuation is not None and auth.platform_user_id is None:
         raise ToolError(
@@ -296,17 +331,21 @@ async def _hand_off_task_impl(
                 now=datetime.now(UTC),
                 recorded=recorded,
             )
-            # After the decision, so authorization speaks first; raising rolls it back.
-            await _refuse_another_providers_destination(
-                session,
-                auth,
-                origin,
-                destination_ma_agent_id=destination.id,
-                destination_name=destination_name,
-            )
+            if switch != "commit":
+                # After the decision, so authorization speaks first; raising rolls it
+                # back. A confirmed switch moves this thread to the copy's provider.
+                await _refuse_another_providers_destination(
+                    session,
+                    auth,
+                    origin,
+                    destination_ma_agent_id=destination.id,
+                    destination_name=destination_name,
+                )
             if repo is not None and unsaved_work is None:
                 # Raised inside the transaction, so the binding rolls back.
                 raise ToolError(render_tool_unsaved_work_question(repo))
+            if switch == "check":
+                raise _HandOffChecked
             if unsaved_work is not None and live_session is not None:
                 # The answer outlives this turn: the replacement it governs
                 # happens at this caller's NEXT message, when the destination
@@ -354,6 +393,8 @@ async def _hand_off_task_impl(
         ) from refused
     except HandoffRefusedInSetupThread as error:
         raise ToolError(render_tool_refusal_setup_thread(destination_name)) from error
+    except _HandOffChecked:
+        pass
 
     confirmation = render_handoff_acknowledged(
         target_name=destination_name,

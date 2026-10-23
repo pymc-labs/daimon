@@ -47,9 +47,12 @@ MA_METADATA_KEY_CHANNEL_COPY = "daimon_isolation_copy"
 # can tell "unchanged source, reuse the variant" from "source moved, update
 # it" without re-deriving the whole spec first.
 MA_METADATA_KEY_READER_OF = "daimon_reader_of"
-# A copy made by fork_agent names the agent it was copied from (its MA id). A fresh
-# copy still on its source's provider can't be handed a thread mid-switch (J1).
+# A copy fork_agent made from a chat conversation names the agent it was copied from
+# (its MA id) and that conversation (platform, channel, thread). Switching such a copy off its
+# source's provider from that conversation hands the conversation to it, in one step
+# with the confirmed switch (J1); nothing else reads these.
 MA_METADATA_KEY_FORKED_FROM = "daimon_forked_from"
+MA_METADATA_KEY_FORKED_IN = "daimon_forked_in"
 # Also stamped on a reader variant: the source agent's names (its config name
 # and its MA name, newline-separated). A reader answers as its source, so a
 # pin on the source holds for the reader too (`daimon.core.agent_pins`).
@@ -70,6 +73,11 @@ MA_METADATA_KEY_BUDGET_CHANNEL = "daimon_budget_channel"
 # tenant resource — see `daimon.core.ma.find_workspace_disposable_sentinel`.
 MA_METADATA_KEY_WORKSPACE = "daimon_workspace"
 MA_METADATA_VALUE_WORKSPACE_DISPOSABLE = "disposable"
+
+
+def forked_in(platform: str | None, channel_id: str | None, thread_id: str | None) -> str:
+    """A conversation as `MA_METADATA_KEY_FORKED_IN` records it."""
+    return json.dumps([platform, channel_id, thread_id], separators=(",", ":"))
 
 
 def account_id_from_metadata(raw: str | None) -> uuid.UUID | None:
