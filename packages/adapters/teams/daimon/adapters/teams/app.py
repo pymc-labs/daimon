@@ -81,7 +81,6 @@ from daimon.adapters.teams.lifecycle import (
     TeamsSender,
     TeamsTurnLifecycle,
     TimedSender,
-    retry_hint,
     send_error_details,
 )
 from daimon.adapters.teams.names import remember_inbound
@@ -163,6 +162,7 @@ from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_DM_TEXT,
     QUEUE_TIMED_OUT_TEXT,
     holding,
     release_turn_slot,
@@ -1540,9 +1540,9 @@ class TeamsApp:
                 if slot != "started":
                     notice = {
                         "cancelled": CANCELLED_NOTICE,
-                        "timed_out": retry_hint(
-                            QUEUE_TIMED_OUT_TEXT, direct_chat=inbound.kind == "dm"
-                        ),
+                        "timed_out": QUEUE_TIMED_OUT_DM_TEXT
+                        if inbound.kind == "dm"
+                        else QUEUE_TIMED_OUT_TEXT,
                         "balance_depleted": admission_refusal_text(
                             "balance_depleted",
                             TEAMS_FOREIGN_REFUSAL_NOUNS

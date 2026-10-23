@@ -674,15 +674,15 @@ class DiscordSettings(BaseModel):
         ),
     )
     unmentioned_reply_hint: bool = Field(
-        default=False,
+        default=True,
         description=(
             "React with 🔔 to a person's reply that does not @mention the bot in a thread the "
             "bot opened, as a hint that only mentions start a turn. The message itself is "
             "never answered. At most once per thread per unmentioned_reply_hint_cooldown_h, "
             "never on a message that mentions someone else, never to any bot, never where the "
             "agent may not post, and never while the thread is followed (thread "
-            "participation on). Off by default: the cooldown is kept in memory, so each "
-            "restart allows one more hint per thread."
+            "participation on). The cooldown is kept in memory, so each restart allows one more "
+            "hint per thread."
         ),
     )
     unmentioned_reply_hint_cooldown_h: float = Field(
@@ -713,9 +713,9 @@ class DiscordSettings(BaseModel):
         ),
     )
     tenant_cap_waiting_card: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Opt in to queue wording on the existing initial Discord mention card while "
+            "Show queue wording on the existing initial Discord mention card while "
             "its admitted turn waits behind the tenant concurrency cap. The same card "
             "returns to ordinary progress when the turn starts. Admission, Stop and queue "
             "limits are unchanged; no other tenant information is displayed."
@@ -2106,8 +2106,8 @@ class Settings(BaseSettings):
         default_factory=dict[uuid.UUID, bool],
         description=(
             "Per-tenant table rendering, keyed by tenant UUID. Discord renders final "
-            "Markdown tables as PNG unless the tenant is set to false. Slack renders "
-            "native tables only when set to true. Set DAIMON_TABLE_RENDERING to a JSON object."
+            "Markdown tables as PNG and Slack as native tables unless the tenant is set to "
+            "false. Set DAIMON_TABLE_RENDERING to a JSON object."
         ),
     )
     database: DatabaseSettings

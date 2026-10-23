@@ -1786,12 +1786,12 @@
         truncates large notebooks).
         <blank line>
         permanent=False (default) publishes a scratch notebook that the host deletes
-        after ttl_days: 1 by default, up to 365. Pick a longer ttl_days when the
+        after ttl_days: 14 by default, up to 365. Pick a longer ttl_days when the
         person needs the link for longer, such as a client review or a report that
-        links to it. permanent=True publishes it as a blog, kept until you delete it.
-        Prefer the default; re-upload the same slug with permanent=True once the
-        notebook is worth keeping. Re-uploading a scratch notebook restarts its
-        ttl_days from now; re-uploading a blog keeps it a blog.
+        links to it. permanent=True publishes it as a blog, kept until you delete it;
+        re-upload the same slug with permanent=True once the notebook is worth
+        keeping. Re-uploading a scratch notebook restarts its ttl_days from now;
+        re-uploading a blog keeps it a blog.
         <blank line>
         Either survives host restarts. The host stops a notebook nobody has opened
         for a couple of hours, so opening a quiet link can take a few seconds while

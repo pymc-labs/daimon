@@ -188,6 +188,7 @@ from daimon.adapters.slack.support_escalation import (
     run_support_submission,
     slack_support_enabled,
 )
+from daimon.adapters.slack.tables import tables_enabled
 from daimon.adapters.slack.thread_handoff import (
     HAND_OVER_ACTION_ID,
     build_hand_over_blocks,
@@ -270,6 +271,7 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import (
+    QUEUE_TIMED_OUT_DM_TEXT,
     QUEUE_TIMED_OUT_TEXT,
     holding,
     release_turn_slot,
@@ -2485,7 +2487,7 @@ class SlackApp:
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
-            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+            render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -2593,7 +2595,12 @@ class SlackApp:
                             "balance_depleted", self.runtime.settings, foreign=standing.foreign
                         ),
                         "queue_full": TENANT_CAP_NOTICE,
-                    }.get(slot, QUEUE_TIMED_OUT_TEXT),
+                    }.get(
+                        slot,
+                        QUEUE_TIMED_OUT_DM_TEXT
+                        if thread_id.startswith(DM_SCOPE_PREFIX)
+                        else QUEUE_TIMED_OUT_TEXT,
+                    ),
                 )
                 intent_terminal = True
                 return
@@ -2985,8 +2992,7 @@ class SlackApp:
                     ask_human=slack_support_enabled(self.runtime.settings.support),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
-                    render_tables=self.runtime.settings.table_rendering.get(tenant_id, False)
-                    is True,
+                    render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
                     client=web_client,
                     channel=channel,
                     thread_ts=thread_id,
@@ -3446,7 +3452,7 @@ class SlackApp:
             ask_human=slack_support_enabled(self.runtime.settings.support),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
-            render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+            render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
             client=web_client,
             channel=channel,
             thread_ts=thread_id,
@@ -3542,7 +3548,7 @@ class SlackApp:
                 ask_human=slack_support_enabled(self.runtime.settings.support),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
-                render_tables=self.runtime.settings.table_rendering.get(tenant_id, False) is True,
+                render_tables=tables_enabled(self.runtime.settings.table_rendering, tenant_id),
                 client=web_client,
                 channel=channel,
                 thread_ts=thread_id,

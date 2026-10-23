@@ -1346,6 +1346,76 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
     assert app._cancel_registry == {}  # pyright: ignore[reportPrivateUsage]
 
 
+@pytest.mark.parametrize(
+    ("thread_id", "expected"),
+    [
+        (
+            "9000000001.000097",
+            "Daimon is too busy right now. @mention Daimon again in a moment.",
+        ),
+        (
+            "dm:U_QUEUE_TIMEOUT",
+            "Daimon is too busy right now. Send your message again in a moment.",
+        ),
+    ],
+    ids=["channel", "dm"],
+)
+async def test_queue_timeout_ends_the_card_saying_daimon_is_busy(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    thread_id: str,
+    expected: str,
+) -> None:
+    """The max queue wait is busy, not broken; a direct message has nobody to @mention."""
+    team_id = "T_QUEUE_TIMEOUT"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    app, _ = make_orchestrate_app(db_session_factory)
+    event = {
+        "type": "app_mention",
+        "ts": "9000000001.000097",
+        "event_ts": "9000000001.000097",
+        "channel": "C_TEST",
+        "user": "U_QUEUE_TIMEOUT",
+        "text": "<@U_BOT> hello",
+    }
+    admission = MagicMock()
+    admission.agent.name = "test-agent"
+    admission.agent.model.id = "claude-sonnet-4-6"
+    ended: list[str] = []
+
+    async def _end_unstarted(self: SlackTurnLifecycle, *, stopped: bool, text: str = "") -> None:
+        assert not stopped
+        ended.append(text)
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_requester",
+            new_callable=AsyncMock,
+            return_value=_host_requester(team_id),
+        ),
+        patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
+        patch(
+            "daimon.adapters.slack.app.wait_for_slot",
+            new_callable=AsyncMock,
+            return_value="timed_out",
+        ),
+        patch.object(SlackTurnLifecycle, "end_unstarted", _end_unstarted),
+        patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as mock_bind,
+    ):
+        await app._run_thread_turn(  # pyright: ignore[reportPrivateUsage]
+            event,
+            channel="C_TEST",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+            thread_id=thread_id,
+            team_id=team_id,
+        )
+
+    assert ended == [expected]
+    mock_bind.assert_not_called()
+
+
 async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_intent(
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -4317,7 +4387,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
     assert captured_deadlines.get("bind") is not None, (
         "bind_session must receive a non-None deadline"
     )
-    assert render_tables == [False], "Slack tables stay plain text without a tenant entry"
+    assert render_tables == [True], "Slack renders tables without a tenant entry, like Discord"
     assert captured_deadlines.get("run") is not None, (
         "run_prepared_turn must receive a non-None deadline"
     )

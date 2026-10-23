@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from daimon.adapters.slack.mrkdwn import (
@@ -13,6 +15,11 @@ from daimon.adapters.slack.mrkdwn import (
 )
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.tables import MarkdownTable, render_tables
+
+
+def tables_enabled(table_rendering: Mapping[uuid.UUID, bool], tenant_id: uuid.UUID) -> bool:
+    """Slack renders native tables unless the tenant explicitly opts out with false."""
+    return table_rendering.get(tenant_id) is not False
 
 
 async def table_block(table: MarkdownTable) -> dict[str, Any]:

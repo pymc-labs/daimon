@@ -31,7 +31,7 @@ from daimon.core.notebooks.publish import (
 _UPLOAD_TTL_SECONDS = 300
 # How long a read-only scratch notebook is kept when the agent asks for
 # nothing, and the longest it may ask for. The host clamps to its own maximum.
-_DEFAULT_TTL_DAYS = 1
+_DEFAULT_TTL_DAYS = 14
 _MAX_TTL_DAYS = 365
 _SECONDS_PER_DAY = 86400
 # 72-bit url-safe nonce for single-use jti dedup (host burns it after one

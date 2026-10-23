@@ -633,13 +633,12 @@ is PENDING; partial collector controls never certify C18 or a live provider.
 
 ## Opt-in product QA settings
 
-`QAProductProfile("opt-in-product").flags` declares exactly five settings: core
+`QAProductProfile("opt-in-product").flags` declares exactly four settings: core
 `mcp.require_routine_destination`, `discord.credential_form_expiry`,
-`discord.writers_none_notice`, `discord.tenant_cap_waiting_card` and
-`turn.native_footer_cost`. Applying explicit copies combines settings in the same
+`discord.writers_none_notice` and `turn.native_footer_cost`. Applying explicit copies combines settings in the same
 section without consulting credentials or constructing settings. Missing product
 declarations refuse with `ProductProfileUnavailable`; the report remains PENDING.
-The default profile keeps all five disabled. An application receipt supplies no
+The default profile keeps all four disabled. An application receipt supplies no
 source, native-send, card, accounting or user-visible outcome evidence.
 
 The explicit `python -m daimon.testing.a7_anthropic --mode live` and

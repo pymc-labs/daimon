@@ -1266,7 +1266,7 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
             + json.dumps(
                 {
                     "backend": backend,
-                    "profile_flag": {"core.discord.tenant_cap_waiting_card": queue_card},
+                    "settings_flag": {"discord.tenant_cap_waiting_card": queue_card},
                     "queue_copy": "PASS under opt-in profile" if queue_card else "FAIL",
                     "whole_cell": "PENDING",
                     "reason": (

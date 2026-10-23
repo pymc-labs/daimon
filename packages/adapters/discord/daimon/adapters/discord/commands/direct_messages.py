@@ -36,7 +36,7 @@ from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
+from daimon.core.turn.slots import QUEUE_TIMED_OUT_DM_TEXT
 from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -256,7 +256,7 @@ class DirectMessageCog(commands.Cog):
                 async with message.channel.typing():
                     if await ticket.wait(asyncio.Event()) != "started":
                         await message.channel.send(
-                            QUEUE_TIMED_OUT_TEXT, allowed_mentions=discord.AllowedMentions.none()
+                            QUEUE_TIMED_OUT_DM_TEXT, allowed_mentions=discord.AllowedMentions.none()
                         )
                         return
                     answer = await reply_to_dm(

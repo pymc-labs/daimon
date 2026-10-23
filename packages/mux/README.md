@@ -643,10 +643,10 @@ bound MCP connection; it never copies a saved tool object verbatim. Multiple
 bound servers are deferred under RULES 24.
 
 Final table rendering belongs to the platform adapter. The host's existing
-`DAIMON_TABLE_RENDERING` tenant UUID map opts into Discord PNGs and Slack native
-tables for Anthropic, OpenAI and Gemini alike; missing/false stays plain text.
+`DAIMON_TABLE_RENDERING` tenant UUID map turns Discord PNGs and Slack native
+tables off per tenant for Anthropic, OpenAI and Gemini alike; only false stays plain text.
 Codecs and journals retain the provider's original text. See
-[`docs/mux.md`](../../docs/mux.md#opt-in-table-rendering) for configuration.
+[`docs/mux.md`](../../docs/mux.md#table-rendering) for configuration.
 Host adapters may consume normalized Events through an optional local lifecycle tap. Discord uses authoritative snapshots and ordered preview fragments for drafts, without granting previews terminal or history authority. ProviderUsageTotals retain observation provenance and are never reconstructed into Anthropic display meters.
 
 Slack folds normalized message Events into local progress drafts through the optional lifecycle tap. The existing host terminal state owns answer delivery and control retirement; ProviderUsageTotals are never turned into Anthropic display meters.

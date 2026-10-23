@@ -261,7 +261,8 @@ async def test_no_hint_in_a_followed_thread(
     )
 
 
-def test_hint_is_off_by_default() -> None:
-    assert DiscordSettings.model_fields["unmentioned_reply_hint"].default is False, (
-        "off until the per-thread cooldown survives a restart"
+def test_hint_is_on_by_default() -> None:
+    assert DiscordSettings.model_fields["unmentioned_reply_hint"].default is True, (
+        "silence in Daimon's own thread reads as being ignored; a restart allowing "
+        "one more hint per thread is the lesser cost"
     )
