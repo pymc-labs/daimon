@@ -1205,18 +1205,26 @@ async def login_questions(
                     FleetRunRow.status,
                     FleetRunRow.login_question,
                     FleetRunRow.login_decision,
-                ).where(FleetRunRow.platform == platform, FleetRunRow.login_question.is_not(None))
+                ).where(
+                    FleetRunRow.platform == platform,
+                    FleetRunRow.login_question.is_not(None),
+                    or_(
+                        # Open: undecided on a running run.
+                        FleetRunRow.status.in_(_OPEN) & FleetRunRow.login_decision.is_(None),
+                        # Posted, and not yet showing its final state.
+                        FleetRunRow.login_question["card_message_id"].astext.is_not(None)
+                        & FleetRunRow.login_question["card_settled"].astext.is_distinct_from(
+                            "true"
+                        ),
+                    ),
+                )
             )
         ).all()
     found: list[tuple[uuid.UUID, uuid.UUID, str, dict[str, Any], dict[str, str] | None]] = []
     for row in rows:
         question: object = row.login_question
-        if not isinstance(question, dict):
-            continue
-        typed = dict(cast(dict[str, Any], question))
-        open_ = row.status in _OPEN and row.login_decision is None
-        unsettled = typed.get("card_message_id") is not None and not typed.get("card_settled")
-        if open_ or unsettled:
+        if isinstance(question, dict):
+            typed = dict(cast(dict[str, Any], question))
             found.append((row.tenant_id, row.id, row.status, typed, _decision(row.login_decision)))
     return tuple(found)
 
@@ -1224,11 +1232,14 @@ async def login_questions(
 async def settle_login_card(
     sessionmaker: Source, *, tenant_id: uuid.UUID, run_id: uuid.UUID
 ) -> bool:
-    """Mark the posted card as showing its final state (False if there is none)."""
+    """Mark the posted card as showing its final state. False (nothing written)
+    unless the card IS final: the run decided, or it is no longer running."""
     async with _transaction(sessionmaker) as session:
         state = await lock_login_state(session, tenant_id=tenant_id, run_id=run_id)
         if state is None or state[2] is None:
             return False
+        if state[3] is None and state[1] in _OPEN:
+            return False  # still open: settling now would hide a live card
         question = state[2]
         question["card_settled"] = True
         await write_login_state(session, tenant_id=tenant_id, run_id=run_id, question=question)

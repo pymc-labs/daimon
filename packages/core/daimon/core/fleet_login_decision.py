@@ -26,7 +26,9 @@ import structlog
 from daimon.core.fleet_credentials import LoginCandidate, may_share_for_run
 
 if TYPE_CHECKING:
-    from daimon.core.neutral_resources import WorkerPermissions
+    from daimon.core.authz import Subject
+    from daimon.core.neutral_resources import NeutralResourceHost, WorkerPermissions
+    from daimon.core.stores.domain import BackendAgent
     from daimon.core.turn.deps import TurnDeps
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -516,24 +518,62 @@ class LoginClickLimiter:
     """Refused clicks per (run, clicker) in a sliding window, in this process.
 
     Past the cap a click is refused without touching the database, so a stale card
-    clicked over and over can't flood the audit table. Applied clicks never count.
+    clicked over and over can't flood the audit table. Applied clicks never count,
+    nor does "you can't share that" (the requester may still answer), and Skip is
+    never held back: nobody is ever locked out of declining.
     """
 
     max_refusals: int = 5
     window_s: float = 60.0
     _refusals: dict[str, deque[float]] = field(default_factory=dict[str, deque[float]])
 
-    def _bucket(self, key: str, now: float) -> deque[float]:
-        bucket = self._refusals.setdefault(key, deque())
-        while bucket and bucket[0] <= now - self.window_s:
-            bucket.popleft()
-        return bucket
+    def _prune(self, now: float) -> None:
+        for key in list(self._refusals):
+            bucket = self._refusals[key]
+            while bucket and bucket[0] <= now - self.window_s:
+                bucket.popleft()
+            if not bucket:
+                del self._refusals[key]
 
     def limited(self, key: str, now: float) -> bool:
-        return len(self._bucket(key, now)) >= self.max_refusals
+        self._prune(now)
+        return len(self._refusals.get(key, ())) >= self.max_refusals
 
     def refused(self, key: str, now: float) -> None:
-        self._bucket(key, now).append(now)
+        self._prune(now)
+        self._refusals.setdefault(key, deque()).append(now)
+
+
+#: Refusals that don't count toward the cap: the requester can still answer.
+_UNCOUNTED: frozenset[Refusal] = frozenset({"share_not_allowed"})
+
+
+async def load_agent_source(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    agent_id: str | None,
+    account_id: uuid.UUID,
+    subject: Subject,
+    resource_host: NeutralResourceHost | None,
+) -> tuple[BackendAgent, BackendAgent]:
+    """The run's agent (by name, through the adapter's resource host so a neutral
+    agent loads too) and its captured source, as the clicker."""
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.turn.admission import capture_agent_source
+
+    agent = await load_backend_agent(
+        deps.anthropic,
+        deps.sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=agent_name,
+        resource_host=resource_host,
+    )
+    if agent_id != str(agent.agent_id):
+        raise LookupError("agent_replaced")  # a namesake is not this run's agent
+    source = await capture_agent_source(deps, agent, account_id=account_id, subject=subject)
+    return agent, source
 
 
 async def answer_login_click(
@@ -546,22 +586,27 @@ async def answer_login_click(
     row: int | Literal["all"],
     choice: LoginChoice,
     clicker_platform_user_id: str,
-    live_admin: Callable[[], Awaitable[bool]],
+    live_subject: Callable[[], Awaitable[Subject]],
     limiter: LoginClickLimiter,
+    resource_host: NeutralResourceHost | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> LoginAnswer:
     """A chat card's button press, end to end: the one call an adapter makes.
 
     The clicker is resolved to the account they already have here (never created
-    on a click; none = refused as not the requester). Admin is asked live, at click
-    time. Refused clicks are capped per (run, clicker) by `limiter`. An owner's or
-    admin's answer is also saved to the agent's config as the clicker.
+    on a click; none = refused as not the requester). `live_subject` is the
+    adapter's facts about the clicker at click time, built with
+    `authz.build_subject` exactly as its turn path does (live admin role, another
+    organisation's member = `client`): a subject for someone else, or an agent key,
+    is refused as not the requester. Refused clicks are capped per (run, clicker)
+    by `limiter`, except Skip. An owner's or admin's answer is also saved to the
+    agent's config as the clicker (`resource_host`: the adapter's, if it has one).
     """
     from daimon.core.stores import fleet
 
     key = f"{run_id}:{clicker_platform_user_id}"
     clock = now().timestamp()
-    if limiter.limited(key, clock):
+    if choice != "skip" and limiter.limited(key, clock):
         log.warning("fleet.login_click_rate_limited", run_id=str(run_id))
         return LoginAnswer(None, "rate_limited")
     account = await fleet.account_for_platform_user(
@@ -570,30 +615,31 @@ async def answer_login_click(
         platform=platform,
         external_id=clicker_platform_user_id,
     )
-    is_admin = account is not None and await live_admin()
+    subject = await live_subject() if account is not None else None
+    if subject is not None and (
+        subject.platform_user_id != clicker_platform_user_id or subject.via_agent_key
+    ):
+        account = subject = None  # not this clicker's facts: never act on them
+    is_admin = subject is not None and subject.is_admin and not subject.client
 
     async def save(
         choices: Mapping[str, Literal["share", "skip", "ask"]], question: Mapping[str, Any]
     ) -> None:
-        from daimon.core.authz import Subject
-        from daimon.core.channel_backend import (
-            AgentBackendService,
-            BackendActor,
-            load_backend_agent,
-        )
-        from daimon.core.turn.admission import capture_agent_source
+        from daimon.core.channel_backend import AgentBackendService, BackendActor
 
-        assert account is not None
+        assert account is not None and subject is not None
         name = question.get("agent_name")
         if not isinstance(name, str):
             raise LookupError("agent_name")
-        subject = Subject(is_admin=is_admin, platform_user_id=clicker_platform_user_id)
-        agent = await load_backend_agent(
-            deps.anthropic, deps.sessionmaker, tenant_id=tenant_id, agent_name=name
+        agent, source = await load_agent_source(
+            deps,
+            tenant_id=tenant_id,
+            agent_name=name,
+            agent_id=question.get("agent_id"),
+            account_id=account,
+            subject=subject,
+            resource_host=resource_host,
         )
-        if question.get("agent_id") != str(agent.agent_id):
-            raise LookupError("agent_replaced")  # a namesake is not this run's agent
-        source = await capture_agent_source(deps, agent, account_id=account, subject=subject)
         await AgentBackendService(deps.sessionmaker, enabled=True).set_credential_sharing(
             agent,
             choices,
@@ -616,7 +662,7 @@ async def answer_login_click(
         now=now(),
         save=save,
     )
-    if answer.refused is not None:
+    if answer.refused is not None and answer.refused not in _UNCOUNTED:
         limiter.refused(key, clock)
     return answer
 
