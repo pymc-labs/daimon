@@ -86,3 +86,42 @@ async def test_a_copys_gemini_turn_runs_from_the_code_default_template(
     ]
     assert sent and sent[-1]["agent_config"]["model"] == model
     assert any(t.get("type") == "mcp_server" for t in sent[-1].get("tools", []))
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("failure", ["own", "deeper"])
+async def test_a_skipped_mcp_representation_is_logged_without_content(
+    template, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """J2's Argon preview dropped MCP with no trace. A capture that can't
+    represent the source now says so once: the error class and the ids, and the
+    capture's own fixed sentence, never text raised from deeper down."""
+    from dataclasses import replace
+
+    from daimon.core.config import McpSettings
+    from daimon.core.mcp_oauth import discovery
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from structlog.testing import capture_logs
+
+    request, *_ = template
+    if failure == "own":
+        # The capture itself refuses: no MCP server to read the catalogue from.
+        request = replace(request, deps=replace(request.deps, mcp=McpSettings()))
+    else:
+
+        async def listed(_url: str, _token: str) -> frozenset[str]:
+            raise ValueError("catalogue body with secret-content")
+
+        monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    with capture_logs() as logs:
+        source = await capture_preparation_source(request, capability_preview=True)
+    assert source.representations == ()
+    (entry,) = [e for e in logs if e["event"] == "source_capture.representation_skipped"]
+    assert entry["log_level"] == "warning" and entry["error"] == "ValueError"
+    assert entry["agent_id"] == str(source.agent_id)
+    assert entry["tenant_id"] == str(source.tenant_id)
+    if failure == "own":
+        assert entry["reason"] == "MCP catalogue requires the captured caller"
+    else:
+        assert entry["reason"] is None
+        assert "secret-content" not in repr(entry)

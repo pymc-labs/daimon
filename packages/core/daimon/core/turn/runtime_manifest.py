@@ -2048,11 +2048,41 @@ async def _capture_source_capabilities(
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
             raise ValueError("ambiguous source representation")
         return source.model_copy(update={"representations": tuple(represented)})
-    except (OSError, ValueError, DaimonError, MuxError, AnthropicError, SQLAlchemyError):
+    except (OSError, ValueError, DaimonError, MuxError, AnthropicError, SQLAlchemyError) as error:
         # Representations are optional capture evidence, never a new failure
         # mode for native callers or worker ceilings. Full deployments require
         # this evidence independently and refuse before any provider exposure.
+        # Said once here, though: without it the agent silently loses its MCP
+        # on the new provider (J2's Argon preview). Only our own fixed
+        # sentences are logged, never a provider's or a validator's text.
+        log.warning(
+            "source_capture.representation_skipped",
+            error=type(error).__name__,
+            reason=_own_sentence(error),
+            tenant_id=str(source.tenant_id),
+            agent_id=str(source.agent_id),
+            profile=revision.profile if revision is not None else None,
+            model=revision.model if revision is not None else None,
+            capability_preview=capability_preview,
+        )
         return source
+
+
+def _own_sentence(error: BaseException) -> str | None:
+    """The fixed sentence of a ValueError raised by the capture itself, else None.
+
+    Anything raised deeper (a catalogue read, a validator) may carry content.
+    """
+    frame = error.__traceback__
+    while frame is not None and frame.tb_next is not None:
+        frame = frame.tb_next
+    if (
+        type(error) is not ValueError
+        or frame is None
+        or frame.tb_frame.f_code is not _capture_source_capabilities.__code__
+    ):
+        return None
+    return str(error)
 
 
 def source_instructions_preserved(required: str | None, system: str | None) -> bool:
