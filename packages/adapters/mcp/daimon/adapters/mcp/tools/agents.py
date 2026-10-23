@@ -416,6 +416,7 @@ async def _get_agent_impl(
         expected_ma_agent_id=expected_ma_agent_id,
         require_identity=False,
         discovery=True,
+        by_name=True,
         location_channel_id=origin_channel_id(origin),
         location_thread_id=origin.thread_id if origin is not None else None,
     )
@@ -1725,7 +1726,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Non-admin callers get null ``mcp_servers`` and ``created_at``.
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
-        Pass this turn's ``origin_context_id`` so its channel counts."""
+        Pass this turn's ``origin_context_id`` so its channel counts. An agent the
+        user names that list_agents doesn't show may still be found here by its
+        exact name, if it may run in this channel."""
         return await _get_agent_impl(
             runtime,
             await _auth(ctx),

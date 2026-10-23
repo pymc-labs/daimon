@@ -28,6 +28,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
 from daimon.core.permissions import (
+    AgentPermissions,
     agent_permissions,
     any_agent_rules,
     any_own_readers,
@@ -302,6 +303,25 @@ class RuleViewer:
             return False
         if not self.restrict_to_location:
             return True
+        return self._runs_here(agent) and (
+            bool(agent.runs_in) or bool(self.routed_agent_names.intersection(agent_names))
+        )
+
+    def sees_named(self, agent_names: tuple[str | None, ...]) -> bool:
+        """An agent the reader names exactly: seen wherever it may run, routed here or not.
+
+        The roster (`sees_names`) still hides unrouted agents; a name only finds
+        an agent the reader already knows of. A member with no verified location
+        finds nothing that `sees_names` would hide.
+        """
+        if self.sees_names(agent_names):
+            return True
+        if not self.restrict_to_location or self.location_channel_id is None:
+            return False
+        agent = agent_permissions(self.policy, agent_names)
+        return listed_at(agent, self.inside_channel_id) and self._runs_here(agent)
+
+    def _runs_here(self, agent: AgentPermissions) -> bool:
         return runs_at(
             agent,
             channel_permissions(
@@ -309,7 +329,7 @@ class RuleViewer:
                 channel_id=self.location_thread_id or self.location_channel_id,
                 parent_channel_id=self.location_channel_id if self.location_thread_id else None,
             ),
-        ) and (bool(agent.runs_in) or bool(self.routed_agent_names.intersection(agent_names)))
+        )
 
     def sees(self, agent_name: str | None) -> bool:
         """For a place that records one name (a routing row, a binding, a routine)."""
@@ -317,6 +337,9 @@ class RuleViewer:
 
     def sees_agent(self, agent: BetaManagedAgentsAgent) -> bool:
         return self.sees_names(agent_pin_names(agent.name, agent.metadata))
+
+    def sees_named_agent(self, agent: BetaManagedAgentsAgent) -> bool:
+        return self.sees_named(agent_pin_names(agent.name, agent.metadata))
 
     def sees_place(self, channel_id: str | None) -> bool:
         """A channel (None: a tenant-wide place) on the reader's side of every line."""

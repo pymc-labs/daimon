@@ -140,7 +140,20 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             await _explain_agent_resolution_impl(
                 runtime, auth, "CLOCAL", origin_context_id=origin_id
             )
+    # An unrouted agent stays off the roster, but naming it exactly finds it
+    # wherever the caller stands somewhere verified that it may run.
+    if caller in {"admin", "bound-key"} or (caller == "member" and origin_kind == "valid"):
+        draft = await _get_agent_impl(runtime, auth, "draft", origin_context_id=origin_id)
+        assert draft.name == "draft"
+        assert (draft.mcp_servers is None) is (caller != "admin")
+    else:
+        with pytest.raises(ToolError, match="not found"):
+            await _get_agent_impl(runtime, auth, "draft", origin_context_id=origin_id)
     if caller != "admin":
+        with pytest.raises(ToolError, match="not found"):
+            await _list_agent_keys_impl(
+                runtime, auth, agent_name="draft", origin_context_id=origin_id
+            )
         with pytest.raises(ToolError, match="not found"):
             await _get_impl(runtime, auth, "draft/notes", origin_id)
         with pytest.raises(ToolError, match="verified channel/thread"):

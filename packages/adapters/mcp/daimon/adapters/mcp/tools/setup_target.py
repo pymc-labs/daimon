@@ -111,6 +111,7 @@ async def resolve_setup_agent(
     expected_ma_agent_id: str | None = None,
     require_identity: bool = True,
     discovery: bool = False,
+    by_name: bool = False,
     location_channel_id: str | None = None,
     location_thread_id: str | None = None,
 ) -> BetaManagedAgentsAgent:
@@ -119,7 +120,9 @@ async def resolve_setup_agent(
     An agent the caller's channel isolation hides resolves as missing.
     ``location_channel_id`` is the turn's channel from a verified origin
     (`load_caller_view`), so a setup thread in an isolated channel sees
-    that channel's own agents.
+    that channel's own agents. ``by_name`` (a discovery read of one named
+    agent) also finds an agent that may run at that location but isn't routed
+    there (`RuleViewer.sees_named`).
     """
     if require_identity and auth.platform in CHAT_PLATFORMS and expected_ma_agent_id is None:
         raise ToolError(
@@ -133,7 +136,8 @@ async def resolve_setup_agent(
         location_channel_id=location_channel_id,
         location_thread_id=location_thread_id,
     )
-    agents = [agent for agent in agents if caller.sees_agent(agent)]
+    sees = caller.sees_named_agent if discovery and by_name else caller.sees_agent
+    agents = [agent for agent in agents if sees(agent)]
     if expected_ma_agent_id is not None:
         for agent in agents:
             if agent.id == expected_ma_agent_id:

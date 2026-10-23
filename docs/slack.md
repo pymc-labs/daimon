@@ -10,6 +10,9 @@ explicit rules allow them to answer at that location. Unrouted agents,
 shadowed workspace or deployment defaults, and agents restricted to other
 channels are hidden from the setup panel and agent tool lookups. Agent aliases
 and channels kept to their own agents follow the same rules as on Discord.
+A member who names an agent exactly (`get_agent`) still finds it when it may
+run at their verified location, even if it isn't routed there; it never joins
+the list, and they get the member view.
 Admins retain their existing visibility.
 
 Agent tools verify location from the active turn origin or a channel-bound

@@ -2625,7 +2625,9 @@
         Non-admin callers get null ``mcp_servers`` and ``created_at``.
         For an admin on an editable agent, ``system`` is the full system prompt;
         null means withheld (non-admin caller, or Daimon/defaults-managed agent).
-        Pass this turn's ``origin_context_id`` so its channel counts.
+        Pass this turn's ``origin_context_id`` so its channel counts. An agent the
+        user names that list_agents doesn't show may still be found here by its
+        exact name, if it may run in this channel.
       ''',
       'parameters': dict({
         'additionalProperties': False,
