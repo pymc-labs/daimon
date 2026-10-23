@@ -209,21 +209,26 @@ def _worker_agent(worker: FleetWorker) -> str:
     """
     name, metadata = worker.spec.get("name"), worker.spec.get("metadata")
     agent = metadata.get(MA_METADATA_KEY_NAME) if isinstance(metadata, dict) else None
-    if not isinstance(name, str) or not name.strip() or name != agent:
-        return ""
-    # What it runs without, so the person who asked sees it, not only the root.
     drops = worker.spec.get("declared_drops")
-    lost = [
-        _DROP_WORDS.get(item, "some of its setup")
-        for item in (drops if isinstance(drops, list) else [])
-        if isinstance(item, str)
+    declared = [
+        item for item in (drops if isinstance(drops, list) else []) if isinstance(item, str)
     ]
+    if not isinstance(name, str) or not name.strip() or name != agent:
+        # A task copy of the root: every one runs without tools and skills, so say only
+        # what the root's own setup lost (its connectors, stored files, repositories).
+        lost = [_DROP_WORDS[item] for item in declared if item in _COPY_LOSSES]
+        return f" (without {', '.join(dict.fromkeys(lost))})" if lost else ""
+    # What it runs without, so the person who asked sees it, not only the root.
+    lost = [_DROP_WORDS.get(item, "some of its setup") for item in declared]
     without = f", without {', '.join(dict.fromkeys(lost))}" if lost else ""
     label = "" if name == worker.role else _literal(name, 40)
     if not label and not without:
         return ""
     return f" ({label}{without})" if label else f" ({without.removeprefix(', ')})"
 
+
+#: Losses a task copy of the root shows; the rest every task worker has.
+_COPY_LOSSES = frozenset({"mcp", "files", "repository"})
 
 #: Plain words for what an agent worker runs without (its declared losses).
 _DROP_WORDS = {

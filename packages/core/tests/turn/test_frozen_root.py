@@ -521,10 +521,14 @@ async def test_real_run_retains_root_before_native_input(root_turn):
 
 
 def with_login_tool(prepared):
-    """A source whose connected tool has its own stored login, as on internal-test (r13)."""
+    """A source with a login that belongs to no connector workers could leave behind.
+
+    (A stored connector login, `agent-mcp:<id>`, is left out of worker ceilings
+    instead: test_fleet_login_connectors.)
+    """
     from mux.contracts.resources import ResourceBinding
 
-    login = "agent-mcp:internal-login"
+    login = "vault:internal-login"
     source = prepared._source
     return replace(
         prepared,

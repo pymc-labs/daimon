@@ -728,7 +728,6 @@ async def test_complete_declared_worker_proof_consumes_actual_native_counterpart
         "skills",
         "mcp",
         "ask_without_tools",
-        "credentials",
         "files",
         "private",
         "scope",
@@ -809,6 +808,9 @@ async def test_explicit_drops_do_not_discharge_unproved_obligations(
             ),
         )
     elif failure in ("credentials", "files"):
+        # A stored secret is left out of the worker ceiling (#1357): without "files"
+        # declared it refuses; declared, see
+        # test_a_stored_secret_never_reaches_a_worker_that_declares_files.
         if failure == "files":
             spec = worker.spec.model_copy(
                 update={"declared_drops": tuple(x for x in worker.declared_drops if x != "files")}
@@ -2299,3 +2301,44 @@ async def test_worker_cleanup_uses_prepared_ports_and_preserves_the_original_fai
         retained = next(row for _, rows in graph for row in rows if row.id == worker.id)
     assert retained.turns_used == 1 and retained.result is None
     assert retained.reserved_usd > 0 and retained.status == "running"
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_a_stored_secret_never_reaches_a_worker_that_declares_files(
+    explicit_worker_request,
+):
+    """#1357: a root's stored .env is left out of the worker ceiling, not carried."""
+    from daimon.core._models import AgentFile
+    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
+    request, _, owned, transport = explicit_worker_request
+    assert "files" in request.worker.declared_drops
+    async with request.deps.sessionmaker.begin() as db:
+        db.add(
+            AgentFile(
+                tenant_id=request.tenant_id,
+                agent_id=request.worker.permissions.agent_id,
+                key="UNREAD_PRIVATE",
+                content="invalid-ciphertext",
+                encoding="fernet_v1",
+            )
+        )
+    selected = await read_preparation_counterpart(request)
+    stored = [
+        binding
+        for binding in selected.source.resource_requirements
+        if (binding.credential_ref or "").startswith("agent-env:")
+    ]
+    assert stored, "the projector still records the root's stored secret"
+    ceiling = worker_source_ceiling(selected.source)
+    dumped = json.dumps(
+        [
+            ceiling.effective_spec.model_dump(mode="json"),
+            [binding.model_dump(mode="json") for binding in ceiling.resource_requirements],
+            selected.counterpart.agent.spec.model_dump(mode="json"),
+        ]
+    )
+    assert "agent-env:" not in dumped and "UNREAD_PRIVATE" not in dumped
+    assert "invalid-ciphertext" not in dumped
+    assert all(r.method == "GET" for r in owned.wire.requests)
+    assert transport.requests == []

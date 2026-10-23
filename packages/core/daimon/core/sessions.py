@@ -764,7 +764,15 @@ async def create_session(
         ):
             raise ScopeViolation("worker-resources", "grant differs from source memory intent")
     app_mode = False
-    if tenant_id is not None and agent_uuid is not None and session_factory is not None:
+    # A fleet worker's agent_uuid is its root's: it never gets the root's per-agent
+    # credentials (GitHub app vault, mirrored MCP logins, the stored .env). Its ceiling
+    # left them out and declared the loss; nothing here may put them back.
+    if (
+        worker is None
+        and tenant_id is not None
+        and agent_uuid is not None
+        and session_factory is not None
+    ):
         app_mode = await _session_app_mode(
             session_factory, tenant_id=tenant_id, agent_id=agent_uuid
         )
@@ -905,12 +913,17 @@ async def create_session(
         app_access: AppSessionAccess | None = None
         provisional_session_id = f"pending:{uuid.uuid4()}"
         if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-            mount = await upload_env_and_mount(
-                anthropic,
-                session_factory,
-                tenant_id=tenant_id,
-                agent_id=agent_uuid,
-                exclude_github=app_mode,
+            # Never the root's stored .env on a worker (see app_mode above).
+            mount = (
+                await upload_env_and_mount(
+                    anthropic,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    exclude_github=app_mode,
+                )
+                if worker is None
+                else None
             )
             if mount is not None:
                 resources.append(mount)

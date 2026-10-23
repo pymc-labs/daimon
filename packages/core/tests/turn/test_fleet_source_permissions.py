@@ -272,12 +272,29 @@ async def test_each_exact_role_pair_derives_without_source_model_substitution(ca
     assert child.permissions.backend_grants == (backend,) and child.permissions.models == (model,)
 
 
-@pytest.mark.parametrize("captured", ("caller_credentials", "mcp"), indirect=True)
+@pytest.mark.parametrize("captured", ("mcp",), indirect=True)
 async def test_actual_projector_keeps_unsupported_main_credentials_and_mcp(captured):
     source, _, _, _, _, trace = captured
     assert source.resource_requirements or source.effective_spec.mcp_servers
     with pytest.raises(WorkerSpecRefused):
         compose(captured)
+    assert len(trace.requests) == 1
+
+
+@pytest.mark.parametrize("captured", ("caller_credentials",), indirect=True)
+async def test_a_caller_login_connector_is_left_out_of_the_worker_ceiling(captured):
+    """The connector with the caller's login stays the root's; workers never get it."""
+    source, _, _, _, _, trace = captured
+    logins = {binding.credential_ref for binding in source.resource_requirements}
+    assert logins - {None}
+    root = compose(captured)
+    assert not {binding.credential_ref for binding in root.resources} & logins
+    assert not {server.credential_ref for server in root.spec.mcp_servers or ()} & logins
+    assert "mcp" in root.spec.declared_drops
+    dumped = json.dumps(
+        [root.spec.model_dump(mode="json"), [r.model_dump(mode="json") for r in root.resources]]
+    )
+    assert not any(str(ref) in dumped for ref in logins - {None})
     assert len(trace.requests) == 1
 
 
@@ -507,7 +524,9 @@ async def test_native_clone_inherits_only_the_projected_ceiling(captured):
 @pytest.mark.parametrize(
     "captured", ("haiku55", "haiku55_credentials", "haiku55_effort"), indirect=True
 )
-async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captured, owned):
+async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
+    captured, owned, monkeypatch
+):
     from daimon.core.config import McpSettings
     from daimon.core.mux_compat import sdk_agent
     from daimon.core.sessions import create_session
@@ -517,6 +536,24 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
     from pydantic import SecretStr
 
     source, _, _, _, policy, _ = captured
+    from daimon.core import sessions as session_module
+
+    async def no_root_env(*args, **kwargs):
+        # #1357 review: a worker's agent_uuid is its root's; the root's .env never mounts.
+        raise AssertionError("a worker session uploaded the root's stored .env")
+
+    monkeypatch.setattr(session_module, "upload_env_and_mount", no_root_env)
+
+    async def root_in_app_mode(*args, **kwargs):
+        return True
+
+    async def no_root_vault(*args, **kwargs):
+        raise AssertionError("a worker session built the root's GitHub app vault")
+
+    # Even an app-mode root never lends a worker its app vault or mirrored logins.
+    monkeypatch.setattr(session_module, "_session_app_mode", root_in_app_mode)
+    monkeypatch.setattr(session_module, "effective_app_grant_view", no_root_vault)
+    monkeypatch.setattr(session_module, "create_session_vault", no_root_vault)
     permissions = compose(captured)
     worker = resolve_worker_spec(
         permissions,
@@ -646,6 +683,7 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
     assert len(executing.tools) == 1
     assert agent_payload(worker.spec)["tools"][0]["default_config"]["enabled"] is False
     assert not any("vault" in call.path for call in trace.requests)
+    assert not any("/v1/files" in call.path for call in trace.requests)
     trace.assert_consumed()
 
 

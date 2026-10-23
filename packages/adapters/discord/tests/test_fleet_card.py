@@ -2360,3 +2360,27 @@ def test_an_agent_workers_card_row_says_what_it_runs_without():
         item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
     )
     assert "**openai** (fleet-openai, without its memory, its tools, its model settings) ·" in text
+
+
+def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
+    """#1357: workers of a root with a logged-in connector or stored secrets run without them."""
+    copy_row = worker(ordinal=0, role="W1")
+    copy = replace(
+        copy_row,
+        spec={
+            **copy_row.spec,
+            "name": "W1",
+            "declared_drops": ["files", "mcp", "skills", "tools"],
+        },
+    )
+    plain_row = worker(ordinal=1, role="W2")
+    plain = replace(
+        plain_row, spec={**plain_row.spec, "name": "W2", "declared_drops": ["skills", "tools"]}
+    )
+    view = build_fleet_view(run(), (copy, plain))
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "**W1** (without its files, its connected tools) ·" in text
+    # Every task worker runs without tools and skills; that isn't news.
+    assert "**W2** ·" in text

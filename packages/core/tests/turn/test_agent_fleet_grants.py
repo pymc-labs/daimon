@@ -684,7 +684,9 @@ async def test_turning_fleet_on_refuses_an_agent_whose_setup_cant_run_one(captur
 
     source, _, value, _, _, _ = captured
     _, _, _, sessions = owned
-    login = "agent-mcp:internal-login"
+    # A login that belongs to no connector still refuses. A stored connector login
+    # (agent-mcp:<id>) no longer does: workers run without connectors (#1357, below).
+    login = "vault:internal-login"
     with_login = source.model_copy(
         update={
             "resource_requirements": (
@@ -713,6 +715,20 @@ async def test_turning_fleet_on_refuses_an_agent_whose_setup_cant_run_one(captur
     await service.preview_fleet_grant(source, value, now=now)
     await service.preview_fleet_grant(source, None, now=now, check_root=True)
     assert captures == [source]
+
+    async def stored_connector_login(agent):
+        stored = "agent-mcp:internal-login"
+        return source.model_copy(
+            update={
+                "resource_requirements": (
+                    *source.resource_requirements,
+                    ResourceBinding(id=stored, kind="credential", credential_ref=stored),
+                )
+            }
+        )
+
+    connector = AgentBackendService(sessions, enabled=True, capture_source=stored_connector_login)
+    await connector.preview_fleet_grant(source, value, now=now, check_root=True)
 
     async def plain(agent):
         return source

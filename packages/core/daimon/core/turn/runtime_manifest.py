@@ -2106,22 +2106,102 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
 
 
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
-    """Exclude validated native-only capabilities and their paired resources."""
+    """Exclude validated native-only capabilities and their paired resources.
+
+    Nothing with its own login enters a worker ceiling: the agent can still run a
+    fleet, its workers run without it, and no credential ever reaches a worker. Each
+    loss is declared (`mcp`, `files`, `repository`):
+    - a connector with its own login (an MCP server carrying a credential, or one a
+      projected credential pairs with), with its toolset and binding;
+    - a stored connector login the projector can't pair with one server
+      (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
+    - stored secrets the session would write to a file (`.env`);
+    - repositories cloned with a login.
+    """
     spec = source.effective_spec
     if spec is None:
         return source
     normalized, excluded = worker_spec_ceiling(spec)
-    resources = tuple(
-        binding
-        for binding in source.resource_requirements
-        if not ((paired := _mcp_credential_servers(source, binding)) and paired <= excluded)
+    logins = login_mcp_servers(source)
+    stored_logins = any(
+        _stored_connector_login(binding) for binding in source.resource_requirements
     )
+    if stored_logins:
+        logins |= {server.name for server in spec.mcp_servers or ()}
+    drops: set[str] = set()
+    if logins - excluded:
+        drops.add("mcp")
+        normalized = normalized.model_copy(
+            update={
+                "mcp_servers": tuple(
+                    server for server in normalized.mcp_servers or () if server.name not in logins
+                ),
+                "tools": tuple(
+                    tool
+                    for tool in normalized.tools or ()
+                    if not (tool.kind == "mcp_toolset" and tool.name in logins)
+                )
+                if normalized.tools is not None
+                else None,
+            }
+        )
+    excluded |= logins
+    credentials = {
+        server.credential_ref
+        for server in spec.mcp_servers or ()
+        if server.name in logins and server.credential_ref is not None
+    }
+    resources: list[ResourceBinding] = []
+    for binding in source.resource_requirements:
+        paired = _mcp_credential_servers(source, binding)
+        if (paired and paired <= excluded) or (
+            binding.kind == "credential" and binding.credential_ref in credentials
+        ):
+            continue
+        if _stored_connector_login(binding):
+            continue
+        if binding.kind == "credential" and binding.target_path is not None:
+            drops.add("files")
+            continue
+        resources.append(binding)
+    repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
+    if len(repositories) != len(source.repository_sources):
+        drops.add("repository")
+    if drops:
+        normalized = normalized.model_copy(
+            update={"declared_drops": tuple(sorted({*normalized.declared_drops, *drops}))}
+        )
     return source.model_copy(
         update={
             "effective_spec": normalized,
-            "resource_requirements": resources,
+            "resource_requirements": tuple(resources),
+            "repository_sources": repositories,
         }
     )
+
+
+def _stored_connector_login(binding: ResourceBinding) -> bool:
+    """A projected stored MCP login (`agent-mcp:<id>`), which names no server."""
+    return (
+        binding.kind == "credential"
+        and binding.credential_ref is not None
+        and binding.id == binding.credential_ref
+        and binding.credential_ref.startswith("agent-mcp:")
+        and binding.native is None
+        and binding.resource is None
+        and binding.target_path is None
+    )
+
+
+def login_mcp_servers(source: BackendAgent) -> frozenset[str]:
+    """The agent's connectors that carry their own paired login; workers run without them."""
+    spec = source.effective_spec
+    if spec is None:
+        return frozenset()
+    names = {server.name for server in spec.mcp_servers or () if server.credential_ref}
+    for binding in source.resource_requirements:
+        names |= _mcp_credential_servers(source, binding)
+    return frozenset(names)
 
 
 def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
@@ -2184,11 +2264,19 @@ def classify_source_obligations(
     retained_agent: ResourceRef | None = None,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
+    ceiling_drops: set[str] = set()
     if worker_ceiling:
+        before: set[str] = (
+            set(source.effective_spec.declared_drops) if source.effective_spec else set()
+        )
         try:
             source = worker_source_ceiling(source)
         except ValueError:
             return frozenset({"source_definition", "tools"})
+        if source.effective_spec is not None:
+            # What the ceiling left out (logins, stored secrets, logged-in repos) is
+            # only discharged when the target declares the same loss.
+            ceiling_drops = set(source.effective_spec.declared_drops) - before
     spec = source.effective_spec
     if spec is None:
         return frozenset({"source_definition"})
@@ -2217,7 +2305,7 @@ def classify_source_obligations(
         and environment == source.environment.spec
         and resources == source.resource_requirements
     )
-    missing: set[str] = set()
+    missing: set[str] = ceiling_drops - set(drops)
     if represented is not None:
         missing.update(set(represented.unavailable_mcp_tools) - set(drops))
         missing.update(set(represented.unavailable_builtin_tools) - set(drops))
