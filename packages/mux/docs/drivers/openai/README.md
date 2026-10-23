@@ -638,6 +638,8 @@ databases skip, and foreign URL refusals have connection-trap regressions.
 | unknown | Unclassified preparation/authorization exceptions, with genuine nullable pre-native session |
 
 Excluded reasons: `reducer_bug` is reserved without a production raiser;
+`refused` needs the Anthropic refusal idle (`stop_details`), which the OpenAI
+codec never emits;
 `mcp_degraded_empty` and `retrying_unsettled` require legacy SDK error records
 which the OpenAI codec never emits (`reducers.py`/`openai_codec.py`).
 `session_preparation_failed` and `session_agent_mismatch` arise in legacy

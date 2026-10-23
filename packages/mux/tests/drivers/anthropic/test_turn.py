@@ -667,6 +667,27 @@ def test_retries_exhausted_records_an_errored_turn_with_native_reason():
     }
 
 
+def test_refusal_idle_records_an_errored_turn_with_refusal_reason():
+    # The API ends a refused turn with a plain end_turn idle; only stop_details differs.
+    normalizer = EventNormalizer(SESSION)
+    normalizer.normalize(native("session.status_running", "root"), observed_at=NOW)
+    event = normalizer.normalize(
+        native(
+            "session.status_idle",
+            "ended",
+            stop_reason={"type": "end_turn"},
+            stop_details={"type": "refusal", "category": "cyber", "explanation": "x"},
+        ),
+        observed_at=NOW,
+    )
+    assert event.type == "session.turn_ended"
+    assert event.payload == {
+        "root_turn_id": "root",
+        "outcome": "errored",
+        "native_reason": "refusal",
+    }, "a refusal is not a completed turn"
+
+
 @pytest.mark.parametrize("permission", ["ask", "allow", "deny", None])
 def test_tool_permission_preserves_ask_and_defaults_other_values_to_auto(permission):
     event = EventNormalizer(SESSION).normalize(
