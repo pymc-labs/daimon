@@ -3991,6 +3991,8 @@ class FleetRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The run's one login decision {key: share|skip}, set once at its first spawn.
     login_decision: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # The open login question the chat adapter posts as a card (names only, never values).
+    login_question: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
 
 class FleetWorker(Base):

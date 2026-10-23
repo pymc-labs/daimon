@@ -1303,6 +1303,15 @@ async def _read_frozen_root(
         or run.deadline_at != parent.limits.deadline
     ):
         raise WorkerSpecRefused("origin", "stale")
+    if parent.login_candidates:
+        from daimon.core.fleet_login_decision import apply_run_decision
+
+        # Workers get only what the run decided at its first spawn (read by run id,
+        # never cached in the root), ∩ the logins the root froze as candidates.
+        decision = await fleet.run_login_decision(
+            deps.sessionmaker, tenant_id=UUID(scope.tenant_id), run_id=selected
+        )
+        root = root.model_copy(update={"permissions": apply_run_decision(parent, decision)})
     return root, policy
 
 

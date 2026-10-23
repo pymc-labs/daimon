@@ -1073,13 +1073,28 @@ async def save_budget(
     return tuple(result)
 
 
+_OPEN = ("running", "collecting")
+
+
+def _decision(raw: object) -> dict[str, str] | None:
+    """A stored run decision; malformed entries read "skip" (never widen)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(key): (value if value in ("share", "no_answer") else "skip")
+        for key, value in cast(dict[object, object], raw).items()
+    }
+
+
 async def decide_run_logins(
     sessionmaker: Source,
     *,
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
     requester_account_id: uuid.UUID,
-    decision: Mapping[str, Literal["share", "skip"]],
+    decision: Mapping[str, Literal["share", "skip", "no_answer"]],
 ) -> bool:
     """Set the run's login decision once, from null, for the run's own requester.
 
@@ -1094,7 +1109,7 @@ async def decide_run_logins(
                 FleetRunRow.id == run_id,
                 FleetRunRow.orchestrator_account_id == requester_account_id,
                 FleetRunRow.login_decision.is_(None),
-                FleetRunRow.status.in_(("running", "collecting")),
+                FleetRunRow.status.in_(_OPEN),
             )
             .values(login_decision=dict(decision))
         )
@@ -1111,11 +1126,101 @@ async def run_login_decision(
                 FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id
             )
         )
-    if raw is None:
+    return _decision(raw)
+
+
+async def open_login_question(
+    sessionmaker: Source,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    requester_account_id: uuid.UUID,
+    question: Mapping[str, JsonValue],
+) -> dict[str, Any] | None:
+    """Open the run's one login question (from null), or return the one already open.
+
+    None when the run is decided, ended, or another person's: nothing to ask.
+    """
+    async with _transaction(sessionmaker) as session:
+        row = (
+            await session.execute(
+                select(FleetRunRow)
+                .where(
+                    FleetRunRow.tenant_id == tenant_id,
+                    FleetRunRow.id == run_id,
+                    FleetRunRow.orchestrator_account_id == requester_account_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if row is None or row.status not in _OPEN or row.login_decision is not None:
+            return None
+        if row.login_question is None:
+            row.login_question = dict(question)
+        return dict(cast(dict[str, Any], row.login_question))
+
+
+async def lock_login_state(
+    session: AsyncSession, *, tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> tuple[uuid.UUID, str, dict[str, Any] | None, dict[str, str] | None] | None:
+    """In the caller's transaction: lock the run and read (requester, status, question,
+    decision). None when there is no such run."""
+    row = (
+        await session.execute(
+            select(FleetRunRow)
+            .where(FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
         return None
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(key): ("share" if value == "share" else "skip")
-        for key, value in cast(dict[object, object], raw).items()
-    }
+    question = row.login_question
+    return (
+        row.orchestrator_account_id,
+        row.status,
+        dict(cast(dict[str, Any], question)) if isinstance(question, dict) else None,
+        _decision(row.login_decision),
+    )
+
+
+async def write_login_state(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    question: Mapping[str, JsonValue],
+    decision: Mapping[str, str] | None = None,
+) -> None:
+    """In the caller's transaction (after `lock_login_state`): save the question, and
+    the decision only if the run has none yet (never changed once set)."""
+    values: dict[str, Any] = {"login_question": dict(question)}
+    query = update(FleetRunRow).where(FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id)
+    await session.execute(query.values(**values))
+    if decision is not None:
+        await session.execute(
+            query.where(FleetRunRow.login_decision.is_(None)).values(login_decision=dict(decision))
+        )
+
+
+async def open_login_questions(
+    sessionmaker: Source, *, platform: str
+) -> tuple[tuple[uuid.UUID, uuid.UUID, dict[str, Any]], ...]:
+    """Every undecided login question of a running run on this platform:
+    (tenant id, run id, question)."""
+    async with _transaction(sessionmaker) as session:
+        rows = (
+            await session.execute(
+                select(FleetRunRow.tenant_id, FleetRunRow.id, FleetRunRow.login_question).where(
+                    FleetRunRow.platform == platform,
+                    FleetRunRow.status.in_(_OPEN),
+                    FleetRunRow.login_question.is_not(None),
+                    FleetRunRow.login_decision.is_(None),
+                )
+            )
+        ).all()
+    found: list[tuple[uuid.UUID, uuid.UUID, dict[str, Any]]] = []
+    for row in rows:
+        question: object = row.login_question
+        if isinstance(question, dict):
+            found.append((row.tenant_id, row.id, dict(cast(dict[str, Any], question))))
+    return tuple(found)
