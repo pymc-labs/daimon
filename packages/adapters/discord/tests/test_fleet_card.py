@@ -2664,3 +2664,14 @@ async def test_run_end_notice_shows_in_the_runs_own_thread(monkeypatch):
     bot._channel_by_id.assert_awaited_once_with(70)
     (where, what, record), _ = shown.await_args
     assert where is thread and what is notice and callable(record)
+
+
+def test_a_setup_error_reads_as_ours_with_a_log_reference():
+    from daimon.adapters.discord.posted_controls.fleet import (
+        _worker_status,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    failed = worker(status="failed", error_code="setup_error")
+    status = _worker_status(failed)
+    assert status == f"failed: a setup error on our side (ref {str(failed.id)[:8]})"
+    assert "couldn't be set up on that model" not in status

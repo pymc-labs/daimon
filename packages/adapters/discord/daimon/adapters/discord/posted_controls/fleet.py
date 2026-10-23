@@ -254,7 +254,8 @@ def _worker_status(worker: FleetWorker) -> str:
         from daimon.core.fleet import worker_error_text
 
         # Known codes in plain words; others stay closed host codes in code spans.
-        if (text := worker_error_text(worker.error_code)) is not None:
+        # A setup error names the worker id prefix the host logs (fleet.worker_task_failed).
+        if (text := worker_error_text(worker.error_code, ref=str(worker.id)[:8])) is not None:
             return f"{status}: {text}"
         code = worker.error_code if _ERROR_CODE.fullmatch(worker.error_code) else "error"
         status += f" (`{code}`)"

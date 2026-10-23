@@ -63,6 +63,12 @@ def _without_fast(models: Sequence[ModelRef]) -> tuple[ModelRef, ...]:
     return tuple(model for model in _allowed_models(models) if model.id != OPUS_FAST)
 
 
+# J7m: asked for "Gemini Pro", the root started a paid worker on Argon unasked.
+ASK_DONT_SUBSTITUTE = (
+    "Ask the person which of these to use; don't start a worker on a model they didn't name."
+)
+
+
 def fleet_model(value: str, models: Sequence[ModelRef]) -> str:
     """The granted model id a worker model name means ("astra" -> gpt-6-astra), or a plain refusal.
 
@@ -79,15 +85,18 @@ def fleet_model(value: str, models: Sequence[ModelRef]) -> str:
         # Refuse before resolving: close-match spelling would turn it into standard Opus.
         raise ToolError(
             f'"{value}" can\'t run as a fleet worker (the fast setting only applies to an '
-            f"agent's own model); allowed: {_allowed_line(allowed)}."
+            f"agent's own model); allowed: {_allowed_line(allowed)}. {ASK_DONT_SUBSTITUTE}"
         )
     try:
         return resolve_model(value, available=allowed).id
     except AmbiguousModel as error:
-        raise ToolError(f"{error} Allowed in this fleet: {_allowed_line(allowed)}.") from None
+        raise ToolError(
+            f"{error} Allowed in this fleet: {_allowed_line(allowed)}. {ASK_DONT_SUBSTITUTE}"
+        ) from None
     except ValueError:
         raise ToolError(
-            f'"{value}" isn\'t allowed in this fleet; allowed: {_allowed_line(allowed)}.'
+            f'"{value}" isn\'t allowed in this fleet; allowed: {_allowed_line(allowed)}. '
+            f"{ASK_DONT_SUBSTITUTE}"
         ) from None
 
 
@@ -807,6 +816,11 @@ def register_fleet_tools(
         every call), plus origin_context_id from your turn controls.
         fleet_agents lists the allowed models by name. A name that matches
         none, or several, is refused with the allowed list.
+        If the person names a model that isn't on that list (e.g. "Gemini
+        Pro" when only Flash and Argon are allowed), don't start a worker:
+        tell them it isn't available here, offer the closest allowed model,
+        and ask which to use. Never run a paid worker on a substitute they
+        didn't choose.
         Leave everything else out: the host binds this turn's run (never
         invent a run_id), picks the granted backend, splits the budget left
         evenly across your planned workers (and each provider's cap across
@@ -968,7 +982,9 @@ def register_fleet_tools(
         "models": the models a task worker (a copy of you, e.g. "fork yourself
         across models") may run on, each with a plain name and its id. Pass
         either as fleet_spawn's model. The agents' models are not this list.
-        Every spawn checks again, so both lists are advice.
+        Every spawn checks again, so both lists are advice. A model the
+        person asked for that isn't listed here isn't available: say so and
+        ask which listed model to use, rather than picking one for them.
         """
         return dict(await owner().agents(await _auth(ctx), origin_context_id=origin_context_id))
 

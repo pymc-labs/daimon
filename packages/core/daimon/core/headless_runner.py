@@ -106,7 +106,12 @@ from daimon.core.turn.posture import (
     BillingPosture,
     ExemptReason,
 )
-from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
+from daimon.core.turn.prepare import (
+    PreparedTurn,
+    ProviderPreparationRequest,
+    bind_session_impl,
+    clone_overrides,
+)
 from daimon.core.turn.run import (
     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
     _turn_port_kwargs,  # pyright: ignore[reportPrivateUsage]
@@ -121,7 +126,7 @@ from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ChannelRef, Scope, ThreadRef
-from mux.contracts.resources import Agent, AgentPatch, AgentSpec, ProviderBinding
+from mux.contracts.resources import Agent, AgentSpec, ProviderBinding
 from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Lease, Slot
@@ -666,7 +671,9 @@ async def commit_worker_transition(
     worker: FleetWorker,
     action: Callable[[AsyncSession, FleetWorker], Awaitable[FleetWorker]] | None = None,
     *,
-    failure_code: Literal["preparation_refused", "dispatch_refused"] = "preparation_refused",
+    failure_code: Literal[
+        "preparation_refused", "dispatch_refused", "provider_error", "setup_error"
+    ] = "preparation_refused",
 ) -> FleetWorker:
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet_store.lock_budget(
@@ -791,7 +798,10 @@ async def run_worker(
                         reason="source_lineage_changed",
                     )
                 definition = source.source
-                overrides = AgentPatch.model_validate(worker.spec)
+                # The admitted spec's native controls (extensions) come from the source;
+                # an AgentPatch keys them by namespace, so the spec's list form is left out
+                # exactly as admission and preparation do (a raw validate fails on them).
+                overrides = clone_overrides(AgentSpec.model_validate(worker.spec))
             normalize = functools.partial(
                 resolve_worker_spec,
                 parent,
@@ -1105,8 +1115,14 @@ async def run_worker(
                         await orphan(prepared)
     except BaseException as error:
         if not native_started:
+            from daimon.core.fleet_orchestration import worker_failure_code
+
+            # A bug before native start is ours, never "couldn't be set up on that model".
+            failure_code = worker_failure_code(error, "preparation_refused")
             with contextlib.suppress(FleetConflict):
-                await asyncio.shield(commit_worker_transition(request, parent, claim))
+                await asyncio.shield(
+                    commit_worker_transition(request, parent, claim, failure_code=failure_code)
+                )
         if isinstance(error, TimeoutError):
             raise ceiling_error() from error
         raise

@@ -1130,9 +1130,11 @@ async def test_dispatch_failure_ends_claim_and_preserves_siblings_and_collection
                 while not any(row.get("event") == "fleet.worker_task_failed" for row in logs):
                     await asyncio.sleep(0.01)
         assert ended.status == "failed"
-        assert ended.error_code == (
-            "deadline_expired" if error_kind == "already_terminal" else "dispatch_refused"
-        )
+        # An unexpected exception is a bug on our side, never "couldn't start on that model".
+        assert ended.error_code == {
+            "already_terminal": "deadline_expired",
+            "unexpected": "setup_error",
+        }.get(error_kind, "dispatch_refused")
         run, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         assert run.status == "running"
         assert next(row for row in rows if row.id == sibling.id) == sibling
@@ -1262,5 +1264,41 @@ async def test_fleet_r7_retry_reuses_defaulted_limits_instead_of_conflicting(wor
         assert {str(row.id) for row in dispatched} == {replies[0]["worker_id"]} and not calls
         _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         assert sum(1 for row in rows if str(row.id) == replies[0]["worker_id"]) == 1
+    finally:
+        await ports.close()
+
+
+async def test_a_bug_while_running_a_worker_is_recorded_as_a_setup_error(worker_root, monkeypatch):
+    """RESCORE-2 J4: a ValidationError read on the card as the model being unable to run."""
+    from daimon.core import headless_runner
+    from mux.contracts.resources import AgentPatch
+
+    request, root, _, resolved, prices, calls, _, _, _ = worker_root
+
+    async def preparation(parent):
+        return request
+
+    async def broken(*args, **kwargs):
+        AgentPatch.model_validate({"extensions": [{"namespace": "x", "version": 1}]})
+        raise AssertionError("expected a ValidationError")
+
+    monkeypatch.setattr(headless_runner, "run_worker", broken)
+    pool = fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=pool,
+        deps=request.deps,
+    )
+    try:
+        reply = await FleetOrchestrator(ports).spawn(
+            root, await _policy(request), **_spawn_terms(request, root, resolved, "bug-in-run")
+        )
+        async with asyncio.timeout(10):
+            ended = await _settled(ports, root, reply["worker_id"])
+        assert ended.status == "failed" and ended.error_code == "setup_error"
+        assert not calls
     finally:
         await ports.close()
