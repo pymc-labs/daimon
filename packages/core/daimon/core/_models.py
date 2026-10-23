@@ -3707,7 +3707,11 @@ class UsageObservation(Base):
     """Each applied revision of a usage observation; the latest is the highest."""
 
     __tablename__ = "usage_observation"
-    __table_args__ = (PrimaryKeyConstraint("binding_id", "observation_id", "revision"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("binding_id", "observation_id", "revision"),
+        # The OpenAI daily model cap reads one tenant's observations per turn.
+        Index("ix_usage_observation_tenant_id", "tenant_id"),
+    )
 
     binding_id: Mapped[str] = mapped_column(
         Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
