@@ -23,6 +23,7 @@ from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import build_attachment_url_prefix
 from daimon.adapters.discord.budget_notice import with_budget_notifier
+from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
     build_channel_context_xml,
@@ -2908,20 +2909,23 @@ class DaimonBot(commands.Bot):
         # (it short-circuits on message.mention_everyone), which would make the bot
         # reply to every mass ping. message.mentions excludes @everyone/@here and
         # role mentions, so this triggers only on a direct user mention of the bot.
-        bot_mentioned = self.user is not None and any(
-            user.id == self.user.id for user in message.mentions
+        bot_mentioned = isinstance(message, ButtonMessage) or (
+            self.user is not None and any(user.id == self.user.id for user in message.mentions)
         )
         if self.draining:
             return
         if (
             not startup_replay
             and not resume_admitted
+            and not isinstance(message, ButtonMessage)
             and message.guild is not None
             and isinstance(message.author, discord.Member)
             and not message.author.bot
         ):
             # Timestamp actual ingress, before routing/queue waits. A queued
             # message's old Member snapshot must never restore a revoked role.
+            # A button's snapshot predates its seed/switch reads; admission uses
+            # current membership evidence instead of re-observing that snapshot.
             guild_id = str(message.guild.id)
             self.membership_resolver.observe(
                 derive_tenant_uuid(platform="discord", workspace_id=guild_id),
@@ -3424,7 +3428,9 @@ class DaimonBot(commands.Bot):
         def compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
             draining.update((id(message), message) for message in queued)
             groups: list[list[discord.Message]] = []
-            for author_messages in group_by_author(queued, lambda m: m.author.id):
+            for author_messages in group_by_author(
+                queued, lambda m: m.author.id, separate=lambda m: isinstance(m, ButtonMessage)
+            ):
                 pending: list[discord.Message] = []
                 for queued_message in author_messages:
                     if is_affirmative(queued_message.content):

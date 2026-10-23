@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import uuid
 from typing import Any
@@ -11,6 +13,7 @@ import pytest
 from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.thread_handoff import VERB
+from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
@@ -19,10 +22,12 @@ from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.turn.errors import SessionAgentMismatch
 from daimon.testing import ma_agent
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.ma import MARouter, build_fake_anthropic
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
+    AAD_OBJECT_ID,
     CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
@@ -33,10 +38,12 @@ from .conftest import (
     bot_token,
     build_teams_runtime,
     make_card_action,
+    make_channel_activity,
     make_inbound,
     patched_admission,
     post_activity,
     running_service,
+    settle,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -84,8 +91,20 @@ async def _hand_over(
     runtime = build_teams_runtime(
         db_factory, anthropic=build_fake_anthropic(router.dispatch), deployment_default=_DEFAULT
     )
-    async with running_service(runtime, fake) as service:
-        answer = await post_activity(service, click or _click())
+    with (
+        patch.object(TeamsApp, "_run_turn", new_callable=AsyncMock) as run_turn,
+        patch.object(
+            ThreadReader, "latest_user_message", AsyncMock(return_value="Continue analysis.")
+        ),
+    ):
+        async with running_service(runtime, fake) as service:
+            answer = await post_activity(service, click or _click())
+            await settle(service.turns)
+    if run_turn.await_count:
+        resent = run_turn.await_args.args[0]
+        assert resent.handover_agent_id == "ag_research"
+        assert resent.text == "Continue analysis."
+
     async with db_factory() as session:
         routed = await resolve(
             session,
@@ -171,3 +190,139 @@ async def test_a_channel_click_without_its_notice_writes_nothing(
 
     assert "something went wrong" in json.dumps(answer), "no thread to name, so it fails"
     assert responder is None, "no binding was written"
+
+
+@pytest.mark.parametrize("busy,later", [(False, False), (True, False), (False, True), (True, True)])
+async def test_click_and_following_mention_use_normal_ingress_in_order(
+    busy: bool,
+    later: bool,
+    db_nullpool_engine: AsyncEngine,
+    teams_api_fake: TeamsApiFake,
+) -> None:
+    from decimal import Decimal
+
+    from daimon.adapters.teams.reactions import HOURGLASS
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+    from daimon.testing import ma_environment, ma_session
+    from daimon.testing.ma import resolved_agent_env_router
+
+    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    agent = ma_agent(id="ag_research", name="research-bot", tenant_id=TENANT)
+    environment = ma_environment(id="env_handover", name="default", tenant_id=TENANT)
+    router = resolved_agent_env_router(agent, environment)
+    runtime = build_teams_runtime(
+        db_session_factory,
+        anthropic=build_fake_anthropic(router.dispatch),
+        deployment_default=_DEFAULT,
+    )
+    runtime = dataclasses.replace(
+        runtime, turn_deps=dataclasses.replace(runtime.turn_deps, turn_path=None)
+    )
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=CHANNEL_ID),
+            tenant_id=TENANT,
+            agent_name="research-bot",
+        )
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=TENANT,
+            delta_usd=Decimal("100"),
+            reason="trial",
+            idempotency_key="busy-handover-credit",
+        )
+    started, release = asyncio.Event(), asyncio.Event()
+    order: list[str] = []
+    real_turn = TeamsApp._run_turn
+
+    async def turn(self: TeamsApp, inbound: Any, *args: Any, **kwargs: Any) -> None:
+        if inbound.handover_agent_id is not None:
+            await real_turn(self, inbound, *args, **kwargs)
+        else:
+            order.append(inbound.text)
+            if "running turn" in inbound.text:
+                started.set()
+                await release.wait()
+
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        await kwargs["before_create"]()
+        return ma_session(id="session_handover", agent=agent, environment_id=environment.id)
+
+    async def answer(deps: Any, prepared: Any, **kwargs: Any) -> Any:
+        assert prepared.admission.agent.id == "ag_research"
+        assert "Please finish the analysis." in kwargs["user_message"]
+        order.append("button")
+        if not busy and later:
+            started.set()
+            await release.wait()
+        await kwargs["lifecycle"].on_terminal_success(TurnState())
+        return RunOutcome(
+            state=TurnState(),
+            ma_session_id=prepared.ma_session_id,
+            mapping_id=prepared.mapping_id,
+            recovered=False,
+        )
+
+    with (
+        patch.object(TeamsApp, "_run_turn", turn),
+        patch.object(
+            ThreadReader,
+            "latest_user_message",
+            AsyncMock(return_value="Please finish the analysis."),
+        ),
+        patch("daimon.core.turn.prepare.create_session", side_effect=create),
+        patch.object(app_module, "admit", wraps=app_module.admit) as admitted,
+        patch.object(app_module, "bind_session", wraps=app_module.bind_session) as bound,
+        patch.object(app_module, "run_prepared_turn", side_effect=answer) as ran,
+    ):
+        async with running_service(runtime, teams_api_fake) as service:
+            if busy:
+                await post_activity(
+                    service, make_channel_activity(text="running turn", activity_id="owner")
+                )
+                await asyncio.wait_for(started.wait(), 20)
+            await post_activity(service, _click())
+            await post_activity(service, _click())
+            if busy:
+                async with asyncio.timeout(20):
+                    while not service.turns._pending.get(THREAD_ID):
+                        await asyncio.sleep(0.01)
+                async with asyncio.timeout(20):
+                    while not any(HOURGLASS in request.url for request in teams_api_fake.requests):
+                        await asyncio.sleep(0.01)
+                ran.assert_not_awaited()
+            elif later:
+                await asyncio.wait_for(started.wait(), 20)
+            if later:
+                await post_activity(
+                    service, make_channel_activity(text="Later request.", activity_id="later-human")
+                )
+                async with asyncio.timeout(20):
+                    while not any(
+                        i.text == "Later request."
+                        for i in service.turns._pending.get(THREAD_ID, [])
+                    ):
+                        await asyncio.sleep(0.01)
+            release.set()
+            await asyncio.gather(*list(service.turns._tasks))
+            await settle(service.turns)
+            assert THREAD_ID not in service.turns._processing
+            assert not service.turns._pending.get(THREAD_ID)
+    assert order == (["running turn"] if busy else []) + ["button"] + (
+        ["Later request."] if later else []
+    )
+    admitted.assert_awaited_once()
+    assert admitted.await_args.kwargs["external_user_id"] == AAD_OBJECT_ID
+    bound.assert_awaited_once()
+    ran.assert_awaited_once()
+    async with db_session_factory() as session:
+        assert (
+            await list_pending_continuations(
+                session, tenant_id=TENANT, platform="teams", thread_id=THREAD_ID
+            )
+            == []
+        )

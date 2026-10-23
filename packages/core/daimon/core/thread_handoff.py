@@ -63,6 +63,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
+from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.continuity.handoff import (
     HandoffRefused,
     HandoffRefusedInSetupThread,
@@ -347,7 +348,10 @@ async def hand_over_thread(
         destination_name=destination.name,
         destination_reachable=reachable,
         existing_binding_kind=binding.kind if binding is not None else None,
-        origin_responder_ma_agent_id=current_responder_ma_agent_id,
+        origin_responder_ma_agent_id=(
+            current_responder_ma_agent_id
+            or (binding.responder_ma_agent_id if binding is not None else None)
+        ),
         access=access,
     )
     if isinstance(decision, HandoffRefused):
@@ -426,11 +430,18 @@ class SwitchOutcome:
     destination_name: str | None = None
 
 
+def handover_seed(text: str | None, *, agent_name: str) -> str:
+    """The clicker's bounded work request, without a bare confirmation or name echo."""
+    return (
+        sanitize_requested_work(text, echoes=(agent_name,))
+        or "Pick up this conversation where it left off."
+    )[:MAX_REQUESTED_WORK]
+
+
 def render_switched(name: str) -> str:
     return (
-        f"{name} answers in this conversation from the next message. The conversation "
-        f"and its working files move across, and {name} uses its own keys, connections "
-        "and memory."
+        f"Your latest message is being sent to {name}. "
+        f"{name} uses its own keys, connections and memory."
     )
 
 
@@ -500,8 +511,7 @@ async def switch_thread_on_request(
                     agent=build_agent_ref(agent.name, agent.metadata, name),
                     is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
                 ),
-                # The session here belongs to another agent; a second click
-                # rewrites the same binding.
+                # The locked binding also rejects repeated clicks.
                 current_responder_ma_agent_id=None,
                 default=default,
                 now=now,

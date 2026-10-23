@@ -7,26 +7,31 @@ message routes to it; a refused click writes nothing and answers privately.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
+import pytest
 from daimon.adapters.discord.feedback_button import FeedbackButton
 from daimon.adapters.discord.support_escalation import SupportEscalateButton
 from daimon.adapters.discord.thread_handoff import HandOverButton, build_custom_id, hand_over_view
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import RecruitmentSettings, RecruitmentTenantSettings
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.testing import ma_agent
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.turn_fakes import deps_for
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _GUILD = "700000009"
 _PARENT = 111111111111111111
@@ -62,7 +67,22 @@ def _interaction(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: Any)
     thread.parent_id = _PARENT
     thread.send = AsyncMock()
     interaction = MagicMock()
-    interaction.client = SimpleNamespace(runtime=runtime, application_id=77)
+    tasks: list[Any] = []
+    interaction.client = SimpleNamespace(
+        runtime=runtime, application_id=77, _spawn=tasks.append, on_message=AsyncMock(), tasks=tasks
+    )
+    interaction.id = 999999999999999999
+    interaction.message.id = 456
+    interaction.message.channel = thread
+    interaction.message.add_reaction = AsyncMock()
+    interaction.message.remove_reaction = AsyncMock()
+
+    async def history(**kwargs: Any) -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            author=SimpleNamespace(id=42, bot=False), content="Please finish the analysis."
+        )
+
+    thread.history = history
     interaction.guild_id = int(_GUILD)
     interaction.channel = thread
     interaction.user = SimpleNamespace(id=42, mention="<@42>")
@@ -78,8 +98,9 @@ def _interaction(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: Any)
     return interaction
 
 
+@pytest.mark.parametrize("clicks", [1, 2])
 async def test_a_click_hands_the_thread_to_the_channels_agent(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    clicks: int, db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await _seed(db_session)
     interaction = _interaction(db_session_factory, tenant.id)
@@ -88,7 +109,7 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
 
     interaction.channel.send.assert_awaited_once()
     posted = interaction.channel.send.call_args.args[0]
-    assert "research-bot answers in this conversation from the next message" in posted
+    assert "Your latest message is being sent to research-bot" in posted
     interaction.message.edit.assert_awaited_once_with(view=None)
     async with db_session_factory() as session:
         binding = await get_binding(
@@ -111,6 +132,15 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
     assert binding is not None and binding.kind == "handoff"
     assert routed.responder_ma_agent_id == "ag_research", "later messages go to research-bot"
     assert routed.thread_binding_kind == "handoff"
+
+    if clicks == 2:
+        await HandOverButton(agent_id="ag_research").callback(interaction)
+    await asyncio.gather(*interaction.client.tasks)
+    interaction.client.on_message.assert_awaited_once()
+    resent = interaction.client.on_message.await_args.args[0]
+    assert resent.author is interaction.user
+    assert resent.content == "Please finish the analysis."
+    assert resent.id == interaction.id
 
 
 async def test_a_refused_click_answers_privately_and_writes_nothing(
@@ -137,6 +167,9 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
         )
     assert binding is None
 
+    assert interaction.client.tasks == []
+    interaction.client.on_message.assert_not_awaited()
+
 
 async def test_a_click_removes_a_webhook_cards_button(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
@@ -156,6 +189,7 @@ async def test_a_click_removes_a_webhook_cards_button(
     ):
         await HandOverButton(agent_id="ag_research").callback(interaction)
 
+    await asyncio.gather(*interaction.client.tasks)
     hook.edit_message.assert_awaited_once_with(
         interaction.message.id, view=None, thread=interaction.channel
     )
@@ -170,3 +204,229 @@ async def test_the_button_carries_the_agent_and_its_template_overlaps_no_other()
     assert HandOverButton.__discord_ui_compiled_template__.fullmatch(custom_id)
     for other in (FeedbackButton, SupportEscalateButton):
         assert other.__discord_ui_compiled_template__.fullmatch(custom_id) is None
+
+
+@pytest.mark.parametrize("busy,later", [(False, False), (True, False), (False, True), (True, True)])
+async def test_click_and_following_mention_use_normal_ingress_in_order(
+    busy: bool,
+    later: bool,
+    db_session: AsyncSession,
+    db_nullpool_engine: AsyncEngine,
+) -> None:
+    from decimal import Decimal
+
+    from daimon.adapters.discord import bot as bot_module
+    from daimon.adapters.discord.button_message import ButtonMessage
+    from daimon.adapters.discord.runtime import DiscordRuntime
+    from daimon.core.config import McpSettings
+    from daimon.core.membership import Membership
+    from daimon.core.notebooks._rate_limit import RateLimiter
+    from daimon.core.stores import tenant_ledger
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+    from daimon.testing import ma_environment, ma_session
+    from daimon.testing.ma import resolved_agent_env_router
+
+    from .harness import make_bot
+
+    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant = await _seed(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("100"),
+        reason="trial",
+        idempotency_key="busy-handover-credit",
+    )
+    await db_session.commit()
+    agent = ma_agent(id="ag_research", name="research-bot", tenant_id=tenant.id)
+    environment = ma_environment(id="env_handover", name="default", tenant_id=tenant.id)
+    client = build_fake_anthropic(resolved_agent_env_router(agent, environment).dispatch)
+    default = DeploymentDefault(agent_name="daimon", environment_name="default")
+    deps = replace(deps_for(client, db_session_factory), turn_path=None, deployment_default=default)
+    settings = MagicMock()
+    settings.mcp = McpSettings()
+    settings.app.env = "production"
+    settings.discord.command_guild_ids = (int(_GUILD),)
+    settings.discord.bot_display_name = "Daimon"
+    settings.agent_identity.enabled = False
+    settings.billing.markup = Decimal("1")
+    settings.discord.max_concurrent_turns_per_tenant = 3
+    bot = make_bot(
+        DiscordRuntime(
+            settings=settings,
+            anthropic=client,
+            sessionmaker=db_session_factory,
+            notebook_rate_limiter=RateLimiter(max_requests=999),
+            billing_config=None,
+            deployment_default=default,
+            resolver_cache=deps.resolver_cache,
+            turn_deps=deps,
+        )
+    )
+    interaction = _interaction(db_session_factory, tenant.id)
+    interaction.client = bot
+    thread = interaction.channel
+    thread.parent = MagicMock(spec=discord.TextChannel)
+    thread.parent.category_id = None
+    member = MagicMock(spec=discord.Member)
+    member.id = 42
+    member.guild_permissions.administrator = True
+    member.guild_permissions.manage_guild = False
+    member.roles = []
+    thread.guild.id = int(_GUILD)
+    thread.guild.owner_id = 99
+    thread.guild.get_member.return_value = member
+    interaction.message.guild = thread.guild
+    interaction.message.channel = thread
+    interaction.message._state = bot._connection
+    member.bot = False
+    member.guild = thread.guild
+    member.display_name = "Clicker"
+    interaction.user = member
+    thread.guild.fetch_member = AsyncMock(return_value=member)
+    message = MagicMock(spec=discord.Message)
+    message.id = 789
+    message.edit = AsyncMock(return_value=message)
+    message.delete = AsyncMock()
+    thread.send = AsyncMock(return_value=message)
+
+    # A newer gateway membership event already revoked the snapshot's admin role.
+    bot.membership_resolver.observe(
+        tenant.id, _GUILD, "42", Membership(is_member=True, is_admin=False)
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+    order: list[str] = []
+    real_orchestrate = bot._orchestrate
+
+    async def turn(inbound: Any, *args: Any, **kwargs: Any) -> None:
+        if isinstance(inbound, ButtonMessage):
+            await real_orchestrate(inbound, *args, **kwargs)
+        else:
+            order.append(inbound.content)
+            if "running turn" in inbound.content:
+                started.set()
+                await release.wait()
+
+    def human(text: str, message_id: int) -> Any:
+        inbound = MagicMock(spec=discord.Message)
+        inbound.id = message_id
+        inbound.author = member
+        inbound.guild = thread.guild
+        inbound.channel = thread
+        inbound.content = text
+        inbound.mentions = [bot.user]
+        inbound.webhook_id = None
+        inbound.reference = None
+        inbound.attachments = []
+        inbound.add_reaction = AsyncMock()
+        inbound.remove_reaction = AsyncMock()
+        return inbound
+
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        await kwargs["before_create"]()
+        return ma_session(id="session_handover", agent=agent, environment_id=environment.id)
+
+    async def context(*args: Any, **kwargs: Any) -> Any:
+        return kwargs.get("query_text") or kwargs["trigger"].content, None
+
+    async def answer(deps: Any, prepared: Any, **kwargs: Any) -> Any:
+        assert prepared.admission.agent.id == "ag_research"
+        assert prepared.admission.grant.subject.is_admin is busy
+        assert prepared.admission.account_id is not None
+        assert "Please finish the analysis." in kwargs["user_message"]
+        order.append("button")
+        if not busy and later:
+            started.set()
+            await release.wait()
+        await kwargs["lifecycle"].on_terminal_success(TurnState())
+        return RunOutcome(
+            state=TurnState(),
+            ma_session_id=prepared.ma_session_id,
+            mapping_id=prepared.mapping_id,
+            recovered=False,
+        )
+
+    with (
+        patch.object(bot, "_orchestrate", side_effect=turn),
+        patch("daimon.core.turn.prepare.create_session", side_effect=create),
+        patch.object(bot_module, "build_context_xml", side_effect=context),
+        patch.object(bot_module, "admit", wraps=bot_module.admit) as admitted,
+        patch.object(bot_module, "bind_session", wraps=bot_module.bind_session) as bound,
+        patch.object(bot_module, "run_prepared_turn", side_effect=answer) as ran,
+    ):
+        owner = None
+        if busy:
+            owner = asyncio.create_task(bot.on_message(human("<@999> running turn", 123)))
+            await asyncio.wait_for(started.wait(), 20)
+        await HandOverButton(agent_id="ag_research").callback(interaction)
+        # A repeated click finds the changed binding and creates no second input.
+        await HandOverButton(agent_id="ag_research").callback(interaction)
+        if busy:
+            async with asyncio.timeout(20):
+                while not bot._pending.get(thread.id):
+                    await asyncio.sleep(0.01)
+            interaction.message.add_reaction.assert_any_await("⌛")
+            ran.assert_not_awaited()
+        elif later:
+            await asyncio.wait_for(started.wait(), 20)
+        if later:
+            await bot.on_message(human("<@999> Later request.", interaction.id + 1))
+        release.set()
+        if owner is not None:
+            await owner
+        async with asyncio.timeout(30):
+            while bot._bg_tasks:
+                await asyncio.gather(*list(bot._bg_tasks))
+                await asyncio.sleep(0)
+    assert order == (["<@999> running turn"] if busy else []) + ["button"] + (
+        ["<@999> Later request."] if later else []
+    )
+    admitted.assert_awaited_once()
+    assert admitted.await_args.kwargs["external_user_id"] == "42"
+    bound.assert_awaited_once()
+    ran.assert_awaited_once()
+    assert thread.id not in bot._processing
+    assert not bot._pending.get(thread.id)
+    async with db_session_factory() as session:
+        assert (
+            await list_pending_continuations(
+                session, tenant_id=tenant.id, platform="discord", thread_id=str(_THREAD)
+            )
+            == []
+        )
+
+
+async def test_a_reserved_thread_click_reads_and_starts_nothing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _seed(db_session)
+    interaction = _interaction(db_session_factory, tenant.id)
+    interaction.client.runtime.settings = SimpleNamespace(
+        recruitment=RecruitmentSettings(
+            tenants={
+                _GUILD: RecruitmentTenantSettings(
+                    channel_ids=(str(_PARENT),), recruiter_user_ids=("42",)
+                )
+            }
+        )
+    )
+    interaction.channel.history = MagicMock(side_effect=AssertionError("must not read"))
+    await HandOverButton(agent_id="ag_research").callback(interaction)
+    assert interaction.client.tasks == []
+    interaction.channel.history.assert_not_called()
+
+
+async def test_unreadable_seed_history_resends_the_fixed_prompt(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _seed(db_session)
+    interaction = _interaction(db_session_factory, tenant.id)
+    response = MagicMock()
+    response.status = 403
+    interaction.channel.history = MagicMock(side_effect=discord.Forbidden(response, "unreadable"))
+    await HandOverButton(agent_id="ag_research").callback(interaction)
+    await asyncio.gather(*interaction.client.tasks)
+    resent = interaction.client.on_message.await_args.args[0]
+    assert resent.content == "Pick up this conversation where it left off."

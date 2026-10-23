@@ -68,7 +68,11 @@ def reaction_target(inbound: TeamsInbound) -> ReactionTarget | None:
     """The message `inbound` answers; None for a submitted form or a reply nobody addressed."""
     if inbound.from_form or inbound.unprompted:
         return None
-    return ReactionTarget(inbound.conversation_id, inbound.activity_id, inbound.service_url)
+    return ReactionTarget(
+        inbound.conversation_id,
+        inbound.handover_notice_id or inbound.activity_id,
+        inbound.service_url,
+    )
 
 
 class React(Protocol):
@@ -138,7 +142,7 @@ class TeamsReactions:
         """
         if self._react is None or (target := reaction_target(inbound)) is None:
             return
-        self._queued[target.key] = target
+        self._queued[(inbound.conversation_id, inbound.activity_id)] = target
         self._queue(target, HOURGLASS, add=True, allowed=allowed)
 
     def clear_queued(self, items: Iterable[TeamsInbound]) -> None:
@@ -157,7 +161,7 @@ class TeamsReactions:
         """
         for item in items:
             if (target := reaction_target(item)) is not None:
-                self._queued.pop(target.key, None)
+                self._queued.pop((item.conversation_id, item.activity_id), None)
                 self._queue(target, HOURGLASS, add=False, known=False)
 
     async def close(self) -> None:

@@ -269,3 +269,73 @@ async def test_a_group_chat_graph_refuses_leaves_the_turn_its_text() -> None:
     block = await reader.read(_chat("1700000000010"), watermark=None, skip_ids=frozenset())
     assert block is not None and block.unavailable == "http error" and block.lines == ()
     assert await reader.read_media(_chat("1700000000010")) is None
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_hand_over_seed_uses_the_clickers_latest_message_before_the_notice(
+    failed: bool,
+) -> None:
+    notice = "1700000000010"
+    requested: list[str] = []
+
+    def message(id: str, user: str, text: str) -> dict[str, object]:
+        return _message(id) | {"from": {"user": {"id": user}}, "body": {"content": text}}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if request.url.params.get("$skiptoken"):
+            if failed:
+                return httpx.Response(403)
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        message("1700000000008", "clicker", "Please finish the analysis."),
+                        message("1700000000007", "clicker", "Older work"),
+                    ]
+                },
+            )
+        if request.url.path.endswith("/replies"):
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        message("1700000000011", "clicker", "After the notice"),
+                        message("1700000000009", "someone-else", "Someone else's work"),
+                    ],
+                    "@odata.nextLink": str(request.url.copy_add_param("$skiptoken", "more")),
+                },
+            )
+        return httpx.Response(200, json=message(ROOT, "clicker", "Opening work"))
+
+    reader = _reader(httpx.MockTransport(handle))
+    seed = await reader.latest_user_message(
+        conversation_id=f"{CHANNEL_ID};messageid={ROOT}",
+        channel_id=CHANNEL_ID,
+        user_id="clicker",
+        team_id=None,
+        team_group_id=GROUP,
+        before=notice,
+        kind="channel",
+    )
+    assert seed == (None if failed else "Please finish the analysis.")
+    assert len(requested) == 3
+
+
+async def test_hand_over_seed_without_a_readable_boundary_uses_no_history() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an opaque notice id cannot bound Graph history")
+
+    reader = _reader(httpx.MockTransport(handle))
+    assert (
+        await reader.latest_user_message(
+            conversation_id=CHANNEL_ID,
+            channel_id=CHANNEL_ID,
+            user_id="clicker",
+            team_id=None,
+            team_group_id=None,
+            before="opaque-notice",
+            kind="channel",
+        )
+        is None
+    )
