@@ -779,7 +779,11 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             preparation, source=source, resources=resources(preparation)
         )
         await verify_storage()
-        if mcp_template:
+        target = preparation.target_spec
+        # As the template compiles it (`deployment`): a target whose confirmed switch
+        # dropped its MCP is served with none, so no catalogue is captured and this
+        # turn never gets an MCP credential.
+        if mcp_template and (target is None or "mcp" not in target.declared_drops):
             from daimon.core.turn.runtime_manifest import represented_source
 
             represented = represented_source(source, preparation.target_spec)
