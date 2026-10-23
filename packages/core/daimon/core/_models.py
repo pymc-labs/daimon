@@ -3989,6 +3989,8 @@ class FleetRun(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The run's one login decision {key: share|skip}, set once at its first spawn.
+    login_decision: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
 
 class FleetWorker(Base):

@@ -56,6 +56,7 @@ from pydantic import (
 
 if TYPE_CHECKING:
     from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.fleet_credentials import LoginCandidate
     from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
     from daimon.core.stores.domain import BackendAgent, SourceRepresentation, TaskContinuationRow
     from daimon.core.stores.mux_state import BeforeClaim
@@ -159,6 +160,8 @@ class FrozenLogins:
     without: tuple[str, ...] = ()
     # (login key, approved row version) for every handed login.
     handed_versions: tuple[tuple[str, str], ...] = ()
+    # What the run may decide to hand its workers (decided at its first spawn).
+    candidates: tuple[LoginCandidate, ...] = ()
 
 
 async def frozen_logins(
@@ -172,6 +175,7 @@ async def frozen_logins(
     Only `handed` (shared AND sharing is live) ever reaches a worker.
     """
     from daimon.core.fleet_credentials import (
+        LoginCandidate,
         fleet_logins,
         parse_sharing,
         run_without_line,
@@ -222,7 +226,45 @@ async def frozen_logins(
             if login.key in handed and login.version is not None
         )
     )
-    return FrozenLogins(shared, handed, servers, without, versions)
+    # Every key the run may still decide to share: shareable, versioned, not saved
+    # as "skip". A saved share that still holds is decided without asking.
+    candidates = (
+        tuple(
+            LoginCandidate(
+                key=login.key,
+                label=login.label,
+                version=login.version,
+                preapproved=login.key in shared,
+                installed_by=login.installed_by,
+                set_by=login.set_by,
+            )
+            for login in logins
+            if LOGIN_SHARING_LIVE
+            and login.shareable
+            and login.version
+            and choice(login.key) != "skip"
+        )
+        if LOGIN_SHARING_LIVE
+        else ()
+    )
+    if candidates:
+        # The run decides at its first spawn: nothing is handed at freeze, and the
+        # candidates are named on the card until then.
+        handed = frozenset[str]()
+        versions = tuple(sorted((candidate.key, candidate.version) for candidate in candidates))
+        without = tuple(
+            line
+            for login, line in zip(
+                logins,
+                (
+                    run_without_line(login, choice(login.key), sharing_live=LOGIN_SHARING_LIVE)
+                    for login in logins
+                ),
+                strict=True,
+            )
+            if login.key not in {candidate.key for candidate in candidates}
+        )
+    return FrozenLogins(shared, handed, servers, without, versions, candidates)
 
 
 async def frozen_shared_logins(deps: TurnDeps, source: BackendAgent) -> frozenset[str]:
@@ -933,7 +975,9 @@ async def _freeze_root(
             policy=policy,
             now=now(),
             seal_ids=prepared.admission.origin_seal_ids,
-            shared_logins=decision.handed,
+            # The root's ceiling carries every candidate; a worker gets only what its
+            # run decides (`_read_frozen_root`, `resolve_worker_spec`).
+            shared_logins=decision.handed | {c.key for c in decision.candidates},
             shared_servers=decision.handed_servers,
         )
     except WorkerSpecRefused as error:
@@ -969,6 +1013,8 @@ async def _freeze_root(
         permissions,
         workers_run_without=decision.without,
         shared_versions=decision.handed_versions,
+        login_candidates=decision.candidates,
+        shared_logins=decision.handed,
     )
     environment = source_environment_record(prepared.admission.environment, scope)
     root = _FrozenRoot(

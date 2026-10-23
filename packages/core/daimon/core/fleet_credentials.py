@@ -59,6 +59,8 @@ class ConnectorLogin:
     version: str | None = None
     # The agent's connector this login belongs to (matched by URL), if any.
     server: str | None = None
+    # Who created and last set the stored row, when that's one person.
+    set_by: str | None = None
 
     @property
     def shareable(self) -> bool:
@@ -99,6 +101,48 @@ class SavedChoice:
             "at": self.at,
             "version": self.version,
         }
+
+
+@dataclass(frozen=True)
+class LoginCandidate:
+    """A login a run may hand its workers, frozen with the root; the run decides once.
+
+    `preapproved` is a saved share that still holds (decided without asking);
+    `set_by` is who created and last set the stored row (a member may share their
+    own key for their own run).
+    """
+
+    key: str
+    label: str
+    version: str
+    preapproved: bool
+    installed_by: Installer
+    set_by: str | None = None
+
+    def login(self) -> ConnectorLogin:
+        return ConnectorLogin(self.key, "env", self.label, self.installed_by, version=self.version)
+
+
+def may_share_for_run(
+    candidate: LoginCandidate, *, actor_account_id: uuid.UUID, is_admin: bool, is_owner: bool
+) -> bool:
+    """Whether the run's requester may share this key with THIS run's workers.
+
+    An admin, or the owner for an owner-set key (as `may_share`); and anyone for a
+    key they set themselves (their own key, their own run). Never another person's.
+    """
+    login = candidate.login()
+    if not login.shareable:
+        return False
+    if candidate.set_by is not None and candidate.set_by == str(actor_account_id):
+        return True
+    return may_share(
+        login,
+        actor_account_id=actor_account_id,
+        requester_account_id=actor_account_id,
+        is_admin=is_admin,
+        is_owner=is_owner,
+    )
 
 
 def parse_sharing(raw: object) -> dict[str, SavedChoice]:
@@ -294,6 +338,9 @@ async def fleet_logins(session: AsyncSession, source: BackendAgent) -> tuple[Con
                     "owner" if by_owner else "unknown",
                     version=stored_key_version(setters[1], setters[2])
                     if setters is not None
+                    else None,
+                    set_by=str(setters[0])
+                    if setters is not None and setters[0] is not None and setters[0] == setters[1]
                     else None,
                 )
             )
