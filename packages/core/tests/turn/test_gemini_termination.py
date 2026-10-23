@@ -96,6 +96,11 @@ def clean_sdk_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+async def _silence() -> AsyncIterator[bytes]:
+    await asyncio.Event().wait()
+    yield b""
+
+
 class NativeWire:
     """Docs-derived native replies; no normalized events/outcomes injected."""
 
@@ -108,6 +113,8 @@ class NativeWire:
         self.final_get_status: str | None = None
         self.retry_after_s: int | None = None
         self.saved: dict[str, Object] = {}
+        # Accepted but never started: the stream stays silent, as under Gemini load.
+        self.silent_stream = False
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -127,12 +134,20 @@ class NativeWire:
             raw = interaction(identity, status=self.status)
             if self.usage is not None:
                 raw["usage"] = self.usage
+            if self.silent_stream:
+                # As Gemini reads back a run it accepted and never began (live probe).
+                raw["steps"] = [{"type": "user_input"}]
+                del raw["usage"]
             if self.status == "requires_action":
                 raw["steps"] = [
                     {"type": "function_call", "id": "call-1", "name": "weather", "arguments": {}}
                 ]
             self.saved[identity] = raw
             return httpx.Response(200, json=raw)
+        if request.method == "POST" and request.url.path.endswith("/cancel"):
+            identity = request.url.path.rsplit("/", 2)[-2]
+            self.saved[identity]["status"] = "cancelled"
+            return httpx.Response(200, json=self.saved[identity])
         if request.method == "GET":
             identity = request.url.path.rsplit("/", 1)[-1]
             assert identity in self.saved
@@ -154,7 +169,9 @@ class NativeWire:
                 )
             if request.url.params.get("stream") == "true":
                 return httpx.Response(
-                    200, headers={"content-type": "text/event-stream"}, content=b""
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=_silence() if self.silent_stream else b"",
                 )
             if self.final_get_status is not None:
                 self.saved[identity]["status"] = self.final_get_status
@@ -374,6 +391,25 @@ async def test_native_final_outcome_has_exact_committed_snapshot(
     assert composed.pending["C18"].kind == PendingKind.ADAPTER_DEPENDENCY
     assert isinstance(composed.transport, GeminiTerminationTransport)
     assert callable(composed.transport.host_termination_evidence)
+
+
+async def test_a_turn_gemini_never_starts_frees_its_hold_at_the_deadline(
+    native_host: NativeHost,
+) -> None:
+    native_host.wire.status = "in_progress"
+    native_host.wire.silent_stream = True
+    deadline = datetime.now(UTC) + timedelta(seconds=3)
+    outcome = await asyncio.wait_for(run(native_host, deadline=deadline), timeout=60)
+    assert outcome.state.termination is not None and outcome.state.termination.is_failure
+    # The host gave up: the interaction is cancelled, as before.
+    cancels = [r for r in native_host.wire.requests if r.url.path.endswith("/cancel")]
+    assert len(cancels) == 1
+    identity = cancels[0].url.path.rsplit("/", 2)[-2]
+    assert native_host.wire.saved[identity]["status"] == "cancelled"
+    # It never ran or billed: its hold is released now, not after the hold TTL (the
+    # cancel's read-back and any later read both ask; the ledger release is idempotent).
+    usage = native_host.deps.turn_runtimes[PROFILE].usage_store
+    assert set(cast(Accounting, usage.accounting).released) == {identity}
 
 
 async def test_public_binding_refusal_is_pre_native_and_committed(native_host: NativeHost) -> None:

@@ -1,10 +1,11 @@
 """Explicit host Flash policy; no client creation, retry or implicit selection."""
 
-from collections.abc import AsyncIterator, Mapping
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from pydantic import JsonValue
 
@@ -20,6 +21,8 @@ from mux.drivers.gemini.transport import (
 )
 from mux.errors import ProviderError
 from mux.profiles.gemini import ARGON_MODEL, WORKER_MODEL
+
+log = logging.getLogger(__name__)
 
 FLASH_PRIMARY = "gemini-3.8-flash"
 FLASH_MODELS = (FLASH_PRIMARY, "gemini-flash-latest", "gemini-3.5-flash-lite")
@@ -43,6 +46,8 @@ class FlashAccounting(Protocol):
     Usage. The only free call this policy reports is a definite refusal: an
     HTTP 4xx that rejected the request itself (`refused` with a 4xx status), so
     no interaction exists. Anything Google may have accepted stays `unknown`.
+    An owner may also offer `release_unbilled(interaction_id=...)`, called when
+    an interaction is read back cancelled, unbilled and with no step but its input.
     """
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None: ...
@@ -64,6 +69,18 @@ def definite_rejection(error: ProviderError) -> int | None:
         return None
     status = code.removeprefix("http_")
     return int(status) if status.isdigit() else None
+
+
+def only_input_steps(steps: object) -> bool:
+    """No step but the caller's own input: Gemini produced nothing for it."""
+    if steps is None:
+        return True
+    if not isinstance(steps, list):
+        return False
+    return all(
+        isinstance(step, dict) and cast(dict[str, object], step).get("type") == "user_input"
+        for step in cast(list[object], steps)
+    )
 
 
 class FlashTransport:
@@ -181,10 +198,42 @@ class FlashTransport:
             bind(interaction_id, digests)
 
     async def get(self, interaction_id: str) -> Object:
-        return await self.source.get(interaction_id)
+        reply = await self.source.get(interaction_id)
+        await self._release_unbilled(interaction_id, reply)
+        return reply
 
     async def cancel(self, interaction_id: str) -> Object:
-        return await self.source.cancel(interaction_id)
+        reply = await self.source.cancel(interaction_id)
+        await self._release_unbilled(interaction_id, reply)
+        return reply
+
+    async def _release_unbilled(self, interaction_id: str, reply: Mapping[str, object]) -> None:
+        """A cancelled interaction that never ran frees its hold at once.
+
+        Never ran: cancelled, no usage, and no step but the caller's own input
+        (Gemini's stamps cannot show it: `updated` stays equal to `created` even
+        while a run works). Settlement otherwise waits for a usage reading that
+        never comes. Anything that may have run keeps its hold for settlement or
+        the TTL. Keyed by the
+        interaction alone, so a cancel seen by another transport (a deadline
+        cleanup, a later poll) releases it too. A failed release is logged and
+        left to the hold's TTL, never raised into the turn.
+        """
+        release = cast(
+            Callable[..., Awaitable[object]] | None,
+            getattr(self.accounting, "release_unbilled", None),
+        )
+        if (
+            release is None
+            or reply.get("status") != "cancelled"
+            or reply.get("usage") is not None
+            or not only_input_steps(reply.get("steps"))
+        ):
+            return
+        try:
+            await release(interaction_id=interaction_id)
+        except Exception:
+            log.warning("gemini_hold_release_failed interaction_id=%s", interaction_id)
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await self.source.download_snapshot(environment_id)

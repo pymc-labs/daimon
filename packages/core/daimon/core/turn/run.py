@@ -102,7 +102,7 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
-from mux.errors import ScopeViolation
+from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
 from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
 from sqlalchemy.exc import SQLAlchemyError
@@ -507,7 +507,9 @@ async def _archive_orphaned_session(
     Shielded from caller cancellation so it can wait for the request up to a
     fixed deadline. If that deadline expires, the request continues in the
     background and its result is logged when it finishes. A failure is
-    swallowed: the error being unwound is the one the caller must see.
+    swallowed: the error being unwound is the one the caller must see. A
+    profile with no native archive (Gemini inline reuse) has nothing to clean
+    up, so its refusal is a skip, never a failure.
     """
     archive_task = asyncio.create_task(
         archive()
@@ -521,7 +523,9 @@ async def _archive_orphaned_session(
         if task.cancelled():
             return
         err = task.exception()
-        if err is not None:
+        if _no_archive(err):
+            log.info("turn.recovery_orphan_archive_skipped", session_id=session_id)
+        elif err is not None:
             log.warning(
                 "turn.recovery_orphan_archive_failed",
                 session_id=session_id,
@@ -558,11 +562,18 @@ async def _archive_orphaned_session(
             log.info("turn.recovery_orphan_archived", session_id=session_id)
             return
     except Exception as err:
+        if _no_archive(err):
+            log.info("turn.recovery_orphan_archive_skipped", session_id=session_id)
+            return
         log.warning(
             "turn.recovery_orphan_archive_failed",
             session_id=session_id,
             error=str(err)[:200],
         )
+
+
+def _no_archive(err: BaseException | None) -> bool:
+    return isinstance(err, UnsupportedCapability) and "session_archive" in err.missing
 
 
 async def _replace_dead_session(

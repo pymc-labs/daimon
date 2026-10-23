@@ -64,12 +64,17 @@ class Accounting:
     def __init__(self) -> None:
         self.holds: list[ModelRef] = []
         self.receipts: list[FlashAttempt] = []
+        self.released: list[str] = []
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
         self.holds.append(model)
 
     async def after_attempt(self, *, receipt: FlashAttempt) -> None:
         self.receipts.append(receipt)
+
+    async def release_unbilled(self, *, interaction_id: str) -> bool:
+        self.released.append(interaction_id)
+        return True
 
 
 @dataclass

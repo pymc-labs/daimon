@@ -322,3 +322,85 @@ async def test_maybe_accepted_create_failures_stay_unknown(error: ProviderError)
         await FlashTransport(source, accounting).create(request())
     assert len(source.requests) == 1
     assert [(r.outcome, r.http_status) for r in accounting.receipts] == [("unknown", None)]
+
+
+CREATED = "2026-10-23T11:39:56Z"
+
+
+INPUT: JsonValue = [{"type": "user_input"}]
+
+
+def cancelled(**extra: JsonValue) -> dict[str, JsonValue]:
+    # Cancelled before it ever ran, as Gemini reads it back: unbilled, only the input step.
+    return {
+        "id": "native",
+        "status": "cancelled",
+        "created": CREATED,
+        "updated": CREATED,
+        "steps": INPUT,
+        **extra,
+    }
+
+
+class Releasing(Accounting):
+    def __init__(self) -> None:
+        super().__init__()
+        self.released: list[str] = []
+
+    async def release_unbilled(self, *, interaction_id: str) -> bool:
+        self.released.append(interaction_id)
+        return True
+
+
+@pytest.mark.parametrize("via", ["cancel", "get"])
+async def test_a_cancelled_interaction_without_usage_releases_its_hold(via: str) -> None:
+    source, accounting = FakeTransport(), Releasing()
+    source.responses.append({"id": "native", "status": "in_progress"})
+    policy = FlashTransport(source, accounting)
+    await policy.create(request())
+    source.reads["native"] = [cancelled()]
+    await getattr(policy, via)("native")
+    assert accounting.released == ["native"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        cancelled(usage={"total_tokens": 9}),
+        # It ran before the cancel landed (the GET -> cancel race): keep the hold.
+        cancelled(steps=[{"type": "user_input"}, {"type": "thought"}]),
+        cancelled(steps="malformed"),
+        {**cancelled(), "status": "in_progress"},
+        {**cancelled(), "status": "completed"},
+    ],
+    ids=["billed", "ran", "malformed-steps", "live", "completed"],
+)
+async def test_billed_or_live_interactions_keep_their_hold(reply: Mapping[str, JsonValue]) -> None:
+    source, accounting = FakeTransport(), Releasing()
+    source.responses.append({"id": "native", "status": "in_progress"})
+    policy = FlashTransport(source, accounting)
+    await policy.create(request())
+    source.reads["native"] = [reply]
+    await policy.cancel("native")
+    assert accounting.released == []
+
+
+async def test_another_transports_cancel_still_releases_the_hold() -> None:
+    # A deadline cleanup or later poll runs on a fresh transport with no model map.
+    source, accounting = FakeTransport(), Releasing()
+    source.saved["native"] = cancelled()
+    await FlashTransport(source, accounting).get("native")
+    assert accounting.released == ["native"]
+
+
+async def test_a_failed_release_never_breaks_the_call() -> None:
+    class Failing(Releasing):
+        async def release_unbilled(self, *, interaction_id: str) -> bool:
+            raise RuntimeError("ledger down")
+
+    source, accounting = FakeTransport(), Failing()
+    source.responses.append({"id": "native", "status": "in_progress"})
+    policy = FlashTransport(source, accounting)
+    await policy.create(request())
+    source.reads["native"] = [cancelled()]
+    assert (await policy.cancel("native"))["status"] == "cancelled"
