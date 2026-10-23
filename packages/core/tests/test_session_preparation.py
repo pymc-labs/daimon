@@ -13,7 +13,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -41,7 +41,7 @@ from daimon.adapters.mcp.tools._ctx import _admission_recheck
 from daimon.adapters.mcp.tools.agent_chat import _continue_turn_impl
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, load_turn_settings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -65,6 +65,7 @@ from daimon.core.stores.agent_memory_stores import (
 )
 from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.domain import AccountRow, Role, TenantRow, ThreadSessionRow
+from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_session_lineage import request_fresh_start
@@ -464,6 +465,87 @@ async def _prepare(
         transfer=transfer,
         now=lambda: now,
     )
+
+
+async def _prepare_message(
+    deps: TurnDeps,
+    base: PreparedTurn,
+    *,
+    tenant: TenantRow,
+    account: AccountRow,
+    thread_id: str = "thread-1",
+) -> PreparedTurn:
+    """Prepare one message the way production does: its own admission, its own turn.
+
+    A `PreparedTurn` is single-use on the mux path: its admission carries the
+    turn observation whose id keys the send operation (`turn/binding.py:46`), so
+    two distinct messages sent through one prepared turn collide on that key and
+    the second is refused as `OperationConflict`. Adapters admit and prepare per
+    message, so a fresh observation is what each message would have been given.
+    """
+    prepared = await _prepare(
+        deps,
+        replace(base.admission, observation=None),
+        tenant=tenant,
+        account=account,
+        thread_id=thread_id,
+    )
+    assert isinstance(prepared, PreparedTurn)
+    return prepared
+
+
+@dataclass
+class _SendGates:
+    """Which tasks reached the gate where concurrent sends on one session queue.
+
+    Legacy sends queue on the session-mutation fence (a Postgres advisory lock).
+    Mux sends queue first on the binding lease (`PostgresStateStore.acquire_lease`,
+    polled with nothing held), then cross the same fence. `reached` is set once
+    `threshold` distinct tasks have arrived at either gate; `lease_tasks` is how a
+    test proves the mux turn I/O ran at all.
+    """
+
+    threshold: int
+    arrived: set[asyncio.Task[Any] | None] = field(default_factory=set)
+    lease_tasks: set[asyncio.Task[Any] | None] = field(default_factory=set)
+    reached: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def note(self, *, lease: bool) -> None:
+        task = asyncio.current_task()
+        self.arrived.add(task)
+        if lease:
+            self.lease_tasks.add(task)
+        if len(self.arrived) >= self.threshold:
+            self.reached.set()
+
+    def assert_turn_path(self, deps: TurnDeps, *, prepared_entry: bool) -> None:
+        """A prepared turn took the lease exactly when the mux path ran it."""
+        if prepared_entry:
+            on_mux = (deps.turn_path or load_turn_settings().path) == "mux"
+            assert bool(self.lease_tasks) == on_mux, (
+                f"turn path {deps.turn_path or load_turn_settings().path!r}: "
+                f"{len(self.lease_tasks)} sends took the binding lease"
+            )
+
+
+def _observe_send_gates(monkeypatch: pytest.MonkeyPatch, *, threshold: int) -> _SendGates:
+    from daimon.core import session_mutation
+
+    gates = _SendGates(threshold=threshold)
+    original_lock = session_mutation.lock_session_mutation
+    original_lease = PostgresStateStore.acquire_lease
+
+    async def observed_lock(*args: Any, **kwargs: Any) -> Any:
+        gates.note(lease=False)
+        return await original_lock(*args, **kwargs)
+
+    async def observed_lease(self: PostgresStateStore, *args: Any, **kwargs: Any) -> Any:
+        gates.note(lease=True)
+        return await original_lease(self, *args, **kwargs)
+
+    monkeypatch.setattr(session_mutation, "lock_session_mutation", observed_lock)
+    monkeypatch.setattr(PostgresStateStore, "acquire_lease", observed_lease)
+    return gates
 
 
 async def _live_row(
@@ -3081,7 +3163,6 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     controlled; ownership, authorization, retirement and PostgreSQL locks are
     real. Shorten the pool timeout so the original cycle fails quickly.
     """
-    from daimon.core import session_mutation
     from daimon.core.session_mutation import SessionRetired
     from daimon.core.turn import run as turn_run
     from daimon.testing.db import build_test_engine
@@ -3090,6 +3171,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     seed_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, _, first = await _changed_channel_agent(db_session, seed_factory)
     account = await _account_of(seed_factory, first.admission.account_id)
+    message_turns = [
+        await _prepare_message(deps, first, tenant=tenant, account=account) for _ in range(15)
+    ]
     engine = build_test_engine(
         os.environ["DAIMON_DATABASE__TEST_URL"],
         db_schema,
@@ -3160,7 +3244,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
 
         return await turn_run.run_prepared_turn(
             deps,
-            first,
+            message_turns[index],
             tenant_id=tenant.id,
             platform="discord",
             thread_id="thread-1",
@@ -3188,25 +3272,16 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
             assert error.pending_reasons == ("session_changed",)
             return await _prepare(deps, first.admission, tenant=tenant, account=account)
 
-    attempted = set()
-    peers_entered = asyncio.Event()
-    original_lock = session_mutation.lock_session_mutation
-
-    async def observed_lock(*args, **kwargs):
-        attempted.add(asyncio.current_task())
-        if len(attempted) == 15:
-            peers_entered.set()
-        return await original_lock(*args, **kwargs)
-
-    monkeypatch.setattr(session_mutation, "lock_session_mutation", observed_lock)
+    gates = _observe_send_gates(monkeypatch, threshold=15)
     tasks = []
     try:
         tasks.append(asyncio.create_task(send(0)))
         await asyncio.wait_for(entered.wait(), 5)
         tasks.extend(asyncio.create_task(send(i)) for i in range(1, 15))
-        # All peers must attempt the real PostgreSQL fence before releasing
-        # the holder. Try-lock contenders now back off outside the pool/gate.
-        await asyncio.wait_for(peers_entered.wait(), 3)
+        # All peers must reach their queue before releasing the holder: the
+        # real PostgreSQL fence on legacy, the binding lease on mux. Try-lock
+        # contenders now back off outside the pool/gate.
+        await asyncio.wait_for(gates.reached.wait(), 3)
         tasks.append(asyncio.create_task(compatible_preparation()))
         tasks.append(asyncio.create_task(replacement()))
         release.set()
@@ -3221,6 +3296,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         assert all(isinstance(r, PreparedTurn) for r in results[15:]), results[15:]
         assert transport.state.sessions[first.ma_session_id].archived_at is not None
         assert any(e["type"] == "user.message" for e in transport.state.events[first.ma_session_id])
+        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
     finally:
         release.set()
         for task in tasks:
@@ -3255,6 +3331,16 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         assert isinstance(result, PreparedTurn)
         if thread.startswith("send-"):
             send_turns.append(result)
+    # One prepared turn per message sent, as adapters prepare: a turn is not reused.
+    phase_turns = {
+        phase: [
+            await _prepare_message(
+                deps, turn, tenant=tenant, account=account, thread_id=f"send-{index + 1}"
+            )
+            for index, turn in enumerate(send_turns)
+        ]
+        for phase in ("checkpoint", "create")
+    }
 
     engine = build_test_engine(
         os.environ["DAIMON_DATABASE__TEST_URL"],
@@ -3312,7 +3398,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
     )
 
     async def send(index, phase):
-        prepared = send_turns[index]
+        prepared = phase_turns[phase][index]
         message = f"send during {phase} {index}"
         if entry == "handle":
             return await _continue_turn_impl(
@@ -3337,6 +3423,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
             render_interval_s=0.001,
         )
 
+    gates = _observe_send_gates(monkeypatch, threshold=1)
     tasks = [
         asyncio.create_task(
             _prepare(
@@ -3368,6 +3455,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
             release.set()
         results = await asyncio.wait_for(asyncio.gather(*tasks), 5)
         assert all(isinstance(result, PreparedTurn) for result in results)
+        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
     finally:
         checkpoint_release.set()
         create_release.set()
@@ -3387,7 +3475,6 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
     db_session, db_committing_engine, db_schema, monkeypatch, entry, contended, blocked_phase
 ):
     """Two checkpoints, then two MA creates, must leave sends usable at 5+10."""
-    from daimon.core import session_mutation
     from daimon.core.session_preparation_gate import PreparationGate
     from daimon.core.turn import run as turn_run
     from daimon.testing.db import build_test_engine
@@ -3409,6 +3496,26 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
             send_turns.append(result)
         else:
             replacement_turns.append(result)
+    # One prepared turn per message sent, as adapters prepare: a turn is not reused.
+    phase_turns = {
+        phase: [
+            await _prepare_message(
+                deps, turn, tenant=tenant, account=account, thread_id=f"send-{index + 1}"
+            )
+            for index, turn in enumerate(send_turns)
+        ]
+        for phase in ("checkpoint", "create")
+    }
+    predecessor_turns = [
+        await _prepare_message(
+            deps,
+            replacement_turns[index % 2],
+            tenant=tenant,
+            account=account,
+            thread_id="thread-1" if index % 2 == 0 else "replacement-2",
+        )
+        for index in range(5)
+    ]
 
     engine = build_test_engine(
         os.environ["DAIMON_DATABASE__TEST_URL"],
@@ -3466,7 +3573,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
     )
 
     async def send(index, phase, retired=False):
-        prepared = replacement_turns[index % 2] if retired else send_turns[index]
+        prepared = predecessor_turns[index] if retired else phase_turns[phase][index]
         message = f"send during {phase} {index}"
         if entry == "handle":
             return await _continue_turn_impl(
@@ -3493,17 +3600,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
             render_interval_s=0.001,
         )
 
-    attempted = set()
-    five_attempts = asyncio.Event()
-    original_lock = session_mutation.lock_session_mutation
-
-    async def observed_lock(*args, **kwargs):
-        attempted.add(asyncio.current_task())
-        if len(attempted) >= 5:
-            five_attempts.set()
-        return await original_lock(*args, **kwargs)
-
-    monkeypatch.setattr(session_mutation, "lock_session_mutation", observed_lock)
+    gates = _observe_send_gates(monkeypatch, threshold=5)
     waiters = []
     predecessor_waiters = []
     tasks = [
@@ -3532,7 +3629,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
                     asyncio.create_task(send(i, phase, retired=True)) for i in range(5)
                 )
                 waiters.extend(predecessor_waiters)
-                await asyncio.wait_for(five_attempts.wait(), 5)
+                await asyncio.wait_for(gates.reached.wait(), 5)
                 # Let every observed acquisition reach PostgreSQL. On the old
                 # implementation all five now block holding mutation permits.
                 await asyncio.sleep(0.1)
@@ -3588,6 +3685,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         from daimon.core.session_mutation import SessionRetired
 
         assert all(isinstance(result, SessionRetired) for result in retired), retired
+        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
     finally:
         checkpoint_release.set()
         create_release.set()
@@ -4138,7 +4236,9 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
     ] == ["read_only", "read_only"]
 
 
-async def test_prepared_turn_cannot_resume_retired_session(db_session, db_committing_engine):
+async def test_prepared_turn_cannot_resume_retired_session(
+    db_session, db_committing_engine, monkeypatch
+):
     from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.turn_fakes import RecordingLifecycle
 
@@ -4150,6 +4250,7 @@ async def test_prepared_turn_cannot_resume_retired_session(db_session, db_commit
         first.ma_session_id
     ].model_copy(update={"archived_at": None})
     before = len(transport.state.events.get(first.ma_session_id, []))
+    gates = _observe_send_gates(monkeypatch, threshold=1)
 
     async def reseed():
         return "stale prepared turn"
@@ -4172,6 +4273,11 @@ async def test_prepared_turn_cannot_resume_retired_session(db_session, db_commit
             render_interval_s=0.001,
         )
     assert len(transport.state.events.get(first.ma_session_id, [])) == before
+    # Which path refused it: the mux binding check answers before the turn
+    # takes its lease or reaches the fence; the legacy turn is refused at the
+    # session-mutation fence (`require_writable_session`) and never leases.
+    on_mux = (deps.turn_path or load_turn_settings().path) == "mux"
+    assert (len(gates.lease_tasks), len(gates.arrived)) == ((0, 0) if on_mux else (0, 1))
     async with factory() as db:
         live = await get_live_thread_session(
             db,
@@ -4181,6 +4287,46 @@ async def test_prepared_turn_cannot_resume_retired_session(db_session, db_commit
             account_id=first.session_account_id,
         )
     assert live.id == successor.mapping_id
+
+
+async def test_retired_mapping_is_reported_only_inside_the_callers_scope(
+    db_session, db_committing_engine
+):
+    """A retired session says so to its own caller; anyone else gets a scope refusal.
+
+    `prepared_persistence` is where the mux path checks the mapping a turn was
+    prepared against. The retired answer must not leak another thread, tenant or
+    account's mapping state, so each out-of-scope caller is refused as a scope
+    violation instead.
+    """
+    from daimon.core.session_mutation import SessionRetired
+    from daimon.core.turn.binding import prepared_persistence
+    from mux.errors import ScopeViolation
+
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    tenant, _, deps, _, first, successor, _ = await _review_replacement(db_session, factory)
+    assert first.mapping_id is not None and successor.mapping_id is not None
+
+    async def check(*, admission=first.admission, tenant_id=tenant.id, thread_id="thread-1"):
+        return await prepared_persistence(
+            deps,
+            admission,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=thread_id,
+            session_id=first.ma_session_id,
+            mapping_id=first.mapping_id,
+        )
+
+    with pytest.raises(SessionRetired):
+        await check()
+    for out_of_scope in (
+        {"thread_id": "another-thread"},
+        {"tenant_id": uuid.uuid4()},
+        {"admission": replace(first.admission, account_id=uuid.uuid4())},
+    ):
+        with pytest.raises(ScopeViolation):
+            await check(**out_of_scope)
 
 
 async def test_failed_handoff_create_keeps_predecessor_writable(db_session, db_committing_engine):

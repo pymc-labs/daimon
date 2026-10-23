@@ -65,7 +65,13 @@ async def _setup(
     on_event=None,
     vault_state=None,
     session_state=None,
+    id_prefix="ses_dm",
 ):
+    """`id_prefix` keeps session ids distinct when one test sets up two fakes.
+
+    Native ids are unique across workspaces, and the mux state store refuses
+    one session bound to two slots, so a second fake must not reuse the first's.
+    """
     tenant = await make_tenant(db, platform=platform, workspace_id=workspace)
     await make_ledger_entry(db, tenant=tenant, delta_usd=Decimal("100"))
     await set_dm_enabled(db, tenant_id=tenant.id, enabled=True)
@@ -86,7 +92,7 @@ async def _setup(
         body = json.loads(request.content)
         created.append(body)
         session = ma_session(
-            id=f"ses_dm_{len(created)}",
+            id=f"{id_prefix}_{len(created)}",
             agent_id="ag_dm",
             environment_id="env_dm",
             resources=body["resources"],
@@ -317,7 +323,7 @@ async def test_new_selection_resets_scope_and_rejects_a_stale_membership_check(
     old = await _start(tenant, deps, admission, context="old source")
     await _reply(deps, old, content="old private text")
     other, new_deps, new_admission, new_sent, _, new_created = await _setup(
-        db_session, db_session_factory, workspace="456"
+        db_session, db_session_factory, workspace="456", id_prefix="ses_dm_new"
     )
     new = await _start(other, new_deps, new_admission, workspace="456", context="new source")
     assert new.scope_id != old.scope_id
@@ -1158,8 +1164,9 @@ async def test_dm_tightening_memory_policy_replaces_the_writable_session(
 
 
 async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_mcp_callers(
-    db_session, db_session_factory
+    db_session, db_session_factory, monkeypatch
 ):
+    import contextvars
     import re
     from dataclasses import replace
 
@@ -1180,14 +1187,28 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     from daimon.adapters.mcp.tools.agent_chat import register_agent_chat_tools
     from daimon.adapters.mcp.tools.sessions import register_sessions_tools
     from daimon.adapters.mcp.tools.slack._read import _slack_read_channel_impl
+    from daimon.core.config import load_turn_settings
     from daimon.core.headless_runner import run_turn as headless_turn
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt, mint_panel_mcp_token
     from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
+    from daimon.core.turn import io as turn_io_module
     from daimon.testing.asgi import call_mcp_tool
     from daimon.testing.legacy_mcp_tokens import mint_internal_mcp_token
     from fastmcp import FastMCP
     from pydantic import HttpUrl, SecretStr
+
+    # Which turn I/O every turn in this test (two DM replies, two headless runs)
+    # actually used: counted at construction, so a scope check alone cannot pass.
+    constructed = {"LegacyTurnIO": 0, "MuxTurnIO": 0}
+    for name in constructed:
+        original_init = getattr(turn_io_module, name).__init__
+
+        def counting_init(self, *args, _name=name, _init=original_init, **kwargs):
+            constructed[_name] += 1
+            _init(self, *args, **kwargs)
+
+        monkeypatch.setattr(getattr(turn_io_module, name), "__init__", counting_init)
 
     secret = b"test-dm-execution-secret-32-bytes-long"
     vaults = {"vaults": [], "credentials": {}, "tokens": {}}
@@ -1285,16 +1306,23 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
             await check_sessions(previous, handle)
         private_tokens.append(token)
         # Run the real headless assembly and driver while the DM context is live.
-        await headless_turn(
-            anthropic=deps.anthropic,
-            agent_id=admission.agent.id,
-            environment_id=admission.environment.id,
-            trigger_message="routine",
-            account_id=admission.account_id,
-            tenant_id=tenant.id,
-            agent_uuid=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=admission.agent.id),
-            session_factory=db_session_factory,
-            mcp_settings=deps.mcp,
+        # A concurrent headless run is its own task with its own context: this
+        # hook runs inside the DM turn's context, and a headless turn nested in
+        # it would inherit that turn's persistence, which (on the mux path)
+        # rightly refuses a session it does not own.
+        await asyncio.create_task(
+            headless_turn(
+                anthropic=deps.anthropic,
+                agent_id=admission.agent.id,
+                environment_id=admission.environment.id,
+                trigger_message="routine",
+                account_id=admission.account_id,
+                tenant_id=tenant.id,
+                agent_uuid=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=admission.agent.id),
+                session_factory=db_session_factory,
+                mcp_settings=deps.mcp,
+            ),
+            context=contextvars.Context(),
         )
         # Retired bearer families fail authentication, even with a valid signature.
         for legacy in (
@@ -1435,6 +1463,12 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     assert len(private_tokens) == 2 and private_tokens[0] != private_tokens[1]
     assert len(denied_headless) == 2
     assert len(vaults["vaults"]) == 3, "two isolated DM grants and one shared non-DM vault"
+    used, unused = (
+        ("MuxTurnIO", "LegacyTurnIO")
+        if load_turn_settings().path == "mux"
+        else ("LegacyTurnIO", "MuxTurnIO")
+    )
+    assert constructed[used] >= 4 and constructed[unused] == 0, constructed
 
 
 @pytest.mark.parametrize("mismatch", ["tenant", "account", "id", "expired"])

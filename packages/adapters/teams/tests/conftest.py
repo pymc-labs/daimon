@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import itertools
 import json
 import re
 import uuid
@@ -541,11 +542,18 @@ def patched_admission() -> Iterator[None]:
         env.return_value = "env_test_id"
         balance.return_value = False
         cap.return_value = False
-        create.return_value = ma_session(
-            id="sess-teams-1",
-            agent=ma_session_agent(id="agent_test_id"),
-            environment_id="env_test_id",
-        )
+        minted = itertools.count(1)
+
+        async def mint_session(*_args: Any, **_kwargs: Any) -> Any:
+            # A real create returns a new id each call, and the mux state store
+            # refuses one session bound to two slots (`stores/mux_state.py`).
+            return ma_session(
+                id=f"sess-teams-{next(minted)}",
+                agent=ma_session_agent(id="agent_test_id"),
+                environment_id="env_test_id",
+            )
+
+        create.side_effect = mint_session
         yield
 
 

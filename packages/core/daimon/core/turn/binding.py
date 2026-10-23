@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+from daimon.core.errors import SessionRetired
 from daimon.core.stores import mux_state
 from daimon.core.stores.thread_sessions import get_live_thread_session, get_thread_session_by_id
 from daimon.core.turn.admission import Admission
@@ -106,11 +107,13 @@ async def prepared_persistence(
             or mapped.thread_id != thread_id
             or mapped.account_id != (admission.shared_owner or admission.account_id)
             or mapped.ma_session_id != session_id
-            or mapped.status != "live"
-            or live is None
-            or live.id != mapped.id
         ):
             raise ScopeViolation(session_id, "prepared session mapping differs from this turn")
+        # Only a mapping inside the caller's own scope may say it is retired:
+        # the legacy fence answers the same way (`require_writable_session`),
+        # and an out-of-scope caller learns nothing about another tenant's rows.
+        if mapped.status != "live" or live is None or live.id != mapped.id:
+            raise SessionRetired("This conversation moved. Continue in the new one.")
         # Match the migration's slot key, including its channel-less rows.
         channel_id = mapped.channel_id or ""
     if admission.shared_owner is not None:

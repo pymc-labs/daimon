@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from daimon.core.config import McpSettings
+from daimon.core.errors import SessionRetired
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.shared_threads import (
@@ -136,7 +137,10 @@ async def test_private_prepared_binding_reuses_ids_and_advances_only_for_replace
         assert second.binding.id == first.binding.id and second.binding.generation == 2
         assert second.binding.native_refs["session"] == "second"
         assert second.operation_key == "turn:second:message"
-        with pytest.raises(ScopeViolation):
+        # A late turn on the replaced session is inside the caller's scope, so it
+        # is told the conversation moved (as legacy's `require_writable_session`
+        # says), and it does not touch the replacement binding.
+        with pytest.raises(SessionRetired):
             await prepared_persistence(
                 dependencies,
                 admitted,

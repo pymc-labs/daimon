@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_backend import (
     BackendUnsupported,
     channel_ref,
@@ -18,9 +19,10 @@ from daimon.core.channel_backend import (
     current_backend,
     set_channel_backend,
 )
-from daimon.core.config import McpSettings, TurnSettings
+from daimon.core.config import McpSettings, TurnSettings, load_turn_settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
@@ -287,7 +289,11 @@ async def test_with_the_flag_on_a_runnable_configuration_is_admitted(
     tmp_path: Path,
 ) -> None:
     tenant = await _tenant(db_session)
-    await clear_channel_backend(db_session, channel_ref(tenant.id, "discord", "chan-1"))
+    # An explicit pin to the default configuration. A cleared channel is a
+    # different thing on the mux path: see the next test.
+    await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), BackendConfig()
+    )
     await db_session.commit()
     on = _deps(tenant, db_session_factory, tmp_path, [], channel_backends=True)
 
@@ -298,12 +304,49 @@ async def test_with_the_flag_on_a_runnable_configuration_is_admitted(
     assert admission.backend is not None
 
 
-async def test_with_the_flag_on_an_unrunnable_configuration_is_refused_before_any_ma_call(
+async def test_with_the_flag_on_a_cleared_pin_is_admitted_as_unconfigured_only_on_mux(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """Clearing a channel's pin (#1323) returns it to no configuration on the mux path.
+
+    Backend selection (`TurnDeps.backend_selection_enabled`, mux plus the flag)
+    reads a `channel_clear` revision as "no pin" (`turn/admission.py`
+    `config_origin`), so admission carries no revision. The legacy path has no
+    selection and still admits the cleared revision, which is the default.
+    """
     tenant = await _tenant(db_session)
+    await set_channel_backend(db_session, channel_ref(tenant.id, "discord", "chan-1"), _UNRUNNABLE)
+    await clear_channel_backend(db_session, channel_ref(tenant.id, "discord", "chan-1"))
+    await db_session.commit()
+    on = _deps(tenant, db_session_factory, tmp_path, [], channel_backends=True)
+
+    admission = await _admit(on, tenant)
+
+    if (on.turn_path or load_turn_settings().path) == "mux":
+        assert admission.backend_revision is None
+        assert admission.backend is None
+    else:
+        assert admission.backend_revision is not None
+        assert admission.backend_revision.digest == _DEFAULT_DIGEST
+        assert admission.backend is not None
+
+
+@pytest.mark.parametrize("provider_enabled", [True, False])
+async def test_with_the_flag_on_an_unrunnable_configuration_is_refused_before_any_ma_call(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    provider_enabled: bool,
+) -> None:
+    tenant = await _tenant(db_session)
+    if provider_enabled:
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai")),
+        )
     await set_channel_backend(db_session, channel_ref(tenant.id, "discord", "chan-1"), _UNRUNNABLE)
     await db_session.commit()
     calls: list[httpx.Request] = []
@@ -313,8 +356,12 @@ async def test_with_the_flag_on_an_unrunnable_configuration_is_refused_before_an
         await _admit(on, tenant)
 
     assert raised.value.reason == "backend_unsupported"
-    # The refusal names the channel's own pin as the cause.
-    assert raised.value.cause == "channel_pin"
+    # The refusal names the real cause (#1319). The workspace's provider
+    # allowlist is read only when backend selection is on (mux plus the flag),
+    # and then it comes before the pin; otherwise only the pin is in play.
+    selection = (on.turn_path or load_turn_settings().path) == "mux"
+    expected = "provider_not_allowed" if selection and not provider_enabled else "channel_pin"
+    assert raised.value.cause == expected
     assert raised.value.provider == _UNRUNNABLE.backend
     assert calls == []
     # Another channel of the same tenant is not affected.
