@@ -62,6 +62,10 @@ from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
+#: HTTP answers that reject a session create outright: no session exists afterwards.
+#: A 409 or 429 may follow an accepted create, so those stay `outcome_unknown`.
+_DEFINITE_REJECTIONS = frozenset({"400", "401", "403", "404", "422"})
+
 
 async def unknown_infrastructure(observation: UsageObservation) -> Decimal | None:
     return None
@@ -269,7 +273,11 @@ async def _create(
     # digest conflict, not a fresh operation which might create a second session.
     # A released slot's era suffix keeps an earlier era's creation from replaying.
     _, era = adopted_identity(await store.get_binding(slot, include_released=True), "")
-    key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json())) + era
+    key = await _create_key(
+        store,
+        request.scope,
+        "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json())) + era,
+    )
     digest = request_digest(
         {"spec": spec.model_dump(mode="json"), "controls": runtime.controls.model_dump(mode="json")}
     )
@@ -302,6 +310,20 @@ async def _create(
                 min(120, (request.deadline - request.now()).total_seconds())
             ):
                 native = await backend.sessions.create(request.scope, spec, key=key)
+        except ProviderError as error:
+            # A definite rejection created no session: the slot's next create gets a
+            # fresh key (`_create_key`), even with a changed plan. Anything else may have
+            # reached OpenAI and is never resent blindly.
+            rejected = error.native_code in _DEFINITE_REJECTIONS
+            await store.advance_operation(
+                request.scope,
+                key,
+                "failed" if rejected else "outcome_unknown",
+                now=request.now(),
+                fence=lease,
+                result={"rejected": True} if rejected else None,
+            )
+            raise
         except BaseException:
             await store.advance_operation(
                 request.scope, key, "outcome_unknown", now=request.now(), fence=lease
@@ -319,6 +341,21 @@ async def _create(
         return native
     finally:
         await store.release_lease(lease)
+
+
+async def _create_key(store: StateStore, scope: Scope, base: str) -> str:
+    """The slot's create key: past each create OpenAI rejected outright, a fresh one.
+
+    A rejected create (`failed`, `rejected`) proves no session exists, so a new key
+    may send again; any other recorded state keeps its key and its digest check.
+    """
+    key, attempt = base, 0
+    while (record := await store.get_operation(scope, key)) is not None and (
+        record.operation.status == "failed" and record.result.get("rejected") is True
+    ):
+        attempt += 1
+        key = f"{base}:rejected-{attempt}"
+    return key
 
 
 async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:

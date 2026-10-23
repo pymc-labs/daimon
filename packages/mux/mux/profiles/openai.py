@@ -15,7 +15,7 @@ LUNA_MODEL = "gpt-6-luna"
 ASTRA_MODEL = "gpt-6-astra"
 # Every model the native OpenAI host runs; the admitted revision selects one.
 NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL)
-# Models a session runs only under a native spend limit.
+# Models a session may run only under a native spend limit (none on our project yet).
 SPEND_CAPPED_MODELS = (ASTRA_MODEL,)
 
 PERSISTENT_WORKSPACE = Profile(
@@ -33,7 +33,10 @@ PERSISTENT_WORKSPACE = Profile(
     support={
         "neutral_catalog": "native",
         "agent_delete": "native",
-        "session_spend_control": "native",
+        # The Agents reference documents `spend_control`, but our project answers it
+        # with HTTP 400 unknown_parameter on every create (2026-10-23, Ref Y7D94P):
+        # no native session cap, so nothing may count on one.
+        "session_spend_control": "unsupported",
         "thread_workspace_persistence": "native",
         "turn_lifecycle": "native",
         "cancel": "native",
@@ -77,7 +80,8 @@ CONVERSATION_ONLY = Profile(
     support={
         "neutral_catalog": "native",
         "agent_delete": "native",
-        "session_spend_control": "native",
+        # Rejected by our project like the persistent profile's (Ref Y7D94P).
+        "session_spend_control": "unsupported",
         "thread_workspace_persistence": "unsupported",
         "turn_lifecycle": "native",
         "cancel": "native",

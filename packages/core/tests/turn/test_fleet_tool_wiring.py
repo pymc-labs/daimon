@@ -378,6 +378,11 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
     from daimon.core.neutral_resources import WorkerLimits
     from daimon.core.pricing import provider_prices
     from daimon.core.stores import mux_state
+
+    from .test_openai_host import openai_native_spend_cap
+
+    # The review worker carries a native budget: a project that honours it.
+    openai_native_spend_cap(monkeypatch)
     from daimon.core.turn.openai_deployment import OpenAIDeployment
     from daimon.core.turn.runtimes import build_channel_runtime
     from mux.contracts.config import ConfigRevision, resolve_default

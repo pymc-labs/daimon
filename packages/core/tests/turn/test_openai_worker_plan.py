@@ -54,6 +54,7 @@ from .native_counterpart_support import (
 from .test_openai_deployment import application as application
 from .test_openai_deployment import manifest
 from .test_openai_host import Wire as SessionWire
+from .test_openai_host import openai_native_spend_cap
 
 
 @pytest.fixture
@@ -557,6 +558,7 @@ async def claimed_openai_worker(
         limits=root.limits.model_copy(update={"deadline": selected.now() + timedelta(minutes=2)}),
     )
     if native_budget is not None:
+        openai_native_spend_cap(monkeypatch)
         root = replace(
             root,
             limits=type(root.limits).model_validate(
@@ -1143,8 +1145,10 @@ async def test_native_worker_budget_conflict_refuses_before_transport(
     assert calls == []
 
 
-async def test_native_budget_compiler_is_decimal_context_independent(target):
+async def test_native_budget_compiler_is_decimal_context_independent(target, monkeypatch):
     from decimal import localcontext
+
+    openai_native_spend_cap(monkeypatch)
 
     from daimon.core.neutral_resources import WorkerLimits
 
@@ -1389,6 +1393,10 @@ async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
 ) -> None:
     request, _, plan, _, owned = target
     _with_astra(plan, owned, monkeypatch, spend_limit=5)
+    # Our project has no native session cap, so Astra never runs uncapped here.
+    with pytest.raises(AdmissionDenied):
+        build_openai_runtime(_astra(request))
+    openai_native_spend_cap(monkeypatch)
     runtime = build_openai_runtime(_astra(request))
     assert runtime.controls.model == "gpt-6-astra"
     assert runtime.price is not None and runtime.price.model == "gpt-6-astra"

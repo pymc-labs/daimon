@@ -132,6 +132,35 @@ async def test_caller_guard_identity_is_composed_and_refuses_before_native_alloc
     assert root.result["root_finance"]["exposure_usd"] == "0.06"
 
 
+async def test_a_root_without_a_native_cap_keeps_the_host_hold_and_no_native_budget(
+    root_turn, monkeypatch
+):
+    """A provider with no native session cap (OpenAI on our project: `spend_control`
+    is a 400) still gets the grant's root controls and cash hold, never a native budget."""
+    from daimon.core.turn.prepare import _admitted_profile  # pyright: ignore[reportPrivateUsage]
+    from mux import profiles
+
+    _, prepared, *_ = root_turn
+    profile_id = _admitted_profile(prepared._preparation.admission)
+    original = profiles.PROFILES[profile_id]
+    monkeypatch.setitem(
+        profiles.PROFILES,
+        profile_id,
+        original.model_copy(
+            update={"support": {**original.support, "session_spend_control": "unsupported"}}
+        ),
+    )
+    request = await select_controls(root_turn)
+    assert request.native_budget_usd is None
+    assert request.root_controls is not None
+    assert request.root_controls["cash_budget_usd"] == "0.06"
+    # The grant's figure only sizes the hold here; nothing records it as a native cap.
+    assert "native_budget_usd" not in request.root_controls
+    assert request.root_controls["hold_budget_usd"] == "0.03"
+    root = await root_record(root_turn)
+    assert root.result["root_finance"]["exposure_usd"] == "0.06"
+
+
 async def test_three_actual_sdk_inputs_and_replay_retain_first_outcome(root_turn):
     deps, prepared, _, _, _, scope, binding, transport = root_turn
     request = await select_controls(root_turn)

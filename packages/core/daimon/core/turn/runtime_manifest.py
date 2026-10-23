@@ -419,13 +419,19 @@ async def prepare_controlled_root(
         or request.admission.shared_owner is not None
         or request.admission.hold is not None
         or request.session_account_id != request.admission.account_id
-        or get_profile(profile).support.get("session_spend_control") != "native"
         or not any(
             backend.profile == profile and selected.id == model
             for backend, selected in value.choices
         )
     ):
         raise WorkerSpecRefused("native_budget_usd", "unsupported")
+    # A provider without a native session cap (OpenAI on our project) gets the same
+    # host-side controls and cash hold, and no native budget it can't honour.
+    native_budget = (
+        value.native_root_budget_usd
+        if get_profile(profile).support.get("session_spend_control") == "native"
+        else None
+    )
     slot = Slot(
         thread=ThreadRef(
             channel=ChannelRef(
@@ -442,7 +448,7 @@ async def prepare_controlled_root(
         raise WorkerSpecRefused("native_budget_usd", "unsupported")
     binding = await store.get_binding(slot)
     if binding is not None and intent_id is None:
-        return replace(request, native_budget_usd=value.native_root_budget_usd)
+        return replace(request, native_budget_usd=native_budget)
     if binding is not None or origin_id is None or intent_id is None:
         raise WorkerSpecRefused("origin", "unbound")
     deadline = min(request.deadline, value.expires_at)
@@ -452,7 +458,10 @@ async def prepare_controlled_root(
         "grant_digest": request_digest(value.model_dump(mode="json")),
         "deadline": deadline.isoformat(),
         "max_inputs": min(3, value.max_root_turns),
-        "native_budget_usd": str(value.native_root_budget_usd),
+        # Without a native cap the grant's figure only sizes the cash hold: say so.
+        ("native_budget_usd" if native_budget is not None else "hold_budget_usd"): str(
+            value.native_root_budget_usd
+        ),
         "cash_budget_usd": str(value.root_cash_budget_usd),
         "profile": profile,
         "model": model,
@@ -502,7 +511,7 @@ async def prepare_controlled_root(
         deps=replace(request.deps, state_store=store),
         deadline=deadline,
         root_controls=controls,
-        native_budget_usd=value.native_root_budget_usd,
+        native_budget_usd=native_budget,
         before_native=guard,
     )
 
