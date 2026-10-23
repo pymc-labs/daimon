@@ -802,7 +802,9 @@ async def commit_worker_failure(
 #: in plain words instead of holding it at "starting" until the run's deadline (SMOKE J4).
 WORKER_SETUP_TIMEOUT_S = 45.0
 #: How long one worker setup transaction waits for the tenant's fleet lock or funds row.
-WORKER_SETUP_LOCK_TIMEOUT = "10s"
+#: A spawn burst keeps the lock busy but moving (SMOKE 56fc2368: waits up to 9.2 s), so
+#: the wait is 20 s, still inside the 45 s setup bound; a stuck lock still fails the worker.
+WORKER_SETUP_LOCK_TIMEOUT = "20s"
 
 
 @contextlib.asynccontextmanager
