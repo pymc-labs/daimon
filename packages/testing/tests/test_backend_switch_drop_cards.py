@@ -634,6 +634,37 @@ async def test_an_agent_that_isnt_this_channels_target_previews_and_confirms_on_
     assert current.backend == target
 
 
+@pytest.mark.parametrize(("target", "said"), [("gemini", "argon"), ("openai", "luna")])
+async def test_a_model_said_by_name_prepares_the_card_the_tool_previewed(
+    chat: Chat, card: Card, target: str, said: str
+) -> None:
+    """J2 smoke-2: "on Argon" reaches the tool as model="argon". The tool previews
+    the resolved id, and the card must re-preview that same id: the raw word is
+    no selectable model ("model not selectable", so the card could not be shown)."""
+    from daimon.core.agent_model_names import resolve_switch_model
+
+    resolved = resolve_switch_model(target, said)  # pyright: ignore[reportArgumentType]
+    assert resolved is not None and resolved != said
+    preview = await chat.tool(target, model=said)
+    assert preview.status == "preview"
+    data = {**tool_call(target, preview, list(preview.declared_drops)), "model": said}
+    prompt = prompt_for(chat, data)
+    assert prompt.backend_switch.model == resolved
+    await card.post(prompt)
+    # The click re-previews too; a different digest would refuse it.
+    assert await card.click(REQUESTER[chat.platform]) is None
+    changed = await chat.tool(
+        target,
+        model=said,
+        expected_revision=data["expected_revision"],
+        preview_digest=data["preview_digest"],
+        accepted_drops=tuple(data["accepted_drops"]),
+    )
+    assert changed.status == "changed"
+    _, current = await chat.current()
+    assert current.backend == target
+
+
 @pytest.mark.parametrize("accepted", ["missing", "partial", "extra", "empty"])
 async def test_accepted_drops_other_than_the_preview_never_post_or_apply(
     chat: Chat, card: Card, accepted: str
