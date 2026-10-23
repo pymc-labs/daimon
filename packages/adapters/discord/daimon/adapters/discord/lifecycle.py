@@ -32,6 +32,7 @@ from daimon.adapters.discord.embed import (
     EmbedData,
     EmbedEvent,
     TurnPhase,
+    embed_fields,
     format_termination_notice,
     to_embed_data,
     update,
@@ -323,8 +324,8 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
         embed.set_footer(text=data.footer)
     if data.notice is not None:
         embed.add_field(name="Notice", value=data.notice[:1024], inline=False)
-    if data.details is not None:
-        embed.add_field(name="Details", value=data.details, inline=False)
+    for name, value in embed_fields(data):
+        embed.add_field(name=name, value=value, inline=False)
     return embed
 
 

@@ -68,7 +68,8 @@ def stop_button_view() -> Any:
 def turn_card_working_with_stop() -> Any:
     embed = _turn_embed(
         "TOOL_RUNNING",
-        tool_lines=("+3 earlier", "✔️ Read a file", "🖋️ Running a command"),
+        plan_lines=("☑️ Load the data", "⏳ Fit the model", "\u2007\u2007\u2007Write it up"),
+        tool_lines=("+3 earlier", "☑️ Read a file", "⏳ Running a command"),
         text_preview="Preview text.",
         cost_str="$0.04",
     )
