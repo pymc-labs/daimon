@@ -1098,3 +1098,49 @@ def test_a_worker_validation_failure_logs_its_fields_never_its_values():
     assert categories == ["extensions:dict_type", "name:string_type"]
     assert secret not in repr(categories)
     assert _validation_categories(RuntimeError(secret)) is None
+
+
+async def test_a_member_forks_across_models_under_the_default_grant_without_an_admin(captured):
+    """ROOT J10 policy: any member may fleet_spawn within the agent's DEFAULT caps; only
+    raising caps or models needs an owner/admin."""
+    import uuid as _uuid
+
+    from daimon.core.fleet_configuration import default_fleet_grant
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+    from daimon.core.neutral_resources import task_worker_spec
+    from daimon.core.stores.domain import TenantBackendPolicy
+
+    source, admission, _, fleet, policy, trace = captured
+    assert not admission.subject.is_admin and admission.subject.platform_user_id == "member"
+    # The computed default (epoch 0) exactly as this tenant's policy derives it.
+    default = default_fleet_grant(
+        TenantBackendPolicy(
+            tenant_id=_uuid.uuid4(), revision="r", enabled_backends=policy.enabled_backends
+        )
+    )
+    assert default is not None
+    root = compose((source, admission, default, fleet, policy, trace))
+    assert not root.subject.is_admin
+    ports, admitted, Admitted = ports_for(root, source)
+    for index, model in enumerate(("claude-opus-5-5", "claude-sonnet-5-5"), start=1):
+        spec = task_worker_spec(root, role=f"W{index}", task="Postgres vs SQLite?", model=model)
+        # The real spawn path: SPAWN_WORKER/RUN_AGENT authorize, then admission.
+        with pytest.raises(Admitted):
+            await FleetOrchestrator(ports).spawn(
+                root,
+                policy,
+                now=NOW,
+                operation_key=f"W{index}",
+                role=f"W{index}",
+                backend=None,
+                limits=root.limits,
+                agent=spec,
+            )
+    assert [resolved.spec.model.id for _, resolved in admitted] == [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+    ]
+    # A model the default grant never includes is refused: widening models is the owner's.
+    assert "claude-opus-5-5-fast" not in {model.id for model in root.models}
+    with pytest.raises(WorkerSpecRefused, match="backend: not_subset"):
+        task_worker_spec(root, role="W3", task="Go.", model="claude-opus-5-5-fast")
