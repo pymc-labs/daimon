@@ -63,7 +63,7 @@ def admin_caller(user: discord.User | discord.Member) -> AdminCaller:
     )
 
 
-def is_guild_admin(interaction: Interaction[commands.Bot]) -> bool:
+def is_guild_admin(interaction: Interaction) -> bool:
     """Discord-native admin check: owner OR manage_guild OR administrator.
 
     Returns False for DM contexts (user is not a Member).
