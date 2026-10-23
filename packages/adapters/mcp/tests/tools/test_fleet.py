@@ -636,22 +636,23 @@ async def test_factory_registers_only_for_explicit_fleet_and_neutral_flags(
     assert (names & NAMES) == (NAMES if enabled and path == "mux" and channel_backends else set())
 
 
-async def test_default_factory_does_not_import_or_discover_a_fleet_service(
+async def test_stopped_fleet_factory_does_not_import_or_discover_a_fleet_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Fleets are on by default; DAIMON_FLEET__ENABLED=false keeps the tools out entirely."""
     import builtins
 
     original_import = builtins.__import__
 
     def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
         assert name != "daimon.adapters.mcp.tools.fleet", (
-            "default factory imported opt-in fleet tools"
+            "a stopped fleet factory imported the fleet tools"
         )
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     app = create_mcp_app(
-        settings=runtime().settings,
+        settings=runtime().settings.model_copy(update={"fleet": FleetSettings(enabled=False)}),
         sessionmaker=async_sessionmaker(class_=AsyncSession),
         auth=StaticTokenVerifier(tokens={}),
         anthropic=build_stub_anthropic(),
