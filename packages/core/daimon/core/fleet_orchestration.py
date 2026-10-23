@@ -1583,13 +1583,19 @@ class HostFleetPorts:
                 async def still_pending(db: AsyncSession, latest: FleetWorker) -> FleetWorker:
                     if latest.status != "pending":
                         return latest  # Claimed or ended meanwhile: its own path records it.
+                    run, _ = await fleet.run_status(
+                        db, tenant_id=worker.tenant_id, run_id=worker.run_id
+                    )
+                    # A person's Stop (this worker, or the whole fleet) ends it as stopped,
+                    # as commit_worker_transition's own path does, never as a failure.
+                    stopped = latest.error_code == "stop_requested" or run.status == "cancelled"
                     return await fleet.finish(
                         db,
                         tenant_id=worker.tenant_id,
                         worker_id=worker.id,
                         expected_version=latest.version,
-                        status="failed",
-                        error_code=code,
+                        status="cancelled" if stopped else "failed",
+                        error_code="stop_requested" if stopped else code,
                     )
 
                 try:

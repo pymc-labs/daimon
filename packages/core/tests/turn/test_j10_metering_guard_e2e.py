@@ -26,6 +26,7 @@ from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from daimon.core import channel_budget
 from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
 from daimon.core.stores import fleet
@@ -222,3 +223,87 @@ async def test_a_cancel_records_a_still_pending_worker_at_once(worker_root):
         assert row.error_code == "usage_unavailable", row.error_code
     finally:
         await ports.close()
+
+
+@pytest.mark.parametrize("stop", ["worker", "fleet"])
+async def test_a_stopped_pending_worker_ends_as_stopped_never_as_failed(worker_root, stop):
+    """#1462 review: a person's Stop on a worker still waiting for its slot (or Stop-all on
+    its fleet) reaches the claim loop as the watch's cancel ("budget" for a stopped
+    worker, "terminal" for a stopped fleet). It must end the worker cancelled /
+    stop_requested, as commit_worker_transition does, never failed with the cancel's
+    failure code."""
+    request, root, _, resolved, prices, _, _, _, _ = worker_root
+    ports = _ports(request, prices, max_per_tenant=1)
+    owner = FleetOrchestrator(ports)
+    try:
+        waiting = await owner.spawn(
+            root, await _policy(request), **_spawn_terms(request, root, resolved, "stops")
+        )
+        await asyncio.sleep(0.5)
+        row = await _row(request, root, waiting["worker_id"])
+        assert row.status == "pending"
+        if stop == "worker":
+            await fleet.request_worker_stop(
+                request.deps.sessionmaker,
+                tenant_id=request.tenant_id,
+                worker_id=row.id,
+                expected_version=row.version,
+            )
+            reason = "budget"
+        else:
+            run, _ = await fleet.run_status(
+                request.deps.sessionmaker, tenant_id=request.tenant_id, run_id=root.fleet.run_id
+            )
+            await fleet.set_run_status(
+                request.deps.sessionmaker,
+                tenant_id=request.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status="cancelled",
+            )
+            reason = "terminal"
+        events = ports._watches[root.fleet.run_id][0]  # pyright: ignore[reportPrivateUsage]
+        channel_budget.cancel_workers(events, reason, run_id=root.fleet.run_id)
+        started = time.monotonic()
+        row = await _row(request, root, waiting["worker_id"])
+        while row.status == "pending" and time.monotonic() - started < 5:
+            await asyncio.sleep(0.05)
+            row = await _row(request, root, waiting["worker_id"])
+        assert (row.status, row.error_code) == ("cancelled", "stop_requested")
+    finally:
+        await ports.close()
+
+
+async def test_the_watch_still_fails_closed_once_reads_fail_for_the_whole_window(monkeypatch):
+    """The window delays failing closed; it never removes it. With a 0.5 s window and
+    every read slower than its timeout, the watch stops the run's workers soon after."""
+    parent, cancelled = _watched()
+    holders = iter(range(30_000, 40_000))
+
+    async def never(*_args, **_kwargs):
+        await asyncio.sleep(60)
+
+    async def holder(_session, _key):
+        return {"pid": next(holders), "xact_start": "admission"}
+
+    monkeypatch.setattr(channel_budget, "BUDGET_READ_FAILURE_WINDOW_S", 0.5)
+    monkeypatch.setattr(channel_budget, "read_fleet_budget_snapshot", never)
+    monkeypatch.setattr(channel_budget, "_lock_holder", holder)
+    finished = asyncio.Event()
+    started = time.monotonic()
+    outcome = await asyncio.wait_for(
+        channel_budget.watch_fleet_budget(
+            sessionmaker=_Sessions(lock_busy=True),  # type: ignore[arg-type]
+            parent=parent,  # type: ignore[arg-type]
+            prices={},
+            markup=Decimal(1),
+            cancelled=cancelled,
+            finished=finished,
+            poll_interval=0.05,
+            read_timeout=0.1,
+        ),
+        timeout=10,
+    )
+    assert outcome == "usage_unavailable"
+    assert {event.reason for event in cancelled.values()} == {"usage_unavailable"}
+    assert time.monotonic() - started < 5

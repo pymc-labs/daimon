@@ -1116,9 +1116,13 @@ async def watch_fleet_budget(
     the watch fails closed when one transaction holds the lock past
     BUDGET_LOCK_BUSY_LIMIT_S or it stays busy past BUDGET_LOCK_CONTENDED_LIMIT_S, and
     only once no budget read has succeeded for BUDGET_READ_FAILURE_WINDOW_S; slow reads
-    fail it closed under the same window. Worst case while reads fail inside the window:
-    each running worker can spend up to its own native spend cap (at most its reserved
-    hold), so the run's exposure stays within the holds its admission reserved.
+    fail it closed under the same window. While reads succeed, the stuck-holder and
+    contended limits no longer fire on their own: the snapshot keeps deciding. Worst
+    case while reads fail inside the window (about 36 s: 30 s plus one slow read): a
+    worker with a native spend cap (native_budget_usd) still stops at that cap, which is
+    at most its reserved hold; a worker on a hold-only provider (no native cap) has no
+    hard stop during that window and can spend at its own rate past its hold until the
+    watch fails closed. Overrun cancels decided from successful reads are unchanged.
     """
     if parent.fleet.enabled is not True or parent.fleet.depth != 0:
         raise FleetConflict("fleet watch requires explicit root opt-in")
