@@ -16,9 +16,9 @@ from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantLedger
-from daimon.core.stores import read_persisted_columns
+from daimon.core.stores import check_persisted_read, read_persisted_columns
 from daimon.core.stores.domain import TenantLedgerRow
-from sqlalchemy import DateTime, and_, func, or_, select
+from sqlalchemy import DateTime, Select, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
@@ -139,17 +139,26 @@ async def get_channel_spend(
     return result.scalar_one()  # type: ignore[no-any-return]
 
 
-async def get_prepaid_balance(
-    session: AsyncSession, *, tenant_id: uuid.UUID, persisted: bool = False
-) -> Decimal | None:
-    """Return the current balance for a prepaid tenant in one query."""
-    stmt = (
+def _prepaid_balance_query(tenant_id: uuid.UUID) -> Select[tuple[Decimal]]:
+    return (
         select(func.coalesce(func.sum(TenantLedger.delta_usd), Decimal("0")))
         .select_from(Tenant)
         .outerjoin(TenantLedger, TenantLedger.tenant_id == Tenant.id)
         .where(Tenant.id == tenant_id, Tenant.funding_mode == "prepaid")
         .group_by(Tenant.id)
     )
+
+
+def check_prepaid_balance_read(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """What `get_prepaid_balance(persisted=True)` refuses, without reading the balance."""
+    check_persisted_read(session, _prepaid_balance_query(tenant_id), reject_new=True)
+
+
+async def get_prepaid_balance(
+    session: AsyncSession, *, tenant_id: uuid.UUID, persisted: bool = False
+) -> Decimal | None:
+    """Return the current balance for a prepaid tenant in one query."""
+    stmt = _prepaid_balance_query(tenant_id)
     result = (
         await read_persisted_columns(session, stmt, reject_new=True)
         if persisted
