@@ -47,7 +47,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import anthropic as anthropic_pkg
 import structlog
@@ -66,6 +66,7 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.continuity.handoff import (
+    HandoffAllowed,
     HandoffRefused,
     HandoffRefusedInSetupThread,
     decide_handoff,
@@ -89,6 +90,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import lock_binding, upsert_responder_binding
 from daimon.core.stores.thread_sessions import list_live_thread_sessions, record_session_seals
+from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -134,6 +136,9 @@ class HandoffCaller:
     # A person's own unheld credential (not a client): their own agents count. Only a
     # caller that checked this sets it; the ownership itself is read here, never passed.
     may_own: bool = False
+    # Who the caller is, for `authorize` itself (not only this opt-in).
+    client: bool = False
+    hold: TurnHold | None = None
 
 
 log = structlog.get_logger(__name__)
@@ -274,6 +279,7 @@ async def _subject(
         is_admin=who.is_server_admin,
         platform_user_id=who.platform_user_id,
         via_agent_key=caller.via_agent_key,
+        client=caller.client,
     )
 
 
@@ -330,10 +336,12 @@ async def hand_over_thread(
         from daimon.core.ma_identity import derive_agent_uuid
         from daimon.core.stores import agent_owners
 
+        # FOR SHARE: a revoke of the ownership waits for this binding, never races it.
         owner = await agent_owners.owner_of(
             session,
             tenant_id,
             derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=destination.ma_agent_id),
+            lock=True,
         )
         owned = owner is not None and owner == caller.account_id
     reachable = await is_agent_reachable_in_tenant(
@@ -346,29 +354,44 @@ async def hand_over_thread(
         default=default,
     )
     answers_here = channel_config.agent_name == destination.name
-    access = authorize(
-        policy,
-        subject=subject,
-        action=Action.HAND_OFF,
-        surface=Surface.HANDOFF,
-        agent=destination.agent,
-        # A DM scope runs in no channel, so it is outside every pin.
-        place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
-        answers_here=answers_here,
-        reach=AgentReach(owned=owned),
-        recorded_seal_ids=snapshot_seals
-        | frozenset(seal for item in recorded for seal in item.facts.seal_ids),
-    )
-    decision = decide_handoff(
-        destination_ma_agent_id=destination.ma_agent_id,
-        destination_name=destination.name,
-        destination_reachable=reachable,
-        existing_binding_kind=binding.kind if binding is not None else None,
-        origin_responder_ma_agent_id=current_responder_ma_agent_id,
-        access=access,
-        caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
-        caller_owns=owned,
-    )
+
+    def decide(as_owner: bool) -> HandoffAllowed | HandoffRefused:
+        access = authorize(
+            policy,
+            subject=subject,
+            action=Action.HAND_OFF,
+            surface=Surface.HANDOFF,
+            agent=destination.agent,
+            # A DM scope runs in no channel, so it is outside every pin.
+            place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
+            answers_here=answers_here,
+            reach=AgentReach(owned=as_owner),
+            recorded_seal_ids=snapshot_seals
+            | frozenset(seal for item in recorded for seal in item.facts.seal_ids),
+            hold=caller.hold,
+        )
+        return decide_handoff(
+            destination_ma_agent_id=destination.ma_agent_id,
+            destination_name=destination.name,
+            destination_reachable=reachable,
+            existing_binding_kind=binding.kind if binding is not None else None,
+            origin_responder_ma_agent_id=current_responder_ma_agent_id,
+            access=access,
+            caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
+            caller_owns=as_owner,
+        )
+
+    # The ordinary rules first; ownership only widens what they refuse.
+    kind: Literal["handoff", "owner"] = "handoff"
+    decision = decide(False)
+    if isinstance(decision, HandoffRefused) and owned:
+        if any(item.account_id != caller.account_id for item in recorded):
+            # The binding moves the whole thread: never someone else's turns onto a
+            # private copy its owner controls.
+            raise ThreadHandoffRefused(
+                HandoffRefused(reason="shared_thread", destination_name=destination.name)
+            )
+        decision, kind = decide(True), "owner"
     if isinstance(decision, HandoffRefused):
         raise ThreadHandoffRefused(decision)
     return await upsert_responder_binding(
@@ -381,6 +404,7 @@ async def hand_over_thread(
         responder_name=destination.name,
         created_by_account_id=caller.account_id,
         now=now,
+        kind=kind,
     )
 
 
@@ -427,6 +451,10 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
         "own_agents_only": f"{channel} only runs its own agents, and {name} isn't one of them.",
         "unreachable": f"{name} doesn't answer anywhere here any more.",
         "same_agent": f"{name} already answers in this conversation.",
+        "shared_thread": (
+            "Other people are in this thread, so I can't move it to your private copy. "
+            "Start a new thread with me and ask again."
+        ),
         "admin_required": (
             f"{name} isn't an agent of {channel}. An admin can hand this conversation to it."
         ),

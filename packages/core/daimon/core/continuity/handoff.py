@@ -58,6 +58,8 @@ HandoffRefusalReason = Literal[
     "invoker_not_allowed",
     "own_agents_only",
     "not_a_reader",
+    # An owner's private copy may take only a thread nobody else is in.
+    "shared_thread",
 ]
 
 # `authorize(HAND_OFF)` denials that refuse before reachability is looked at.
@@ -107,7 +109,7 @@ def decide_handoff(
     destination_ma_agent_id: str,
     destination_name: str,
     destination_reachable: bool,
-    existing_binding_kind: Literal["setup", "handoff"] | None,
+    existing_binding_kind: Literal["setup", "handoff", "owner"] | None,
     origin_responder_ma_agent_id: str | None,
     access: Decision,
     caller_is_admin: bool = False,

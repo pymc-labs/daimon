@@ -43,7 +43,7 @@ from daimon.core.thread_handoff import (
 )
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.db import build_test_engine
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy import text
@@ -675,3 +675,107 @@ async def test_an_unrouted_agent_the_caller_does_not_own_stays_admin_only(
         async with db_session_factory.begin() as session:
             await _switch(session, tenant.id, caller=caller, destination=_COPY)
     assert await _binding(db_session_factory, tenant.id) is None, "nothing is written"
+
+
+def _owner_caller(account_id: uuid.UUID) -> HandoffCaller:
+    return HandoffCaller(
+        account_id=account_id,
+        admin=AdminCaller(platform_user_id="U1", is_server_admin=False),
+        may_own=True,
+    )
+
+
+async def test_an_owner_binding_is_marked_and_answers_only_its_owner(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.errors import UserFacingError
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores.scoped_config_read import resolve
+
+    tenant = await _seed(db_session)
+    member = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    await db_session.commit()
+    async with db_session_factory.begin() as session:
+        await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    binding = await _binding(db_session_factory, tenant.id)
+    assert binding is not None and binding.kind == "owner"
+    assert binding.creator_account_id == member.id
+
+    def here(account_id: uuid.UUID) -> ScopeContext:
+        return ScopeContext(
+            tenant_id=tenant.id,
+            channel_id="C1",
+            account_id=account_id,
+            platform="slack",
+            thread_id="T1",
+        )
+
+    async with db_session_factory() as session:
+        mine = await resolve(session, context=here(member.id), default=_DEFAULT)
+        assert mine.responder_ma_agent_id == "agt_copy"
+        # Someone else speaking in the thread is never run on the private copy.
+        with pytest.raises(UserFacingError, match="private copy"):
+            await resolve(session, context=here(other.id), default=_DEFAULT)
+
+
+async def test_a_thread_other_people_are_in_never_moves_to_a_private_copy(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.thread_handoff import render_handoff_refused
+
+    tenant = await _seed(db_session)
+    member = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    for account in (member, other):
+        await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=account,
+            platform="slack",
+            thread_id="T1",
+            channel_id="C1",
+        )
+    await db_session.commit()
+    with pytest.raises(ThreadHandoffRefused) as refused:
+        async with db_session_factory.begin() as session:
+            await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    assert refused.value.refusal.reason == "shared_thread"
+    assert render_handoff_refused(refused.value.refusal, channel="C1").startswith(
+        "Other people are in this thread, so I can't move it to your private copy. "
+        "Start a new thread with me and ask again."
+    )
+    assert await _binding(db_session_factory, tenant.id) is None, "nothing is written"
+
+
+@pytest.mark.parametrize(
+    ("policy", "reason"),
+    [
+        (TenantAccessPolicy(agent_channel_pins={"Daimon-2": ("C9",)}), "runs_elsewhere"),
+        (
+            TenantAccessPolicy(sealed_channel_ids=("C1",), isolated_channel_ids=("C1",)),
+            "own_agents_only",
+        ),
+    ],
+    ids=["pinned-elsewhere", "isolated"],
+)
+async def test_owning_a_copy_never_lifts_the_channels_rules(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    policy: TenantAccessPolicy,
+    reason: str,
+) -> None:
+    tenant = await _seed(db_session, policy=policy)
+    member = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    await db_session.commit()
+    with pytest.raises(ThreadHandoffRefused) as refused:
+        async with db_session_factory.begin() as session:
+            await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    assert refused.value.refusal.reason == reason
+    assert await _binding(db_session_factory, tenant.id) is None
