@@ -157,6 +157,12 @@ async def _deliver(sm: async_sessionmaker[AsyncSession]) -> list[str]:
             "It will run again at its next scheduled time once the limit resets or is raised.",
         ),
         (
+            TerminationReason.REFUSED,
+            "discord",
+            "The AI model declined this request.\n\n"
+            "Rewording the routine's prompt may help. It will try again at its next scheduled time.",
+        ),
+        (
             TerminationReason.UNKNOWN,
             "discord",
             "Something went wrong while it was running.\n\n"

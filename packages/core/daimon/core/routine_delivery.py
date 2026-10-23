@@ -299,6 +299,10 @@ _NEXT_RUN = "It will try again at its next scheduled time."
 _ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
     TerminationReason.CEILING: ("It took too long, so Daimon stopped it.", _NEXT_RUN),
     TerminationReason.UPSTREAM: ("The request to the AI model failed.", _NEXT_RUN),
+    TerminationReason.REFUSED: (
+        "The AI model declined this request.",
+        "Rewording the routine's prompt may help. It will try again at its next scheduled time.",
+    ),
     TerminationReason.ADMISSION_CAP_EXCEEDED: (
         "The person who made it has used their monthly limit.",
         "It will run again at its next scheduled time once the limit resets or is raised.",
