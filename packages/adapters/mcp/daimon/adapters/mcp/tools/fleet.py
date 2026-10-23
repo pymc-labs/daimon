@@ -1010,6 +1010,7 @@ def register_fleet_tools(
         A blocked run with partial=true still carries the verified results of
         the workers that succeeded and lists the failed ones: present it as a
         partial result and name which worker failed, never as a complete one.
+        A ready or partial result carries `cost`: end your reply with it verbatim.
         Omit run_id for this turn's run.
         """
         return dict(

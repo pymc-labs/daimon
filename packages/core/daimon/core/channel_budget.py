@@ -970,6 +970,47 @@ async def read_fleet_budget_snapshot(
         )
 
 
+async def read_fleet_run_cost(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    parent: WorkerPermissions,
+    prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
+    markup: Decimal,
+) -> Decimal | None:
+    """What this run's workers cost so far, from this run's rows alone.
+
+    Each worker counts at its priced, observed usage or its ledger debit, whichever
+    is larger (the producer's own money rule), so usage already seen counts before
+    it is debited. Read-only, no locks, and never another run's rows. None when a
+    worker's usage can't be priced yet: then no honest figure exists.
+    """
+    facts = parent.fleet
+    if facts.scope.is_platform or facts.scope.is_legacy_host_authorized:
+        raise FleetConflict("fleet cost requires tenant authority")
+    async with sessionmaker.begin() as session:
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        run, workers = await fleet_store.run_status(
+            session, tenant_id=uuid.UUID(facts.scope.tenant_id), run_id=facts.run_id
+        )
+        total = Decimal(0)
+        with localcontext() as arithmetic:
+            arithmetic.prec = 80
+            for worker in workers:
+                spent, _debit, unpriced, _ = await _fleet_worker_money(
+                    session,
+                    run,
+                    worker,
+                    scope=facts.scope,
+                    prices=prices,
+                    markup=markup,
+                    price_floor=True,
+                )
+                if unpriced:
+                    return None
+                total += spent
+        return total
+
+
 async def _reserve_fleet_worker(
     session: AsyncSession,
     *,

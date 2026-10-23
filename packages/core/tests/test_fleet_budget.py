@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -2861,3 +2862,58 @@ async def test_watch_logs_why_it_releases_a_terminal_worker(sm):
     assert any(
         log["event"] == "fleet.worker_cancel" and log["reason"] == "terminal" for log in logs
     )
+
+
+async def test_a_runs_cost_is_its_own_workers_observed_usage_before_any_debit(sm):
+    """J3's cost line: read fresh from this run's rows, priced usage counts at once."""
+    from daimon.core.channel_budget import read_fleet_run_cost
+
+    parent, run = await setup(sm)
+    worker = await add(sm, parent, budget="2")
+    assert (await reserve(sm, parent, worker)).admitted
+    assert await read_fleet_run_cost(
+        sm, parent=parent, prices=tariffs(parent), markup=Decimal(1)
+    ) == Decimal(0)
+    await usage(sm, parent, run, worker, inputs=600_000, outputs=0)
+    cost = await read_fleet_run_cost(sm, parent=parent, prices=tariffs(parent), markup=Decimal(1))
+    assert cost == Decimal("1.2"), "the measured usage, not the stored run figure"
+    # Another run's spend is never this run's.
+    other_parent, other = await next_run(sm, parent, run)
+    stranger = await add(sm, other_parent, budget="2")
+    assert (await reserve(sm, other_parent, stranger)).admitted
+    await usage(sm, other_parent, other, stranger, inputs=600_000, outputs=0)
+    assert await read_fleet_run_cost(
+        sm, parent=parent, prices=tariffs(parent), markup=Decimal(1)
+    ) == Decimal("1.2")
+
+
+async def test_a_slow_or_failed_cost_read_says_not_available_never_zero(monkeypatch):
+    import asyncio
+
+    from daimon.core import channel_budget, fleet_orchestration
+    from daimon.core.fleet_orchestration import (
+        FleetOrchestrator,
+        HostFleetPorts,
+        fleet_cost_sentence,
+    )
+
+    async def stuck(*_a, **_k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(channel_budget, "read_fleet_run_cost", stuck)
+    monkeypatch.setattr(fleet_orchestration, "RUN_COST_TIMEOUT_S", 0.05)
+    ports = object.__new__(HostFleetPorts)
+    ports.sessions, ports.prices, ports.markup = None, {}, Decimal(1)
+    parent = root()
+    assert await ports.run_cost(parent, parent.fleet.run_id) is None, "bounded, then None"
+
+    class Failing:
+        async def run_cost(self, *_a):
+            raise RuntimeError("pool exhausted")
+
+    run = SimpleNamespace(id=parent.fleet.run_id, observed_usd=Decimal(0))
+    orchestrator = FleetOrchestrator(Failing())  # pyright: ignore[reportArgumentType]
+    assert await orchestrator.run_cost(parent, run) is None  # pyright: ignore[reportArgumentType]
+    assert fleet_cost_sentence(None) == "This cost isn't available yet."
+    assert fleet_cost_sentence(Decimal("0.001911")) == "This cost less than $0.01."
+    assert fleet_cost_sentence(Decimal("0.425")) == "This cost $0.43."
