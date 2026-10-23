@@ -342,13 +342,22 @@ class _FlashAccounting:
                 interaction_id=receipt.interaction_id,
             )
             status = receipt.http_status
-            if receipt.outcome == "refused" and status is not None and 400 <= status < 500:
-                # Google rejected the request itself: no interaction, nothing
-                # to bill. Release the hold instead of stranding it as unknown.
+            # A 4xx rejected the request itself; a 503 UNAVAILABLE refused the work
+            # (no interaction returned). Kept stranded, one 503 storm across the
+            # Flash fallback chain would block the account's Gemini calls for the TTL.
+            rejected = status is not None and (400 <= status < 500 or status == 503)
+            if receipt.outcome == "refused" and (rejected or not receipt.sent):
+                # Google rejected or refused the request, or it never reached Google
+                # (the connection failed): no interaction, nothing to bill. Release
+                # the hold instead of stranding it as unknown.
                 row.update(held_usd="0", actual_usd="0", released_usd=row.get("held_usd"))
 
-        await self._update(publish)
-        self._pending.set(None)
+        try:
+            await self._update(publish)
+        finally:
+            # One receipt ends the attempt even if publishing failed: a stale marker
+            # would refuse every later attempt in this context as backend_unsupported.
+            self._pending.set(None)
 
     async def settle(self, *, interaction_id: str, model: str, actual_usd: Decimal) -> bool:
         """Settle the hold of the attempt that created `interaction_id` to its measured cost.

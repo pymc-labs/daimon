@@ -37,15 +37,19 @@ class FlashAttempt:
     outcome: Literal["accepted", "refused", "unknown"]
     http_status: int | None = None
     interaction_id: str | None = None
+    # False only when the create provably never reached Google (its connection
+    # failed): nothing was sent, so its hold is freed at once.
+    sent: bool = True
 
 
 class FlashAccounting(Protocol):
     """Caller persists a hold before each dispatch, and preserves its outcome.
 
     A failed accounting operation stops the chain. Actuals arrive via scoped
-    Usage. The only free call this policy reports is a definite refusal: an
-    HTTP 4xx that rejected the request itself (`refused` with a 4xx status), so
-    no interaction exists. Anything Google may have accepted stays `unknown`.
+    Usage. Free calls are reported `refused`: an HTTP 4xx that rejected the
+    request itself, a 503 that refused the work (both with their status, no
+    interaction returned), or a create that never reached Google (`sent=False`).
+    Anything Google may have accepted stays `unknown`.
     An owner may also offer `release_unbilled(interaction_id=...)`, called when
     an interaction is read back cancelled, unbilled and with no step but its input.
     """
@@ -160,36 +164,53 @@ class FlashTransport:
             else:
                 bounded["agent_config"] = {**original, "model": name}
             try:
-                reply = await self.source.create(bounded)
+                return await self._dispatch(bounded, model, index + 1)
             except ProviderError as error:
-                refused = error.category == "overloaded" and error.native_code == "503"
-                rejected = definite_rejection(error)
-                await self.accounting.after_attempt(
-                    receipt=FlashAttempt(
-                        model=model,
-                        attempt=index + 1,
-                        outcome="refused" if refused or rejected is not None else "unknown",
-                        http_status=503 if refused else rejected,
-                    )
-                )
                 # Only a 503 moves down the chain; a rejected request is the answer.
-                if not refused or index + 1 == len(models):
+                if error.category != "overloaded" or error.native_code != "503":
                     raise
-                continue
+                if index + 1 == len(models):
+                    raise
+        raise ProviderError("upstream", retryable=False, native_code="flash_chain_exhausted")
+
+    async def _dispatch(
+        self, request: Mapping[str, JsonValue], model: ModelRef, attempt: int
+    ) -> Object:
+        """One create against its reserved hold, always followed by exactly one receipt.
+
+        However the create ends, the receipt is published: a timeout, a cancel or a
+        malformed reply after the send stays `unknown` (Google may have accepted it),
+        so the hold is never left without an outcome and the next attempt in this
+        context is never refused for a missing receipt.
+        """
+        receipt = FlashAttempt(model=model, attempt=attempt, outcome="unknown")
+        try:
+            reply = await self.source.create(request)
             # No fallback on malformed/lost acceptance or persistence failure.
             interaction = string(reply["id"])
             string(reply["status"])
             self._models[interaction] = model
-            await self.accounting.after_attempt(
-                receipt=FlashAttempt(
-                    model=model,
-                    attempt=index + 1,
-                    outcome="accepted",
-                    interaction_id=interaction,
-                )
+            receipt = FlashAttempt(
+                model=model, attempt=attempt, outcome="accepted", interaction_id=interaction
             )
             return reply
-        raise ProviderError("upstream", retryable=False, native_code="flash_chain_exhausted")
+        except ProviderError as error:
+            refused = error.category == "overloaded" and error.native_code == "503"
+            rejected = definite_rejection(error)
+            unsent = error.category == "transient_network" and error.native_code == "connect_failed"
+            receipt = FlashAttempt(
+                model=model,
+                attempt=attempt,
+                outcome="refused" if refused or rejected is not None or unsent else "unknown",
+                http_status=503 if refused else rejected,
+                sent=not unsent,
+            )
+            raise
+        finally:
+            # Awaited in this task, never shielded: the owner's per-attempt marker is
+            # context-local, and a shielded task would clear only its own copy. A
+            # create cancelled once still completes this await.
+            await self.accounting.after_attempt(receipt=receipt)
 
     def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
         digests = getattr(self.source, "mount_echo_digests", None)

@@ -427,6 +427,18 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
     return ("quota_zero" if zero else "quota_exhausted"), model
 
 
+def connect_failure(error: BaseException) -> bool:
+    """The request never left: the connection itself failed (in `error` or its causes)."""
+    seen: BaseException | None = error
+    for _ in range(8):
+        if seen is None:
+            return False
+        if isinstance(seen, httpx.ConnectError | httpx.ConnectTimeout):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 def normalize_error(error: Exception) -> ProviderError:
     status = (
         error.status_code
@@ -444,7 +456,13 @@ def normalize_error(error: Exception) -> ProviderError:
         503: "overloaded",
     }
     if isinstance(error, APIConnectionError | httpx.HTTPError):
-        return ProviderError("transient_network", retryable=True)
+        # A connection that never opened sent nothing: say so, so a held attempt
+        # can be freed. Any later network failure may follow an accepted request.
+        return ProviderError(
+            "transient_network",
+            retryable=True,
+            native_code="connect_failed" if connect_failure(error) else None,
+        )
     # The HTTP status alone is safe to log and lets an unmapped status be told apart.
     http = None if status is None else f"http_{status}"
     if status is not None and status >= 500 and status != 503 and high_demand(error):
