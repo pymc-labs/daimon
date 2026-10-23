@@ -14,6 +14,17 @@ _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _ROOT / "scripts/ci/iap-ssh-key.sh"
 _WORKFLOW = _ROOT / ".github/workflows/deploy.yml"
 
+#: deploy.yml appends this to every step after its freshness check
+#: (tests/test_deploy_superseded.py proves it); a step's own condition is the rest.
+_FRESHNESS = (
+    " && steps.fresh.outputs.superseded != 'true' && steps.fresh_again.outputs.superseded != 'true'"
+)
+
+
+def without_freshness(condition: str) -> str:
+    own = condition.removesuffix(_FRESHNESS)
+    return own[1:-1] if own != condition and own.startswith("(") and own.endswith(")") else own
+
 
 def _fake_tools(tmp_path: Path, *, mode: str = "success") -> dict[str, str]:
     bindir = tmp_path / "bin"
@@ -193,11 +204,13 @@ def test_staging_prebuilt_join_precedes_both_vm_refreshes() -> None:
     join = steps[names.index("Wait for staging IAP SSH key registration")]
     serial = steps[names.index("Register the IAP SSH key")]
     assert (
-        start["if"] == "inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'"
+        without_freshness(start["if"])
+        == "inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'"
     )
     assert join["if"] == start["if"]
     assert (
-        serial["if"] == "inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true'"
+        without_freshness(serial["if"])
+        == "inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true'"
     )
     assert names.index("Wait for staging IAP SSH key registration") < names.index(
         "Start notebook-host VM refresh (in the background)"
