@@ -1105,6 +1105,10 @@ BUDGET_LOCK_CONTENDED_LIMIT_S = 60.0
 #: them decide from the lock-free snapshot, so the watch no longer holds the tenant fleet
 #: lock four times a second per run while every admission in the tenant waits on it.
 BUDGET_LOCKED_REFRESH_S = 2.0
+#: How long the watch queues for the tenant fleet lock. Long enough to get its turn
+#: behind admissions' short holds, short enough never to park a pooled connection for
+#: long (it held one for up to 1.5 s per poll before, and starved the workers').
+BUDGET_LOCK_WAIT_MS = 150
 #: The least time one budget read may take before it counts as slow. A full producer
 #: read under a fleet spawn burst can take seconds without the usage being unknown.
 BUDGET_READ_TIMEOUT_MIN_S = 5.0
@@ -1256,8 +1260,6 @@ async def watch_fleet_budget(
     holder_key: tuple[object, object] | None = None
     holder_since: float | None = None
     lock_key = f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"
-    # Wait in line for the tenant lock, but leave room inside the read timeout.
-    lock_wait_ms = max(1, int(min(1.5, timeout * 0.75) * 1000))
     last_locked: float | None = None
     # When a budget read last succeeded (the watch's start counts): failing closed needs
     # BUDGET_READ_FAILURE_WINDOW_S without one, not only a few slow polls in a row.
@@ -1274,15 +1276,16 @@ async def watch_fleet_budget(
             try:
                 if last_locked is not None and started - last_locked < locked_refresh_s:
                     raise _BudgetSnapshotDue
-                # The read gets its whole timeout after the lock wait, so a lock granted
-                # late in the wait is not then counted as a slow read.
-                async with asyncio.timeout(timeout + lock_wait_ms / 1000):
+                async with asyncio.timeout(timeout):
                     async with sessionmaker.begin() as session:
-                        # Admissions take the tenant fleet lock repeatedly during dispatch; a held
-                        # lock past the short wait below is busy, not unavailable usage.
-                        # Queue fairly behind writers (try-lock starved behind the
-                        # admissions' repeated short holds), but only briefly.
-                        await session.execute(text(f"SET LOCAL lock_timeout = '{lock_wait_ms}ms'"))
+                        # Wait for the tenant fleet lock only briefly. Queueing at all keeps
+                        # the watch from being starved by admissions' back-to-back short holds
+                        # (staging r21); a long wait held this pooled connection for the whole
+                        # wait, every poll, and starved the workers' own steps of connections
+                        # (smoke-5/6 timeouts). Busy past it: decide from the snapshot below.
+                        await session.execute(
+                            text(f"SET LOCAL lock_timeout = '{BUDGET_LOCK_WAIT_MS}ms'")
+                        )
                         try:
                             # A savepoint keeps the transaction usable to name the holder.
                             async with session.begin_nested():

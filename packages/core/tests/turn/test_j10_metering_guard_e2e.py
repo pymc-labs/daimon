@@ -62,9 +62,15 @@ class _Session:
     def __init__(self, lock_busy: bool) -> None:
         self._lock_busy = lock_busy
 
-    async def execute(self, statement: object, params: object = None) -> None:
-        if self._lock_busy and "pg_advisory_xact_lock" in str(statement):
-            raise DBAPIError(str(statement), params, _LockTimeout())
+    async def execute(self, statement: object, params: object = None) -> SimpleNamespace | None:
+        sql = str(statement)
+        if "pg_try_advisory_xact_lock" in sql:
+            # The try-lock answers at once: someone else holds it, or it's ours.
+            return SimpleNamespace(scalar_one=lambda: not self._lock_busy)
+        if self._lock_busy and "pg_advisory_xact_lock" in sql:
+            # A waiting lock attempt ends in Postgres's lock timeout.
+            raise DBAPIError(sql, params, _LockTimeout())
+        return None
 
     def begin_nested(self) -> contextlib.AbstractAsyncContextManager[None]:
         return contextlib.nullcontext()  # type: ignore[return-value]

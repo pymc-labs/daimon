@@ -149,12 +149,19 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
     """
     from sqlalchemy import text as real_text
 
-    watch_lock = "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"
+    # Either way the watch asks for the tenant lock: waiting, or (since the OWNER 3
+    # follow-up) trying without waiting.
+    watch_locks = {
+        "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))",
+        "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))",
+    }
     held, release = asyncio.Event(), asyncio.Event()
 
     def text(sql: str, *args, **kwargs):
-        if sql == watch_lock:
-            sql = "SELECT pg_advisory_xact_lock(hashtextextended(:key || '|watch-busy', 0))"
+        if sql in watch_locks:
+            sql = sql.replace(
+                "hashtextextended(:key, 0)", "hashtextextended(:key || '|watch-busy', 0)"
+            )
         return real_text(sql, *args, **kwargs)
 
     holders = itertools.count(10_000)
@@ -198,18 +205,11 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
 @pytest.mark.parametrize(
     "lock",
     [
-        # Load + timeouts: green on main.
+        # Load + timeouts.
         "free",
-        # Smoke-5's metering kill under load: red on main. On the OWNER 3 fix the kill is
-        # gone, but a watch lock held for the whole run still slows the worker turn after
-        # bind past this leg's budget: ROOT item 3, owned by nc-fleet, flips it green.
-        pytest.param(
-            "busy",
-            marks=pytest.mark.xfail(
-                strict=False,
-                reason="the watch parks a pooled connection on a busy lock; follow-up: watch try-lock (nc-click), ROOT item 3; flaky until try-lock",
-            ),
-        ),
+        # Smoke-5's metering kill under load, and the watch parking a pooled connection
+        # on a held lock (ROOT item 3): red on main, green with the short lock wait.
+        "busy",
     ],
 )
 async def test_three_fleets_of_three_finish_well_under_their_deadline(
