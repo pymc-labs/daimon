@@ -784,6 +784,8 @@ async def advance_operation(
     fence: Lease | None,
     resource: ResourceRef | None = None,
     result: Mapping[str, JsonValue] | None = None,
+    expected_status: OperationStatus | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> OperationRecord:
     record = await _owned(session, scope, key)
     await _check_fence(session, record.slot, fence, clock)
@@ -792,7 +794,16 @@ async def advance_operation(
             **result,
             **{name: record.result[name] for name in ("root_controls", "root_finance")},
         }
-    advanced = operations.advance(record, status, now=now, resource=resource, result=result)
+    # Under the row lock `_owned` took, so the expected-state check is atomic.
+    advanced = operations.advance(
+        record,
+        status,
+        now=now,
+        resource=resource,
+        result=result,
+        expected_status=expected_status,
+        expected_updated_at=expected_updated_at,
+    )
     await _save_operation(session, scope, advanced)
     return OperationRecord.model_validate(_json(advanced))
 
@@ -1166,6 +1177,8 @@ class PostgresStateStore:
         fence: Lease | None,
         resource: ResourceRef | None = None,
         result: Mapping[str, JsonValue] | None = None,
+        expected_status: OperationStatus | None = None,
+        expected_updated_at: datetime | None = None,
     ) -> OperationRecord:
         async with self._tx() as session:
             return await advance_operation(
@@ -1178,6 +1191,8 @@ class PostgresStateStore:
                 fence=fence,
                 resource=resource,
                 result=result,
+                expected_status=expected_status,
+                expected_updated_at=expected_updated_at,
             )
 
     async def acquire_lease(

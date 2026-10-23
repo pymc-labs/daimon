@@ -254,6 +254,9 @@ class ProviderPreparationRequest:
     before_native: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
+    # The tenant's hosted OpenAI environment, created or reused for this turn by
+    # `openai_environment.tenant_environment`; the code-default GPT row uses it.
+    openai_environment_id: str | None = field(default=None, kw_only=True, compare=False, repr=False)
 
     async def capture_root(
         self, parent: WorkerPermissions, *, deadline: dt.datetime | None = None

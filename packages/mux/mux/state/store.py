@@ -211,8 +211,11 @@ class StateStore(Protocol):
         fence: Lease | None,
         resource: ResourceRef | None = None,
         result: Mapping[str, JsonValue] | None = None,
+        expected_status: OperationStatus | None = None,
+        expected_updated_at: datetime | None = None,
     ) -> OperationRecord:
-        """Record an observed status along `operations.TRANSITIONS`."""
+        """Record an observed status along `operations.TRANSITIONS`; with an
+        expected status/time, only if the operation is still as read."""
         ...
 
     # Slot leases.

@@ -261,13 +261,23 @@ class MemoryStateStore:
         fence: Lease | None,
         resource: ResourceRef | None = None,
         result: Mapping[str, JsonValue] | None = None,
+        expected_status: OperationStatus | None = None,
+        expected_updated_at: datetime | None = None,
     ) -> OperationRecord:
         async with self.data.lock:
             staged = self.data.snapshot()
             record = self._owned(staged, scope, key)
             self._fenced(staged, record.slot, fence, now)
             advanced = _detach(
-                operations.advance(record, status, now=now, resource=resource, result=result)
+                operations.advance(
+                    record,
+                    status,
+                    now=now,
+                    resource=resource,
+                    result=result,
+                    expected_status=expected_status,
+                    expected_updated_at=expected_updated_at,
+                )
             )
             staged.operations[(*operations.operation_scope(scope), key)] = advanced
             self._commit("advance_operation", staged)
