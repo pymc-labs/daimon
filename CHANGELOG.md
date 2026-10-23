@@ -75,8 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent keep a short checklist of a longer task's steps on the card: turn them on
   with `DAIMON_PROGRESS_PLANS__MODE` or per workspace, channel or thread with
   `set_progress_plans` (`get_progress_plans` reports why), under thread
-  participation's cascade and permissions, Slack included. The default agent's
-  prompt changes, so existing sessions restart once after the upgrade.
+  participation's cascade and permissions, Slack included. The card reads the
+  latest updates first, then the plan under a Plan header, then the tool lines
+  under Details, with plan steps drawn in code like the tool lines. Done and
+  running items show ☑️ and ⏳, which stay visible on a dark theme. The default
+  agent's prompt changes, so existing sessions restart once after the upgrade.
 
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 

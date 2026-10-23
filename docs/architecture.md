@@ -1078,8 +1078,9 @@ every one set apart by a blank line (a run of messages before a tool call is
 one candidate for a sealed answer, joined the same way, so Discord compares
 like with like when it drops a repeat). `daimon.core.turn.status_log` holds the
 switch. Either way the status card on Discord, Slack and Teams shows the last
-three messages as a small log under the tool lines, oldest first, each cut to
-one line of 120 characters. On Slack the log's section is also held under
+three messages as a small log right under the headline, oldest first, each cut
+to one line of 120 characters. The plan and the tool lines follow, in that
+order (`status_lines.CARD_SECTIONS`). On Slack the log's section is also held under
 Slack's 3,000 character limit after escaping. For a non-Anthropic provider,
 each new message item starts a new entry and its previews and snapshots revise
 that entry.
@@ -1100,10 +1101,13 @@ so the tool list and the system prompt stay the same whether the switch is on
 or off. Before a chat turn `run_prepared_turn` resolves the cascade once; when
 it resolves on, a short `<progress_plans>` block goes in front of the user
 message and the turn's `TurnObservation` is marked, so the card draws the
-latest `update_plan` steps as a checklist above the tool lines in the card's
-own icons (✔️ done, 🖋️ in progress, a pending step plain text set in line;
-finished steps at the top fold into one line, at most six lines) and leaves
-the call out of the tool lines. Off, nothing is added and the call is an
+latest `update_plan` steps as a checklist under a Plan header, between the
+latest messages and the tool lines' Details, in the card's own icons (☑️ done,
+⏳ in progress, a pending step set in line by figure spaces; finished steps at
+the top fold into one line, at most six lines), and leaves the call out of the
+tool lines. Like the tool lines, each step is drawn in code (a Discord embed
+field, a Slack context block, a Teams monospace block), so the icons of both
+look the same. Off, nothing is added and the call is an
 ordinary tool line.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
