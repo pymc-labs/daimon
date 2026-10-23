@@ -218,7 +218,7 @@ async def test_deny_set_while_card_waits_refuses_approved_call() -> None:
         confirm=confirm,
     )
     result = await decide(_call())
-    assert not result.allow and "denies remote/append_note" in (result.deny_message or "")
+    assert not result.allow and "blocks remote/append_note" in (result.deny_message or "")
     assert reads == 2
 
 
@@ -750,7 +750,7 @@ async def test_a_deny_rule_on_a_proxied_daimon_tool_refuses_without_a_card(
     ):
         result = await decide(_proxy("hubspot_update_objects"))
         assert not result.allow
-        assert "denies daimon-mcp/hubspot_update_objects" in (result.deny_message or "")
+        assert "blocks daimon-mcp/hubspot_update_objects" in (result.deny_message or "")
     assert prompts == []
 
 
@@ -774,7 +774,7 @@ async def test_a_deny_set_while_a_daimon_card_waits_refuses_the_approved_call(
     )
     result = await decide(_proxy("hubspot_update_objects"))
     assert not result.allow
-    assert "denies daimon-mcp/hubspot_update_objects" in (result.deny_message or "")
+    assert "blocks daimon-mcp/hubspot_update_objects" in (result.deny_message or "")
 
 
 async def test_an_unattended_ask_rule_on_a_daimon_tool_is_refused(
@@ -906,7 +906,7 @@ async def test_a_wildcard_deny_refuses_every_proxied_daimon_call_in_the_driver(
         for inner in ("get_session", "hubspot_update_objects"):
             result = await decide(_proxy(inner))
             assert not result.allow
-            assert f"denies daimon-mcp/{inner}" in (result.deny_message or "")
+            assert f"blocks daimon-mcp/{inner}" in (result.deny_message or "")
 
 
 async def test_a_wildcard_row_does_nothing_for_other_servers_or_without_the_daimon_endpoint(
@@ -1174,7 +1174,7 @@ async def test_a_channel_rule_on_a_publish_tool_cards_everywhere_and_denies_in_i
         )
 
     refused = await decider("home")(publish)
-    assert not refused.allow and "denies daimon-mcp/publish_report" in (refused.deny_message or "")
+    assert not refused.allow and "blocks daimon-mcp/publish_report" in (refused.deny_message or "")
     assert prompts == []
     elsewhere = await decider("elsewhere")(publish)
     assert elsewhere.allow and len(prompts) == 1, "no rule here, but the publish card still shows"
