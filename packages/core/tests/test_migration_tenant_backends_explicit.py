@@ -24,8 +24,8 @@ def migration() -> ModuleType:
     return module
 
 
-def test_the_migration_follows_the_mcp_token_surface() -> None:
-    assert migration().down_revision == "0120_mcp_token_surface"
+def test_the_migration_follows_the_thread_provider_release() -> None:
+    assert migration().down_revision == "0122_thread_provider_release"
 
 
 async def _row(session: AsyncSession, tenant_id: uuid.UUID, backends: str) -> None:
