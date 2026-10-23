@@ -197,31 +197,55 @@ async def test_a_click_on_an_old_copy_never_redraws_it_as_the_live_card(monkeypa
 
 
 class _Core:
-    """Stand-ins for the core poller calls, recording what the poller asked for."""
+    """Stand-ins for the core poller calls, recording what the poller asked for.
 
-    def __init__(self, monkeypatch, cards, *, claimed=True, expired=None):
+    `cards` is what each `login_cards` call returns, in order (the last repeats).
+    """
+
+    def __init__(self, monkeypatch, *cards_per_call, claimed=True, expired=None):
         from daimon.core import fleet_login_decision
         from daimon.core.stores import fleet
 
         self.settled: list[UUID] = []
         self.expire = AsyncMock(return_value=expired)
         self.record = AsyncMock(return_value=claimed)
+        calls = list(cards_per_call)
+
+        async def login_cards(_sm, *, platform):
+            assert platform == "discord"
+            return calls.pop(0) if len(calls) > 1 else calls[0]
 
         async def settle(_sm, *, tenant_id, run_id):
             self.settled.append(run_id)
             return True
 
-        monkeypatch.setattr(fleet_login_decision, "login_cards", AsyncMock(return_value=cards))
+        monkeypatch.setattr(fleet_login_decision, "login_cards", login_cards)
         monkeypatch.setattr(fleet_login_decision, "expire_question", self.expire)
         monkeypatch.setattr(fleet_login_decision, "settle_login_card", settle)
         monkeypatch.setattr(fleet, "record_login_card", self.record)
 
 
-async def _poll(post=None, fetch=None, now=NOW):
-    post = post or AsyncMock(return_value=SimpleNamespace(id=500, delete=AsyncMock()))
-    fetch = fetch or AsyncMock(return_value=MagicMock(edit=AsyncMock()))
-    await poll_login_cards_once(object(), post=post, fetch=fetch, now=lambda: now)  # type: ignore[arg-type]
+def _message(message_id: int = 500):
+    return SimpleNamespace(id=message_id, delete=AsyncMock(), edit=AsyncMock())
+
+
+async def _poll(post=None, fetch=None, find=None, now=NOW, state=None):
+    post = post or AsyncMock(return_value=_message())
+    fetch = fetch or AsyncMock(return_value=_message())
+    find = find or AsyncMock(return_value=None)
+    await poll_login_cards_once(
+        object(),  # type: ignore[arg-type]
+        post=post,
+        fetch=fetch,
+        find=find,
+        state=state,
+        now=lambda: now,
+    )
     return post, fetch
+
+
+def _http(status: int) -> discord.HTTPException:
+    return discord.HTTPException(MagicMock(status=status, reason="x"), "x")
 
 
 async def test_the_poller_posts_an_open_card_once_and_claims_it(monkeypatch):
@@ -233,10 +257,44 @@ async def test_the_poller_posts_an_open_card_once_and_claims_it(monkeypatch):
     assert core.settled == []
 
 
-async def test_a_poster_that_loses_the_claim_deletes_its_copy(monkeypatch):
-    _Core(monkeypatch, (card(),), claimed=False)
+async def test_a_copy_already_in_the_thread_is_adopted_not_posted_again(monkeypatch):
+    core = _Core(monkeypatch, (card(),))
+    post, _ = await _poll(find=AsyncMock(return_value=_message(777)))
+    post.assert_not_awaited()
+    assert core.record.await_args.kwargs["message_id"] == "777"
+
+
+async def test_a_poster_that_loses_the_claim_to_another_card_deletes_its_copy(monkeypatch):
+    _Core(monkeypatch, (card(),), (card(card_message_id="999"),), claimed=False)
     post, _ = await _poll()
     post.return_value.delete.assert_awaited_once()
+
+
+async def test_a_card_decided_between_post_and_claim_becomes_the_final_card(monkeypatch):
+    decided = card(
+        state="decided",
+        rows=(LoginCardRow(0, "GITHUB_TOKEN", "skip"), LoginCardRow(1, "Linear", "skip")),
+    )
+    core = _Core(monkeypatch, (card(),), (decided,), claimed=False)
+    post, _ = await _poll()
+    mine = post.return_value
+    mine.delete.assert_not_awaited()
+    view = mine.edit.await_args.kwargs["view"]
+    assert _buttons(view) == [] and "Workers run without: GITHUB_TOKEN, Linear" in _texts(view)
+    assert core.settled == [RUN]
+
+
+async def test_a_failed_delete_is_retried_on_the_next_poll(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import LoginPollState
+
+    _Core(monkeypatch, (card(),), (card(card_message_id="999"),), (), claimed=False)
+    state = LoginPollState()
+    copy = _message()
+    copy.delete.side_effect = [_http(503), None]
+    await _poll(post=AsyncMock(return_value=copy), state=state)
+    assert len(state.orphans) == 1
+    await _poll(state=state)
+    assert copy.delete.await_count == 2 and state.orphans == []
 
 
 async def test_a_posted_open_card_is_left_alone_until_its_deadline(monkeypatch):
@@ -266,17 +324,119 @@ async def test_after_a_restart_an_unsettled_final_card_is_redrawn_and_settled(mo
     assert core.settled == [RUN]
 
 
-async def test_a_retryable_discord_error_retries_and_a_gone_thread_stops_a_final_card(
-    monkeypatch,
-):
-    def http(status: int) -> discord.HTTPException:
-        return discord.HTTPException(MagicMock(status=status, reason="x"), "x")
+async def test_a_final_card_retries_a_5xx_a_few_times_then_gives_up(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import (
+        MAX_FINAL_ATTEMPTS,
+        LoginPollState,
+    )
 
     core = _Core(monkeypatch, (card(card_message_id="500", state="decided"),))
-    await _poll(fetch=AsyncMock(side_effect=http(503)))
+    state = LoginPollState()
+    for _ in range(MAX_FINAL_ATTEMPTS - 1):
+        await _poll(fetch=AsyncMock(side_effect=_http(503)), state=state)
     assert core.settled == []
-    await _poll(fetch=AsyncMock(side_effect=http(403)))
+    await _poll(fetch=AsyncMock(side_effect=_http(503)), state=state)
     assert core.settled == [RUN]
+
+
+async def test_a_gone_thread_stops_a_final_card_at_once(monkeypatch):
+    core = _Core(monkeypatch, (card(card_message_id="500", state="decided"),))
+    await _poll(fetch=AsyncMock(side_effect=_http(403)))
+    assert core.settled == [RUN]
+
+
+async def test_one_bad_card_never_stops_the_others(monkeypatch):
+    other_run = UUID(int=43)
+    bad, good = card(), card(run_id=other_run)
+    core = _Core(monkeypatch, (bad, good))
+
+    async def post(posting):
+        if posting.run_id == RUN:
+            raise ValueError("this card can't be drawn")
+        return _message(501)
+
+    await _poll(post=post)
+    assert core.record.await_args.kwargs["run_id"] == other_run
+    assert core.settled == []  # The open bad card is retried until it expires.
+
+
+@pytest.mark.parametrize("logins", [7, 20])
+def test_a_card_with_many_logins_fits_discords_component_cap(logins):
+    from daimon.adapters.discord.posted_controls.fleet_login import MAX_ROWS_SHOWN
+
+    rows = tuple(LoginCardRow(i, f"KEY_{i}_" + "x" * 120, None) for i in range(logins))
+    view = build_login_view(card(rows=rows))
+    assert sum(1 for _ in view.walk_children()) < 40
+    labels = [b.label for b in _buttons(view)]
+    assert labels.count("Share") == MAX_ROWS_SHOWN and labels[-1] == "Skip all"
+    assert f"{logins - MAX_ROWS_SHOWN} more logins after these." in _texts(view)
+    # Answering the shown ones brings the next ones up.
+    answered = tuple(
+        replace(row, choice="skip") if row.index < MAX_ROWS_SHOWN else row for row in rows
+    )
+    later = build_login_view(card(rows=answered))
+    assert login_custom_id(RUN, MAX_ROWS_SHOWN, "share", DIGEST) in [
+        b.custom_id for b in _buttons(later)
+    ]
+    assert sum(1 for _ in later.walk_children()) < 40
+
+
+async def test_a_core_error_after_the_defer_replies_with_a_plain_error(monkeypatch):
+    from daimon.adapters.discord.posted_controls.fleet_login import CLICK_FAILED_TEXT
+    from daimon.core import fleet_login_decision
+
+    monkeypatch.setattr(
+        fleet_login_decision, "answer_login_click", AsyncMock(side_effect=RuntimeError("db"))
+    )
+    interaction = _interaction()
+    await LoginButton(
+        discord.ui.Button(custom_id=login_custom_id(RUN, 0, "share", DIGEST))
+    ).callback(interaction)
+    interaction.followup.send.assert_awaited_once_with(CLICK_FAILED_TEXT, ephemeral=True)
+    interaction.message.edit.assert_not_awaited()
+
+
+class _Thread(discord.Thread):
+    """A real `discord.Thread` subclass (for the isinstance guard) with only a guild."""
+
+    def __init__(self, guild_id: int) -> None:
+        self._fake_guild = SimpleNamespace(id=guild_id)
+
+    @property
+    def guild(self):  # type: ignore[override]
+        return self._fake_guild
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("ok", True),
+        ("no_thread", False),
+        ("not_a_thread", False),
+        ("other_server", False),
+        ("may_not_post", False),
+        ("gone", False),
+    ],
+)
+async def test_the_bot_posts_a_login_card_only_in_the_runs_own_thread(case, expected):
+    from daimon.adapters.discord.bot import DaimonBot
+
+    thread = _Thread(61 if case == "other_server" else 60)
+    channel: object = object() if case == "not_a_thread" else thread
+
+    async def channel_by_id(_id: int) -> object:
+        if case == "gone":
+            raise discord.NotFound(MagicMock(status=404, reason="x"), "x")
+        return channel
+
+    bot = SimpleNamespace(
+        _channel_by_id=channel_by_id,
+        _may_post_in=AsyncMock(return_value=case != "may_not_post"),
+    )
+    found = await DaimonBot._login_card_thread(  # type: ignore[arg-type]
+        bot, card(thread_id=None if case == "no_thread" else "71")
+    )
+    assert (found is thread) is expected
 
 
 def test_the_poller_is_fast_enough_for_the_spawn_wait():

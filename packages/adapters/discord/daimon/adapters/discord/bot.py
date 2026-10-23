@@ -1209,17 +1209,21 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
-            if self.runtime.turn_deps.fleet_enabled:
+            from daimon.core.turn import runtime_manifest
+
+            if self.runtime.turn_deps.fleet_enabled and runtime_manifest.LOGIN_SHARING_LIVE:
                 from daimon.adapters.discord.posted_controls.fleet_login import (
                     run_login_card_poller,
                 )
 
-                # A fleet's first spawn waits up to 60 s for its login question.
+                # A fleet's first spawn waits up to 60 s for its login question. Off,
+                # no question is ever opened, so nothing polls for one.
                 self._spawn(
                     run_login_card_poller(
                         self.runtime.sessionmaker,
                         post=self._post_login_card,
                         fetch=self._fetch_login_card,
+                        find=self._find_login_card,
                         should_stop=lambda: self.draining or self.is_closed(),
                     )
                 )
@@ -3795,17 +3799,22 @@ class DaimonBot(commands.Bot):
     async def _login_card_thread(self, card: LoginCard) -> discord.Thread | None:
         """The run's own thread, in the run's own server, or None."""
         if card.thread_id is None or not card.thread_id.isdigit():
+            log.warning("fleet.login_card_no_thread", run_id=str(card.run_id))
             return None
         try:
             channel = await self._channel_by_id(int(card.thread_id))
         except (discord.NotFound, discord.Forbidden):
+            log.warning("fleet.login_card_thread_gone", run_id=str(card.run_id))
             return None
         if (
             not isinstance(channel, discord.Thread)
             or derive_tenant_uuid(platform="discord", workspace_id=str(channel.guild.id))
             != card.tenant_id
-            or not await self._may_post_in(tenant_id=card.tenant_id, channel=channel)
         ):
+            log.warning("fleet.login_card_foreign_thread", run_id=str(card.run_id))
+            return None
+        if not await self._may_post_in(tenant_id=card.tenant_id, channel=channel):
+            log.warning("fleet.login_card_post_refused", run_id=str(card.run_id))
             return None
         return channel
 
@@ -3818,6 +3827,18 @@ class DaimonBot(commands.Bot):
         return await thread.send(
             view=build_login_view(card), allowed_mentions=discord.AllowedMentions.none()
         )
+
+    async def _find_login_card(self, card: LoginCard) -> discord.Message | None:
+        """This run's card if a post already landed in its thread (its claim did not)."""
+        from daimon.adapters.discord.posted_controls.fleet_login import is_login_card
+
+        thread = await self._login_card_thread(card)
+        if thread is None or self.user is None:
+            return None
+        async for message in thread.history(limit=50):
+            if message.author.id == self.user.id and is_login_card(message, card.run_id):
+                return message
+        return None
 
     async def _fetch_login_card(self, card: LoginCard) -> discord.Message | None:
         thread = await self._login_card_thread(card)

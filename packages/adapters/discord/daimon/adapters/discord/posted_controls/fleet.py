@@ -324,7 +324,7 @@ def fleet_result_seen(state: TurnState) -> bool:
     return False
 
 
-def _custom_ids(components: Sequence[object]) -> Iterator[str]:
+def custom_ids_of(components: Sequence[object]) -> Iterator[str]:
     for component in components:
         custom_id = getattr(component, "custom_id", None)
         if isinstance(custom_id, str):
@@ -332,10 +332,10 @@ def _custom_ids(components: Sequence[object]) -> Iterator[str]:
         for name in ("children", "components"):
             nested = getattr(component, name, None)
             if isinstance(nested, (list, tuple)):
-                yield from _custom_ids(cast("Sequence[object]", nested))
+                yield from custom_ids_of(cast("Sequence[object]", nested))
         accessory = getattr(component, "accessory", None)
         if accessory is not None:
-            yield from _custom_ids((accessory,))
+            yield from custom_ids_of((accessory,))
 
 
 def history_finder(thread: discord.Thread) -> FindPosted:
@@ -346,7 +346,7 @@ def history_finder(thread: discord.Thread) -> FindPosted:
         try:
             async for message in thread.history(limit=_CARD_HISTORY_LIMIT):
                 if (message.webhook_id is not None or message.author.bot) and any(
-                    custom_id.startswith(prefix) for custom_id in _custom_ids(message.components)
+                    custom_id.startswith(prefix) for custom_id in custom_ids_of(message.components)
                 ):
                     return message
         except Exception:
