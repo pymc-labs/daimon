@@ -41,6 +41,7 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
 )
 from daimon.core.posted_controls.lifecycle import (
+    STILL_WAITING_MESSAGE,
     check_confirmation_admin,
     edit_card_within,
     queue_card_edit,
@@ -504,7 +505,19 @@ def discord_confirmation_hook(
             view.retired = True
             await _retire(message, prompt, state)
 
-        result = await wait_local_confirmation(prompt, answer, stop=view.stop, retire=retire)
+        async def remind() -> None:
+            # Once, after a while: the requester is pinged in the card's own thread.
+            await message.reply(
+                f"<@{prompt.requester_platform_user_id}> {STILL_WAITING_MESSAGE}",
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False, replied_user=False
+                ),
+                mention_author=False,
+            )
+
+        result = await wait_local_confirmation(
+            prompt, answer, stop=view.stop, retire=retire, remind=remind
+        )
         if result == "approved":
 
             async def retire_unsent() -> None:

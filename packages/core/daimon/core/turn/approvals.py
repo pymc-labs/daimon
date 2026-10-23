@@ -443,6 +443,25 @@ def unattended_decider(
     return _decide
 
 
+CARD_TURN_MARGIN = timedelta(seconds=5)
+
+
+def card_timeout(policy: ToolSafetyPolicy, *, now: datetime) -> timedelta:
+    """How long a card may wait: its policy timeout, never past the running turn's end.
+
+    A card shows its expiry, so it must never promise a time the turn can't keep.
+    """
+    from daimon.core.turn.ceiling import current_turn_deadline
+
+    timeout = timedelta(seconds=policy.confirmation_timeout_s)
+    deadline = current_turn_deadline.get()
+    if deadline is None:
+        return timeout
+    # A little before the turn's end, so the card expires (and says so) before the
+    # turn's own cancellation would retire it as stopped.
+    return max(timedelta(0), min(timeout, deadline - CARD_TURN_MARGIN - now))
+
+
 def interactive_decider(
     policy: ToolSafetyPolicy,
     *,
@@ -500,8 +519,8 @@ def interactive_decider(
             prompt = prompt_for_tool_call(
                 call,
                 requester_platform_user_id=requester_platform_user_id,
-                now=now(),
-                timeout=timedelta(seconds=policy.confirmation_timeout_s),
+                now=(asked := now()),
+                timeout=card_timeout(policy, now=asked),
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})

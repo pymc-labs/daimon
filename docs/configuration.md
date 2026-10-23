@@ -1555,9 +1555,11 @@ confirms unattended.
 
 `int` · optional · default `600`
 
-How long an approval card waits for the requester's Approve or Deny, in seconds, before
-it expires and the call is refused. Production keeps the 10-minute default; staging can
-set it short (60-90) so a precheck or load test does not hold a turn for ten minutes.
+How long an approval card waits for the requester's Approve or Deny, in seconds (up to
+24 hours), before it expires and the call is refused. A card never outlives its turn: it
+shows and keeps the earlier of this and the turn's own deadline. Production keeps the
+10-minute default; staging can set it short (60-90) so a precheck or load test does not
+hold a turn for ten minutes.
 
 ## Artifacts
 
