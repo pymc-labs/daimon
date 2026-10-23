@@ -7,10 +7,10 @@ guaranteed and the credential guidance applied. It starts with no credentials
 repos that need connecting again are named in its receipt (`fork_notes`).
 Skills scoped to the source are uploaded again under the copy's own name, so
 the two never share a skill id; skills scoped to another agent, and any copy
-that fails, are left off and named. It also takes the source's provider,
-model and settings, and, made by an admin or the source's owner
-(`carry="all"`), its fleet grant and shared memory (`_carry`); a channel's
-own copy takes none of these.
+that fails, are left off and named. Given a `capture_source`, it also takes
+the source's provider, model and settings; with `carry="all"` its shared
+memory, and, for an admin, its fleet grant (`_carry`); a channel's own copy
+takes none of these.
 Its face starts rendering as soon as it exists, so its first post has it.
 Whether it may be copied is `authorize(FORK)`'s: an admin's call, and never
 a pinned agent. The chat `fork_agent` tool, the CLI and
@@ -92,8 +92,12 @@ type CopyCarryScope = Literal["all", "settings"]
 """What a copy takes past its definition, by who makes it.
 
 `"all"` (an admin's copy, or an owner's copy of their own agent) also takes
-the shared memory and the fleet grant; `"settings"` (anyone else, and any
-caller that doesn't say) takes the provider, model and settings only.
+the shared memory, and, only when the forker is an admin, the fleet grant
+and shared threads: a copied grant is a second budget under the same limits,
+so the source and the copy can together spend twice. `"settings"` (anyone
+else, and any caller that doesn't say) takes the provider, model and
+settings only. Either way the provider is carried only by a caller that
+passes a `capture_source`.
 """
 
 
@@ -480,11 +484,13 @@ async def _carry(
 ) -> CopyCarry:
     """Give the new copy what lives outside its definition. Never raises: the copy exists.
 
-    Only a copy made with `carry="all"` takes the fleet grant (spending
-    authority) and the shared memory (what the source's people told it). A
-    channel's own copy takes none of it, its provider setting included: it
-    exists to keep a channel apart, and it has no capture to re-take a switch's
-    consent with. Who owns the copy is recorded apart, by the owner rule.
+    Only a copy made with `carry="all"` takes the shared memory (what the
+    source's people told it), and only an admin's such copy the fleet grant
+    (a second budget under the same limits). The provider setting comes only
+    with a `capture_source`, so a chat fork stays as it was until chat passes
+    one. A channel's own copy takes none of it: it exists to keep a channel
+    apart, and it has no capture to re-take a switch's consent with. Who owns
+    the copy is recorded apart, by the owner rule.
 
     The provider comes last. A carried consent is pinned to everything the
     copy's capture reads, its shared memory store among them, so the store is
@@ -529,9 +535,12 @@ async def _carry(
             )
             memory_failed = True
     backend: CarriedBackend | None = None
-    if source_revision is not None and not args.channel_copy:
-        capture = args.capture_source
-        if source_revision.drop_consent is not None and capture is not None:
+    # Only a caller that can capture the copy carries its provider (the CLI today):
+    # without one a chat fork stays as it was, on the default provider, until chat
+    # can capture it and show the receipt.
+    if source_revision is not None and not args.channel_copy and args.capture_source is not None:
+        capture: CaptureSource | None = args.capture_source
+        if source_revision.drop_consent is not None:
             try:
                 # The pin reads the copy's shared store: it must exist before the capture.
                 await ensure_memory_store_and_mount(
@@ -551,6 +560,9 @@ async def _carry(
                 )
                 capture = None
         try:
+            # `copy` is the definition as created: mounting a memory store binds it
+            # in the database and leaves the agent itself unchanged, and the capture
+            # retrieves the agent afresh anyway.
             backend_agent = await load_backend_agent(
                 anthropic,
                 sessionmaker,
@@ -562,7 +574,8 @@ async def _carry(
             backend = await service.carry_to_copy(
                 source_revision,
                 backend_agent,
-                fleet_grant=full,
+                # A copied grant is a second budget under the same limits: an admin's call.
+                fleet_grant=full and args.admin,
                 shared_threads=full and args.admin,
                 account_id=None,
                 now=datetime.now(UTC),

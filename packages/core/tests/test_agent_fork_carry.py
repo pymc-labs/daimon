@@ -108,6 +108,11 @@ async def _source_setting(
         )
 
 
+async def _no_switch_capture(target: BackendAgent) -> BackendAgent:
+    """A capture for sources with no switch consent: never called for them."""
+    raise AssertionError("no consent to re-take")
+
+
 def _copy(agent: BackendAgent) -> BackendAgent:
     return agent.model_copy(update={"agent_id": uuid.uuid4(), "name": "copy"})
 
@@ -327,6 +332,7 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
         default_agent_name="daimon",
         extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: "chan"} if channel_copy else None,
         **({"carry": carry} if carry is not None else {}),
+        capture_source=_no_switch_capture,
     )
 
     assert created[0]["metadata"][MA_METADATA_KEY_COPY_OF] == "source"
@@ -625,3 +631,98 @@ async def test_a_carried_consent_that_no_longer_matches_the_copy_is_withdrawn(ow
             session, tenant_id=copy.tenant_id, agent_id=copy.agent_id
         )
     assert [r.operation for r in rows] == ["copy_withdrawn"]
+
+
+class _Allowed:
+    reason = None
+
+    def __bool__(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("admin", "capture", "provider"),
+    [(True, False, None), (False, True, "openai")],
+    ids=["no-capture-stays-default", "non-admin-gets-no-fleet"],
+)
+async def test_the_provider_needs_a_capture_and_the_fleet_an_admin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    admin: bool,
+    capture: bool,
+    provider: str | None,
+) -> None:
+    """A chat fork today (no capture) stays as on main, even of a source switched
+    without dropping anything; an owner's full copy still gets no second budget."""
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+    # A non-admin forker is hypothetical today (FORK is admin-only): let one through.
+    monkeypatch.setattr(agent_fork, "authorize", lambda *_a, **_k: _Allowed())
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+    source_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_src")
+    service = AgentBackendService(db_session_factory, enabled=True)
+    await enable(
+        service,
+        BackendAgent(
+            tenant_id=tenant.id, agent_id=source_uuid, name="source", configuration_digest="x"
+        ),
+        BackendActor(tenant.id, account.id, Subject(is_admin=True)),
+    )
+    await _source_setting(
+        db_session_factory,
+        tenant.id,
+        source_uuid,
+        backend="openai",
+        model=None,
+        grant=_grant(datetime.now(UTC) + timedelta(hours=1), epoch=1),
+    )
+    source = ma_agent(id="ag_src", name="source", tenant_id=tenant.id)
+    copy = await copy_agent(
+        _plain_client(tenant.id, source, []),
+        db_session_factory,
+        tenant_id=tenant.id,
+        source=source,
+        new_name="mine",
+        public_url=None,
+        subject=Subject(is_admin=admin),
+        default_agent_name="daimon",
+        carry="settings" if not capture else "all",
+        capture_source=_no_switch_capture if capture else None,
+    )
+    copy_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_new")
+    async with db_session_factory() as session:
+        revision = await agent_backends.current(session, tenant.id, copy_uuid)
+    if provider is None:
+        assert revision is None and copy.carry.backend is None
+        return
+    assert revision is not None and revision.backend == provider
+    assert revision.fleet_grant is None and not copy.carry.backend.fleet
+
+
+async def test_a_recheck_that_cannot_capture_withdraws_the_consent(owned) -> None:
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    copy = _copy(agent)
+    async with sessions.begin() as session:
+        written = await agent_backends.put_revision(
+            session,
+            tenant_id=copy.tenant_id,
+            agent_id=copy.agent_id,
+            agent_name=copy.name,
+            local=1,
+            backend="gemini",
+            previous_local=None,
+            preview_digest="preview",
+            digest="copy-digest",
+            drop_consent=CONSENT,
+        )
+
+    async def broken(_target: BackendAgent) -> BackendAgent:
+        raise RuntimeError("capture went away")
+
+    flaky = AgentBackendService(sessions, enabled=True, capture_source=broken)
+    assert not await flaky.recheck_copy_consent(copy, written)
+    current = await flaky.current(copy)
+    assert current is not None and (current.local, current.backend) == (2, None)
+    assert current.drop_consent is None

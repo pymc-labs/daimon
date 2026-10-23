@@ -1636,15 +1636,21 @@ class AgentBackendService:
         Its pin covers everything the capture reads, so anything the copy
         gained after `carry_to_copy` (its memory store, say) would refuse every
         turn. A stale one is replaced by a default setting (keeping the fleet
-        grant), so the copy runs on the default provider until switched.
+        grant), so the copy runs on the default provider until switched. A
+        capture that fails is treated the same: an unchecked pin is never kept.
         """
         if revision.drop_consent is None or self._capture_source is None:
             return True
         from daimon.core.turn.runtime_manifest import source_preservation_pin
 
-        captured = await self._capture_source(copy)
-        if source_preservation_pin(captured) == revision.drop_consent.source_pin:
-            return True
+        try:
+            captured = await self._capture_source(copy)
+            if source_preservation_pin(captured) == revision.drop_consent.source_pin:
+                return True
+        except Exception as error:
+            log.warning(
+                "agent_backend.copy_recheck_failed", error=type(error).__name__, exc_info=True
+            )
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=copy.tenant_id
         ) as session:

@@ -271,12 +271,14 @@ A fork also takes the source's provider setting
 the source, so it is carried only with a fresh consent from the fork's own
 capture (made after the fork's shared memory store exists, and checked again
 once written), and only when the fork drops nothing more; without a capture it
-is left behind. Today only `daimon agents fork` passes one. A provider turned
+is left behind. The provider setting is carried only by a caller that passes a
+capture; today only `daimon agents fork` does, so a chat fork stays on the
+default provider. A provider turned
 off for the tenant is never carried. Only a fork made with
-`copy_agent(carry="all")`, which the CLI passes, also takes the fleet grant,
-checked again as setting one is (`checked_fleet_grant`), and the shared memory
-(`memory_resource.copy_shared_memory`); shared threads come along only then
-and for an admin. Personal and channel memory stores are never copied. The
+`copy_agent(carry="all")`, which the CLI passes, also takes the shared memory
+(`memory_resource.copy_shared_memory`), and, when an admin forks, the fleet
+grant, checked again as setting one is (`checked_fleet_grant`): a second budget
+under the same limits. Shared threads come along only then too. Personal and channel memory stores are never copied. The
 receipt names a keyed MCP server by name and `scheme://host` only, never its
 path or query. A channel's own copy takes none of this.
 
