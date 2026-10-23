@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from daimon.core.pricing import AGENT_MODEL_PRICING, provider_prices
-from mux.contracts.ids import PROVIDERS, ModelRef
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import PROVIDERS, ModelRef, Provider
 from mux.profiles import (
     MANAGED_AGENTS,
     PROFILES,
@@ -171,3 +172,48 @@ def resolve_models(value: str) -> tuple[ModelRef, ...]:
             for model in (resolve_model(part.strip()),)
         }.values()
     )
+
+
+def _provider_words() -> dict[str, Provider]:
+    """A provider word alone ("switch to GPT") means that provider's default model.
+
+    From the model catalog: each provider's id, display name and model family
+    ("claude", "gpt", "gemini"), so no provider is written out here.
+    """
+    from daimon.core.turn.notices import provider_name
+    from mux.profiles import PROVIDER_ALIASES
+
+    words: dict[str, Provider] = dict(PROVIDER_ALIASES)
+    for entry in agent_catalog():
+        provider = entry.model.provider
+        for word in (provider, provider_name(provider), entry.model.id.split("-")[0]):
+            words[word.lower()] = provider
+    return words
+
+
+def resolve_switch_model(backend: Provider | None, model: str | None) -> str | None:
+    """A switch's model as said ("argon", "luna", "GPT") to its id; None means the default.
+
+    The tool and the card that confirms it both resolve here, so the card
+    re-previews the very model the tool previewed. Raises `ValueError` with
+    words for the person.
+    """
+    word = model.strip().lower() if model is not None else None
+    if word == "default":
+        return None
+    named = _provider_words().get(word or "")
+    if named is not None:
+        # No provider means clearing to the default provider.
+        meant = backend or DEFAULT_BACKEND
+        if named != meant:
+            from daimon.core.turn.notices import provider_name
+
+            raise ValueError(
+                f"'{model}' is {provider_name(named)}, but this switch names "
+                f"{provider_name(meant)}. Nothing changed. Say which one you want."
+            )
+        return None
+    if model is None or backend is None or model in selectable_models(backend):
+        return model
+    candidates = tuple(entry.model for entry in agent_catalog() if entry.model.provider == backend)
+    return resolve_model(model, available=candidates).id

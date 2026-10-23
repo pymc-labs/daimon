@@ -427,7 +427,9 @@ def prompt_for_tool_call(
             {
                 "agent": data.get("agent_name"),
                 "target_backend": data.get("target_backend"),
-                "model": data.get("model"),
+                # As the tool resolved it ("argon" -> its id), or the card's
+                # preview names a model no agent can select.
+                "model": _switch_model(data.get("target_backend"), data.get("model")),
                 "expected_revision": data.get("expected_revision"),
                 "preview_digest": data.get("preview_digest"),
                 "accepted_drops": data.get("accepted_drops"),
@@ -588,6 +590,19 @@ def stated_settings(
         requires={cap: required for cap in required_capabilities or ()} or None,
         thread_mode=thread_mode,
     )
+
+
+def _switch_model(backend: object, model: object) -> object:
+    """The tool call's model resolved as the tool resolves it; as sent when it can't be."""
+    from daimon.core.agent_model_names import resolve_switch_model
+    from mux.contracts.ids import PROVIDERS
+
+    if backend not in PROVIDERS or not (model is None or isinstance(model, str)):
+        return model
+    try:
+        return resolve_switch_model(backend, model)
+    except ValueError:
+        return model
 
 
 def reference_settings(reference: BackendSwitchReference) -> AgentSettings | None:

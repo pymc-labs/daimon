@@ -1347,47 +1347,11 @@ async def _provider_now(
     return (setting.backend if setting is not None else None) or DEFAULT_BACKEND
 
 
-def _provider_words() -> dict[str, Provider]:
-    """A provider word alone ("switch to GPT") means that provider's default model.
-
-    From the model catalog: each provider's id, display name and model family
-    ("claude", "gpt", "gemini"), so no provider is written out here.
-    """
-    from daimon.core.agent_model_names import agent_catalog
-    from daimon.core.turn.notices import provider_name
-    from mux.profiles import PROVIDER_ALIASES
-
-    words: dict[str, Provider] = dict(PROVIDER_ALIASES)
-    for entry in agent_catalog():
-        provider = entry.model.provider
-        for word in (provider, provider_name(provider), entry.model.id.split("-")[0]):
-            words[word.lower()] = provider
-    return words
-
-
 def _resolve_agent_model(backend: Provider | None, model: str | None) -> str | None:
-    word = model.strip().lower() if model is not None else None
-    if word == "default":
-        return None
-    named = _provider_words().get(word or "")
-    if named is not None:
-        # No provider means clearing to the default provider.
-        meant = backend or DEFAULT_BACKEND
-        if named != meant:
-            from daimon.core.turn.notices import provider_name
+    from daimon.core.agent_model_names import resolve_switch_model
 
-            raise ToolError(
-                f"'{model}' is {provider_name(named)}, but this switch names "
-                f"{provider_name(meant)}. Nothing changed. Say which one you want."
-            )
-        return None
-    if model is None or backend is None or model in selectable_models(backend):
-        return model
-    from daimon.core.agent_model_names import agent_catalog, resolve_model
-
-    candidates = tuple(entry.model for entry in agent_catalog() if entry.model.provider == backend)
     try:
-        return resolve_model(model, available=candidates).id
+        return resolve_switch_model(backend, model)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
