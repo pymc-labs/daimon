@@ -217,6 +217,28 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
 ):
     request, root, _, resolved, prices, _, wire, _, _ = worker_root
     import mux.drivers.openai as native_transport
+    from daimon.core.stores import mux_state
+    from daimon.testing.db import build_test_engine, isolated_test_schema
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    # The product's pool (pool_size 5 + max_overflow 10): 9 concurrent workers and 3
+    # watches on the shared test engine's 2 connections isn't a shape the product runs.
+    shared = request.deps.sessionmaker.kw["bind"]
+    engine = build_test_engine(
+        shared.url.render_as_string(hide_password=False),
+        isolated_test_schema(shared),
+        pool_size=5,
+        max_overflow=10,
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    request = replace(
+        request,
+        deps=replace(
+            request.deps,
+            sessionmaker=sessions,
+            state_store=mux_state.PostgresStateStore(sessions),
+        ),
+    )
 
     native = MultiWorkerNative(
         owned.wire, {owned.retained.agent.ref.id: owned.wire.agent}, wire.expected_spend_limit
@@ -302,6 +324,7 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
                 pytest.fail(f"workers still unfinished at half the run deadline: {states}")
         finally:
             await ports.close()
+            await engine.dispose()
     outcomes = sorted(
         (str(row.run_id)[:8], row.ordinal, row.status, row.error_code) for row in ended
     )
