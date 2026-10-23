@@ -1,7 +1,7 @@
 # Stripped-env report host. Runtime secrets are supplied only at startup.
 FROM mirror.gcr.io/library/python:3.12-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.9.11 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /usr/local/bin/uv
 ENV UV_LINK_MODE=copy
 WORKDIR /workspace
 

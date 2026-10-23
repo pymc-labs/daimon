@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Update the Python CA bundle to certifi 2026.10.19 and pinned Docker uv binaries to 0.13.5 for the eMudhra / emSign certificate incident. Rebuild images and recreate environments to pick up the new trust stores.
+
 - Admins can clear a channel's model-provider pin from chat: "clear this channel's pin" shows what the channel pins and clears it after the admin confirms on the card, so each agent answers there on its own provider again. Refusals and provider switches that mention a channel pin now give those words.
 
 - Configure an agent's fleet from chat: choose worker agents by name, worker and spending limits, and an expiry, then confirm the exact settings. Owners or admins can change the fleet; only admins can change the server's provider allowlist. Natural model names such as “opus 5.5” and “luna” work when configuring an agent's model. Edits preserve every omitted limit and the saved expiry; confirmation cards name removed caps. Ambiguous model-name typos ask for a choice.
