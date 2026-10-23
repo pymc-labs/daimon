@@ -1083,3 +1083,39 @@ async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_
     assert (moves in prepared.consequence) == (handed_to == "Researcher")
     if handed_to == "Researcher":
         assert "earlier messages here aren't carried over" in prepared.consequence
+
+
+async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_preview):
+    """A setup conversation stays put on an approved switch, so the card says nothing moves."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    async with sessions.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=agent.tenant_id,
+            platform="discord",
+            parent_channel_id="parent-1",
+            thread_id="thread-1",
+            responder_ma_agent_id="agent_daimon",
+            responder_name="daimon",
+            configuration_target_name="Researcher",
+            kind="setup",
+        )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        answering_agent_name="Researcher",
+        handoff_thread=("discord", "parent-1", "thread-1"),
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    assert "This conversation moves" not in prepared.consequence
+    assert "other existing threads keep their model" in prepared.consequence
