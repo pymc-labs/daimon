@@ -773,7 +773,8 @@ def backend_switch_callbacks(
                 action = "Change allowed providers"
                 details = (
                     "Allowed providers: " + (", ".join(reference.providers) or "none"),
-                    "Applies to this server. Provider keys do not enable providers automatically.",
+                    "Applies to this server. Saving makes this list the server's own choice: "
+                    "it stops following the providers this Daimon install has keys for.",
                 )
             else:
                 assert reference.agent_name is not None

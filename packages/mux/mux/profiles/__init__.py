@@ -252,6 +252,22 @@ def selectable_models(backend: Provider) -> tuple[str, ...]:
     )
 
 
+def worker_models(backend: Provider) -> tuple[str, ...]:
+    """The models a fleet worker on `backend` may run, its default first.
+
+    Worker-only models are included; channel-only models are left out.
+    """
+    declared = _BACKEND_SELECTIONS[backend]
+    default = resolve_default(declared.config).model
+    return tuple(
+        dict.fromkeys(
+            model
+            for model in (default, *(declared.allowed_models or ()))
+            if model is not None and model not in declared.channel_only_models
+        )
+    )
+
+
 def shared_threads_available(backend: Provider) -> bool:
     """Read the same admitted thread modes used by selection and runnable checks."""
     return "shared" in _BACKEND_SELECTIONS[backend].thread_modes

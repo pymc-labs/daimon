@@ -97,7 +97,7 @@ class _OwnedStream[T](AsyncIterator[T]):
 
 
 class _ConfiguredTransport:
-    def __init__(self, api_key: str, project: str) -> None:
+    def __init__(self, api_key: str, project: str | None) -> None:
         self._api_key, self._project = api_key, project
 
     def _client(self) -> AsyncOpenAI:
@@ -169,9 +169,14 @@ class _ConfiguredTransport:
         return _OwnedStream(source, client)
 
 
-def configured_transport(*, api_key: str, project: str) -> Transport:
-    """No I/O at construction; each request/stream owns its SDK client lifetime."""
+def configured_transport(*, api_key: str, project: str | None) -> Transport:
+    """No I/O at construction; each request/stream owns its SDK client lifetime.
+
+    `project=None` sends no OpenAI-Project header, so the key's own default project
+    applies; ambient `OPENAI_*` settings are refused either way. A blank project is
+    still refused: None is the only way to omit it.
+    """
     _check_environment()
-    if not api_key.strip() or not project.strip():
+    if not api_key.strip() or (project is not None and not project.strip()):
         raise ValueError("explicit OpenAI credential and project are required")
     return _ConfiguredTransport(api_key, project)

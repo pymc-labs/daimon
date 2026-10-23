@@ -238,6 +238,10 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{Provider} isn't turned on for this {scope}.",
         'Ask {who} to turn it on, or to say "switch {agent_mid} to {default}".',
     ),
+    "provider_not_configured": _Copy(
+        "{Provider} isn't set up on this Daimon install yet.",
+        "Ask whoever runs Daimon to add the {provider} key.",
+    ),
     "agent_backend": _Copy(
         "{agent} runs on {provider}, which isn't set up here yet.",
         'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',

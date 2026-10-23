@@ -993,3 +993,28 @@ async def test_an_unselectable_model_is_refused_before_any_write(owned, backend,
     with pytest.raises(AgentBackendRefused, match="model not selectable"):
         await service.set_backend(agent, backend, 0, actor, model=model)
     assert await service.current(agent) is None
+
+
+async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overrides(
+    owned, monkeypatch
+) -> None:
+    service, agent, actor, sessions = owned
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
+    monkeypatch.delenv("DAIMON_CHANNEL_GEMINI_KEY", raising=False)
+    default = await service.tenant_policy(agent.tenant_id)
+    assert default.enabled_backends == ("anthropic", "openai"), "keyed, never configured"
+
+    await service.set_tenant_allowlist(agent.tenant_id, ("anthropic",), default.revision, actor)
+
+    async with sessions() as session:
+        stored = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
+    assert stored.enabled_backends == ("anthropic",) and stored.backends_explicit is True
+    chosen = await service.tenant_policy(agent.tenant_id)
+    assert chosen.enabled_backends == ("anthropic",)
+
+    await service.set_tenant_allowlist(agent.tenant_id, None, chosen.revision, actor)
+
+    async with sessions() as session:
+        followed = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
+    assert followed.backends_explicit is False, "None goes back to the deployment default"
+    assert followed.enabled_backends == ("anthropic", "openai")

@@ -50,6 +50,7 @@ from daimon.core.pricing import (
     provider_price_expired_on,
     provider_prices,
 )
+from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import agent_backends, agent_owners, mux_state, security_audit
 from daimon.core.stores.domain import (
@@ -808,6 +809,7 @@ class AgentBackendService:
             tenant_id=tenant_id,
             revision=_digest(policy.model_dump(mode="json")),
             enabled_backends=policy.enabled_backends,
+            explicit=policy.backends_explicit,
         )
 
     async def tenant_policy(self, tenant_id: uuid.UUID) -> TenantBackendPolicy:
@@ -1453,12 +1455,13 @@ class AgentBackendService:
     async def set_tenant_allowlist(
         self,
         tenant_id: uuid.UUID,
-        backends: tuple[Provider, ...],
+        backends: tuple[Provider, ...] | None,
         expected_revision: str,
         actor: BackendActor,
         *,
         dry_run: bool = False,
     ) -> TenantBackendPolicy:
+        """Save the admin's provider list; None goes back to the deployment default."""
         self._check_actor(tenant_id, actor)
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=tenant_id
@@ -1469,7 +1472,13 @@ class AgentBackendService:
                 raise AgentBackendRefused("stale_revision")
             policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
             updated = type(policy).model_validate(
-                {**policy.model_dump(), "enabled_backends": backends}
+                {
+                    **policy.model_dump(),
+                    "enabled_backends": backends
+                    if backends is not None
+                    else default_enabled_backends(),
+                    "backends_explicit": backends is not None,
+                }
             )
             if dry_run:
                 return current.model_copy(update={"enabled_backends": updated.enabled_backends})

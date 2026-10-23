@@ -79,6 +79,9 @@ class OpenAIDeployment(BaseModel):
     config_digest: Nonblank | None = None
     configuration_grant: ConfigurationGrant | None = None
     project: Nonblank
+    # False: send no OpenAI-Project header (the key's default project); `project` is
+    # then only this deployment's namespace label. Set only by the code defaults.
+    project_header: bool = Field(default=True, strict=True, exclude_if=lambda value: value)
     agent_id: Nonblank | None = None
     environment_id: Nonblank | None = None
     api_key_env: ApiKeyEnvironment
@@ -513,7 +516,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         # request/stream lifetimes and disables retry of uncertain mutations.
         from mux.drivers.openai import configured_transport
 
-        return configured_transport(api_key=secret, project=deployment.project)
+        return configured_transport(
+            api_key=secret, project=deployment.project if deployment.project_header else None
+        )
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal counterpart_verified
