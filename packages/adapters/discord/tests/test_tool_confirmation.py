@@ -885,3 +885,112 @@ async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monk
     )
     mentions = call.kwargs["allowed_mentions"].to_dict()
     assert mentions.get("parse") == ["users"] and call.kwargs["mention_author"] is False
+
+
+def _dm_runtime_hook(
+    monkeypatch: pytest.MonkeyPatch, *, client: object, guild: object
+) -> tuple[MagicMock, AsyncMock]:
+    """A runtime hook on a DM channel; returns the backend factory and the tenant lookup."""
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    lookup = AsyncMock(return_value=guild)
+    monkeypatch.setattr(confirmation_module, "tenant_guild", lookup)
+    discord_confirmation_hook(
+        MagicMock(spec=discord.DMChannel),
+        runtime=runtime,
+        tenant_id=uuid4(),
+        account_id=uuid4(),
+        client=client,  # pyright: ignore[reportArgumentType]
+    )
+    return factory, lookup
+
+
+async def test_dm_admin_card_checks_the_tenants_server_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Friction #36: a DM has no guild, so the admin re-check uses the turn's tenant server."""
+    guild = MagicMock(spec=discord.Guild)
+    guild.owner_id = 999
+    member = MagicMock(spec=discord.Member)
+    member.id = 111
+    member.roles = []
+    member.guild_permissions = discord.Permissions(manage_guild=True)
+    guild.fetch_member = AsyncMock(return_value=member)
+    factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=guild)
+    check = factory.call_args.kwargs["current_admin"]
+    assert await check("111") is True
+    member.guild_permissions = discord.Permissions.none()
+    assert await check("111") is False
+    assert guild.fetch_member.await_count == 2
+    assert lookup.await_count == 2
+
+
+async def test_dm_admin_card_without_a_client_or_server_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory, lookup = _dm_runtime_hook(monkeypatch, client=None, guild=MagicMock())
+    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    lookup.assert_not_awaited()
+    factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=None)
+    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    lookup.assert_awaited_once()
+
+
+class _OneSession:
+    def __call__(self) -> _OneSession:
+        return self
+
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("platform", "external_id", "cached", "fetched", "expected"),
+    [
+        ("discord", "42", "cached", None, "cached"),
+        ("discord", "42", None, "fetched", "fetched"),
+        ("discord", "42", None, discord.NotFound, None),
+        ("cli", "42", "cached", None, None),
+        ("discord", "not-a-guild", "cached", None, None),
+        (None, "42", "cached", None, None),
+    ],
+)
+async def test_tenant_guild_resolves_only_a_discord_tenants_server(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str | None,
+    external_id: str,
+    cached: str | None,
+    fetched: object,
+    expected: str | None,
+) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.core.stores import tenants
+
+    tenant = (
+        None if platform is None else SimpleNamespace(platform=platform, external_id=external_id)
+    )
+    monkeypatch.setattr(tenants, "get_tenant", AsyncMock(return_value=tenant))
+    client = MagicMock()
+    client.get_guild = MagicMock(return_value=cached)
+    if fetched is discord.NotFound:
+        client.fetch_guild = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404, reason="nf"), "Unknown Guild")
+        )
+    else:
+        client.fetch_guild = AsyncMock(return_value=fetched)
+    got = await confirmation_module.tenant_guild(client, _OneSession(), uuid4())  # pyright: ignore[reportArgumentType]
+    assert got == expected
+    if expected is not None:
+        client.get_guild.assert_called_once_with(42)

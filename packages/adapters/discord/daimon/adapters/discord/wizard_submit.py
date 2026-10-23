@@ -807,6 +807,7 @@ async def run_wizard_submit_turn_observed(
                     tenant_id=row.tenant_id,
                     account_id=admission.account_id,
                     admission=admission,
+                    client=bot,
                 ),
                 # A dead-session recovery moves this turn's marker to the replacement.
                 active_turn_message_id=marker_ids.get(prepared.mapping_id)
