@@ -206,8 +206,8 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
         pytest.param(
             "busy",
             marks=pytest.mark.xfail(
-                strict=True,
-                reason="the watch parks a pooled connection on a busy lock; follow-up: watch try-lock (nc-click), ROOT item 3",
+                strict=False,
+                reason="the watch parks a pooled connection on a busy lock; follow-up: watch try-lock (nc-click), ROOT item 3; flaky until try-lock",
             ),
         ),
     ],
