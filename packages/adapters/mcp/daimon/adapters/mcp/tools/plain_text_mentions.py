@@ -88,8 +88,9 @@ def register_plain_text_mentions_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         the list) is answered as if they had mentioned you. Messages from
         bots and webhooks never count, and direct messages are unchanged. So
         that suffixes and domains never match, a name followed by "(" or by a
-        dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks"). Off
-        by default. Read the returned ``note`` back to the user.
+        dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks"). On
+        by default for workspaces added from now on; older ones keep their
+        setting. Read the returned ``note`` back to the user.
         """
         return await _set_plain_text_mentions_impl(runtime, await _auth(ctx), enabled)
 
