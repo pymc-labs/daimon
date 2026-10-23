@@ -1077,9 +1077,13 @@ def task_worker_spec(
 
     The worker carries no tools or skills. A worker on another model declares the
     loss of the root's model controls (e.g. effort), which that model may not accept;
-    a foreign-provider worker also declares the root capabilities it cannot represent.
-    The resolver still checks every ceiling.
+    a worker on another profile (another provider, or an OpenAI worker under a GPT
+    root's persistent workspace) also declares the root capabilities it cannot
+    represent, so its workspace is never carried. The resolver still checks every
+    ceiling.
     """
+    from mux.profiles import backend_selection, worker_selection
+
     root = parent.spec.model
     if model is None or model == root.id:
         choice = ModelRef(provider=root.provider, id=root.id)
@@ -1091,7 +1095,15 @@ def task_worker_spec(
     if not task.strip():
         raise WorkerSpecRefused("system", "unbound")
     drops: set[DeclaredDrop] = {"skills", "tools", *parent.spec.declared_drops}
-    if choice.provider != root.provider:
+    granted = next(
+        (
+            grant.profile
+            for grant in parent.backend_grants
+            if grant.backend == choice.provider and grant.model in (None, choice.id)
+        ),
+        worker_selection(choice.provider).profile,
+    )
+    if choice.provider != root.provider or granted != backend_selection(root.provider).profile:
         drops |= {"mcp", "memory", "sandbox"}
     if choice.id != root.id and parent.spec.extensions:
         drops.add("model_controls")

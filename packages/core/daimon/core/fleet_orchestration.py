@@ -746,11 +746,31 @@ class FleetOrchestrator:
                 captured_source=captured_source,
             )
 
+        from mux.profiles import backend_selection
+
+        # Another provider, or the same provider on another profile (an OpenAI
+        # worker under a GPT source's persistent workspace), can't carry everything.
+        source_model = (
+            captured_source.effective_spec.model
+            if captured_source is not None and captured_source.effective_spec is not None
+            else None
+        )
+        worker_profile = next(
+            (
+                grant.profile
+                for grant in parent.backend_grants
+                if grant.backend == parent.models[0].provider
+                and grant.model in (None, parent.models[0].id)
+            ),
+            None,
+        )
         foreign = (
             as_agent is not None
-            and captured_source is not None
-            and captured_source.effective_spec is not None
-            and parent.models[0].provider != captured_source.effective_spec.model.provider
+            and source_model is not None
+            and (
+                parent.models[0].provider != source_model.provider
+                or worker_profile != backend_selection(source_model.provider).profile
+            )
         )
         while True:
             try:

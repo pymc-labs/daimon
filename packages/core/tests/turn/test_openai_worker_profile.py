@@ -87,3 +87,38 @@ def test_a_fresh_tenants_openai_task_worker_finds_the_code_default_row(model: st
 def test_every_default_worker_row_serves_its_providers_worker_profile() -> None:
     rows = [row for row in default_rows(str(TENANT)) if row.get("worker_materialization")]
     assert {row["profile"] for row in rows} == {worker_selection("openai").profile}
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-astra"], ids=["same-model", "astra"])
+def test_a_gpt_root_spawns_gpt_task_workers_without_its_workspace(model: str | None) -> None:
+    """J1 then J3: a root switched to GPT keeps its workspace; its GPT workers can't carry it."""
+    from dataclasses import replace
+
+    from daimon.core.neutral_resources import WorkerLimits, resolve_worker_spec, task_worker_spec
+    from mux.contracts.ids import ModelRef
+
+    from ..test_fleet_orchestration import NOW, POLICY, permissions
+
+    root = permissions("openai")
+    assert root.backend_grants[0].profile == "openai.persistent_workspace", "the root's own"
+    models = (root.spec.model, ModelRef(provider="openai", id="gpt-6-astra"))
+    # The default fleet grant: each OpenAI model on the worker profile.
+    grants = tuple(worker_selection("openai").model_copy(update={"model": m.id}) for m in models)
+    parent = replace(root, backend_grants=grants, models=models)
+
+    spec = task_worker_spec(parent, role="researcher", task="Answer X.", model=model)
+    assert {"mcp", "memory", "sandbox", "skills", "tools"} <= set(spec.declared_drops)
+
+    resolved = resolve_worker_spec(
+        parent,
+        spec,
+        policy=POLICY,
+        now=NOW,
+        limits=WorkerLimits(
+            budget_usd=parent.limits.budget_usd / 2,
+            deadline=parent.limits.deadline,
+            max_turns=1,
+        ),
+    )
+    assert resolved.backend.profile == CONVERSATION_ONLY.profile_id
+    assert resolved.environment is None and resolved.resources == ()
