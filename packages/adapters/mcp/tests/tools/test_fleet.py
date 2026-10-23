@@ -1731,7 +1731,7 @@ async def test_j10_fork_yourself_across_models_means_fleet_workers_not_a_saved_c
     register_agent_tools(agents, runtime())
     fork = next(t for t in await agents.list_tools() if t.name == "fork_agent")
     fork_doc = " ".join((fork.description or "").split())
-    assert "Only for a saved, named copy" in fork_doc and "is NOT this" in fork_doc
+    assert "Only for a saved, named copy" in fork_doc and "fleet_spawn" in fork_doc
     skill = (Path(__file__).parents[5] / "defaults/skills/workspace-setup/SKILL.md").read_text()
     skill = " ".join(skill.split())
     assert '"Fork yourself across Opus, Astra and Argon"' in skill and "`fleet_spawn`" in skill

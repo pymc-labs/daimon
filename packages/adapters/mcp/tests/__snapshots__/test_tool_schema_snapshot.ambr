@@ -2575,10 +2575,9 @@
     'fork_agent': dict({
       'description': '''
         Make a copy of Daimon or another agent that you can edit under a new name.
-        Admin-only. Only for a saved, named copy someone asked to keep ("make a copy
-        of Daimon called research-bot"). "Fork yourself across Opus, Astra and
-        Argon" or "run copies of yourself on X and Y" is NOT this: that is a fleet
-        of task workers (fleet_spawn, one per model), which needs no admin.
+        Admin-only. Only for a saved, named copy someone asked to keep. Running
+        copies of yourself on several models at once is not this: that is a fleet
+        of task workers (fleet_spawn), which needs no admin.
         Copies its prompt, model, skills and the MCP servers that need
         no stored token. The copy starts with no credentials: no repo binding or
         GitHub access, no API/service keys and no connector tokens; attach its own
