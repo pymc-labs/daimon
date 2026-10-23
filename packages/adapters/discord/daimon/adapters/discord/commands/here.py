@@ -9,12 +9,15 @@ from daimon.adapters.discord.checks import (
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
+from daimon.adapters.discord.confidential import MakeConfidentialView
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.outsiders import channel_outsiders
 from daimon.adapters.discord.recruitment_guard import protected
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError, UserFacingError
-from daimon.core.here_card import HereCard, load_here_card, render_here_card
+from daimon.core.here_card import HereCard, load_here_card, render_here_card, render_here_card_text
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 
 import discord
@@ -113,6 +116,8 @@ class HereCog(commands.Cog):
                     platform="discord",
                     external_id=str(interaction.user.id),
                 )
+                policy = await load_access_policy(session, tenant_id=tenant_id)
+                visibility = await channel_outsiders(channel, policy.internal_role_ids)
                 card = await load_here_card(
                     session,
                     runtime.anthropic,
@@ -140,8 +145,23 @@ class HereCog(commands.Cog):
                     else None,
                     category_channels_bot_can_view=category_visible,
                 )
+            card = card.model_copy(
+                update={
+                    "outsiders_can_view": visibility.outsiders_can_view,
+                    "outsider_note": visibility.note,
+                }
+            )
+            card = card.model_copy(update={"text": render_here_card_text(card)})
+            view = (
+                MakeConfidentialView(runtime, tenant_id, str(channel.id))
+                if visibility.outsiders_can_view
+                and card.effective_readers != "own"
+                and is_guild_admin(interaction)
+                else None
+            )
             await interaction.edit_original_response(
                 embed=build_here_embed(card),
+                view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, discord.HTTPException) as exc:

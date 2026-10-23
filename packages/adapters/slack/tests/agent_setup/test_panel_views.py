@@ -1235,3 +1235,27 @@ def _all_views() -> list[dict[str, Any]]:
         ),
         build_creating_view(agent_name="new-agent", meta=meta),
     ]
+
+
+@pytest.mark.parametrize("admin", [True, False])
+@pytest.mark.parametrize("readers", ["any", "inside", "own"])
+def test_current_channel_outsider_warning_and_fix(admin: bool, readers: str) -> None:
+    from daimon.adapters.slack.outsiders import SLACK_GUESTS_UNCHECKED
+    from daimon.core.outsiders import OutsiderVisibility
+
+    visibility = OutsiderVisibility(outsiders_can_view=True, note=SLACK_GUESTS_UNCHECKED)
+    view = build_routing_view(
+        _answering_map(),
+        page=paginate((), page=0, page_size=PANEL_PAGE_SIZE),
+        meta=_meta(),
+        is_admin=admin,
+        attributions={},
+        setup_links=[],
+        channel_id=_CHANNEL_ID,
+        unrouted_agent_name=None,
+        outsider_lines=visibility.lines(readers=readers),
+        outsider_warning=readers != "own",
+    )
+    assert ("outside your organisation" in str(view)) is (readers != "own")
+    assert (SLACK_GUESTS_UNCHECKED in str(view)) is (readers != "own")
+    assert ("Make confidential" in str(view)) is (admin and readers != "own")

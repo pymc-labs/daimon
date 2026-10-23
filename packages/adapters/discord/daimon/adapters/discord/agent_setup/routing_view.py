@@ -45,8 +45,7 @@ from daimon.adapters.discord.agent_setup.operator_tokens_view import (
 )
 from daimon.adapters.discord.agent_setup.permissions_view import (
     PERMISSIONS_LABEL,
-    PermissionsView,
-    load_rule_status,
+    build_permissions_view,
 )
 from daimon.adapters.discord.agent_setup.scope_default import resolve_account_display
 from daimon.adapters.discord.agent_setup.state import PanelState
@@ -519,14 +518,13 @@ class RoutingView(PanelViewBase):
         if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.defer()
-        status = await load_rule_status(self.runtime, state=self.state)
         await self.swap_to(
             interaction,
-            PermissionsView(
-                self.state,
+            await build_permissions_view(
+                interaction,
+                state=self.state,
                 runtime=self.runtime,
                 allowed_user_id=self.allowed_user_id,
-                status=status,
             ),
         )
 

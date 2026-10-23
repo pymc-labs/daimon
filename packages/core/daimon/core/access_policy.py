@@ -122,6 +122,8 @@ class TenantAccessPolicy(BaseModel):
     # Platform user and Discord role ids form a union; both empty means open.
     invoker_user_ids: tuple[str, ...] = ()
     invoker_role_ids: tuple[str, ...] = ()
+    # Discord organisation membership for visibility warnings, independent of invoker access.
+    internal_role_ids: tuple[str, ...] = ()
     invoker_admin_bypass: bool = True
     # Channel, Discord thread or Slack ``channel:ts`` id -> its rule; a thread
     # also follows its channel's. Open rules are not kept.
@@ -134,11 +136,11 @@ class TenantAccessPolicy(BaseModel):
     agent_rules: dict[str, AgentRule] = Field(default_factory=dict)
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
 
-    @field_validator("invoker_role_ids")
+    @field_validator("invoker_role_ids", "internal_role_ids")
     @classmethod
     def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
         if not all(is_discord_snowflake(value) for value in ids):
-            raise ValueError("invoker_role_ids must contain Discord snowflakes")
+            raise ValueError("role ids must contain Discord snowflakes")
         return tuple(dict.fromkeys(ids))
 
     @field_validator("enabled_backends")

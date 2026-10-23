@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from aiohttp import ClientError
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
+from daimon.adapters.slack.outsiders import channel_outsiders
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError
-from daimon.core.here_card import HereCard, load_here_card, render_here_card
+from daimon.core.here_card import HereCard, load_here_card, render_here_card, render_here_card_text
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.outsiders import OutsiderVisibility
+from daimon.core.permissions import channel_permissions
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
-from slack_sdk.errors import SlackApiError
+from slack_sdk.errors import SlackApiError, SlackClientError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
 
@@ -54,7 +59,7 @@ async def _visible_channel_ids(client: AsyncWebClient, user_id: str) -> set[str]
     }
 
 
-def build_here_attachment(card: HereCard) -> dict[str, Any]:
+def build_here_attachment(card: HereCard, *, is_admin: bool = False) -> dict[str, Any]:
     """Block Kit inside a coloured attachment, with no name interpolation in mrkdwn."""
     shown = render_here_card(card)
     blocks: list[dict[str, Any]] = [
@@ -76,6 +81,19 @@ def build_here_attachment(card: HereCard) -> dict[str, Any]:
                 "elements": [{"type": "plain_text", "text": "\n".join(shown.extras)}],
             }
         )
+    if is_admin and card.outsiders_can_view and card.effective_readers != "own":
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": "here_make_confidential",
+                        "text": {"type": "plain_text", "text": "Make confidential"},
+                    }
+                ],
+            }
+        )
     blocks.append(
         {
             "type": "context",
@@ -83,6 +101,50 @@ def build_here_attachment(card: HereCard) -> dict[str, Any]:
         }
     )
     return {"color": shown.colour, "fallback": card.text, "blocks": blocks}
+
+
+def build_visibility_attachment(visibility: OutsiderVisibility, *, readers: str) -> dict[str, Any]:
+    """Fixed current-channel facts when optional Slack metadata is unavailable."""
+    lines = (
+        "Some channel details are unavailable. Try again shortly.",
+        *visibility.lines(readers=readers),
+    )
+    return {
+        "color": "#F0B429",
+        "fallback": "\n".join((NOTIFICATION_TEXT, *lines)),
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": NOTIFICATION_TEXT}},
+            {"type": "section", "text": {"type": "plain_text", "text": "\n".join(lines)}},
+        ],
+    }
+
+
+async def _post_here_attachment(
+    client: AsyncWebClient,
+    payload: dict[str, Any],
+    attachment: dict[str, Any],
+    *,
+    bot_view: bool | None,
+) -> None:
+    response_url = str(payload.get("response_url") or "")
+    if not bot_view and response_url:
+        await AsyncWebhookClient(response_url).send_dict(
+            {
+                "text": NOTIFICATION_TEXT,
+                "attachments": [attachment],
+                "response_type": "ephemeral",
+                "parse": "none",
+            }
+        )
+    else:
+        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+            channel=str(payload.get("channel_id") or ""),
+            user=str(payload.get("user_id") or ""),
+            text=NOTIFICATION_TEXT,
+            attachments=[attachment],
+            parse="none",
+            link_names=False,
+        )
 
 
 async def _setter_display_name(client: AsyncWebClient, external_id: str) -> str | None:
@@ -107,19 +169,26 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
     if client is None:
         return
     try:
-        try:
-            info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
-            channel = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownArgumentType]
-            bot_view = bool(channel.get("is_member"))
-        except SlackApiError as exc:
-            error = str(cast(dict[str, Any], exc.response.data).get("error", ""))  # pyright: ignore[reportUnknownMemberType]
-            if error not in {"channel_not_found", "not_in_channel"}:
-                raise
-            bot_view = False
-        caller_view = True  # Slack delivered this command from the caller's channel.
-        visible_ids = await _visible_channel_ids(client, user_id)
-        visible_ids.add(channel_id)
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        visibility = await channel_outsiders(client, team_id=team_id, channel_id=channel_id)
+        bot_view = visibility.bot_can_view
+        try:
+            if bot_view is None:
+                raise SlackClientError("Channel metadata is unavailable")
+            is_admin = await resolve_is_admin(client, user_id=user_id)
+            visible_ids = await _visible_channel_ids(client, user_id)
+            visible_ids.add(channel_id)
+        except (SlackClientError, ClientError, TimeoutError):
+            async with runtime.sessionmaker() as session:
+                policy = await load_access_policy(session, tenant_id=tenant_id)
+            # The signed slash payload establishes this channel only. Do not
+            # load routing/agent details or offer admin controls on this path.
+            attachment = build_visibility_attachment(
+                visibility, readers=channel_permissions(policy, channel_id=channel_id).readers
+            )
+            await _post_here_attachment(client, payload, attachment, bot_view=bot_view)
+            return
+        caller_view = True  # Slack delivered this command from the caller's channel.
         async with runtime.sessionmaker() as session:
             principal = await find_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
@@ -140,7 +209,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 public_mcp_url=str(runtime.settings.mcp.public_url)
                 if runtime.settings.mcp.public_url is not None
                 else None,
-                is_admin=await resolve_is_admin(client, user_id=user_id),
+                is_admin=is_admin,
                 caller_account_id=principal.account_id if principal else None,
                 resolve_setter_display=lambda external_id: _setter_display_name(
                     client, external_id
@@ -149,27 +218,16 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 bot_can_view=bot_view,
                 caller_can_view=caller_view,
             )
-        response_url = str(payload.get("response_url") or "")
-        # The attachment carries the card; top-level text is only the notification
-        # line, so Slack does not render the card twice.
-        if not bot_view and response_url:
-            await AsyncWebhookClient(response_url).send_dict(
-                {
-                    "text": NOTIFICATION_TEXT,
-                    "attachments": [build_here_attachment(card)],
-                    "response_type": "ephemeral",
-                    "parse": "none",
-                }
-            )
-        else:
-            await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-                channel=channel_id,
-                user=user_id,
-                text=NOTIFICATION_TEXT,
-                attachments=[build_here_attachment(card)],
-                parse="none",
-                link_names=False,
-            )
+        card = card.model_copy(
+            update={
+                "outsiders_can_view": visibility.outsiders_can_view,
+                "outsider_note": visibility.note,
+            }
+        )
+        card = card.model_copy(update={"text": render_here_card_text(card)})
+        await _post_here_attachment(
+            client, payload, build_here_attachment(card, is_admin=is_admin), bot_view=bot_view
+        )
     except (SlackApiError, DaimonError) as exc:
         await surface_command_error(
             client,
@@ -180,3 +238,39 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
             channel_id=channel_id,
             user_id=user_id,
         )
+
+
+async def handle_make_confidential(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+    """Use Slack's signed channel context and re-check the current workspace admin."""
+    from daimon.adapters.slack.agent_setup.rules import RULE_NEED_ADMIN_MESSAGE, change_rule
+
+    team = cast(dict[str, Any], payload.get("team") or {})
+    channel = cast(dict[str, Any], payload.get("channel") or {})
+    user = cast(dict[str, Any], payload.get("user") or {})
+    team_id, channel_id, user_id = (
+        str(team.get("id") or ""),
+        str(channel.get("id") or ""),
+        str(user.get("id") or ""),
+    )
+    if not team_id or not channel_id or not user_id:
+        return
+    client = await resolve_web_client(runtime, team_id=team_id)
+    if client is None:
+        return
+    if not await resolve_is_admin(client, user_id=user_id):
+        text = RULE_NEED_ADMIN_MESSAGE
+    else:
+        text = await change_rule(
+            runtime,
+            client,
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+            user_id=user_id,
+            channel_id=channel_id,
+            readers="own",
+        )
+    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+        channel=channel_id,
+        user=user_id,
+        text=text,
+        parse="none",
+    )

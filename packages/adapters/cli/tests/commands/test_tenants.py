@@ -993,3 +993,54 @@ async def test_invoker_admin_bypass_set_get(db_session_factory, stub_anthropic, 
                 assert json.loads(output)["invoker_admin_bypass"] is bypass
             else:
                 assert f"invoker_admin_bypass: {str(bypass).lower()}" in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clear_flag", ["clear_internal_roles", "clear"])
+async def test_internal_roles_set_show_and_clear(db_session_factory, stub_anthropic, clear_flag):  # type: ignore[no-untyped-def]
+    # Deployment DB/config access is the operator boundary, without Discord attestation.
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="111")
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        internal_role=["222", "333", "222"],
+    )
+    assert (await _policy(db_session_factory, workspace_id="111")).internal_role_ids == (
+        "222",
+        "333",
+    )
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="discord", external_id="111", as_json=True
+    )
+    assert json.loads(_output(console))["internal_role_ids"] == ["222", "333"]
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        **{clear_flag: True},
+    )
+    assert not (await _policy(db_session_factory, workspace_id="111")).internal_role_ids
+    with pytest.raises(typer.BadParameter, match="@everyone"):
+        await tenants_access_policy_set(
+            rt=rt, console=console, platform="discord", external_id="111", internal_role=["111"]
+        )
+
+
+@pytest.mark.parametrize("flag", ["--internal-role", "--clear-internal-roles", "--clear"])
+def test_access_policy_help_states_operator_boundary_for_all_role_mutations(flag: str) -> None:
+    command = get_command(main_mod.app)
+    for name in ("tenants", "access-policy", "set"):
+        assert isinstance(command, Group)
+        command = command.commands[name]
+    assert "Deployment-operator command" in (command.help or "")
+    assert "Permissions panel" in (command.help or "")
+    option = next(
+        param for param in command.params if isinstance(param, Option) and flag in param.opts
+    )
+    assert isinstance(option, Option)
+    assert "Operator-only" in (option.help or "")
