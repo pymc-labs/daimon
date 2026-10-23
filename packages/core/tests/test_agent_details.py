@@ -505,3 +505,34 @@ async def test_load_agent_details_hides_an_isolated_channels_agent_from_a_member
             is_admin=False,
             channel_label="#general",
         )
+
+
+@pytest.mark.parametrize("show_setup", [False, True])
+def test_connector_urls_are_setup_shown_only_to_who_may_read_it(show_setup: bool) -> None:
+    """A Details reader who isn't an admin or the owner sees connection names only."""
+    tenant_id = uuid.uuid4()
+    agent = ma_agent(
+        name="alpha",
+        tenant_id=tenant_id,
+        mcp_servers=[{"type": "url", "name": "linear", "url": "https://linear.example/mcp"}],
+    )
+    details = build_agent_details(
+        agent=agent,
+        tenant_id=tenant_id,
+        tenant=None,
+        channels=[],
+        default=DeploymentDefault(),
+        resolved_here=None,
+        repo=None,
+        files=[],
+        skill_titles={},
+        skills_truncated=False,
+        github=_NO_GITHUB,
+        public_mcp_url=None,
+        is_admin=False,
+        channel_label=None,
+        show_setup=show_setup,
+    )
+    (server,) = details.mcp_servers
+    assert server.name == "linear"
+    assert server.url == ("https://linear.example/mcp" if show_setup else None)

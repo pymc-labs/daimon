@@ -11,7 +11,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
-from daimon.adapters.teams.billing_panel import channel_name_text
+from daimon.adapters.teams.billing_panel import channel_name_text, plain_name
 from daimon.adapters.teams.card_actions import button, clip, heading
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.core import channel_backend
@@ -195,7 +195,11 @@ def _detail_lists(
 ) -> list[CardElement]:
     items: Mapping[DetailListName, Sequence[str]] = {
         "skills": [skill.title or skill.skill_id for skill in details.skills],
-        "connections": [f"[{server.name}]({server.url})" for server in details.mcp_servers],
+        # The URL only for a viewer who may read the agent's setup; else the name alone.
+        "connections": [
+            f"[{server.name}]({server.url})" if server.url is not None else plain_name(server.name)
+            for server in details.mcp_servers
+        ],
         "keys": [key.name for key in details.keys],
     }
     lists = format_detail_lists(items, expanded=expanded, max_chars=_DETAIL_LIST_MAX_CHARS)

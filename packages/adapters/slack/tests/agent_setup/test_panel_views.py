@@ -48,6 +48,7 @@ from daimon.core.access_policy import ChannelRule
 from daimon.core.agent_details import (
     AgentDetails,
     GitHubDeploymentFacts,
+    McpServerEntry,
     RepoBinding,
     build_agent_details,
 )
@@ -552,7 +553,12 @@ async def test_load_details_view_omits_avatar_when_identity_is_off(
     monkeypatch.setattr(setup_actions, "resolve_agent_identity", avatar_lookup)
 
     view = await setup_actions.load_details_view(  # type: ignore[arg-type]
-        runtime, tenant_id=uuid.uuid4(), meta=_meta(), agent_name="research-bot", is_admin=True
+        runtime,
+        tenant_id=uuid.uuid4(),
+        meta=_meta(),
+        agent_name="research-bot",
+        is_admin=True,
+        viewer_user_id="U0ADMIN",
     )
 
     assert view is not None
@@ -586,7 +592,12 @@ async def test_load_details_view_queues_picture_without_generating_in_panel(
     monkeypatch.setattr(setup_actions, "resolve_agent_identity", lookup)
 
     view = await setup_actions.load_details_view(  # type: ignore[arg-type]
-        runtime, tenant_id=uuid.uuid4(), meta=_meta(), agent_name="research-bot", is_admin=True
+        runtime,
+        tenant_id=uuid.uuid4(),
+        meta=_meta(),
+        agent_name="research-bot",
+        is_admin=True,
+        viewer_user_id="U0ADMIN",
     )
 
     assert view is not None
@@ -706,24 +717,21 @@ def test_details_view_renders_multiple_answering_places_one_per_line() -> None:
     )
 
 
-def test_details_view_sanitizes_connection_names_inside_slack_links() -> None:
+@pytest.mark.parametrize("url", ["https://example.com/mcp", None])
+def test_details_view_sanitizes_connection_names_inside_slack_links(url: str | None) -> None:
+    name = "Example|service\nspoofed"
+    details = _details().model_copy(update={"mcp_servers": (McpServerEntry(name=name, url=url),)})
     view = build_details_view(
-        _details(
-            mcp_servers=[
-                {
-                    "type": "url",
-                    "name": "Example|service\nspoofed",
-                    "url": "https://example.com/mcp",
-                }
-            ]
-        ),
+        details,
         meta=_meta(),
         is_admin=True,
         coding_tools_available=True,
         channel_id=_CHANNEL_ID,
         attribution=None,
     )
-    assert "<https://example.com/mcp|Example¦service spoofed>" in _joined(view), (
+    shown = "Example¦service spoofed"
+    expected = f"<{url}|{shown}>" if url is not None else shown
+    assert expected in _joined(view), (
         "a service name cannot terminate its link label or inject another row"
     )
 
@@ -1294,3 +1302,25 @@ def _all_views() -> list[dict[str, Any]]:
         ),
         build_creating_view(agent_name="new-agent", meta=meta),
     ]
+
+
+def test_a_connection_s_url_shows_only_when_the_reader_may_read_its_setup() -> None:
+    """The builder drops URLs for a reader who may not read the agent's setup."""
+    linear = [{"type": "url", "name": "linear", "url": "https://linear.example/mcp"}]
+    hidden = _details(mcp_servers=linear, is_admin=False)
+    assert hidden.mcp_servers == (McpServerEntry(name="linear", url=None),)
+    shown = hidden.model_copy(
+        update={"mcp_servers": (McpServerEntry(name="linear", url="https://linear.example/mcp"),)}
+    )
+    for details, has_url in ((hidden, False), (shown, True)):
+        view = build_details_view(
+            details,
+            meta=_meta(),
+            is_admin=False,
+            coding_tools_available=True,
+            channel_id=_CHANNEL_ID,
+            attribution=None,
+        )
+        text = _joined(view)
+        assert "linear" in text
+        assert ("linear.example" in text) is has_url

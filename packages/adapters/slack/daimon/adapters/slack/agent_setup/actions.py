@@ -639,8 +639,12 @@ async def load_details_view(
     meta: PanelMetadata,
     agent_name: str,
     is_admin: bool,
+    viewer_user_id: str,
 ) -> dict[str, Any] | None:
-    """Build the Details view for `agent_name`, or None when it is gone."""
+    """Build the Details view for `agent_name`, or None when it is gone.
+
+    `viewer_user_id`: connector URLs only for an admin or the agent's owner.
+    """
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -661,6 +665,7 @@ async def load_details_view(
             channel_id=meta.channel_id,
             thread_id=None,
             is_admin=is_admin,
+            viewer_user_id=viewer_user_id,
         )
         if details is None:
             return None
@@ -833,6 +838,7 @@ async def _dispatch_panel_action(
                 meta=meta.with_view("details", agent_name=name),
                 agent_name=name,
                 is_admin=True,
+                viewer_user_id=user_id,
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -965,6 +971,7 @@ async def _dispatch_panel_action(
             meta=meta.with_view("details", agent_name=name),
             agent_name=name,
             is_admin=is_admin,
+            viewer_user_id=user_id,
         )
         if view is not None:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -1083,7 +1090,12 @@ async def _dispatch_panel_action(
         if not agent_name:
             return
         details_view = await load_details_view(
-            runtime, tenant_id=tenant_id, meta=meta, agent_name=agent_name, is_admin=is_admin
+            runtime,
+            tenant_id=tenant_id,
+            meta=meta,
+            agent_name=agent_name,
+            is_admin=is_admin,
+            viewer_user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
@@ -1144,6 +1156,7 @@ async def _dispatch_panel_action(
             meta=meta.toggled(expansion),
             agent_name=agent_name,
             is_admin=is_admin,
+            viewer_user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(

@@ -1163,6 +1163,7 @@ async def test_details_hydration_hides_unavailable_backend_controls(seam, monkey
         meta=PanelMetadata(team_id="T1", channel_id="C1", agent_name="analyst", view="details"),
         agent_name="analyst",
         is_admin=True,
+        viewer_user_id="U1",
     )
     assert modal is not None and "analyst" in str(modal)
     assert sv.ACTION_BACKEND_SELECT not in str(modal)

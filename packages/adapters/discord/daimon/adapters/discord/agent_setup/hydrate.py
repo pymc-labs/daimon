@@ -420,6 +420,7 @@ async def load_details_for(
             public_mcp_url=public_mcp_url(runtime),
             is_admin=state.is_admin,
             channel_label=_channel_label(state),
+            viewer_account_id=state.account_id,
         )
         state.avatar_urls[agent.name] = None
         if identity_enabled_for(

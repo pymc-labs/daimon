@@ -82,6 +82,7 @@ async def _refresh_details(
     *,
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
+    user_id: str,
     notice: str | None = None,
 ) -> None:
     if not meta.root_view_id or not meta.agent_name:
@@ -89,7 +90,12 @@ async def _refresh_details(
     from daimon.adapters.slack.agent_setup.actions import load_details_view
 
     view = await load_details_view(
-        runtime, tenant_id=tenant_id, meta=meta, agent_name=meta.agent_name, is_admin=True
+        runtime,
+        tenant_id=tenant_id,
+        meta=meta,
+        agent_name=meta.agent_name,
+        is_admin=True,
+        viewer_user_id=user_id,
     )
     if view is not None:
         if notice is not None:
@@ -159,5 +165,6 @@ async def reset_agent_avatar(
         client,
         tenant_id=tenant_id,
         meta=meta.with_view("details", agent_name=meta.agent_name, root_view_id=view_id),
+        user_id=user_id,
         notice="Default picture restored.",
     )

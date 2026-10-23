@@ -335,6 +335,7 @@ async def run_new_agent_submission(
                 channel_id=channel_id,
                 thread_id=None,
                 is_admin=is_admin,
+                viewer_user_id=user_id,
             )
             attributions = await resolve_attributions(
                 session,

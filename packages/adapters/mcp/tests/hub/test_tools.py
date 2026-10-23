@@ -56,6 +56,7 @@ def _agents_router(
             id=ma_id,
             name=name,
             system="Answers ops questions",
+            description="Helps with ops",
             metadata={"daimon_tenant": str(tid), "daimon_name": name},
         ).model_dump(mode="json")
         for tid, agents in agents_by_tenant.items()
@@ -118,7 +119,33 @@ async def test_list_daimons_spans_every_tenant_and_disambiguates_same_names(
         str(derive_agent_uuid(tenant_id=t1.tenant_id, ma_agent_id="ag_1")),
         str(derive_agent_uuid(tenant_id=t2.tenant_id, ma_agent_id="ag_2")),
     }, f"ids must be the derived per-agent UUIDs, got {[d.id for d in daimons]!r}"
-    assert daimons[0].platform == "discord" and daimons[0].role_summary.startswith("Answers ops")
+    # Neither agent is the caller's: their prompts are setup, so the description shows.
+    assert daimons[0].platform == "discord" and daimons[0].role_summary == "Helps with ops"
+
+
+async def test_list_daimons_shows_the_prompt_only_on_the_callers_own_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores import agent_owners
+
+    hub = await _two_tenant_hub(db_session)
+    t1, t2 = hub.tenants
+    await agent_owners.set_owner(
+        db_session,
+        tenant_id=t1.tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=t1.tenant_id, ma_agent_id="ag_1"),
+        owner_account_id=t1.account_id,
+        source="created",
+    )
+    await db_session.commit()
+    client = build_fake_anthropic(
+        _agents_router(
+            {t1.tenant_id: [("ag_1", "helper")], t2.tenant_id: [("ag_2", "helper")]}
+        ).dispatch
+    )
+    daimons = await _list_daimons_impl(_runtime(client, db_session_factory), hub)
+    by_workspace = {d.workspace: d.role_summary for d in daimons}
+    assert by_workspace == {"PyMC": "Answers ops questions", "Bayes": "Helps with ops"}
 
 
 async def test_list_daimons_leaves_out_only_a_tenant_whose_policy_cant_be_read(

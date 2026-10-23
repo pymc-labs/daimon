@@ -197,6 +197,7 @@ async def run_add_skill_submission(
             meta=meta.with_view("details", agent_name=agent_name),
             agent_name=agent_name,
             is_admin=is_admin,
+            viewer_user_id=user_id,
         )
         if details is not None:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]

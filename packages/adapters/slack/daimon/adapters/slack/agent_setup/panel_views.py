@@ -735,8 +735,11 @@ def _link_url(url: str) -> str:
 def _detail_list_blocks(details: AgentDetails, *, meta: PanelMetadata) -> list[dict[str, Any]]:
     items: Mapping[DetailListName, Sequence[str]] = {
         "skills": [escape_mrkdwn(skill.title or skill.skill_id) for skill in details.skills],
+        # The URL only for a viewer who may read the agent's setup; else the name alone.
         "connections": [
             f"<{_link_url(server.url)}|{_link_label(server.name)}>"
+            if server.url is not None
+            else _link_label(server.name)
             for server in details.mcp_servers
         ],
         "keys": [escape_mrkdwn(key.name) for key in details.keys],

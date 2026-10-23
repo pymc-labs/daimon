@@ -1798,6 +1798,51 @@ def _describe_agent_router() -> MARouter:
     return router
 
 
+@pytest.mark.parametrize("sees_prompt", [False, True])
+async def test_describe_agent_shows_the_prompt_only_to_an_admin_or_the_owner(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    sees_prompt: bool,
+) -> None:
+    """Someone else's prompt is setup: they get the agent's description instead."""
+    from daimon.adapters.mcp.tools import agent_chat
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="test-agent",
+                    system="SECRET internal instructions",
+                    description="Answers support questions",
+                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    asked: list[dict[str, object]] = []
+
+    async def rule(_session: object, **kwargs: object) -> bool:
+        asked.append(kwargs)
+        return sees_prompt
+
+    monkeypatch.setattr(agent_chat, "may_read_agent_setup", rule)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
+    description = await _describe_agent_impl(runtime, _auth())
+    (call,) = asked
+    assert (call["ma_agent_id"], call["is_admin"], call["account_id"]) == (
+        _MA_AGENT_ID,
+        False,
+        _ACCOUNT_ID,
+    )
+    expected = "SECRET internal instructions" if sees_prompt else "Answers support questions"
+    assert description.role_summary == expected
+
+
 async def test_describe_agent_returns_none_repo_url_for_unbound_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
