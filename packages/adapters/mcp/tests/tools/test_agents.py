@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -1074,6 +1075,140 @@ async def test_fork_agent_impl_creates_ma_agent_from_source_spec(
         "forked agent should be tagged with new name"
     )
     assert queued == [(tenant_id, "myfork")], "the copy's face renders when it is created"
+
+
+def _fork_router(tenant_id: uuid.UUID, created: list[dict[str, Any]]) -> MARouter:
+    """Two agents to copy: the one answering this turn (ag_src) and another (ag_other)."""
+    agents = {
+        name: ma_agent(
+            id=f"ag_{name}",
+            name=name,
+            metadata={"daimon_tenant": str(tenant_id), "daimon_name": name},
+        )
+        for name in ("src", "other")
+    }
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = ma_agent(id="ag_new", name="mycopy", metadata=created[-1].get("metadata"))
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response([a.model_dump(mode="json") for a in agents.values()]),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/ag_([^/]+)",
+        lambda _req, m: (
+            httpx.Response(200, json=agents[m.group(1)].model_dump(mode="json"))
+            if m.group(1) in agents
+            else httpx.Response(
+                200, json=ma_agent(id="ag_new", name="mycopy").model_dump(mode="json")
+            )
+        ),
+    )
+    router.add("POST", r"/v1/agents", on_create)
+    return router
+
+
+async def _member(db_session_factory: async_sessionmaker[AsyncSession], **changes: Any):
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="member-1",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_src"),
+    )
+    return tenant.id, replace(auth, **changes) if changes else auth
+
+
+async def test_a_member_copies_the_agent_answering_their_turn_and_owns_the_copy(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.stores import agent_owners
+
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *a, **k: None)
+    tenant_id, auth = await _member(db_session_factory)
+    created: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_fork_router(tenant_id, created).dispatch)
+    runtime = _runtime(client, session_factory=db_session_factory)
+    copy = await _fork_agent_impl(
+        runtime, auth, source_name="src", new_name="mycopy", expected_ma_agent_id="ag_src"
+    )
+    assert copy.name == "mycopy" and len(created) == 1
+    async with db_session_factory() as session:
+        owner = await agent_owners.owner_of(
+            session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_new")
+        )
+    assert owner == auth.account_id, "the member who made the copy owns it"
+    # Owning the copy never raises its fleet: the default caps and models stay the ceiling.
+    from datetime import UTC, datetime
+
+    from daimon.core.authz import Subject
+    from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService, BackendActor
+    from daimon.core.fleet_configuration import default_fleet_grant
+    from daimon.core.stores.domain import BackendAgent
+
+    service = AgentBackendService(db_session_factory, enabled=True)
+    default = default_fleet_grant(await service.tenant_policy(tenant_id))
+    assert default is not None
+    raised = default.model_copy(update={"max_workers": default.max_workers + 1})
+    mine = BackendAgent(
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_new"),
+        name="mycopy",
+        configuration_digest="c",
+    )
+    member = BackendActor(tenant_id, auth.account_id, Subject(platform_user_id="member-1"))
+    with pytest.raises(AgentBackendRefused, match="admin"):
+        await service.check_owner_fleet_ceiling(mine, raised, member, now=datetime.now(UTC))
+
+
+@pytest.mark.parametrize(
+    "who",
+    ["another_agent", "agent_key", "client", "held_turn", "no_turn"],
+)
+async def test_a_member_may_copy_only_the_agent_answering_their_own_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    who: str,
+) -> None:
+    from daimon.core.turn_hold import TurnHold
+
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *a, **k: None)
+    tenant_id, auth = await _member(db_session_factory)
+    source = "src"
+    if who == "another_agent":
+        source = "other"  # the turn's agent is ag_src; the model names another
+    elif who == "agent_key":
+        auth = replace(auth, agent_id=auth.chat_agent_id)
+    elif who == "client":
+        auth = replace(auth, foreign_home_id="other-org")
+    elif who == "held_turn":
+        auth = replace(auth, hold=TurnHold(platform="discord", channel_id="C1", client=False))
+    else:
+        auth = replace(auth, chat_agent_id=None)
+    created: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_fork_router(tenant_id, created).dispatch)
+    with pytest.raises(ToolError):
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            source_name=source,
+            new_name="mycopy",
+            expected_ma_agent_id=f"ag_{source}",
+        )
+    assert created == [], "nothing is created"
 
 
 async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(

@@ -21,6 +21,7 @@ from daimon.core.authz import (
     Surface,
     authorize,
 )
+from daimon.core.turn_hold import TurnHold
 
 PINNED = TenantAccessPolicy(agent_channel_pins={"acme": ("C_ACME",)})
 NOWHERE = TenantAccessPolicy(agent_channel_pins={"acme": ()})
@@ -349,6 +350,58 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         TenantAccessPolicy(),
         {"subject": MEMBER, "action": Action.FORK, "agent": AgentRef.of("other")},
         _deny("admin_required"),
+    ),
+    (
+        "G_fork_own member copies the agent answering their own turn",
+        TenantAccessPolicy(),
+        {"subject": MEMBER, "action": Action.FORK, "agent": ACME, "answering": True},
+        ALLOW,
+    ),
+    (
+        "G_fork_own never with an agent key",
+        TenantAccessPolicy(),
+        {
+            "subject": Subject(platform_user_id="U_MEM", via_agent_key=True),
+            "action": Action.FORK,
+            "agent": ACME,
+            "answering": True,
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "G_fork_own never with no person behind the call",
+        TenantAccessPolicy(),
+        {"subject": Subject(), "action": Action.FORK, "agent": ACME, "answering": True},
+        _deny("admin_required"),
+    ),
+    (
+        "G_fork_own never another organisation's member",
+        TenantAccessPolicy(),
+        {
+            "subject": Subject(platform_user_id="U_CLIENT", client=True),
+            "action": Action.FORK,
+            "agent": ACME,
+            "answering": True,
+        },
+        _deny("client_requester"),
+    ),
+    (
+        "G_fork_own never from a held turn",
+        TenantAccessPolicy(),
+        {
+            "subject": MEMBER,
+            "action": Action.FORK,
+            "agent": ACME,
+            "answering": True,
+            "hold": TurnHold(platform="slack", channel_id="C_HELD", client=False),
+        },
+        _deny("admin_required"),
+    ),
+    (
+        "G_fork_own a pinned agent still can't be copied",
+        DISPLAY_PINNED,
+        {"subject": MEMBER, "action": Action.FORK, "agent": ACME_DISPLAY, "answering": True},
+        _deny("agent_has_rule"),
     ),
     (
         "G_pin_fork admin forking a pinned agent",
