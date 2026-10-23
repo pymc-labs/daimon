@@ -399,6 +399,8 @@ async def sweep_expired(
                         run_id=run.id,
                         expected_version=run.version,
                         status="failed",
+                        # No wake delivered a result: the thread is owed a notice.
+                        end_reason="run_expired",
                     )
                     runs_ended += 1
     return workers_ended, runs_ended
@@ -734,6 +736,7 @@ async def set_run_status(
     status: RunStatus,
     wake_id: uuid.UUID | None = None,
     unless_waking: bool = False,
+    end_reason: task_continuations.RunEndReason = "run_ended",
 ) -> FleetRun:
     """Compare-and-set the run's status; an ended run withdraws its wakes.
 
@@ -772,7 +775,9 @@ async def set_run_status(
         ):
             raise FleetConflict(f"run {run_id} has a pending wake", reason="wake_pending")
         if finished:
-            await task_continuations.retire_worker_finished_rows(session, run=run, keep_id=wake_id)
+            await task_continuations.retire_worker_finished_rows(
+                session, run=run, keep_id=wake_id, reason=end_reason
+            )
     return run
 
 

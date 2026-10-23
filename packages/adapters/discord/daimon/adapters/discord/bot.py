@@ -259,6 +259,7 @@ from discord.http import HTTPClient
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+    from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.stores.agent_posts import AgentPostRow
 
 log = structlog.get_logger()
@@ -1204,6 +1205,18 @@ class DaimonBot(commands.Bot):
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
+            if self.runtime.turn_deps.fleet_enabled:
+                from daimon.core.fleet_run_end import run_run_end_poller
+
+                # A fleet the deadline ended with no wake: settle its card, say so.
+                self._spawn(
+                    run_run_end_poller(
+                        self.runtime.sessionmaker,
+                        platform="discord",
+                        post=self._post_fleet_run_end,
+                        should_stop=lambda: self.draining or self.is_closed(),
+                    )
+                )
             # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
             self._spawn(
@@ -3771,6 +3784,28 @@ class DaimonBot(commands.Bot):
     async def _channel_by_id(self, channel_id: int) -> object:
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+    async def _post_fleet_run_end(self, run: FleetRun, workers: tuple[FleetWorker, ...]) -> bool:
+        """Settle an expired run's card and post its notice; False retries later."""
+        from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+        from daimon.core.fleet_orchestration import FleetRefused
+
+        try:
+            channel = await self._channel_by_id(int(run.thread_id))
+            if (
+                not isinstance(channel, discord.Thread)
+                or derive_tenant_uuid(platform="discord", workspace_id=str(channel.guild.id))
+                != run.tenant_id
+                or not await self._may_post_in(tenant_id=run.tenant_id, channel=channel)
+            ):
+                return True
+            await show_fleet_ended(channel, run, workers)
+            return True
+        except (discord.NotFound, discord.Forbidden, ValueError, FleetRefused):
+            log.info("fleet.run_end_notice_unpostable", run_id=str(run.id))
+            return True
+        except discord.HTTPException:
+            return False
 
     async def _post_github_request_expiry(self, request: AccessRequest) -> bool:
         try:

@@ -2458,3 +2458,128 @@ async def test_the_answer_shows_a_running_fleets_card_never_posted_by_a_render()
         TurnState(content=[TextBlock(kind="text", text="Started the workers.")])
     )
     assert "**Fleet — running**" in _headlines(send, edit)
+def _ended_thread(card=None):
+    async def history(limit):
+        if card is not None:
+            yield card
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.history = history
+    thread.send = AsyncMock()
+    return thread
+
+
+def _ended_card():
+    from types import SimpleNamespace
+
+    message = MagicMock(spec=discord.Message)
+    message.webhook_id = None
+    message.author.bot = True
+    button = SimpleNamespace(custom_id=f"fleet:{RUN.hex}:all:2:kill")
+    message.components = [SimpleNamespace(children=[SimpleNamespace(children=[button])])]
+    message.edit = AsyncMock()
+    return message
+
+
+def _view_texts(view):
+    return [item.content for item in view.walk_children() if hasattr(item, "content")]
+
+
+async def test_a_run_the_deadline_ended_settles_its_card_and_says_so():
+    from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+
+    ended = replace(run(), status="failed")
+    workers = (
+        worker(ordinal=1, status="failed", error_code="deadline_expired"),
+        worker("openai", ordinal=2, status="dispatch_refused", error_code="backend_unsupported"),
+    )
+    card = _ended_card()
+    thread = _ended_thread(card)
+    await show_fleet_ended(thread, ended, workers)
+
+    view = card.edit.await_args.kwargs["view"]
+    assert "Fleet — failed" in "\n".join(_view_texts(view))
+    assert not any(isinstance(item, discord.ui.Button) for item in view.walk_children())
+    assert not any("running" in text or "starting" in text for text in _view_texts(view))
+    # The card is edited in place; only the notice is a new message.
+    (notice,), kwargs = thread.send.await_args
+    assert notice.startswith("The fleet ended: it ran out of time before any worker finished.")
+    assert "failed: it ran out of time" in notice
+    assert "@everyone" not in notice and "<#50>" not in notice
+    assert kwargs["allowed_mentions"].everyone is False
+
+
+async def test_a_lost_card_is_posted_again_in_its_final_state():
+    from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+
+    ended = replace(run(), status="failed")
+    workers = (worker(ordinal=1, status="succeeded"),)
+    for card in (None, _ended_card()):
+        if card is not None:
+            card.edit.side_effect = discord.NotFound(MagicMock(status=404), "gone")
+        thread = _ended_thread(card)
+        await show_fleet_ended(thread, ended, workers)
+        first, second = thread.send.await_args_list
+        assert "Fleet — failed" in "\n".join(_view_texts(first.kwargs["view"]))
+        assert second.args[0].startswith(
+            "The fleet ended: it ran out of time before I could pick up the result."
+        )
+
+
+def _run_end_bot(channel, *, may_post=True):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        _channel_by_id=AsyncMock(return_value=channel)
+        if not isinstance(channel, Exception)
+        else AsyncMock(side_effect=channel),
+        _may_post_in=AsyncMock(return_value=may_post),
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "settled"),
+    [
+        (discord.NotFound(MagicMock(status=404), "gone"), True),
+        (discord.Forbidden(MagicMock(status=403), "no"), True),
+        (discord.HTTPException(MagicMock(status=503), "later"), False),
+    ],
+)
+async def test_run_end_notice_retries_only_a_transient_failure(failure, settled):
+    from daimon.adapters.discord.bot import DaimonBot
+
+    bot = _run_end_bot(failure)
+    ended = replace(run(), status="failed")
+    assert await DaimonBot._post_fleet_run_end(bot, ended, ()) is settled  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("case", ["foreign_guild", "not_a_thread", "may_not_post"])
+async def test_run_end_notice_posts_nothing_where_it_does_not_belong(monkeypatch, case):
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.adapters.discord.posted_controls import fleet as fleet_card
+
+    shown = AsyncMock()
+    monkeypatch.setattr(fleet_card, "show_fleet_ended", shown)
+    thread = _ended_thread()
+    thread.guild.id = 61 if case == "foreign_guild" else 60
+    channel = MagicMock(spec=discord.TextChannel) if case == "not_a_thread" else thread
+    bot = _run_end_bot(channel, may_post=case != "may_not_post")
+    ended = replace(run(), status="failed")
+    assert await DaimonBot._post_fleet_run_end(bot, ended, ()) is True  # type: ignore[arg-type]
+    shown.assert_not_awaited()
+    thread.send.assert_not_awaited()
+
+
+async def test_run_end_notice_shows_in_the_runs_own_thread(monkeypatch):
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.adapters.discord.posted_controls import fleet as fleet_card
+
+    shown = AsyncMock()
+    monkeypatch.setattr(fleet_card, "show_fleet_ended", shown)
+    thread = _ended_thread()
+    thread.guild.id = 60
+    bot = _run_end_bot(thread)
+    ended = replace(run(), status="failed")
+    assert await DaimonBot._post_fleet_run_end(bot, ended, ()) is True  # type: ignore[arg-type]
+    bot._channel_by_id.assert_awaited_once_with(70)
+    shown.assert_awaited_once_with(thread, ended, ())

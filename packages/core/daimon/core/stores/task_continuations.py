@@ -18,6 +18,7 @@ owner so a process that lost its lease can change nothing.
 
 from __future__ import annotations
 
+import re
 import uuid as _uuid
 from collections.abc import Collection
 from datetime import datetime, timedelta
@@ -443,13 +444,27 @@ def _run_wakes(run: FleetRun) -> list[ColumnElement[bool]]:
     ]
 
 
+#: Why a run's wakes were withdrawn. "run_expired" rows still owe the thread a
+#: run-end notice; the adapter moves them to "run_expired_shown" once it is out.
+type RunEndReason = Literal["run_ended", "run_expired"]
+RUN_EXPIRED_SHOWN = "run_expired_shown"
+_RUN_PREFIX = re.compile(r'\{"run_id":"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})",')
+
+
 async def retire_worker_finished_rows(
-    session: AsyncSession, *, run: FleetRun, keep_id: _uuid.UUID | None = None
+    session: AsyncSession,
+    *,
+    run: FleetRun,
+    keep_id: _uuid.UUID | None = None,
+    reason: RunEndReason = "run_ended",
 ) -> int:
     """Withdraw this ended run's scheduling, retaining native/audit evidence.
 
     `keep_id` is the wake whose turn ended the run: its own claim settles as
     delivered through the wake owner, not as cancelled here.
+    `reason` is "run_expired" when the deadline sweep ended the run: no wake
+    delivered its result, so the adapter still owes the thread a run-end notice
+    (`claim_run_end_notice`).
     The caller holds the run lock; publication takes that same lock first.
     """
     retired = await session.scalars(
@@ -467,7 +482,7 @@ async def retire_worker_finished_rows(
         )
         .values(
             status="cancelled",
-            skip_reason="run_ended",
+            skip_reason=reason,
             lease_owner=None,
             lease_expires_at=None,
         )
@@ -475,6 +490,70 @@ async def retire_worker_finished_rows(
     )
     await session.flush()
     return len(tuple(retired))
+
+
+async def claim_run_end_notice(
+    session: AsyncSession, *, platform: str
+) -> tuple[_uuid.UUID, _uuid.UUID, str, tuple[_uuid.UUID, ...]] | None:
+    """Lock one expired run's withdrawn wakes: (tenant, run, thread, row ids).
+
+    Row locks (SKIP LOCKED) keep a second process off the same run while the
+    caller posts; `mark_run_end_notice_shown` in the same transaction settles it.
+    A row whose wait text names no run is settled here, with nothing to post.
+    """
+    while True:
+        row = (
+            await session.execute(
+                select(
+                    TaskContinuation.id,
+                    TaskContinuation.tenant_id,
+                    TaskContinuation.thread_id,
+                    TaskContinuation.requested_work,
+                )
+                .where(
+                    TaskContinuation.platform == platform,
+                    TaskContinuation.reason == "worker_finished",
+                    TaskContinuation.status == "cancelled",
+                    TaskContinuation.skip_reason == "run_expired",
+                )
+                .order_by(TaskContinuation.created_at, TaskContinuation.id)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        match = _RUN_PREFIX.match(row.requested_work or "")
+        if match is None:
+            await mark_run_end_notice_shown(session, ids=(row.id,))
+            continue
+        run_id = _uuid.UUID(match[1])
+        ids = (
+            await session.scalars(
+                select(TaskContinuation.id)
+                .where(
+                    TaskContinuation.tenant_id == row.tenant_id,
+                    TaskContinuation.platform == platform,
+                    TaskContinuation.thread_id == row.thread_id,
+                    TaskContinuation.reason == "worker_finished",
+                    TaskContinuation.status == "cancelled",
+                    TaskContinuation.skip_reason == "run_expired",
+                    TaskContinuation.requested_work.startswith(f'{{"run_id":"{run_id}",'),
+                )
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+        return row.tenant_id, run_id, row.thread_id, tuple({row.id, *ids})
+
+
+async def mark_run_end_notice_shown(session: AsyncSession, *, ids: Collection[_uuid.UUID]) -> None:
+    """The run-end notice for these withdrawn wakes is out (or can never be)."""
+    await session.execute(
+        update(TaskContinuation)
+        .where(TaskContinuation.id.in_(tuple(ids)), TaskContinuation.skip_reason == "run_expired")
+        .values(skip_reason=RUN_EXPIRED_SHOWN)
+    )
+    await session.flush()
 
 
 async def count_run_wakes(

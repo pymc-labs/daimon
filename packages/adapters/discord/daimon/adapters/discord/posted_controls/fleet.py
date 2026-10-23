@@ -351,6 +351,41 @@ def history_finder(thread: discord.Thread) -> FindPosted:
     return find
 
 
+def fleet_ended_text(workers: Sequence[FleetWorker]) -> str:
+    """The plain notice for a run the deadline ended before any wake delivered it."""
+    done = sum(1 for row in workers if row.status == "succeeded")
+    why = (
+        "it ran out of time before I could pick up the result"
+        if done
+        else "it ran out of time before any worker finished"
+    )
+    details = _worker_list(workers)
+    return f"The fleet ended: {why}." + (f" Workers: {details}." if details else "")
+
+
+async def show_fleet_ended(
+    thread: discord.Thread, run: FleetRun, workers: Sequence[FleetWorker]
+) -> None:
+    """Settle the run's card to its final state, then post the run-end notice.
+
+    The card is edited where its controls name the run; a card that can't be
+    found or edited is posted again, so the thread never ends on "running".
+    """
+    view = build_fleet_view(run, workers)
+    card = await history_finder(thread)(run.id)
+    edited = False
+    if card is not None:
+        try:
+            await card.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+            edited = True
+        except discord.HTTPException:
+            log.info("fleet.card_end_edit_failed", run_id=str(run.id))
+    if not edited:
+        await thread.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+    view.stop()
+    await thread.send(fleet_ended_text(workers), allowed_mentions=discord.AllowedMentions.none())
+
+
 class FleetControl(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.LayoutView]],
     template=r"fleet:(?P<run>[0-9a-f]{32}):(?P<worker>all|[0-9a-f]{32}):(?P<version>[0-9]+):(?P<action>kill|resume)",
