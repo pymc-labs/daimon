@@ -19,7 +19,7 @@ from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
 from daimon.core.stores.domain import FLEET_OFF, CompatibilityPreview, TenantBackendPolicy
 from mux.contracts.config import ConfigRevision, ResolvedBackend
 from mux.contracts.ids import ModelRef, Provider
-from mux.profiles import MANAGED_AGENTS, backend_selection
+from mux.profiles import MANAGED_AGENTS, backend_selection, worker_selection
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -76,7 +76,7 @@ class FleetConfigInput(BaseModel):
         expires = self.expires_at or now + timedelta(days=90)
         choices = tuple(
             (
-                backend_selection(model.provider).model_copy(
+                worker_selection(model.provider).model_copy(
                     update={"model": model.id} if model.provider != MANAGED_AGENTS.provider else {}
                 ),
                 model,
@@ -162,7 +162,7 @@ def default_fleet_grant(policy: TenantBackendPolicy) -> AgentFleetGrant | None:
             continue
         if not backend_is_enabled(model.provider, policy.enabled_backends):
             continue
-        backend = backend_selection(model.provider).model_copy(
+        backend = worker_selection(model.provider).model_copy(
             update={"model": model.id} if model.provider != MANAGED_AGENTS.provider else {}
         )
         if backend.profile not in RUNNABLE_PROFILES or not runnable_selection(backend):
