@@ -52,6 +52,11 @@ _ACTIVE = ("pending", "starting", "running")
 log = structlog.get_logger(__name__)
 
 WORKER_PREPARATION_TIMEOUT_S = 30.0
+#: How often a pending worker retries its slot claim, doubling up to the max. Each
+#: attempt takes the tenant fleet lock, so a full tenant must not be polled four times a
+#: second per waiting worker.
+PENDING_CLAIM_POLL_S = 0.5
+PENDING_CLAIM_POLL_MAX_S = 2.0
 
 
 def _unique_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -1504,13 +1509,17 @@ class HostFleetPorts:
             cancel_workers,
             watch_fleet_budget,
         )
+        from daimon.core.fleet import FleetConflict
         from daimon.core.headless_runner import (
             FAILURE_RECORDED,
+            WORKER_FAILURE_COMMIT_LOCK_TIMEOUT,
             commit_worker_failure,
+            commit_worker_transition,
             run_worker,
         )
         from daimon.core.stores import fleet
         from daimon.core.turn.ceiling import remaining_s
+        from sqlalchemy.exc import DBAPIError
 
         async with self._load_preparation(parent, deadline=worker.deadline_at) as request:
             pool = self._pool
@@ -1567,7 +1576,42 @@ class HostFleetPorts:
             cancel = watch[0].setdefault(worker.id, WorkerCancel())
             trigger = worker_trigger(reviewed_result)
 
+            async def end_pending(code: WorkerFailureCode | None) -> None:
+                if code is None:
+                    return  # A plain cancel (not the watch's): the sweep or its owner ends it.
+
+                async def still_pending(db: AsyncSession, latest: FleetWorker) -> FleetWorker:
+                    if latest.status != "pending":
+                        return latest  # Claimed or ended meanwhile: its own path records it.
+                    return await fleet.finish(
+                        db,
+                        tenant_id=worker.tenant_id,
+                        worker_id=worker.id,
+                        expected_version=latest.version,
+                        status="failed",
+                        error_code=code,
+                    )
+
+                try:
+                    await commit_worker_transition(
+                        request,
+                        parent,
+                        worker,
+                        still_pending,
+                        lock_timeout=WORKER_FAILURE_COMMIT_LOCK_TIMEOUT,
+                    )
+                except (FleetConflict, DBAPIError) as error:
+                    # Bounded: a busy lock leaves the row to the deadline sweep, as before.
+                    log.warning(
+                        "fleet.pending_worker_end_deferred",
+                        run_id=str(worker.run_id),
+                        worker_id=str(worker.id),
+                        failure_code=code,
+                        error_class=type(error).__name__,
+                    )
+
             async def execute() -> None:
+                poll = PENDING_CLAIM_POLL_S
                 with request.deps.running_turns.track():
                     if request.deps.running_turns.shutting_down:
                         cancel_workers({worker.id: cancel}, "shutdown", run_id=worker.run_id)
@@ -1636,7 +1680,16 @@ class HostFleetPorts:
                             actual = next((row for row in rows if row.id == worker.id), None)
                             if actual is None or actual.status != "pending":
                                 return
-                            await asyncio.sleep(0.25)
+                            # Each claim attempt takes the tenant fleet lock: back off while
+                            # the tenant's worker slots stay full.
+                            await asyncio.sleep(poll)
+                            poll = min(PENDING_CLAIM_POLL_MAX_S, poll * 2)
+                        # Cancelled before it was ever claimed: end it now with why, so it
+                        # neither waits for the deadline sweep ("ran out of time") nor holds
+                        # the run open (SMOKE 26250cd6 J10).
+                        await asyncio.shield(
+                            end_pending(_CANCEL_CODES.get(getattr(cancel, "reason", None) or ""))
+                        )
 
             task = asyncio.create_task(execute())
             self._tasks[worker.id] = task

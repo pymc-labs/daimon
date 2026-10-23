@@ -11,6 +11,7 @@ Any refusal on this path is a product bug, not a test detail.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -32,13 +33,13 @@ from daimon.testing.db import db_committing_pool as db_committing_pool
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.pytest_plugin import db_preflight as db_preflight
 from mux.testing.drivers.anthropic.ma import list_response
+from structlog.testing import capture_logs
 
 from packages.adapters.mcp.tests.tools.test_fleet import AUTH, runtime
 from packages.adapters.mcp.tests.tools.test_j10_fork_e2e import (
     AstraWire,
     GeminiCatalog,
     GeminiTransport,
-    _settled,
 )
 from packages.adapters.mcp.tests.tools.test_j10_fork_e2e import j10_root as j10_root
 from packages.core.tests.turn.test_frozen_root import run_root_input
@@ -151,7 +152,19 @@ async def _save_named_agents(j10_root) -> dict[str, str]:
     return {name: agent.id for name, agent in native.items()}
 
 
-async def test_j4_a_member_runs_a_fleet_of_the_named_agents(j10_root, monkeypatch):
+async def _settled_within(ports, root, count, seconds):
+    async with asyncio.timeout(seconds):
+        while True:
+            _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+            if len(rows) == count and all(
+                row.status in ("failed", "succeeded", "cancelled") for row in rows
+            ):
+                return rows
+            await asyncio.sleep(0.05)
+
+
+async def _run_named_fleet(j10_root, monkeypatch, *, tenant_cap: int = 4, settle_s: float = 30):
+    """Spawn the three named agents as one member's fleet and run it to the collected card."""
     import mux.drivers.gemini as gemini_sdk
     import mux.drivers.openai as openai_sdk
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
@@ -214,7 +227,9 @@ async def test_j4_a_member_runs_a_fleet_of_the_named_agents(j10_root, monkeypatc
                 deps.sessionmaker,
                 markup=Decimal(1),
                 deps=deps,
-                pool=WorkerPool(max_concurrent_workers=4, max_concurrent_workers_per_tenant=4),
+                pool=WorkerPool(
+                    max_concurrent_workers=4, max_concurrent_workers_per_tenant=tenant_cap
+                ),
             )
             owner = FleetOrchestrator(ports)
             bridge = HostFleetToolService(
@@ -257,7 +272,7 @@ async def test_j4_a_member_runs_a_fleet_of_the_named_agents(j10_root, monkeypatc
                             )
                         )
                     )
-                settled = await _settled(ports, root, len(replies))
+                settled = await _settled_within(ports, root, len(replies), settle_s)
                 collected = dict(
                     await bridge.collect(
                         caller, run_id=root.fleet.run_id, origin_context_id=origin.id
@@ -285,6 +300,13 @@ async def test_j4_a_member_runs_a_fleet_of_the_named_agents(j10_root, monkeypatc
     finally:
         gemini_client.close()
         await gemini_client.aio.aclose()
+    return replies, settled, collected, gate, shown, transport, gemini_wire
+
+
+async def test_j4_a_member_runs_a_fleet_of_the_named_agents(j10_root, monkeypatch):
+    replies, settled, collected, gate, shown, transport, gemini_wire = await _run_named_fleet(
+        j10_root, monkeypatch
+    )
     # All three named agents were admitted, allocated, dispatched and succeeded.
     assert [reply["status"] for reply in replies] == ["pending"] * 3
     assert [(row.role, row.backend, row.status) for row in settled] == [
@@ -310,3 +332,50 @@ async def test_j4_a_member_runs_a_fleet_of_the_named_agents(j10_root, monkeypatc
     assert text[0] == "**Fleet — collected**"
     for name in NAMED:
         assert any(name in line and "succeeded" in line for line in "\n".join(text).splitlines())
+
+
+async def test_j4_slow_budget_reads_and_full_slots_never_stop_or_strand_a_worker(
+    j10_root, monkeypatch
+):
+    """SMOKE 26250cd6 (J3/J10): under a fleet spawn burst the run's budget watch read
+    slower than its 2 s timeout three polls in a row and stopped every worker ("its
+    spending couldn't be measured"), and workers still waiting for a tenant slot were
+    left pending until the deadline sweep ("ran out of time"). With two tenant slots (so
+    one worker waits) and every budget read slowed to 4 s, every worker still
+    runs and succeeds, none is stopped for unmeasured spending or left to expire. (Fails
+    on the old watch: three 4 s reads in a row stopped every worker.)"""
+    import time
+
+    from daimon.core import channel_budget
+
+    def slowed(read):
+        # Every budget read, lock-free or locked, takes about as long as it did on staging
+        # under the spawn burst: past the old 2 s read timeout, inside the new minimum.
+        async def slow(*args, **kwargs):
+            await asyncio.sleep(4)
+            return await read(*args, **kwargs)
+
+        return slow
+
+    for name in ("read_fleet_budget_snapshot", "produce_fleet_budget"):
+        monkeypatch.setattr(channel_budget, name, slowed(getattr(channel_budget, name)))
+    started = time.monotonic()
+    with capture_logs() as logs:
+        _, settled, _, gate, _, _, _ = await _run_named_fleet(
+            j10_root, monkeypatch, tenant_cap=2, settle_s=180
+        )
+    elapsed = time.monotonic() - started
+    assert [(row.role, row.status, row.error_code) for row in settled] == [
+        ("fleet-claude", "succeeded", None),
+        ("fleet-openai", "succeeded", None),
+        ("fleet-gemini", "succeeded", None),
+    ]
+    assert gate == (True, None)
+    assert not [e for e in logs if e.get("event") == "fleet.budget_read_unavailable"]
+    assert not [
+        e
+        for e in logs
+        if e.get("event") == "fleet.worker_cancel" and e.get("reason") == "usage_unavailable"
+    ]
+    # One-sentence workers, two at a time, every budget read 4 s: inside the worker deadline.
+    assert elapsed < 240

@@ -987,6 +987,13 @@ BUDGET_LOCK_CONTENDED_LIMIT_S = 60.0
 #: them decide from the lock-free snapshot, so the watch no longer holds the tenant fleet
 #: lock four times a second per run while every admission in the tenant waits on it.
 BUDGET_LOCKED_REFRESH_S = 2.0
+#: The least time one budget read may take before it counts as slow. A full producer
+#: read under a fleet spawn burst can take seconds without the usage being unknown.
+BUDGET_READ_TIMEOUT_MIN_S = 5.0
+#: How long the watch must go without one successful budget read (slow reads, or a
+#: busy tenant lock) before it fails closed and stops the run's workers. While reads
+#: keep succeeding inside this window, a busy lock or a slow read never stops anyone.
+BUDGET_READ_FAILURE_WINDOW_S = 30.0
 
 # The granted holder of one advisory key, from the same transaction the watch opened.
 _LOCK_HOLDER = text(
@@ -1091,13 +1098,13 @@ async def watch_fleet_budget(
     markup: Decimal,
     cancelled: Mapping[uuid.UUID, asyncio.Event],
     finished: asyncio.Event,
-    poll_interval: float = 0.25,
+    poll_interval: float = 1.0,
     read_timeout: float | None = None,
     locked_refresh_s: float = BUDGET_LOCKED_REFRESH_S,
 ) -> str:
     """One loop per run, fanning out decisions from the same producer graph.
 
-    Poll at four Hz by default, counting producer time inside each interval.
+    Poll once a second by default, counting producer time inside each interval.
     run_prepared_turn owns the only worker deadline. Unknown reservations at
     the run bound remain held; verified worker floors at their bound cancel.
     Caller registers each worker's cancellation event in the same mapping only
@@ -1107,11 +1114,19 @@ async def watch_fleet_budget(
     lock is busy, each poll decides from a lock-free read-only snapshot of the same
     producer, so contention never stops overrun cancellation. The holder is logged;
     the watch fails closed when one transaction holds the lock past
-    BUDGET_LOCK_BUSY_LIMIT_S or it stays busy past BUDGET_LOCK_CONTENDED_LIMIT_S.
+    BUDGET_LOCK_BUSY_LIMIT_S or it stays busy past BUDGET_LOCK_CONTENDED_LIMIT_S, and
+    only once no budget read has succeeded for BUDGET_READ_FAILURE_WINDOW_S; slow reads
+    fail it closed under the same window. Worst case while reads fail inside the window:
+    each running worker can spend up to its own native spend cap (at most its reserved
+    hold), so the run's exposure stays within the holds its admission reserved.
     """
     if parent.fleet.enabled is not True or parent.fleet.depth != 0:
         raise FleetConflict("fleet watch requires explicit root opt-in")
-    timeout = read_timeout if read_timeout is not None else poll_interval * 8
+    timeout = (
+        read_timeout
+        if read_timeout is not None
+        else max(BUDGET_READ_TIMEOUT_MIN_S, poll_interval * 8)
+    )
     if not all(math.isfinite(v) and v > 0 for v in (poll_interval, timeout)):
         raise ValueError("budget poll and read timeout must be positive finite durations")
     timeouts = 0
@@ -1122,6 +1137,13 @@ async def watch_fleet_budget(
     # Wait in line for the tenant lock, but leave room inside the read timeout.
     lock_wait_ms = max(1, int(min(1.5, timeout * 0.75) * 1000))
     last_locked: float | None = None
+    # When a budget read last succeeded (the watch's start counts): failing closed needs
+    # BUDGET_READ_FAILURE_WINDOW_S without one, not only a few slow polls in a row.
+    last_read = asyncio.get_running_loop().time()
+
+    def read_starved() -> bool:
+        return asyncio.get_running_loop().time() - last_read >= BUDGET_READ_FAILURE_WINDOW_S
+
     try:
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
@@ -1179,7 +1201,7 @@ async def watch_fleet_budget(
                         log.info("fleet.budget_lock_busy", holder=holder)
                     stuck = now - holder_since >= BUDGET_LOCK_BUSY_LIMIT_S
                     contended = now - busy_since >= BUDGET_LOCK_CONTENDED_LIMIT_S
-                    if stuck or contended:
+                    if (stuck or contended) and read_starved():
                         log.warning(
                             "fleet.budget_read_unavailable",
                             reason="lock_busy",
@@ -1202,7 +1224,7 @@ async def watch_fleet_budget(
                         raise FleetConflict("watched worker is unavailable")
                 except TimeoutError:
                     timeouts += 1
-                    if timeouts < BUDGET_READ_TIMEOUT_LIMIT:
+                    if timeouts < BUDGET_READ_TIMEOUT_LIMIT or not read_starved():
                         log.info("fleet.budget_read_slow", consecutive=timeouts, snapshot=True)
                         await asyncio.sleep(poll_interval)
                         continue
@@ -1229,7 +1251,7 @@ async def watch_fleet_budget(
                 # is not unavailable usage: retry, and fail closed only after
                 # consecutive timeouts. Holds are unchanged meanwhile.
                 timeouts += 1
-                if timeouts < BUDGET_READ_TIMEOUT_LIMIT:
+                if timeouts < BUDGET_READ_TIMEOUT_LIMIT or not read_starved():
                     log.info("fleet.budget_read_slow", consecutive=timeouts)
                     continue
                 log.warning(
@@ -1248,6 +1270,7 @@ async def watch_fleet_budget(
                 cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                 return "usage_unavailable"
             timeouts = 0
+            last_read = asyncio.get_running_loop().time()
             if not snapshot_read:
                 busy_since, holder_key, holder_since = None, None, None
                 last_locked = started
