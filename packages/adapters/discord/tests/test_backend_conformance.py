@@ -159,8 +159,9 @@ async def setup(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         discord=DiscordSettings(bot_token=SecretStr("offline")),
         thread_naming=ThreadNamingSettings(enabled=False),
-        # The legacy path these conformance cases were written for; the mux
-        # retention case below selects mux itself.
+        # The legacy path these conformance cases were written for. On mux an
+        # existing thread keeps its bound backend after a channel change; that is
+        # test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted.
         turn=TurnSettings(path="legacy", channel_backends=True, agent_backends=False),
         fleet=FleetSettings(enabled=False),
     )
