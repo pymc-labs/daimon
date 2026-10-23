@@ -86,8 +86,8 @@ def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_o
 #: What Discord's and Slack's prompts hash to. A new hash replaces their sessions, so
 #: it moves only with a deliberate change to the shipped prompt.
 _PINNED_ON_MAIN = {
-    "discord": "c464a962b00b5cbac3fa60e6b4842e26b366aa2711d73667a250914ef3738b9c",
-    "slack": "071e4bc9da3d83dfdc488c98c2424a50a224d4414fa765a64db777098714dc68",
+    "discord": "1a73ba32df940caaf3c06e6018477d4f7d396850d69bdf9e3b6d12dd1fb3bf67",
+    "slack": "34aa6842ccbb5a242e2177f155b56d96447eece1bf263a23198116954c7df053",
 }
 
 
