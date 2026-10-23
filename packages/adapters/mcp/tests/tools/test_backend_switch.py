@@ -478,6 +478,45 @@ async def test_a_private_session_context_refuses_the_preview(active_chat):
     assert not trace.replies and not trace.violations
 
 
+@pytest.mark.parametrize("stamp", ["channel_only", "other_channel", "other_thread"])
+async def test_a_thread_opened_by_a_channel_mention_previews_the_switch(active_chat, stamp):
+    """A first mention's session is stamped before its thread exists: channel only.
+
+    That session is the live one in this origin's thread, so the switch previews.
+    A session stamped with another channel or another thread still refuses.
+    """
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    _without_own_tools(payload)
+    if stamp == "channel_only":
+        del frozen["metadata"]["daimon_thread"]
+    elif stamp == "other_channel":
+        del frozen["metadata"]["daimon_thread"]
+        frozen["metadata"]["daimon_channel"] = "another-channel"
+    else:
+        frozen["metadata"]["daimon_thread"] = "another-thread"
+    gate()
+    agent()
+    if stamp == "channel_only":
+        preview = await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            agent_name="Researcher",
+            target_backend="openai",
+            origin_context_id=str(origin.id),
+        )
+        assert preview.status == "preview"
+    else:
+        with pytest.raises(ToolError, match="public channel or thread"):
+            await _request_agent_backend_switch_impl(
+                runtime,
+                auth,
+                agent_name="Researcher",
+                target_backend="openai",
+                origin_context_id=str(origin.id),
+            )
+    assert not trace.replies and not trace.violations
+
+
 async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat):
     runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
     payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}

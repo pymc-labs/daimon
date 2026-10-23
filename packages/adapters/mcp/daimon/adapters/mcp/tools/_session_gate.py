@@ -83,10 +83,18 @@ async def session_card_gap(
                 owned=True,
                 legacy_thread_id=origin.thread_id,
             )
+            # A first mention in a channel creates its session before Discord opens
+            # the thread, so that session is stamped with the channel alone. The
+            # live row read above is keyed on this origin's thread, so the
+            # session is this thread's own.
+            opened_here = facts.thread is None and facts.channel == origin.parent_channel_id
             if (
                 facts.private
                 or facts.channel is None
-                or (facts.channel, facts.thread) != (origin.parent_channel_id, origin.thread_id)
+                or (
+                    (facts.channel, facts.thread) != (origin.parent_channel_id, origin.thread_id)
+                    and not opened_here
+                )
             ):
                 return "source_context_unavailable"
         if ma_session.agent.id != origin.responder_ma_agent_id:
