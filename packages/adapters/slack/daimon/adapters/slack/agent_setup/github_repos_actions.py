@@ -48,6 +48,7 @@ async def handle(
                 meta=meta,
                 agent_name=meta.agent_name,
                 is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
+                viewer_user_id=user_id,
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]

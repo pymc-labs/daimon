@@ -364,7 +364,7 @@ def assemble_here_card(
                     usable_in_session=None,
                 )
             )
-            if server.url.rstrip("/") in token_urls:
+            if server.url is not None and server.url.rstrip("/") in token_urls:
                 credentials.append(
                     CredentialStatus(
                         name=server.name,
@@ -388,7 +388,8 @@ def assemble_here_card(
                     (
                         item
                         for item in details.mcp_servers
-                        if item.url.rstrip("/") == grant.mcp_server_url.rstrip("/")
+                        if item.url is not None
+                        and item.url.rstrip("/") == grant.mcp_server_url.rstrip("/")
                     ),
                     None,
                 )
@@ -537,6 +538,8 @@ async def load_here_card(
             github=github,
             public_mcp_url=public_mcp_url,
             is_admin=is_admin,
+            # URLs match stored logins below; the card shows connection names only.
+            urls_internal_only=True,
             channel_label=channel_id,
             preloaded_agent=ma_agent,
         )
@@ -553,7 +556,9 @@ async def load_here_card(
             grants = await mcp_oauth_flows.list_completed_grants(
                 session,
                 tenant_id=tenant_id,
-                server_urls=(server.url for server in details.mcp_servers),
+                server_urls=(
+                    server.url for server in details.mcp_servers if server.url is not None
+                ),
             )
     if visible_channel_ids is not None and viewer is not None:
         visible_channel_ids = {cid for cid in visible_channel_ids if viewer.sees_place(cid)}

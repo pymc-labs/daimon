@@ -115,8 +115,11 @@ async def load_panel_details(
     channel_id: str,
     thread_id: str | None,
     is_admin: bool,
+    viewer_user_id: str | None = None,
 ) -> AgentDetails | None:
     """Everything the Details view shows for `agent_name`, or None.
+
+    `viewer_user_id`: connector URLs only for an admin or the agent's owner.
 
     The roster in hand is the name→MA id map, so a click carrying a name that
     is no longer in this tenant's roster resolves to None here rather than
@@ -140,6 +143,7 @@ async def load_panel_details(
         public_mcp_url=public_mcp_url(runtime),
         is_admin=is_admin,
         channel_label=f"<#{channel_id}>",
+        viewer_user_id=viewer_user_id,
     )
 
 

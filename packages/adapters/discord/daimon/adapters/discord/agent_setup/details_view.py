@@ -14,6 +14,7 @@ only; key values are never part of the rendered model.
 from __future__ import annotations
 
 import functools
+import re
 from urllib.parse import quote
 
 import anthropic
@@ -169,13 +170,21 @@ def _detail_items(details: AgentDetails) -> dict[DetailListName, tuple[str, ...]
     if details.skills:
         items["skills"] = tuple(skill.title or skill.skill_id for skill in details.skills)
     if details.mcp_servers:
+        # The URL only for a viewer who may read the agent's setup; else the name alone.
         items["connections"] = tuple(
             f"[{_escape_link_label(server.name)}]({quote(server.url, safe=':/?&=#%+-._~')})"
+            if server.url is not None
+            else _plain_label(server.name)
             for server in details.mcp_servers
         )
     if details.keys:
         items["keys"] = tuple(f"`{entry.name}`" for entry in details.keys)
     return items
+
+
+def _plain_label(text: str) -> str:
+    """A connection name as literal text: no Markdown, no link, whatever it holds."""
+    return re.sub(r"([\\*_~|`>\[\]()#-])", r"\\\1", text)
 
 
 def _escape_link_label(text: str) -> str:

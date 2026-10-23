@@ -1011,3 +1011,24 @@ async def test_a_member_sees_no_buttons_that_only_refuse(
     labels = {child.label for child in view.walk_children() if isinstance(child, discord.ui.Button)}
     assert "🧰 Use from your coding tools" not in labels
     assert "➕ Add skill" not in labels
+
+
+@pytest.mark.parametrize("url", [None, "https://linear.example/mcp"])
+def test_a_connection_s_url_shows_only_when_the_reader_may_read_its_setup(
+    account_id: uuid.UUID, url: str | None
+) -> None:
+    """A reader who is neither an admin nor the owner gets the name alone (URL None)."""
+    name = "[x](https://evil.test)"
+    details = _details(mcp_servers=(McpServerEntry(name=name, url=url),))
+    container = build_details_container(
+        _state(details, account_id=account_id),
+        details,
+        expanded_detail=None,
+        is_admin=False,
+        attribution=None,
+    )
+    text = _container_text(container)
+    assert ("linear.example" in text) is (url is not None)
+    if url is None:
+        # The bare name is literal: a name shaped like a link renders as text.
+        assert "\\[x\\]\\(https://evil.test\\)" in text

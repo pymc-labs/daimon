@@ -531,6 +531,7 @@ class SetupPanel:
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.is_admin,
                 channel_label=None,
+                viewer_user_id=actor.user_id,
             )
             details = await self._without_hidden_places(session, actor, details)
             # Only a member's ownership adds anything: an admin already gets every control.

@@ -20,6 +20,7 @@ from datetime import datetime
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.agent_ownership import may_read_agent_setup
 from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -101,12 +102,16 @@ class SkillEntry(BaseModel):
 
 
 class McpServerEntry(BaseModel):
-    """One external MCP server attached to the agent."""
+    """One external MCP server attached to the agent.
+
+    `url` is None for a viewer who may not read the agent's setup
+    (`may_read_agent_setup`): they see the connection's name only.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     name: str
-    url: str
+    url: str | None
 
 
 class AgentDetails(BaseModel):
@@ -156,8 +161,11 @@ def build_agent_details(
     public_mcp_url: str | None,
     is_admin: bool,
     channel_label: str | None,
+    show_setup: bool = False,
 ) -> AgentDetails:
     """Fold one live agent plus this install's rows into `AgentDetails`.
+
+    `show_setup`: the viewer may read the agent's setup, so connector URLs are kept.
 
     The deployment's own MCP server is filtered out of `mcp_servers`: every
     agent carries it, it is how the product works rather than something the
@@ -192,7 +200,7 @@ def build_agent_details(
         ),
         skills_listing_truncated=skills_truncated,
         mcp_servers=tuple(
-            McpServerEntry(name=server.name, url=server.url)
+            McpServerEntry(name=server.name, url=server.url if show_setup else None)
             for server in agent.mcp_servers
             if public_mcp_url is None or server.url != public_mcp_url
         ),
@@ -231,8 +239,17 @@ async def load_agent_details(
     is_admin: bool,
     channel_label: str | None,
     preloaded_agent: BetaManagedAgentsAgent | None = None,
+    viewer_user_id: str | None = None,
+    viewer_account_id: uuid.UUID | None = None,
+    urls_internal_only: bool = False,
 ) -> AgentDetails:
     """Read everything `build_agent_details` needs, then fold it.
+
+    `viewer_user_id` (their user id on `platform`) or `viewer_account_id` names the
+    viewer: connector URLs are shown only to an admin or the agent's owner
+    (`may_read_agent_setup`). Without either, only an admin sees them.
+    `urls_internal_only`: the caller keeps every URL to match its own records and
+    never shows one (the /here card), so they are kept whoever views.
 
     At most one MA retrieve, through `get_setup_agent`, so an agent from
     another install or an archived one is refused before any of this is read.
@@ -292,6 +309,16 @@ async def load_agent_details(
     skill_titles, skills_truncated = await resolve_custom_skill_titles(
         anthropic, agents=[agent], tenant_id=tenant_id
     )
+    show_setup = urls_internal_only or await may_read_agent_setup(
+        session,
+        tenant_id=tenant_id,
+        ma_agent_id=agent.id,
+        metadata=agent.metadata,
+        is_admin=is_admin,
+        account_id=viewer_account_id,
+        platform=platform,
+        platform_user_id=viewer_user_id,
+    )
     return build_agent_details(
         agent=agent,
         tenant_id=tenant_id,
@@ -307,4 +334,5 @@ async def load_agent_details(
         public_mcp_url=public_mcp_url,
         is_admin=is_admin,
         channel_label=channel_label,
+        show_setup=show_setup,
     )

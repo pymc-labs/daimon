@@ -64,9 +64,11 @@ from daimon.adapters.mcp.tools.agent_chat import (
     _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _verify_agent_owns_session,  # pyright: ignore[reportPrivateUsage]
     agent_pin_names,
+    role_summary,
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_ownership import may_read_agent_setup
 from daimon.core.authz import Subject
 from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import list_agents_by_tenants
@@ -100,17 +102,20 @@ class DaimonSummary(BaseModel):
     workspace_id: str
     workspace: str
     role_summary: str
+    """The start of the prompt for the agent's owner; else its description."""
     skill_names: list[str]
 
 
-def _summary(tenant: HubTenant, hub: HubIdentity, agent: BetaManagedAgentsAgent) -> DaimonSummary:
+def _summary(
+    tenant: HubTenant, hub: HubIdentity, agent: BetaManagedAgentsAgent, *, sees_prompt: bool
+) -> DaimonSummary:
     return DaimonSummary(
         id=str(derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id))),
         name=agent.name,
         platform=hub.platform,
         workspace_id=tenant.workspace_id,
         workspace=tenant.workspace_name,
-        role_summary=(agent.system or "")[:200],
+        role_summary=role_summary(agent, sees_prompt=sees_prompt),
         skill_names=[sk.skill_id for sk in agent.skills],
     )
 
@@ -174,7 +179,18 @@ def _hub_sees(
 async def _list_daimons_impl(runtime: McpRuntime, hub: HubIdentity) -> list[DaimonSummary]:
     out: list[DaimonSummary] = []
     for tenant, agents in await _agents_by_tenant(runtime, hub):
-        out.extend(_summary(tenant, hub, agent) for agent in agents)
+        async with runtime.session_factory() as session:
+            for agent in agents:
+                # The hub is never an admin surface: the prompt is the owner's alone.
+                sees_prompt = await may_read_agent_setup(
+                    session,
+                    tenant_id=tenant.tenant_id,
+                    ma_agent_id=agent.id,
+                    metadata=agent.metadata,
+                    is_admin=False,
+                    account_id=tenant.account_id,
+                )
+                out.append(_summary(tenant, hub, agent, sees_prompt=sees_prompt))
     out.sort(key=lambda d: (d.workspace.lower(), d.name.lower()))
     return out
 

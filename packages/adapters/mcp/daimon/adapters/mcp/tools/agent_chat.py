@@ -94,6 +94,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.agent_ownership import may_read_agent_setup
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
@@ -232,6 +233,7 @@ class AgentDescription(BaseModel):
 
     name: str
     role_summary: str
+    """The start of the prompt for an admin or the agent's owner; else its description."""
     skill_names: list[str]
     repo_url: str | None
     environment_name: str | None
@@ -472,6 +474,12 @@ async def _resolve_ma_agent(
     return agent
 
 
+def role_summary(agent: BetaManagedAgentsAgent, *, sees_prompt: bool) -> str:
+    """The start of the prompt for an admin or the owner (`may_read_agent_setup`), else the
+    agent's description: someone else's prompt is setup, not a capability."""
+    return (agent.system or "")[:200] if sees_prompt else (agent.description or "")
+
+
 def agent_pin_names(agent: BetaManagedAgentsAgent) -> tuple[str | None, ...]:
     """Every name a channel pin on ``agent`` may be keyed by (`core.agent_pins`)."""
     return core_agent_pin_names(agent.name, agent.metadata)
@@ -490,12 +498,19 @@ async def _describe_agent_impl(
         grants = await list_live_grant_repositories(
             session, tenant_id=auth.tenant_id, agent_id=auth.agent_id
         )
+        sees_prompt = await may_read_agent_setup(
+            session,
+            tenant_id=auth.tenant_id,
+            ma_agent_id=ma_agent.id,
+            metadata=ma_agent.metadata,
+            is_admin=auth.is_admin,
+            account_id=auth.account_id,
+        )
     repo_url = next((repo.repo_full_name for grant, repo in grants if grant.is_working_repo), None)
     skill_names = [sk.skill_id for sk in ma_agent.skills]
-    role_summary = (ma_agent.system or "")[:200]
     return AgentDescription(
         name=ma_agent.name,
-        role_summary=role_summary,
+        role_summary=role_summary(ma_agent, sees_prompt=sees_prompt),
         skill_names=skill_names,
         repo_url=repo_url,
         environment_name=env_name,

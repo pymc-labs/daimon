@@ -6,8 +6,9 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
+import pytest
 from daimon.adapters.teams import setup_card
-from daimon.core.agent_details import AgentDetails
+from daimon.core.agent_details import AgentDetails, McpServerEntry
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer, ChannelEnvironment
 from daimon.core.roster import paginate
 from daimon.core.scope import AnsweringPlace
@@ -174,3 +175,26 @@ def test_the_agents_owner_is_offered_add_skill_and_a_member_is_not() -> None:
     assert "Add skill" not in text(owned=False)
     # The coding-tool token stays an admin's.
     assert "coding tools" not in text(owned=True)
+
+
+@pytest.mark.parametrize("url", [None, "https://linear.example/mcp"])
+def test_a_connection_s_url_shows_only_when_the_reader_may_read_its_setup(url: str | None) -> None:
+    details = AgentDetails(
+        ma_agent_id="ag_helper",
+        name="Helper",
+        model_id="model",
+        model_display_name="Model",
+        daimon_managed=False,
+        created_by_is_workspace=True,
+        created_at=datetime.now(UTC),
+        answers_here=True,
+        applies_note="Changes apply next turn.",
+        mcp_servers=(McpServerEntry(name="lin*ear", url=url),),
+    )
+    card = setup_card.details_card(
+        details, here="19:here@thread.tacv2", page=0, coding_tools=False, is_admin=False
+    )
+    text = json.dumps(card.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False)
+    assert ("linear.example" in text) is (url is not None)
+    if url is None:
+        assert "lin\\\\*ear" in text, "the bare name is literal text, markdown escaped"

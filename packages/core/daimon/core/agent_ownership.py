@@ -9,10 +9,11 @@ recorded by the tool that created the agent; only an admin assigns or clears.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 
 import structlog
+from daimon.core.defaults.metadata import MA_METADATA_KEY_SETUP_HIDDEN
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_owners, security_audit
 from daimon.core.stores.identity import find_platform_principal
@@ -129,6 +130,42 @@ async def owns_agent(
         return False
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     return await agent_owners.owner_of(session, tenant_id, agent_id) == account_id
+
+
+def setup_hidden(metadata: Mapping[str, str] | None) -> bool:
+    """A member's copy of the agent answering them: its inherited setup stays an admin's."""
+    return (metadata or {}).get(MA_METADATA_KEY_SETUP_HIDDEN) == "true"
+
+
+async def may_read_agent_setup(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str,
+    metadata: Mapping[str, str] | None,
+    is_admin: bool,
+    account_id: uuid.UUID | None = None,
+    platform: str | None = None,
+    platform_user_id: str | None = None,
+) -> bool:
+    """Whether the viewer may read an agent's setup: its prompt and connector URLs.
+
+    An admin always may. Otherwise only the agent's owner, and never on a copy whose
+    inherited setup is hidden (`setup_hidden`). Everyone else sees capabilities:
+    the name, description, model, skills and connector names.
+    """
+    if is_admin:
+        return True
+    if setup_hidden(metadata) or (account_id is None and platform_user_id is None):
+        return False
+    return await owns_agent(
+        session,
+        tenant_id=tenant_id,
+        ma_agent_id=ma_agent_id,
+        account_id=account_id,
+        platform=platform,
+        platform_user_id=platform_user_id,
+    )
 
 
 async def agent_owner(
