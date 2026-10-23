@@ -556,7 +556,7 @@ def interactive_decider(
                 return ToolConfirmationResult(allow=False, deny_message=str(err))
             if isinstance(err, CardRefusal):
                 # Worded for the person (e.g. another switch landed first): pass it on.
-                return ToolConfirmationResult(allow=False, deny_message=str(err))
+                return ToolConfirmationResult(allow=False, deny_message=f"{err} Do not retry it.")
             return ToolConfirmationResult(allow=False, deny_message=_card_failed_message(call))
         answer = response.answer if isinstance(response, ApprovedConfirmation) else response
         log.info("tool_safety.answered", tool=call.key, answer=answer)
