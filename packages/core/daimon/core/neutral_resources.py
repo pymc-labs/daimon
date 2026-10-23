@@ -1544,8 +1544,8 @@ FLEET_ROOT_OBSTACLES: Mapping[str, str] = {
     "files": "it has stored secrets or files that fleet workers can't receive",
     "repository": "it uses a repository with its own login",
     "tools": "it has tools that ask before running, or that fleet workers can't use",
-    # Its memory store is created by this turn's session, so only a later turn has it.
-    "memory": ("its memory is being created by this reply. Ask in your next message and it can"),
+    # Only an existing store: before it exists, workers run without memory instead.
+    "memory": "its memory can't be shared with fleet workers",
     # Default-fleet turns that ran with fleet off instead of failing.
     "held": "this conversation includes another organisation, so fleets are off here",
     "shared_thread": "this is a shared thread, and fleets run only in your own thread",

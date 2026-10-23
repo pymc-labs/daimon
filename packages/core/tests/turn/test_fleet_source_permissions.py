@@ -17,6 +17,7 @@ from daimon.core.neutral_resources import (
     AgentFleetGrant,
     WorkerLimits,
     WorkerSpecRefused,
+    fleet_root_obstacle,
     fleet_root_permissions,
     resolve_worker_spec,
 )
@@ -448,6 +449,8 @@ async def test_a_root_before_its_memory_store_exists_runs_workers_without_memory
         r.resource is not None and r.resource.kind == "memory_store" for r in permissions.resources
     )
     assert len(trace.requests) == 1
+    # So it is no obstacle either: the memory obstacle copy is for an existing store only.
+    assert fleet_root_obstacle(source) is None
 
 
 _HAIKU55_BUILTINS = ("bash", "read", "edit", "grep", "glob", "write", "web_fetch", "web_search")
