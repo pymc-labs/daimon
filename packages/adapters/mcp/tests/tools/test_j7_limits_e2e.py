@@ -343,7 +343,8 @@ async def test_stop_by_the_fleets_starter_ends_it_and_another_member_is_refused(
             assert worker.status not in ("cancelled", "failed"), "a refused stop changes nothing"
             return
         assert answer == FLEET_STOPPING
-        gated.release.set()
+        # Gemini never answers: the stop itself must end the in-flight worker (releasing
+        # it here would race a late success against the cancel).
         (worker,) = await _settled(run.ports, run.root, 1)
         # Stopped, said as such: never "it couldn't start on that model here".
         assert (worker.status, worker.error_code) == ("cancelled", "stop_requested"), worker
