@@ -271,6 +271,9 @@ A fork also takes the source's provider setting
 source's owner (`copy_agent(carry="all")`) also takes the fleet grant and the
 shared memory (`memory_resource.copy_shared_memory`); anyone else's fork, and
 one whose maker the caller doesn't state, takes the settings only.
+A copied fleet grant passes the same checks as setting one
+(`checked_fleet_grant`), or it is left behind. The receipt names a keyed MCP
+server by name and `scheme://host` only, never its path or query.
 Personal and channel memory stores are never copied. A provider switch whose
 consent dropped features is carried only with a fresh consent pinned to the
 fork, and only when the fork drops nothing more; a provider turned off for

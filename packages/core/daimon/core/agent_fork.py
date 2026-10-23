@@ -100,7 +100,7 @@ class CopyCarry:
     memory: CopiedMemory | None = None
     memory_failed: bool = False
     reconnect: tuple[tuple[str, str], ...] = ()
-    """The source's MCP servers (name, URL) left off because their key stays with the source."""
+    """The source's MCP servers (name, scheme://host) left off: their key stays with the source."""
     github_repos: tuple[str, ...] = ()
     """The source's GitHub repos; the copy has no access to them."""
     kept_back: bool = False
@@ -128,16 +128,34 @@ def fork_notes(copy: AgentCopy, new_name: str) -> tuple[str, ...]:
         model = f" ({carried.model})" if carried.model else ""
         notes.append(f"It runs on {provider_name(carried.backend)}{model}, like {source}.")
     left = carry.backend.left_backend if carry.backend is not None else None
-    if left is not None:
+    if left is not None and carry.backend is not None:
         provider = provider_name(left)
-        notes.append(
-            f"{source} runs on {provider}, but {new_name} starts on Anthropic: the switch needs "
-            f'confirming for it. To move it, ask in chat "switch {new_name} to {provider}".'
-        )
+        reason = carry.backend.left_reason
+        if reason == "turned_off":
+            notes.append(
+                f"{source} runs on {provider}, which is turned off here, "
+                f"so {new_name} runs on Anthropic."
+            )
+        elif reason == "not_runnable":
+            notes.append(
+                f"{source}'s {provider} setting can't run here any more, "
+                f"so {new_name} runs on Anthropic."
+            )
+        else:
+            notes.append(
+                f"{source} runs on {provider}, but {new_name} starts on Anthropic: the switch "
+                f'needs confirming for it. To move it, ask in chat "switch {new_name} to '
+                f'{provider}".'
+            )
+    if carry.backend is not None and carry.backend.fleet_left:
+        notes.append(f"{source}'s fleet setup can't be used here any more, so {new_name} has none.")
     if carry.kept_back:
         notes.append(f"{source}'s memory and fleet setup stay with {source}.")
     if carry.backend is not None and carry.backend.fleet:
-        notes.append(f"It has {source}'s fleet setup, with the same limits.")
+        notes.append(
+            f"It has {source}'s fleet setup, with the same limits; each agent spends up to "
+            "them on its own."
+        )
     memory = carry.memory
     if memory is not None and memory.copied:
         notes.append(
@@ -151,10 +169,10 @@ def fork_notes(copy: AgentCopy, new_name: str) -> tuple[str, ...]:
             )
     if carry.memory_failed or (memory is not None and not memory.copied and memory.failed):
         notes.append(f"{source}'s memory couldn't be copied, so {new_name} starts with none.")
-    for server, url in carry.reconnect:
+    for server, origin in carry.reconnect:
+        at = f" ({origin})" if origin else ""
         notes.append(
-            f"{server} needs connecting again: ask in chat "
-            f'"connect {server} ({url}) to {new_name}".'
+            f'{server}{at} needs connecting again: ask in chat "connect {server} to {new_name}".'
         )
     if carry.github_repos:
         repos = ", ".join(carry.github_repos)
@@ -486,7 +504,9 @@ async def _carry(
             )
     except Exception as exc:
         # Best effort from here on: the copy exists, and raising would report it as not made.
-        _log.warning("agent_fork.backend_carry_failed", error=type(exc).__name__, **log_fields)
+        _log.warning(
+            "agent_fork.backend_carry_failed", error=type(exc).__name__, **log_fields, exc_info=True
+        )
     memory: CopiedMemory | None = None
     memory_failed = False
     if full:
@@ -500,7 +520,12 @@ async def _carry(
                 copy_name=args.new_name,
             )
         except Exception as exc:
-            _log.warning("agent_fork.memory_copy_failed", error=type(exc).__name__, **log_fields)
+            _log.warning(
+                "agent_fork.memory_copy_failed",
+                error=type(exc).__name__,
+                **log_fields,
+                exc_info=True,
+            )
             memory_failed = True
     repos: list[AgentRepo] = []
     try:
@@ -509,7 +534,9 @@ async def _carry(
                 session, tenant_id=tenant_id, agent_id=args.source_uuid
             )
     except Exception as exc:
-        _log.warning("agent_fork.repos_read_failed", error=type(exc).__name__, **log_fields)
+        _log.warning(
+            "agent_fork.repos_read_failed", error=type(exc).__name__, **log_fields, exc_info=True
+        )
     return CopyCarry(
         source_name=args.source_name,
         backend=backend,

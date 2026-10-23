@@ -481,7 +481,9 @@ async def copy_shared_memory(
                 await write_memory(anthropic, target, path, memory.content or "", scope=scope)
             except Exception as error:
                 # Best effort per memory: the receipt counts what didn't come.
-                _log.warning("memory_store.copy_one_failed", error=type(error).__name__)
+                _log.warning(
+                    "memory_store.copy_one_failed", error=type(error).__name__, exc_info=True
+                )
                 return False
             return True
 

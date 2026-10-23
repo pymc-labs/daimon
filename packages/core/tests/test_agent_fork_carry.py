@@ -57,6 +57,7 @@ from .test_agent_backend import enable
 from .test_agent_backend import owned as owned
 
 NOW = datetime(2026, 10, 13, 21, 0, tzinfo=UTC)
+SECRET_URL = "https://crm.example.com/s/sk_SECRET_PATH/mcp?api_key=SECRET_QUERY"
 CONSENT = {"declared_drops": ["memory"], "source_pin": "a" * 64, "target_digest": "b" * 64}
 
 
@@ -158,7 +159,7 @@ async def test_a_switch_that_dropped_features_needs_the_copys_own_consent(owned)
     # No capture of the copy: its provider stays the default and is named.
     plain = _copy(agent)
     carried = await service.carry_to_copy(source, plain, fleet_grant=True, account_id=None, now=NOW)
-    assert carried == CarriedBackend(None, "gemini", fleet=False)
+    assert carried == CarriedBackend(None, "gemini", fleet=False, left_reason="needs_consent")
     assert await service.current(plain) is None
 
 
@@ -193,7 +194,7 @@ async def test_the_copys_consent_is_kept_only_within_what_the_source_accepted(
         assert carried.revision.drop_consent.source_pin == "c" * 64, "pinned to the copy"
         assert carried.revision.declared_drops == tuple(drops)
     else:
-        assert carried == CarriedBackend(None, "gemini", fleet=False)
+        assert carried == CarriedBackend(None, "gemini", fleet=False, left_reason="needs_consent")
 
 
 def _client(
@@ -251,7 +252,7 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
         name="source",
         tenant_id=tenant.id,
         metadata={MA_METADATA_KEY_MANAGED: "true"},
-        mcp_servers=[{"type": "url", "name": "crm", "url": "https://crm.example.com/mcp"}],
+        mcp_servers=[{"type": "url", "name": "crm", "url": SECRET_URL}],
     )
     source_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_src")
     copy_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_new")
@@ -260,7 +261,7 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
         fernet=build_multifernet((Fernet.generate_key().decode(),)),
         tenant_id=tenant.id,
         agent_id=source_uuid,
-        mcp_server_url="https://crm.example.com/mcp",
+        mcp_server_url=SECRET_URL,
         plaintext_token="tok_crm",
     )
     service = AgentBackendService(factory, enabled=True)
@@ -302,7 +303,7 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
 
     assert created[0]["metadata"][MA_METADATA_KEY_COPY_OF] == "source"
     assert not any(server["name"] == "crm" for server in created[0]["mcp_servers"])
-    assert copy.carry.reconnect == (("crm", "https://crm.example.com/mcp"),)
+    assert copy.carry.reconnect == (("crm", "https://crm.example.com"),)
     async with factory() as session:
         revision = await agent_backends.current(session, tenant.id, copy_uuid)
         store = await get_memory_store_id(session, tenant_id=tenant.id, agent_id=copy_uuid)
@@ -312,9 +313,9 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
     )
     notes = fork_notes(copy, "mine")
     assert (
-        'crm needs connecting again: ask in chat "connect crm (https://crm.example.com/mcp) '
-        'to mine".'
+        'crm (https://crm.example.com) needs connecting again: ask in chat "connect crm to mine".'
     ) in notes
+    assert not any("SECRET" in note for note in notes), "a server's path or query is never echoed"
     kept_back = "source's memory and fleet setup stay with source."
     if channel_copy or carry != "all":
         assert revision.fleet_grant is None and store is None
@@ -329,7 +330,10 @@ async def test_copy_agent_carries_by_who_copies_and_names_what_to_reconnect(
     assert copied == {("/conventions.md", "tabs"), ("/project/facts.md", "due friday")}
     assert copy.carry.memory == CopiedMemory(2, 0)
     assert "It runs on Gemini (gemini-4-argon), like source." in notes
-    assert "It has source's fleet setup, with the same limits." in notes
+    assert (
+        "It has source's fleet setup, with the same limits; each agent spends up to them on "
+        "its own."
+    ) in notes
 
 
 def test_fork_notes_name_a_provider_left_behind_and_lost_memory() -> None:
@@ -338,7 +342,7 @@ def test_fork_notes_name_a_provider_left_behind_and_lost_memory() -> None:
         (),
         carry=CopyCarry(
             source_name="source",
-            backend=CarriedBackend(None, "openai", fleet=False),
+            backend=CarriedBackend(None, "openai", fleet=False, left_reason="needs_consent"),
             memory_failed=True,
             github_repos=("acme/app",),
         ),
@@ -388,8 +392,68 @@ async def test_a_provider_turned_off_here_is_left_behind(owned) -> None:
     source = await _source_setting(sessions, agent.tenant_id, agent.agent_id)
     copy = _copy(agent)
     carried = await service.carry_to_copy(source, copy, fleet_grant=True, account_id=None, now=NOW)
-    assert carried == CarriedBackend(None, "gemini", fleet=False)
+    assert carried == CarriedBackend(None, "gemini", fleet=False, left_reason="turned_off")
     assert await service.current(copy) is None
+
+
+@pytest.mark.parametrize("problem", ["unreadable", "provider-off"])
+async def test_a_grant_that_fails_its_checks_is_left_behind_and_named(owned, problem: str) -> None:
+    service, agent, _actor, sessions = owned
+    if problem == "unreadable":
+        # Epoch 0 on revision 1 reads back as an invalid grant.
+        value = _grant(NOW + timedelta(hours=1))
+    else:
+        value = AgentFleetGrant(
+            epoch=1,
+            max_workers=2,
+            choices=((backend_selection("openai"), ModelRef(provider="openai", id="gpt-6-luna")),),
+            limits=WorkerLimits(
+                budget_usd=Decimal("0.9"), deadline=NOW + timedelta(hours=1), max_turns=1
+            ),
+            max_run_seconds=600,
+            max_worker_seconds=120,
+            max_root_turns=3,
+        )
+    source = await _source_setting(
+        sessions, agent.tenant_id, agent.agent_id, backend=None, model=None, grant=value
+    )
+    copy = _copy(agent)
+    carried = await service.carry_to_copy(source, copy, fleet_grant=True, account_id=None, now=NOW)
+    assert carried == CarriedBackend(None, None, fleet=False, fleet_left=True)
+    notes = fork_notes(
+        AgentCopy(copy_ma(), (), carry=CopyCarry(source_name="source", backend=carried)), "mine"
+    )
+    assert notes == ("source's fleet setup can't be used here any more, so mine has none.",)
+
+
+def copy_ma() -> Any:
+    return ma_agent(id="ag_new", name="mine")
+
+
+@pytest.mark.parametrize(
+    ("reason", "line"),
+    [
+        (
+            "turned_off",
+            "source runs on Gemini, which is turned off here, so mine runs on Anthropic.",
+        ),
+        (
+            "not_runnable",
+            "source's Gemini setting can't run here any more, so mine runs on Anthropic.",
+        ),
+        (
+            "needs_consent",
+            "source runs on Gemini, but mine starts on Anthropic: the switch needs confirming "
+            'for it. To move it, ask in chat "switch mine to Gemini".',
+        ),
+    ],
+)
+def test_fork_notes_give_the_true_reason_a_provider_was_left(reason: Any, line: str) -> None:
+    backend = CarriedBackend(None, "gemini", fleet=False, left_reason=reason)
+    notes = fork_notes(
+        AgentCopy(copy_ma(), (), carry=CopyCarry(source_name="source", backend=backend)), "mine"
+    )
+    assert notes == (line,)
 
 
 async def _seeded_store(
