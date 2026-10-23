@@ -55,6 +55,9 @@ from microsoft_teams.api.models.entity.quoted_reply_entity import QuotedReplyDat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DENIED = "This agent is not available for this account."
+# Why a message from an organisation with no live tenant gets no turn.
+SETTING_UP = "Daimon is still being set up for your organization. Try again in a few minutes."
+NOT_FOR_ORGANIZATION = "Daimon isn't available for your organization."
 INPUT_TOO_LONG = "That message is too long for this agent. Please shorten it."
 TEXT_ONLY = "Send your question as text, an image or a file."
 MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
@@ -613,3 +616,24 @@ async def live_tenant_id(
         and tenant.archived_at is None
     )
     return tenant_id if live else None
+
+
+async def not_live_reason(
+    sessionmaker: async_sessionmaker[AsyncSession], entra_tenant_id: str
+) -> str:
+    """What to tell someone whose organisation `live_tenant_id` refused.
+
+    Setup still running (or being retried after a failure) says to try again;
+    an organisation Daimon was never set up for, or was removed from, says so.
+    """
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=entra_tenant_id)
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+    if (
+        tenant is not None
+        and tenant.platform == "teams"
+        and tenant.archived_at is None
+        and tenant.provision_status in ("pending", "failed")
+    ):
+        return SETTING_UP
+    return NOT_FOR_ORGANIZATION

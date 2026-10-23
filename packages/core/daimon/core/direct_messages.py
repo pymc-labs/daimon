@@ -379,6 +379,15 @@ async def reply_to_dm(
         await require_dm_enabled(deps, tenant_id=conversation.tenant_id)
         async with deps.sessionmaker() as session:
             tenant = await get_tenant(session, conversation.tenant_id)
+        if (
+            tenant is not None
+            and tenant.archived_at is None
+            and tenant.provision_status == "pending"
+        ):
+            raise UserFacingError(
+                f"Daimon is still setting up this {space_for(platform)}, so no DM was started. "
+                "Try again in a moment."
+            )
         if tenant is None or tenant.archived_at is not None or tenant.provision_status != "ready":
             raise UserFacingError(
                 f"This {space_for(platform)} isn't available, so no DM was started. Ask an admin."

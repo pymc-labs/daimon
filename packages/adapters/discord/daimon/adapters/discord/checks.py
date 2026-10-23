@@ -1,8 +1,9 @@
 """Gating decorators for slash command handlers.
 
 ``require_registered_guild`` verifies the invoking guild is in the workspace
-registry (DB check).  ``require_manage_guild`` verifies the invoking
-user has Discord-native manage_guild (or administrator, or is the owner).
+registry (DB check), and starts setting it up when it is not.
+``require_manage_guild`` verifies the invoking user has Discord-native
+manage_guild (or administrator, or is the owner).
 
 Both decorators consume the interaction response on rejection (ephemeral error)
 and return early.  The happy path falls through to the wrapped handler, which
@@ -30,8 +31,29 @@ P = ParamSpec("P")
 _ADMIN_ONLY_MESSAGE = "That action needs Manage Server — ask a server admin to do it."
 
 #: Discord's own name for the person a member is sent to when a change needs
-#: elevated permission. Copy never says "admin" in the abstract.
+#: elevated permission. Copy never says "admin" in the abstract. It matches
+#: `is_member_guild_admin` and `platform_words`: Discord grants the server
+#: owner and every Administrator Manage Server too.
 ADMIN_NOUN = "someone with Manage Server"
+
+#: The reply to a slash command in a server that has no tenant yet. The command
+#: starts the same setup a mention does, so the person only has to wait.
+SETTING_UP_MESSAGE = "Setting Daimon up in this server. Try again in a moment."
+
+
+def start_guild_setup(interaction: discord.Interaction) -> None:
+    """Start setting up the interaction's server, as a mention would.
+
+    Mentions self-heal a server with no tenant row; slash commands start the
+    same background setup so a retry a moment later works.
+    """
+    # `DaimonBot.start_provisioning`; checks is imported by bot, so it is
+    # looked up rather than typed against the bot class.
+    start: Callable[[discord.Guild], None] | None = getattr(
+        interaction.client, "start_provisioning", None
+    )
+    if interaction.guild is not None and start is not None:
+        start(interaction.guild)
 
 
 def is_member_guild_admin(member: discord.Member, *, guild_owner_id: int | None) -> bool:
@@ -137,10 +159,8 @@ def require_registered_guild(  # noqa: UP047  -- ParamSpec used for decorator ge
             return
         tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
         if tenant_id is None:
-            await interaction.response.send_message(
-                "This server is not registered. Ask an operator to register it.",
-                ephemeral=True,
-            )
+            start_guild_setup(interaction)
+            await interaction.response.send_message(SETTING_UP_MESSAGE, ephemeral=True)
             return
         await func(self, interaction, *args, **kwargs)
 

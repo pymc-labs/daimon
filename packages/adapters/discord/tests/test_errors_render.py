@@ -222,7 +222,7 @@ class TestGenerateRequestId:
 def test_audited_user_guidance_keeps_its_next_step_without_retry_later() -> None:
     for copy in (
         "This turn's setup context expired. Mention me again to continue.",
-        "This server is not registered. Ask a server admin to finish setup.",
+        "Setting Daimon up in this server. Try again in a moment.",
         "The agent was created but is not listed yet. Reopen `/agent-setup` to see it.",
     ):
         assert render_error(UserFacingError(copy), request_id=TEST_RID) == f"{copy}\n\n{REF}"

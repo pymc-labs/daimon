@@ -8,8 +8,10 @@ from typing import Any
 import pytest
 from daimon.core import direct_messages
 from daimon.core.direct_messages import reply_to_dm
+from daimon.core.errors import UserFacingError
 from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.domain import Role
+from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
@@ -59,6 +61,33 @@ async def test_a_dm_turn_is_admitted_against_its_source_channel(
         )
     assert stored is not None and stored.source_channel_id == source_channel_id, "it round-trips"
     assert stored.active_until is None, "a refused turn releases the conversation"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("pending", "still setting up this server"), ("failed", "isn't available")],
+)
+async def test_a_dm_in_a_server_still_being_set_up_says_to_try_again(
+    db_session_factory: async_sessionmaker[AsyncSession], status: str, expected: str
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(session, tenant=tenant, account_id=account.id)
+    await set_provision_status(db_session_factory, tenant_id=tenant.id, status=status)
+    deps = replace(deps_for(None, db_session_factory), turn_path=None)
+
+    with pytest.raises(UserFacingError, match=expected):
+        await reply_to_dm(
+            deps,
+            platform="discord",
+            route_key="dm-chan",
+            external_user_id="u1",
+            message_id="m1",
+            expected_scope_id="dm:1",
+            text="hello",
+            role=Role.USER,
+        )
 
 
 @pytest.mark.parametrize("owns_claim", [True, False])

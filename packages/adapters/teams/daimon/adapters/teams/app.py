@@ -63,13 +63,13 @@ from daimon.adapters.teams.deployment_admins import (
 )
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import (
-    DENIED,
     GraphSource,
     Refusal,
     TeamsInbound,
     canonical_uuid,
     kind_of,
     live_tenant_id,
+    not_live_reason,
     parse_graph_message,
     parse_inbound,
     strip_typed_name,
@@ -1205,7 +1205,8 @@ class TeamsApp:
         tenant_id = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
         if tenant_id is None:
             if await self._finish([inbound]):
-                await self._say(inbound, DENIED, sender_only=True)
+                reason = await not_live_reason(self.runtime.sessionmaker, inbound.entra_tenant_id)
+                await self._say(inbound, reason, sender_only=True)
             return
         command = self._private.command(inbound)
         if command is None and not inbound.is_targeted:

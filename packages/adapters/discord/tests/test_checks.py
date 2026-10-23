@@ -71,7 +71,7 @@ class TestRequireRegisteredGuild:
         wrapped.assert_not_awaited()
 
     async def test_rejects_unregistered_guild(self) -> None:
-        """Guild without a tenants row should be rejected."""
+        """Guild without a tenants row starts the same setup a mention does."""
         wrapped = AsyncMock()
 
         @require_registered_guild
@@ -95,8 +95,11 @@ class TestRequireRegisteredGuild:
 
         interaction.response.send_message.assert_awaited_once()
         call_kwargs = interaction.response.send_message.call_args
-        assert "not registered" in call_kwargs.args[0], "should mention registration"
+        assert call_kwargs.args[0] == (
+            "Setting Daimon up in this server. Try again in a moment."
+        ), "the person learns setup is underway and only has to retry"
         assert call_kwargs.kwargs.get("ephemeral") is True
+        interaction.client.start_provisioning.assert_called_once_with(interaction.guild)
         wrapped.assert_not_awaited()
 
     async def test_passes_registered_guild(self) -> None:
