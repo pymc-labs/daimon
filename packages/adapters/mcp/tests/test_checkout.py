@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl
 import httpx
 import pytest
 import pytest_asyncio
+from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.admin_authority import AdminAuthority
 from daimon.core.billing import BillingConfig
@@ -144,6 +145,7 @@ def _build_billing_config() -> BillingConfig:
 def _build_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     stripe_http_client: _FakeStripeHTTPClient | None = None,
+    verified_claims: dict[str, Any] | None = None,
 ) -> Starlette:
     return create_mcp_app(
         settings=Settings(
@@ -158,6 +160,7 @@ def _build_app(
                     "client_id": "test",
                     "tenant_id": str(_TENANT_ID),
                     "sub": str(_ACCOUNT_ID),
+                    **(verified_claims or {}),
                 }
             }
         ),
@@ -423,3 +426,42 @@ async def test_checkout_refuses_delegated_admin_before_stripe(
     assert response.status_code == 403
     assert stripe.last_post_data is None, "a delegated admin cannot create a checkout directly"
     platform_authority.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("chat", "platform", "external", "expected"),
+    [
+        (True, True, False, 200),
+        (True, False, False, 403),
+        (False, True, False, 403),
+        (True, True, True, 403),
+    ],
+)
+async def test_checkout_distinguishes_verified_chat_from_external_agent_keys(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    platform_authority: AsyncMock,
+    chat: bool,
+    platform: bool,
+    external: bool,
+    expected: int,
+) -> None:
+    platform_authority.return_value = AdminAuthority(platform_admin=platform, daimon_admin=True)
+    stripe = _FakeStripeHTTPClient(_CANNED_SESSION)
+    claims: dict[str, Any] = {
+        TOKEN_KIND_CLAIM: "agent",
+        CHAT_EXECUTION_CLAIM: chat,
+        "chat_agent_id": str(uuid.uuid4()),
+    }
+    if external:
+        claims["agent_id"] = str(uuid.uuid4())
+    app = _build_app(sessionmaker, stripe, verified_claims=claims)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/billing/checkout",
+            json={"amount": 10},
+            headers={"Authorization": f"Bearer {_VALID_TOKEN}"},
+        )
+    assert response.status_code == expected
+    assert (stripe.last_post_data is not None) is (expected == 200)

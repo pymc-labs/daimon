@@ -64,6 +64,7 @@ class AuthIdentity:
     # Signed grant for one isolated provider session, never a tool argument.
     chat_session_id: str | None = None
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
+    is_chat_execution: bool = False
     token_kind: McpTokenKind | None = None
     token_jti: uuid.UUID | None = None
     # What an operator token may call, read from its row on every request.
@@ -71,6 +72,13 @@ class AuthIdentity:
     # The channel the agent key was minted in, from its mcp_tokens row; read
     # through `token_channel_id`.
     bound_channel_id: str | None = None
+
+    @property
+    def is_external_agent(self) -> bool:
+        """External keys cannot inherit their owner's configuration authority."""
+        return self.agent_id is not None or (
+            self.token_kind == "agent" and not self.is_chat_execution
+        )
 
     @property
     def is_operator(self) -> bool:

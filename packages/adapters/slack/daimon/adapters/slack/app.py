@@ -2808,7 +2808,7 @@ class SlackApp:
                     responder_name=admission.config.agent_name or agent.name,
                     configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                     configuration_target_name=admission.config.configuration_target_name,
-                    role=Role.ADMIN if admission.is_admin else Role.USER,
+                    role=Role.ADMIN if admission.is_platform_admin else Role.USER,
                 ) as origin:
                     outcome = await run_prepared_turn(
                         self.runtime.turn_deps,
@@ -3330,7 +3330,7 @@ class SlackApp:
                     follow_admission.config.configuration_target_ma_agent_id
                 ),
                 configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=Role.ADMIN if follow_admission.is_admin else Role.USER,
+                role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
             ) as follow_origin:
                 await run_prepared_turn(

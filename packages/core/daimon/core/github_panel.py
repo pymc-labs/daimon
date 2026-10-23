@@ -9,12 +9,9 @@ from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.native_admins import AdminCaller, load_live_subject, read_stored_admin
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
 from daimon.core.stores.github_connect import (
     PINNED_AGENT_MESSAGE,
-    admin_account_for_platform_user,
     expire_pending_invitation,
     latest_pending_invitation,
     mint_invitation,
@@ -103,13 +100,12 @@ async def sync_connect_admin(
     platform_user_id: str,
     verified_tenant_admin: bool,
 ) -> None:
-    """Record a live Daimon admin check before a connect entry point mints a link."""
+    """Ensure a verified configuration caller has a principal, without caching authority."""
     if not verified_tenant_admin:
         raise ValueError("Only a workspace admin can connect GitHub.")
-    principal = await get_or_create_platform_principal(
+    await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
-    await set_role(session, principal.account_id, Role.ADMIN)
 
 
 _PUBLIC_ERRORS = frozenset(
@@ -220,11 +216,7 @@ async def connect_link(
     if root is None:
         raise ValueError("GitHub connection is not configured for this workspace.")
     for_agent = agent_id is not None and agent_name is not None
-    if verified_tenant_admin:
-        account_id = await admin_account_for_platform_user(
-            session, tenant_id=tenant_id, external_id=platform_user_id
-        )
-    elif for_agent and verified_agent_manager:
+    if verified_tenant_admin or (for_agent and verified_agent_manager):
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
         )
@@ -255,7 +247,7 @@ async def connect_link(
         agent_id=agent_id,
         agent_name=agent_name,
         agent_ma_id=agent_ma_id,
-        agent_manager_verified=verified_agent_manager,
+        agent_manager_verified=verified_tenant_admin or verified_agent_manager,
         origin_platform=platform,
         origin_parent_channel_id=origin_parent_channel_id,
         origin_thread_id=origin_thread_id,

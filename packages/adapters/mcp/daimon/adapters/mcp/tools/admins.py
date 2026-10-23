@@ -23,7 +23,7 @@ async def change_admin(
 ) -> None:
     """A fresh attestation; claims, an agent key and delegated authority cannot grant."""
     if (
-        (auth.agent_id is not None or auth.token_kind == "agent")
+        auth.is_external_agent
         or auth.is_operator
         or auth.platform_user_id is None
         or auth.platform not in {"discord", "slack", "teams"}
@@ -87,7 +87,7 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Revoke an explicit Daimon admin grant immediately (platform admins only).
 
-        Demotes affected stored accounts in the same transaction for MCP.
+        Deletes the grant and records its audit atomically; delegated authority is never cached.
         Platform authority cannot be revoked; remaining grants still apply.
         """
         await change_admin(

@@ -414,5 +414,5 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
 
 def _require_platform_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedFunction]
     """Money and delegation require live platform authority, never a delegated role."""
-    if not auth.is_platform_admin or (auth.agent_id is not None or auth.token_kind == "agent"):
+    if not auth.is_platform_admin or auth.is_external_agent:
         raise ToolError("This operation requires a live platform admin.")

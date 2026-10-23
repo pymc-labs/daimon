@@ -148,10 +148,10 @@ def _submit_data(form: dict[str, Any]) -> dict[str, Any]:
 
 
 async def test_details_offers_add_skill_only_on_an_agent_that_can_take_one(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     async with _running(
-        db_session_factory, teams_api_fake, _Skills(), local_helper=True
+        service_session_factory, teams_api_fake, _Skills(), local_helper=True
     ) as service:
         helper = await post_activity(
             service, make_card_action("agent_setup", "details", agent="helper")
@@ -164,10 +164,10 @@ async def test_details_offers_add_skill_only_on_an_agent_that_can_take_one(
 
 
 async def test_a_paste_is_previewed_then_added_as_the_agents_own_and_details_refresh(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     skills = _Skills()
-    async with _running(db_session_factory, teams_api_fake, skills, admin=True) as service:
+    async with _running(service_session_factory, teams_api_fake, skills, admin=True) as service:
         opened = _form(await _dialog(service, "fetch", agent="helper"))
         preview = _form(await _dialog(service, "submit", agent="helper", skill=SKILL_MD))
         changed = _form(
@@ -188,7 +188,7 @@ async def test_a_paste_is_previewed_then_added_as_the_agents_own_and_details_ref
     ], "uploaded once, as the agent's own copy, never to the shared library"
     edits = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edits and edits[-1].url.endswith("/activities/m-7"), "the panel shows Details again"
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         row = await load_user_skill(
             session,
             tenant_id=TENANT,
@@ -201,10 +201,10 @@ async def test_a_paste_is_previewed_then_added_as_the_agents_own_and_details_ref
 
 
 async def test_an_invalid_paste_comes_back_with_the_reason_and_adds_nothing(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     skills = _Skills()
-    async with _running(db_session_factory, teams_api_fake, skills, admin=True) as service:
+    async with _running(service_session_factory, teams_api_fake, skills, admin=True) as service:
         again = _form(await _dialog(service, "submit", agent="helper", skill="no frontmatter"))
     assert "hash" not in _submit_data(again), "nothing to confirm yet"
     assert "no frontmatter" in json.dumps(again), "the paste is kept to fix"
@@ -212,17 +212,17 @@ async def test_an_invalid_paste_comes_back_with_the_reason_and_adds_nothing(
 
 
 async def test_a_built_in_agent_is_refused(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake, _Skills(), admin=True) as service:
+    async with _running(service_session_factory, teams_api_fake, _Skills(), admin=True) as service:
         opened = await _dialog(service, "fetch", agent="daimon")
     assert opened["task"]["value"] == add_skill.BUILT_IN
 
 
 async def test_a_member_is_refused_on_the_organisation_default(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         await set_fields(
             session,
             scope=TenantScopeRef(tenant_id=TENANT),
@@ -231,7 +231,7 @@ async def test_a_member_is_refused_on_the_organisation_default(
             mode="agent",
         )
     skills = _Skills()
-    async with _running(db_session_factory, teams_api_fake, skills) as service:
+    async with _running(service_session_factory, teams_api_fake, skills) as service:
         opened = await _dialog(service, "fetch", agent="helper")
         preview = await _dialog(service, "submit", agent="helper", skill=SKILL_MD)
         content_hash = bundle_from_markdown(SKILL_MD).preview.content_hash

@@ -9,6 +9,7 @@ from daimon.adapters.discord.agent_setup.github_home import connect_button_view,
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
     is_guild_admin,
+    is_platform_admin,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
@@ -151,7 +152,11 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     platform="discord",
                     external_id=str(interaction.user.id),
                 )
-                await set_role(session, principal.account_id, Role.ADMIN)
+                await set_role(
+                    session,
+                    principal.account_id,
+                    Role.ADMIN if is_platform_admin(interaction) else Role.USER,
+                )
                 token = await mint_invitation(
                     session,
                     tenant_id=tenant_id,
@@ -159,6 +164,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     requester_label=str(interaction.user.id),
                     requester_platform_user_id=str(interaction.user.id),
                     agent_id=agent_id,
+                    agent_manager_verified=True,
                     agent_name=target_name,
                     agent_ma_id=target_ma_id,
                     origin_platform="discord",

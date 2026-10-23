@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Claim keys only this verifier writes, from the token's registry row. Any
 # value a token carries under them is dropped before verification.
+CHAT_EXECUTION_CLAIM = "daimon_chat_execution"
 TOKEN_KIND_CLAIM = "daimon_token_kind"
 TOKEN_JTI_CLAIM = "daimon_token_jti"
 SCOPES_CLAIM = "daimon_scopes"
@@ -192,6 +193,7 @@ class DaimonJWTVerifier(JWTVerifier):
             return _reject_token("signature_or_expiry", {})
         # Only the registry row sets these, never a claim.
         for key in (
+            CHAT_EXECUTION_CLAIM,
             TOKEN_KIND_CLAIM,
             TOKEN_JTI_CLAIM,
             SCOPES_CLAIM,
@@ -262,6 +264,11 @@ class DaimonJWTVerifier(JWTVerifier):
         if identity_row.platform_user_id is not None:
             access.claims["platform_user_id"] = identity_row.platform_user_id
         if row is not None:
+            # This distinction is established only after validating the registry
+            # binding. A signed claim alone cannot turn an external key into chat.
+            access.claims[CHAT_EXECUTION_CLAIM] = (
+                row.kind == "agent" and access.claims.get("chat_agent_id") is not None
+            )
             access.claims[TOKEN_KIND_CLAIM] = row.kind
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)
             if row.kind == "operator":

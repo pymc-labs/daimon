@@ -87,7 +87,7 @@ async def _target_facts(
     if not needs_reachability_read(operation, is_admin=is_admin, is_daimon_managed=entry.is_system):
         return TargetFacts(is_daimon_managed=entry.is_system, is_reachable_in_tenant=False)
     tenant_id = await resolve_tenant_for_panel(runtime, interaction)
-    caller = admin_caller(interaction.user).model_copy(update={"is_server_admin": is_admin})
+    caller = admin_caller(interaction.user)
     async with runtime.sessionmaker() as session:
         return await load_target_facts(
             session,

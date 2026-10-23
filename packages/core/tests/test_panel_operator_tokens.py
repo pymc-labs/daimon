@@ -24,6 +24,7 @@ NOW = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
 async def _mint(session: AsyncSession, tenant_id: uuid.UUID, scopes: list[str]):
     return await mint_panel_operator_token(
         session,
+        is_platform_admin=True,
         tenant_id=tenant_id,
         platform="slack",
         platform_user_id="U1",

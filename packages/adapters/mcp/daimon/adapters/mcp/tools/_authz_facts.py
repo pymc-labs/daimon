@@ -22,7 +22,7 @@ def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
     return build_subject(
         is_admin=is_admin,
         platform_user_id=auth.platform_user_id,
-        via_agent_key=auth.agent_id is not None or auth.token_kind == "agent",
+        via_agent_key=auth.is_external_agent,
     )
 
 

@@ -2574,17 +2574,20 @@ covered between deleted message IDs, including parent-channel starter events.
 `core/native_admins.py` combines live platform authority with uncached, tenant-scoped
 `daimon_admins` grants. Discord interaction gates are asynchronous; Slack binds each
 per-event Web API client to its verified workspace; Teams adds grants at its runtime
-admin boundary. Admission persists the aggregate account role under a shared tenant
-lock. Revocation takes the exclusive lock and demotes affected accounts in the same
-transaction as the grant deletion and audit event. Platform authority is re-derived
-from the platform and is never a grant row.
+admin boundary. Delegation is request-local: account roles and turn-origin role
+snapshots record only live platform authority. Hub stored-role readers retain
+their platform-only transcript exception. Revocation deletes the grant and records
+the audit in one transaction, without changing platform-admin snapshots. Platform
+authority is re-derived from the platform and is never a grant row.
 
 Discord's Permissions panel and Slack's Who answers where panel link to Admins.
 The screen lists grants and gives platform admins grant/revoke controls; every
 mutation checks current platform authority. Teams uses CLI/MCP. The CLI's admins
 commands use authenticated MCP calls. MCP middleware independently attests live
 platform authority and delegation for platform principals on each request, ignoring
-stale internal admin claims. Delegation and money tools use the platform authority
+stale internal admin claims. The token verifier distinguishes validated chat
+execution bindings from external agent keys; ordinary chat retains the caller’s
+live authority. Delegation, money and operator-token minting use the platform authority
 signal; agent keys and operator tokens cannot change admin grants. Grant/revoke
 audit events include the actor, subject kind, subject ID and timestamp. Privacy
 erasure removes user grants and scrubs grantor and audit identifiers.

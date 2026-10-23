@@ -12,7 +12,11 @@ Platform admins can grant Daimon admin to a user ID, or on Discord to a role
 ID. A role grant applies while the member holds that role. Delegated admins
 can configure agents, shared credentials and channel permissions. Only
 platform admins can grant or revoke; delegated admins cannot delegate.
-Billing, promo redemption, and turn and spending caps remain platform-only.
+Billing, promo redemption, turn and spending caps, and operator-token minting
+remain platform-only. Delegated admin is never cached in account roles or turn
+origins. Delegated admins do not get the hub exception for reading other
+people’s sessions or sealed channel transcripts; that exception stays limited
+to the stored platform-admin role.
 
 Open **Who answers where → Permissions → Admins** in Discord, or
 **Who answers where → Admins** in Slack. Each change checks platform

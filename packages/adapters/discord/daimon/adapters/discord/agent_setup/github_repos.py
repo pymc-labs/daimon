@@ -110,7 +110,7 @@ class GitHubReposView(PanelViewBase):
             account = await get_account(session, self.state.account_id)
             if account is None or account.tenant_id != tenant_id:
                 return False
-            caller = admin_caller(interaction.user).model_copy(update={"is_server_admin": admin})
+            caller = admin_caller(interaction.user)
             facts = (
                 await load_target_facts(
                     session,

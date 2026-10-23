@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import structlog
-from daimon.adapters.mcp.auth.verifier import TOKEN_KIND_CLAIM
+from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.admin_authority import resolve_authority
 from daimon.core.billing import BillingConfig
@@ -59,7 +59,11 @@ def build_checkout_route(
             return Response(status_code=401)
         # An operator token reaches only its scopes' tools; buying credit is not one.
         if (
-            access.claims.get(TOKEN_KIND_CLAIM) in {"operator", "agent"}
+            access.claims.get(TOKEN_KIND_CLAIM) == "operator"
+            or (
+                access.claims.get(TOKEN_KIND_CLAIM) == "agent"
+                and access.claims.get(CHAT_EXECUTION_CLAIM) is not True
+            )
             or access.claims.get("agent_id") is not None
         ):
             return Response(status_code=403)

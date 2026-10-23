@@ -8,7 +8,7 @@ from typing import Any, cast
 import anthropic
 import httpx
 import structlog
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_admin, resolve_is_platform_admin
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -119,7 +119,13 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 platform="slack",
                 external_id=user_id,
             )
-            await set_role(session, principal.account_id, Role.ADMIN)
+            await set_role(
+                session,
+                principal.account_id,
+                Role.ADMIN
+                if await resolve_is_platform_admin(client, user_id=user_id)
+                else Role.USER,
+            )
             token = await mint_invitation(
                 session,
                 tenant_id=tenant_id,
@@ -127,6 +133,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 requester_label=user_id,
                 requester_platform_user_id=user_id,
                 agent_id=agent_id,
+                agent_manager_verified=True,
                 agent_name=target_name,
                 agent_ma_id=target_ma_id,
                 origin_platform="slack",

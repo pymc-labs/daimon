@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daimon admins list|grant|revoke`. Delegated admins can configure Daimon but
   cannot delegate, change billing or spending caps. Revocation applies to open
   panels and existing MCP credentials immediately; changes are audited.
-  Promo redemption, including channel codes, requires a live platform admin.
+  Promo redemption, including channel codes, and operator-token minting require
+  a live platform admin. Delegated admins do not acquire the hub exception for
+  reading other people’s sessions or sealed transcripts.
 
 - Hide saved routine triggers/results from MCP, CLI and Discord controls when
   their source or destination becomes reserved for recruitment, including

@@ -30,6 +30,7 @@ from typing import TypedDict, cast
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import (
+    CHAT_EXECUTION_CLAIM,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
@@ -320,9 +321,16 @@ class IdentityMiddleware(Middleware):
         # Keep chat execution identity separate from external agent credentials:
         # agent_id controls tool visibility and several authorization gates.
         chat_agent_id = signed_uuid("chat_agent_id")
+        chat_execution = _token is not None and _token.claims.get(CHAT_EXECUTION_CLAIM) is True
+        if chat_execution and (chat_agent_id is None or raw_agent_id is not None):
+            raise AuthorizationError("malformed chat execution binding")
         agent_id: uuid.UUID | None
         if raw_agent_id is None:
-            if _token is not None and _token.claims.get(TOKEN_KIND_CLAIM) == "agent":
+            if (
+                _token is not None
+                and _token.claims.get(TOKEN_KIND_CLAIM) == "agent"
+                and not chat_execution
+            ):
                 raise AuthorizationError("agent credential missing agent_id")
             agent_id = None
         else:
@@ -457,6 +465,7 @@ class IdentityMiddleware(Middleware):
 
 
 class _TokenFields(TypedDict):
+    is_chat_execution: bool
     token_kind: McpTokenKind | None
     token_jti: uuid.UUID | None
     scopes: frozenset[str]
@@ -471,6 +480,7 @@ def _token_fields(claims: Mapping[str, object]) -> _TokenFields:
     jti = claims.get(TOKEN_JTI_CLAIM)
     scopes = claims.get(SCOPES_CLAIM)
     return _TokenFields(
+        is_chat_execution=claims.get(CHAT_EXECUTION_CLAIM) is True,
         token_kind=_TOKEN_KINDS.get(kind) if isinstance(kind, str) else None,
         token_jti=_uuid_or_none(jti) if isinstance(jti, str) else None,
         scopes=(

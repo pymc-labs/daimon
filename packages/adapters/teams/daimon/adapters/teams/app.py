@@ -1562,7 +1562,7 @@ class TeamsApp:
             thread_id=inbound.thread_id,
             responder_ma_agent_id=str(admission.agent.id),
             responder_name=config.agent_name or admission.agent.name,
-            role=Role.ADMIN if admission.is_admin else Role.USER,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",

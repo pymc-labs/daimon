@@ -61,6 +61,7 @@ async def mint_panel_operator_token(
     tenant_id: uuid.UUID,
     platform: str,
     platform_user_id: str,
+    is_platform_admin: bool,
     scopes: Iterable[str],
     label: str | None,
     secret: bytes,
@@ -70,6 +71,8 @@ async def mint_panel_operator_token(
 
     Raises `OperatorTokenError` for no scope, an unknown one, or a deployment scope.
     """
+    if is_platform_admin is not True:
+        raise OperatorTokenError("Only platform admins can mint operator tokens")
     parsed = parse_operator_scopes(scopes)
     beyond = sorted(parsed.difference(PANEL_SCOPES))
     if beyond:

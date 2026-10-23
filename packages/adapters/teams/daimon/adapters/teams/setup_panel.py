@@ -292,7 +292,7 @@ class SetupPanel:
             op=op,
             token_kind="operator",
         )
-        if not actor.is_admin:
+        if not actor.is_platform_admin:
             await audit(outcome="denied", reason="needs_admin")
             return dialog_message(OPERATOR_NEEDS_ADMIN)
         secret = self._runtime.settings.mcp.jwt_secret
@@ -324,6 +324,7 @@ class SetupPanel:
                     tenant_id=actor.tenant_id,
                     platform="teams",
                     platform_user_id=actor.user_id,
+                    is_platform_admin=actor.is_platform_admin,
                     scopes=scopes,
                     label=str(data.get("label") or ""),
                     secret=secret.get_secret_value().encode(),
@@ -741,7 +742,7 @@ class SetupPanel:
                     tenant_id=actor.tenant_id,
                     platform="teams",
                     caller=AdminCaller(
-                        platform_user_id=actor.user_id, is_server_admin=actor.is_admin
+                        platform_user_id=actor.user_id, is_server_admin=actor.is_platform_admin
                     ),
                 )
         except AccessPolicyUnreadable:

@@ -61,7 +61,7 @@ async def _setup(
 ) -> None:
     async with factory.begin() as session:
         await make_tenant(session, platform="slack", workspace_id=TEAM)
-    monkeypatch.setattr(operator_tokens, "resolve_is_admin", AsyncMock(return_value=admin))
+    monkeypatch.setattr(operator_tokens, "resolve_is_platform_admin", AsyncMock(return_value=admin))
     monkeypatch.setattr(operator_tokens, "load_routing_view", AsyncMock(return_value={"v": 1}))
 
 

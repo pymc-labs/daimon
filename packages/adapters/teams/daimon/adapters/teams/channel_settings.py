@@ -133,7 +133,9 @@ class ChannelSettingsDialog:
                 session,
                 tenant_id=actor.tenant_id,
                 platform="teams",
-                caller=AdminCaller(platform_user_id=actor.user_id, is_server_admin=actor.is_admin),
+                caller=AdminCaller(
+                    platform_user_id=actor.user_id, is_server_admin=actor.is_platform_admin
+                ),
             )
 
     async def _listed(self, tenant_id: uuid.UUID) -> dict[str, str | None]:

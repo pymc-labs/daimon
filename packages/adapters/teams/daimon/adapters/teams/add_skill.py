@@ -119,7 +119,8 @@ async def skill_change_refusal(
             caller_account_id=account_id,
             caller_platform_user_id=actor.user_id,
         )
-    if decide_operation("skill_add", is_admin=caller.is_server_admin, target=facts) == "allow":
+        effective_admin = (await live_subject()).is_admin
+    if decide_operation("skill_add", is_admin=effective_admin, target=facts) == "allow":
         return None
     return needs_admin(agent.name)
 

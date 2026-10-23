@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 async def current_admin(session: AsyncSession, auth: AuthIdentity) -> bool:
     """A live platform attestation or a still-present grant from this request's verified roles."""
-    if not auth.is_admin or (auth.agent_id is not None or auth.token_kind == "agent"):
+    if not auth.is_admin or auth.is_external_agent:
         return False
     if auth.platform not in {"discord", "slack", "teams"}:
         return True  # Local operator identities have no platform delegation.

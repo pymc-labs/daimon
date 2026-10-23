@@ -526,7 +526,7 @@ async def _run_admitted_dm_turn(
             thread_id=scope_id,
             responder_ma_agent_id=prepared.admission.agent.id,
             responder_name=prepared.admission.agent.name,
-            role=role,
+            role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
             attended=origin != "routine",
         ) as turn_origin_row,
     ):
@@ -889,7 +889,7 @@ async def run_dm_routine(
                 parent_channel_id=scope_id,
                 scope_id=scope_id,
                 external_user_id=owner_user_id,
-                role=Role.ADMIN if grant.subject.is_admin else Role.USER,
+                role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
                 prompt=prompt,
                 deadline=deadline,
                 on_sealed=sealed,

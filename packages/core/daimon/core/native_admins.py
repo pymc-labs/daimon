@@ -349,7 +349,7 @@ async def load_live_subject(
 
 
 class StoredAdmin(BaseModel):
-    """An aggregate account snapshot for configuration, never delegation authority."""
+    """A platform-admin account snapshot; delegation never enters stored authority."""
 
     model_config = ConfigDict(frozen=True)
     is_admin: bool
@@ -367,7 +367,7 @@ async def read_stored_admin(
     account_id: uuid.UUID,
     platform_user_id: str | None,
 ) -> StoredAdmin:
-    """Read a bound account snapshot plus current explicit user grants."""
+    """Read a bound platform-admin snapshot. Delegates never gain transcript exceptions."""
     account = await get_account(session, account_id)
     identity = await get_account_with_tenant(session, account_id=account_id)
     bound = (
@@ -380,19 +380,7 @@ async def read_stored_admin(
         is_admin=bound
         and account is not None
         and account.tenant_id == tenant_id
-        and (
-            account.role is Role.ADMIN
-            or (
-                platform is not None
-                and await is_daimon_admin(
-                    session,
-                    tenant_id=tenant_id,
-                    platform=platform,
-                    platform_user_id=platform_user_id,
-                    is_platform_admin=False,
-                )
-            )
-        ),
+        and account.role is Role.ADMIN,
         platform_user_id=platform_user_id,
     )
 

@@ -4281,7 +4281,7 @@ class DaimonBot(commands.Bot):
                 responder_name=admission.config.agent_name or agent.name,
                 configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                 configuration_target_name=admission.config.configuration_target_name,
-                role=Role.ADMIN if admission.is_admin else Role.USER,
+                role=Role.ADMIN if admission.is_platform_admin else Role.USER,
                 is_setup=admission.config.thread_binding_kind == "setup",
             ) as origin:
                 outcome = await run_prepared_turn(
@@ -5161,7 +5161,7 @@ class DaimonBot(commands.Bot):
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
             configuration_target_name=admission.config.configuration_target_name,
-            role=Role.ADMIN if admission.is_admin else Role.USER,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             is_setup=admission.config.thread_binding_kind == "setup",
             message_text=message.content,
             queued_message=content_override is not None,

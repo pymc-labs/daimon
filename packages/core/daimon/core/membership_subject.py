@@ -11,7 +11,7 @@ from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-async def resolve_subject(
+async def resolve_subject_authority(
     sessionmaker: async_sessionmaker[AsyncSession],
     resolver: MembershipResolver | None,
     *,
@@ -19,7 +19,7 @@ async def resolve_subject(
     user_id: str,
     require_fresh: bool = False,
     session: AsyncSession | None = None,
-) -> Subject:
+) -> tuple[Subject, bool]:
     """Resolve only the selected, registered, active Discord tenant; fail closed.
 
     No account UUID or persisted admin flag is used as platform identity.
@@ -34,9 +34,11 @@ async def resolve_subject(
     else:
         tenant = await get_tenant(session, tenant_id)
     if tenant is None or tenant.archived_at is not None:
-        return build_subject(is_admin=False, platform_user_id=user_id, verified_membership=False)
+        return build_subject(
+            is_admin=False, platform_user_id=user_id, verified_membership=False
+        ), False
     if tenant.platform != "discord" or resolver is None:
-        return unknown
+        return unknown, False
     facts = await resolver.resolve(
         tenant_id, tenant.external_id, user_id, require_fresh=require_fresh
     )
@@ -61,4 +63,25 @@ async def resolve_subject(
         platform_user_id=user_id,
         role_ids=facts.role_ids if facts.is_member is True else (),
         verified_membership=facts.is_member,
+    ), facts.is_member is True and facts.is_admin
+
+
+async def resolve_subject(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    resolver: MembershipResolver | None,
+    *,
+    tenant_id: UUID,
+    user_id: str,
+    require_fresh: bool = False,
+    session: AsyncSession | None = None,
+) -> Subject:
+    """Resolve effective authority without persisting delegated admin status."""
+    subject, _ = await resolve_subject_authority(
+        sessionmaker,
+        resolver,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        require_fresh=require_fresh,
+        session=session,
     )
+    return subject

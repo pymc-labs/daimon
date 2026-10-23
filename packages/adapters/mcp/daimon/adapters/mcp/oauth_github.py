@@ -14,6 +14,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -26,10 +27,8 @@ from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.web_icons import icon, platform_mark
-from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_app_auth import (
     build_app_jwt,
     get_app_installation_details,
@@ -41,7 +40,6 @@ from daimon.core.github_connect_cards import (
     audience_line,
 )
 from daimon.core.github_credentials import decrypt_token, encrypt_token
-from daimon.core.github_panel import requester_manages_agent
 from daimon.core.github_requester_access import list_github_pages
 from daimon.core.native_admins import (
     AdminAttestationUnavailable,
@@ -109,8 +107,9 @@ async def _attest_native_admin(
     sessionmaker: async_sessionmaker[AsyncSession],
     fernet: MultiFernet,
     http_client: httpx.AsyncClient | None = None,
+    db_session: AsyncSession | None = None,
 ) -> bool:
-    """Read native authority for the invitation's bound principal, outside a write transaction."""
+    """Attest configuration authority without promoting the bound account snapshot."""
     user_id = requester.platform_user_id
     if user_id is None:
         raise AdminAttestationUnavailable("platform principal unavailable")
@@ -121,7 +120,7 @@ async def _attest_native_admin(
             settings=settings,
             http_client=http_client,
         )
-        async with sessionmaker() as session:
+        async with nullcontext(db_session) if db_session is not None else sessionmaker() as session:
             return await is_daimon_admin(
                 session,
                 tenant_id=requester.tenant_id,
@@ -132,7 +131,9 @@ async def _attest_native_admin(
             )
     if requester.platform == "slack":
         try:
-            async with sessionmaker() as session:
+            async with (
+                nullcontext(db_session) if db_session is not None else sessionmaker()
+            ) as session:
                 row = await get_slack_bot_token(session, team_id=requester.external_id)
         except SQLAlchemyError as exc:
             raise AdminAttestationUnavailable("workspace bot token lookup failed") from exc
@@ -177,7 +178,9 @@ async def _attest_native_admin(
             flags = ("is_admin", "is_owner", "is_primary_owner")
             if any(type(user.get(flag)) is not bool for flag in flags):
                 raise ValueError("Missing Slack admin facts")
-            async with sessionmaker() as session:
+            async with (
+                nullcontext(db_session) if db_session is not None else sessionmaker()
+            ) as session:
                 return await is_daimon_admin(
                     session,
                     tenant_id=requester.tenant_id,
@@ -213,7 +216,9 @@ async def _attest_native_admin(
                         owners = await teams_lookup(client)
                 else:
                     owners = await teams_lookup(http_client)
-            async with sessionmaker() as session:
+            async with (
+                nullcontext(db_session) if db_session is not None else sessionmaker()
+            ) as session:
                 return await is_daimon_admin(
                     session,
                     tenant_id=requester.tenant_id,
@@ -1603,21 +1608,23 @@ def build_oauth_github_routes(
             return requester.tenant_id == invitation.tenant_id and requester.role == Role.ADMIN
         if deployment_default is None:
             return False
-        metadata = live.metadata if live is not None else {}
-        return await requester_manages_agent(
-            session,
-            tenant_id=invitation.tenant_id,
-            account_id=invitation.requester_account_id,
-            platform=requester.platform,
-            platform_user_id=requester.platform_user_id,
-            agent_name=invitation.agent_name,
-            ma_agent_id=invitation.agent_ma_id,
-            default=deployment_default,
-            is_daimon_managed=(
-                None if live is None else metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-            ),
-            other_names=agent_pin_names(live.name, metadata) if live is not None else (),
-        )
+        if live is None or requester.tenant_id != invitation.tenant_id:
+            return False
+        # Only platform authority enters account roles. Preserve the existing
+        # native snapshot for viewing this link; every save separately attests
+        # live authority below. Delegates need a fresh check even to view it.
+        if requester.role is Role.ADMIN:
+            return True
+        try:
+            return await _attest_native_admin(
+                requester=requester,
+                settings=settings,
+                sessionmaker=sessionmaker,
+                fernet=fernet,
+                db_session=session,
+            )
+        except AdminAttestationUnavailable:
+            return False
 
     async def successful_page(
         state: str, cookie: str, invitation_hash: str = ""
@@ -2339,9 +2346,6 @@ def build_oauth_github_routes(
                 for repo_id in selected_ids
             ]
             live = await live_agent(invitation)
-            is_daimon_managed = (
-                None if live is None else live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-            )
             if not invitation.operator_issued:
                 if (
                     invitation.requester_platform_user_id is not None
@@ -2368,20 +2372,7 @@ def build_oauth_github_routes(
                         github_user_id=flow.github_user_id,
                         repos=repos,
                         requester_manages_agent=deployment_default is not None
-                        and await requester_manages_agent(
-                            session,
-                            tenant_id=invitation.tenant_id,
-                            account_id=invitation.requester_account_id,
-                            platform=requester.platform,
-                            platform_user_id=requester.platform_user_id,
-                            agent_name=invitation.agent_name,
-                            ma_agent_id=invitation.agent_ma_id,
-                            default=deployment_default,
-                            is_daimon_managed=is_daimon_managed,
-                            other_names=agent_pin_names(live.name, live.metadata)
-                            if live is not None
-                            else (),
-                        ),
+                        and await may_manage_agent(session, invitation, requester, live),
                     )
                     if saved:
                         for detail in details:

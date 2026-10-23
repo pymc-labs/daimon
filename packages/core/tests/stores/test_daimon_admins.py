@@ -55,9 +55,7 @@ async def test_user_grant_revoke_is_scoped_and_atomic(
         platform_user_id="member",
         is_platform_admin=True,
     )
-    # A turn's aggregate role is demoted in the revoke transaction, even before
-    # the user next interacts or a token is re-issued.
-    await set_role(db_session, principal.account_id, Role.ADMIN)
+    # Delegation never promotes the platform-admin account snapshot.
     await change_grant(db_session, **key, is_platform_admin=True, revoke=True)
     account = await get_account(db_session, principal.account_id)
     assert account is not None and account.role is Role.USER
@@ -124,7 +122,9 @@ async def test_delegated_admin_cannot_change_grants(db_session: AsyncSession, re
     assert await list_events(db_session, tenant_id=tenant.id) == before
 
 
-async def test_discord_roles_are_live_and_revoke_demotes_holders(db_session: AsyncSession) -> None:
+async def test_discord_roles_are_live_and_revoke_preserves_platform_snapshot(
+    db_session: AsyncSession,
+) -> None:
     tenant = await make_tenant(db_session)
     principal = await make_platform_principal(
         db_session, tenant=tenant, platform="discord", external_id="member"
@@ -151,7 +151,7 @@ async def test_discord_roles_are_live_and_revoke_demotes_holders(db_session: Asy
         db_session, tenant_id=tenant.id, platform="discord", user_id="member", role_ids=["role"]
     )
     account = await get_account(db_session, principal.account_id)
-    assert account is not None and account.role is Role.USER
+    assert account is not None and account.role is Role.ADMIN
 
 
 async def test_erasure_scrubs_grantee_and_grantor(db_session: AsyncSession) -> None:

@@ -7,12 +7,11 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Literal
 
-from daimon.core._models import Account, DaimonAdmin, PlatformPrincipal
-from daimon.core.stores.domain import Role
+from daimon.core._models import DaimonAdmin, PlatformPrincipal
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.tenants import get_tenant
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, false, func, or_, select, true, update
+from sqlalchemy import delete, false, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,9 +80,8 @@ async def change_grant(
 ) -> None:
     """Grant/revoke and audit atomically. A Daimon admin bit is never acceptable here.
 
-    Revoke demotes affected accounts in this transaction, including all stored
-    holders of a Discord role. Their next live check restores platform authority
-    or any remaining grant. There is no API for revoking platform authority.
+    Delegation is never persisted on accounts. Deleting the grant removes
+    delegated authority without changing any platform-admin snapshot.
     """
     if is_platform_admin is not True:
         raise PermissionError("Only platform admins may grant or revoke Daimon admins")
@@ -109,22 +107,6 @@ async def change_grant(
     await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
     if revoke:
         await session.execute(delete(DaimonAdmin).filter_by(**key))
-        affected = (
-            select(PlatformPrincipal.account_id)
-            .join(Account, Account.id == PlatformPrincipal.account_id)
-            .where(
-                PlatformPrincipal.tenant_id == tenant_id,
-                PlatformPrincipal.platform == platform,
-                PlatformPrincipal.external_id == subject_id
-                if subject_kind == "user"
-                else true()
-                if subject_id == tenant.external_id
-                else Account.platform_role_ids.contains([subject_id]),
-            )
-        )
-        await session.execute(
-            update(Account).where(Account.id.in_(affected)).values(role=Role.USER.value)
-        )
     else:
         await session.execute(
             insert(DaimonAdmin).values(**key, granted_by=actor_user_id).on_conflict_do_nothing()
@@ -203,14 +185,3 @@ async def count_user_rows(
         )
         or 0
     )
-
-
-async def lock_authority(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
-    """Hold a shared tenant lock while deriving and persisting aggregate authority.
-
-    Revocation takes the exclusive lock, so an in-flight role write cannot
-    resurrect the aggregate role after revoke has demoted its holders.
-    """
-    from daimon.core._models import Tenant
-
-    await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(read=True))

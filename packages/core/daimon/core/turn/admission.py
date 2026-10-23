@@ -70,7 +70,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
-from daimon.core.membership_subject import resolve_subject
+from daimon.core.membership_subject import resolve_subject, resolve_subject_authority
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -84,7 +84,7 @@ from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.accounts import set_platform_role_ids, set_role
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -213,6 +213,7 @@ class Admission:
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
+    is_platform_admin: bool = False
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
     # The channel's backend configuration and its admission, when the channel
     # has one and `DAIMON_TURN__CHANNEL_BACKENDS` is on; None otherwise.
@@ -455,9 +456,6 @@ async def admit_impl(
 
     # --- Identity resolution ---
     async with deps.sessionmaker() as session:
-        from daimon.core.stores.daimon_admins import lock_authority
-
-        await lock_authority(session, tenant_id=tenant_id)
         principal = await get_or_create_platform_principal(
             session,
             tenant_id=tenant_id,
@@ -466,6 +464,7 @@ async def admit_impl(
         )
         from daimon.core.native_admins import is_daimon_admin
 
+        platform_admin = role is Role.ADMIN
         policy = await load_access_policy(session, tenant_id=tenant_id)
         admin = await is_daimon_admin(
             session,
@@ -486,7 +485,7 @@ async def admit_impl(
             and (is_dm or verified_membership is None)
             and (is_dm or policy.invoker_role_ids or deps.membership_resolver is not None)
         ):
-            subject = await resolve_subject(
+            subject, platform_admin = await resolve_subject_authority(
                 deps.sessionmaker,
                 deps.membership_resolver,
                 tenant_id=tenant_id,
@@ -494,14 +493,12 @@ async def admit_impl(
                 require_fresh=is_dm,
                 session=session,
             )
-        # Keep role writes in the same tenant lock as the grant read. Revocation
-        # waits for this write, then demotes it; stale grants cannot resurrect it.
-        if role is not None or subject.is_admin:
+        # Stored authority belongs only to live platform admins. A grant affects
+        # this subject, never the hub's account/transcript admin exception.
+        if role is not None:
             await set_role(
-                session, principal.account_id, Role.ADMIN if subject.is_admin else Role.USER
+                session, principal.account_id, Role.ADMIN if platform_admin else Role.USER
             )
-        if platform == "discord":
-            await set_platform_role_ids(session, principal.account_id, subject.role_ids)
         await session.commit()
         mark("identity")
         mark("policy_and_admins")
@@ -846,6 +843,7 @@ async def admit_impl(
         from daimon.core.turn.runtimes import scope_channel_runtimes
 
         provisional = Admission(
+            is_platform_admin=platform_admin,
             account_id=principal.account_id,
             agent=agent,
             environment=environment,
@@ -1065,6 +1063,7 @@ async def admit_impl(
     mark("thread_model")
 
     result = Admission(
+        is_platform_admin=platform_admin,
         backend_revision=backend_revision,
         backend_revision_origin=backend_revision_origin,
         backend_counterpart=backend_counterpart,
