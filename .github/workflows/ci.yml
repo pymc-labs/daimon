@@ -295,8 +295,10 @@ jobs:
   # driven through the real production path with fake providers and code defaults
   # only. A dedicated, named job so a broken journey is visible as such, on both
   # turn legs, and blocks the staging deploy (it is in deploy-gcp's `needs`).
-  # Files are found by name, test_j<N>_<what>_e2e.py anywhere under packages/ or
-  # tests/, so a new journey file joins without editing this job; none found fails.
+  # Files are found by name, test_j<N>_<what>.py anywhere under packages/ or tests/
+  # (the journey end-to-ends, test_j<N>_..._e2e.py, and journey guards such as J1's
+  # test_j1_switch_card_guard.py), so a new journey file joins without editing this
+  # job; none found fails.
   journeys-offline:
     name: journeys-offline (${{ matrix.leg }})
     runs-on: ubuntu-latest
@@ -340,9 +342,9 @@ jobs:
           if [ -n "$LEG_CHANNEL_BACKENDS" ]; then
             export DAIMON_TURN__CHANNEL_BACKENDS="$LEG_CHANNEL_BACKENDS"
           fi
-          mapfile -t journeys < <(find packages tests -name 'test_j[0-9]*_e2e.py' | sort)
+          mapfile -t journeys < <(find packages tests -name 'test_j[0-9]*_*.py' | sort)
           if [ "${#journeys[@]}" -eq 0 ]; then
-            echo "::error::no journey end-to-end files (test_j<N>_*_e2e.py) found"
+            echo "::error::no journey test files (test_j<N>_*.py) found"
             exit 1
           fi
           printf 'journey file: %s\n' "${journeys[@]}"
