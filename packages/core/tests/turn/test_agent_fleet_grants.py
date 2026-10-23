@@ -12,7 +12,7 @@ from daimon.core._models import AgentBackendRevisionRecord
 from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
 from daimon.core.stores import security_audit
-from daimon.core.stores.domain import AgentBackendRevision
+from daimon.core.stores.domain import FLEET_OFF, AgentBackendRevision
 from mux.contracts.ids import ModelRef
 from mux.profiles import backend_selection
 from pydantic import ValidationError
@@ -119,9 +119,9 @@ async def test_backend_revert_never_restores_a_revoked_grant(owned):
     selected = await service.set_backend(agent, "openai", granted.local, actor)
     assert selected.fleet_grant == granted.fleet_grant
     revoked = await revoke_grant(service, agent, actor)
-    assert revoked.fleet_grant is None
+    assert revoked.fleet_grant == FLEET_OFF and revoked.fleet_off
     reverted = await service.revert(agent, actor, expected_revision=revoked.local)
-    assert reverted.backend is None and reverted.fleet_grant is None
+    assert reverted.backend is None and reverted.fleet_grant == FLEET_OFF
     assert await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW) is None
     assert (await service.revision(agent, granted.local)).fleet_grant == granted.fleet_grant
     regranted = await set_grant(service, agent, actor)
@@ -418,7 +418,7 @@ async def test_grant_revoke_still_works_after_backend_allowlist_is_narrowed(owne
     policy = await service.tenant_policy(agent.tenant_id)
     await service.set_tenant_allowlist(agent.tenant_id, ("anthropic",), policy.revision, actor)
     revoked = await revoke_grant(service, agent, actor)
-    assert revoked.backend == "openai" and revoked.fleet_grant is None
+    assert revoked.backend == "openai" and revoked.fleet_grant == FLEET_OFF
     assert await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW) is None
 
 
@@ -478,7 +478,7 @@ async def test_mixed_backend_and_grant_cas_has_one_shared_winner(owned, operatio
     else:
         assert latest.backend == second.backend and latest.previous_local == current.previous_local
         assert (
-            latest.fleet_grant is None
+            latest.fleet_grant == FLEET_OFF
             if value is None
             else latest.fleet_grant["epoch"] == latest.local
         )

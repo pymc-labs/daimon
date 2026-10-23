@@ -1546,6 +1546,10 @@ FLEET_ROOT_OBSTACLES: Mapping[str, str] = {
     "tools": "it has tools that ask before running, or that fleet workers can't use",
     # A root's very first turn: its memory store is created by that turn's session.
     "memory": "its memory is still being set up. Ask again and it can",
+    # Default-fleet turns that ran with fleet off instead of failing.
+    "held": "this conversation includes another organisation, so fleets are off here",
+    "shared_thread": "this is a shared thread, and fleets run only in your own thread",
+    "unavailable": "this conversation couldn't start one. Ask again in a new thread",
 }
 _FLEET_ROOT_OBSTACLE_DEFAULT = "its setup includes something fleet workers can't carry yet"
 
@@ -1590,6 +1594,18 @@ def fleet_root_obstacle(source: BackendAgent) -> str | None:
     return sorted(missing)[0] if missing else None
 
 
+def _is_current_default(grant: AgentFleetGrant, policy: TenantAccessPolicy) -> bool:
+    from daimon.core.fleet_configuration import default_fleet_grant
+    from daimon.core.stores.domain import TenantBackendPolicy
+
+    default = default_fleet_grant(
+        TenantBackendPolicy(
+            tenant_id=uuid.UUID(int=0), revision="", enabled_backends=policy.enabled_backends
+        )
+    )
+    return default is not None and grant == default
+
+
 def fleet_root_permissions(
     source: BackendAgent,
     admission: AdmissionGrant,
@@ -1615,7 +1631,9 @@ def fleet_root_permissions(
         grant = AgentFleetGrant.model_validate(grant.model_dump())
     except ValueError:
         raise WorkerSpecRefused("budget", "unsupported") from None
-    if grant.epoch <= 0 or grant.expires_at <= now:
+    if grant.expires_at <= now or (grant.epoch == 0 and not _is_current_default(grant, policy)):
+        # Stored grants have epoch >= 1; epoch 0 is only ever the computed default,
+        # and only as the tenant's current policy derives it.
         raise WorkerSpecRefused("origin", "stale")
     actual, effective, environment = source.source, source.effective_spec, source.environment
     if (

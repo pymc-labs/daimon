@@ -12,6 +12,7 @@ from daimon.core.fleet_configuration import (
     ConfigurationReference,
     FleetConfigInput,
     configured_fleet_grant,
+    fleet_default_line,
     fleet_detail_lines,
     provider_preview_digest,
 )
@@ -164,7 +165,8 @@ async def test_fleet_card_reloads_effective_models_and_rechecks_permission_and_c
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
-    assert prepared.detail_lines == lines
+    # The agent had no grant: the card says it runs on the default today.
+    assert prepared.detail_lines == (fleet_default_line("default", revoke=False) + lines)
     assert "any on this server" in prepared.consequence
     assert "own model and settings" in prepared.consequence
     trace.queue(reply())
@@ -411,3 +413,53 @@ async def test_channel_pin_card_binds_the_chat_channel_and_a_current_admin(owned
         await clear_channel_backend(session, here)
     assert await check(prompt, "requester"), "a cleared pin's card is stale"
     assert not trace.replies and not trace.violations
+
+
+async def test_an_owners_card_can_not_raise_fleet_limits_above_the_default(owned_preview):
+    """The Confirm path: a non-admin owner's raise is refused when the card is prepared."""
+    from daimon.core.stores import agent_owners
+
+    service, agent, actor, sessions, client, trace, payload, reply, _ = owned_preview
+    async with sessions.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            owner_account_id=actor.account_id,
+            source="created",
+        )
+    value = config(max_workers=8, expires_at=NOW + timedelta(days=90))
+    grant = await configured_fleet_grant(value, service, client, sessions, agent, now=NOW)
+    preview = await service.preview_fleet_grant(agent, grant, now=NOW)
+    prompt = prompt_for_tool_call(
+        call(
+            agent_name="Researcher",
+            config=value.model_dump(mode="json"),
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+        ),
+        requester_platform_user_id="requester",
+        now=NOW,
+    )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=False),
+    )
+    trace.queue(reply())
+    with pytest.raises(ValueError, match="Only an admin can raise fleet limits"):
+        await prepare(prompt)
+    # The same card from an admin prepares.
+    admin_prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+    )
+    trace.queue(reply())
+    assert (await admin_prepare(prompt)).configuration

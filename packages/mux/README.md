@@ -996,6 +996,25 @@ and mux outside `mux.testing`. Boundary tests run the configured
 checker against reintroduced imports; the mux initializer and new top-level
 module inventory are covered too. Harness consumers belong in daimon-testing.
 
+### Bounded mutation retries
+
+`mux.state.mutation_retry` holds the retry vocabulary and policy for claimed
+provider mutations. A driver classifies each failure at its provider boundary
+as `rejected` (provably not executed), `repeatable` (deduplicated by a
+verified provider contract) or `unknown`, and separately as retryable or not;
+`mux.drivers.anthropic.classify_mutation_failure` is the Anthropic table. The
+host acts on it: Daimon's `TurnPersistence.mutate` retries only a rejected,
+retryable failure, each attempt as its own durable operation claimed under
+the current lease fence, with SDK client retries off. `MutationRetryPolicy`
+bounds attempts and elapsed time, backs off with jitter, never retries before
+`Retry-After` (seconds, milliseconds or HTTP date) and fails at once when the
+wait exceeds the remaining budget. `unknown` is never retried. Every rule is
+read back from the durable attempt records (attempt 0's start, the refusal's
+recorded time and classification), so a restart or a concurrent replay waits
+out the same Retry-After and budget. A claimed Anthropic mutation never follows
+an HTTP redirect, and a failure that belongs to a redirected request is
+`unknown`. Other drivers classify nothing yet, so their failures stay `unknown`.
+
 ## Test doubles: `mux.testing`
 
 `mux.testing` ships in the `daimon-mux` wheel and is never imported by product

@@ -241,7 +241,11 @@ def _worker_status(worker: FleetWorker) -> str:
     """Status words, with the closed error code of a worker that did not succeed."""
     status = worker.status.replace("_", " ")
     if worker.status in TERMINAL and worker.status != "succeeded" and worker.error_code:
-        # Closed host codes, shown verbatim in code spans (no Markdown escapes).
+        from daimon.core.fleet import worker_error_text
+
+        # Known codes in plain words; others stay closed host codes in code spans.
+        if (text := worker_error_text(worker.error_code)) is not None:
+            return f"{status}: {text}"
         code = worker.error_code if _ERROR_CODE.fullmatch(worker.error_code) else "error"
         status += f" (`{code}`)"
     return status

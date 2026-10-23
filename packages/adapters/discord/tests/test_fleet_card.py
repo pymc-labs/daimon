@@ -706,7 +706,7 @@ async def test_partial_result_heads_the_roots_answer_with_the_failed_worker():
     final = [text for text in _texts(send, edit) if "W1 says: verified." in text]
     assert len(final) == 1
     assert final[0].startswith("Partial result: 1 of 2 workers succeeded.")
-    assert "W3: failed (`dispatch_refused`)" in final[0] and "\\_" not in final[0]
+    assert "W3: failed: it couldn't start on that model here" in final[0] and "\\_" not in final[0]
     assert "No reviewed result to share." not in final[0]
     assert _headlines(send, edit)[-1] == "**Fleet — partial result**"
     assert owner.settle_run.await_args.args[2] == "failed"
@@ -773,7 +773,7 @@ async def test_wake_turn_edits_the_fleet_card_its_root_turn_posted(restarted):
     adopted = [c for c in wake_edit.await_args_list if c.args and c.args[0] is first_message]
     assert adopted
     assert _headlines(wake_edit)[-1] == "**Fleet — blocked**"
-    assert any("deadline_expired" in text for text in _texts(wake_send, wake_edit))
+    assert any("ran out of time" in text for text in _texts(wake_send, wake_edit))
     # The wake's own claim is kept for the wake owner to settle as delivered.
     assert owner.settle_run.await_args.kwargs == {"wake_id": WAKE, "unless_waking": False}
 

@@ -63,12 +63,54 @@ def _unique_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
     return result
 
 
+#: Refusals a user hits by asking for more than the fleet allows, said plainly.
+_PLAIN_REFUSALS = {
+    "worker_limit_reached": (
+        "Use fewer workers or wait for one to finish; only the agent's owner or an admin "
+        "can raise the limit, by asking for it themselves."
+    ),
+    "over_fleet_limits": (
+        "Ask for at most that many workers. Only the agent's owner or an admin can raise "
+        "the limit, by asking for it themselves; don't offer a bigger limit instead."
+    ),
+    "financial_admission_refused": (
+        "That worker would go over this fleet's budget per run or the server's spending "
+        "limit. Use fewer or cheaper workers, or ask the agent's owner or an admin to "
+        "raise the fleet budget."
+    ),
+    "argon_requires_bounded_worker": (
+        "Gemini 4 Argon runs as a fleet worker only with token limits its budget covers. "
+        "Give it a smaller task or a larger budget, or pick another model."
+    ),
+    "prompt_exceeds_worker_token_cap": (
+        "That task is longer than this worker's token limit. Shorten it or pick another model."
+    ),
+    "worker_agent_unbound": "That agent isn't one you can use as a worker here.",
+    "worker_agent_required": "Name the agent the worker should run as.",
+    "worker_agent_model_mismatch": (
+        "A worker that runs as an agent uses that agent's own model; don't pick a model for it."
+    ),
+    "worker_agent_drops_unsupported": (
+        "That agent can't run as a worker on its model without losing something it needs."
+    ),
+    "terminal_run": "This fleet has already finished. Start a new one.",
+    "wake_pending": "This fleet is still collecting results. Wait for them, then try again.",
+    "prerequisites_unavailable": "Fleets aren't available right now. Try again in a moment.",
+}
+
+
 class FleetRefused(ValueError):
     """Closed refusal code, with no request, result or credential material."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, detail: str | None = None) -> None:
         self.reason = reason
-        super().__init__(f"fleet: {reason}")
+        plain = " ".join(part for part in (detail, _PLAIN_REFUSALS.get(reason)) if part)
+        super().__init__(f"fleet: {reason}" + (f". {plain}" if plain else ""))
+
+
+def fleet_limits_sentence(max_workers: int, budget_usd: Decimal) -> str:
+    """The real limits, said the way a user can act on them."""
+    return f"This fleet is limited to {max_workers} workers and ${budget_usd.normalize():f} a run."
 
 
 def _validation_categories(error: BaseException) -> list[str] | None:
@@ -426,21 +468,45 @@ class FleetOrchestrator:
             if budget_usd is None
             else (None, ())
         )
-        return default_worker_limits(
-            parent.limits,
-            run,
-            workers,
-            provider=provider,
-            budget_usd=budget_usd,
-            deadline=deadline,
-            max_turns=max_turns,
-            max_input_tokens=max_input_tokens,
-            max_output_tokens=max_output_tokens,
-            planned_workers=planned_workers,
-            planned_on_provider=planned_on_provider,
-            now=now,
-            max_runtime_s=max_runtime_s,
-        )
+        if run is not None and planned_workers is not None and planned_workers > run.max_workers:
+            # Refuse the whole plan up front, with the real limits, before any worker.
+            raise FleetRefused(
+                "over_fleet_limits",
+                detail=fleet_limits_sentence(run.max_workers, run.total_budget_usd),
+            )
+        from daimon.core.neutral_resources import WorkerSpecRefused
+
+        try:
+            return default_worker_limits(
+                parent.limits,
+                run,
+                workers,
+                provider=provider,
+                budget_usd=budget_usd,
+                deadline=deadline,
+                max_turns=max_turns,
+                max_input_tokens=max_input_tokens,
+                max_output_tokens=max_output_tokens,
+                planned_workers=planned_workers,
+                planned_on_provider=planned_on_provider,
+                now=now,
+                max_runtime_s=max_runtime_s,
+            )
+        except WorkerSpecRefused as error:
+            from daimon.core.fleet import holds_slot
+
+            # Only a run out of worker slots is the worker limit; a run out of money
+            # keeps its own budget refusal.
+            if (
+                run is None
+                or (error.field, error.reason) != ("budget", "exhausted")
+                or sum(1 for worker in workers if holds_slot(worker)) < run.max_workers
+            ):
+                raise
+            raise FleetRefused(
+                "worker_limit_reached",
+                detail=fleet_limits_sentence(run.max_workers, run.total_budget_usd),
+            ) from None
 
     def _bounded_gemini(
         self,
@@ -1854,8 +1920,12 @@ class HostFleetPorts:
             return run, worker
         except OperationConflict:
             raise FleetRefused("operation_conflict") from None
-        except FleetConflict:
-            raise FleetRefused("admission_evidence_invalid") from None
+        except FleetConflict as error:
+            raise FleetRefused(
+                "worker_limit_reached"
+                if error.reason == "worker_limit"
+                else "admission_evidence_invalid"
+            ) from None
 
     async def read_result(
         self,

@@ -5217,9 +5217,9 @@ class DaimonBot(commands.Bot):
         )
         prepared_origin = None
         if self.runtime.turn_deps.fleet_enabled:
-            from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+            from daimon.core.turn.runtime_manifest import read_agent_fleet_grant_or_off
 
-            grant = await read_agent_fleet_grant(
+            grant = await read_agent_fleet_grant_or_off(
                 self.runtime.turn_deps, admission, now=datetime.now(UTC)
             )
             if grant is not None:

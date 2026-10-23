@@ -95,7 +95,11 @@ log = structlog.get_logger(__name__)
 async def read_agent_fleet_grant(
     deps: TurnDeps, admission: Admission, *, now: datetime
 ) -> AgentFleetGrant | None:
-    """Read the current grant for the actual admitted source, without name lookup."""
+    """The fleet the actual admitted source may use now, without name lookup.
+
+    Its own grant when it has one; otherwise the computed default, unless fleet
+    was turned off for it. `FLEET__ENABLED=false` stops all of them.
+    """
     from daimon.core.channel_backend import AgentBackendService
     from daimon.core.ma_identity import derive_agent_uuid
 
@@ -103,11 +107,31 @@ async def read_agent_fleet_grant(
         return None
     if admission.grant is None:
         raise WorkerSpecRefused("origin", "unbound")
-    return await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+    setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
         admission.grant.tenant_id,
         derive_agent_uuid(tenant_id=admission.grant.tenant_id, ma_agent_id=admission.agent.id),
         now=now,
     )
+    return setting.grant
+
+
+async def read_agent_fleet_grant_or_off(
+    deps: TurnDeps, admission: Admission, *, now: datetime
+) -> AgentFleetGrant | None:
+    """`read_agent_fleet_grant` for a chat turn: a failed read is fleet off, not a failed turn.
+
+    Refusals (an unbound origin, an invalid stored grant) still raise. Anything else
+    (the database, a timeout) is logged and read as no fleet: nothing is retained.
+    """
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    try:
+        return await read_agent_fleet_grant(deps, admission, now=now)
+    except (WorkerSpecRefused, AgentBackendRefused):
+        raise
+    except Exception as error:  # a fleet read never fails a chat turn
+        log.error("fleet.read_failed", error_type=type(error).__name__)
+        return None
 
 
 class _FrozenRoot(BaseModel):
@@ -187,8 +211,9 @@ async def _root_context(
         if (
             parent.agent_id is None
             or len(parent.source_agents) != 1
+            # Epoch 0 is the computed default; the digest check below binds it.
             or root.grant_epoch is None
-            or root.grant_epoch <= 0
+            or root.grant_epoch < 0
             or not root.grant_digest
         ):
             raise WorkerSpecRefused("origin", "stale")
@@ -309,13 +334,16 @@ async def _root_context(
         )
         assert agent_id is not None
         try:
-            value = await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+            setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
                 UUID(scope.tenant_id), agent_id, now=now
             )
         except AgentBackendRefused:
             raise WorkerSpecRefused("origin", "unsupported") from None
+        value = setting.grant
         if parent is None:
-            if value is not None or origin.is_setup:
+            # A turn under the default fleet may run without a root (it answers with
+            # fleet off); a custom grant's turn always retains one.
+            if setting.kind == "custom" or origin.is_setup:
                 raise WorkerSpecRefused("origin", "unbound")
         else:
             assert root is not None
@@ -613,8 +641,74 @@ async def freeze_prepared_root(
     intent_id: UUID,
     now: Callable[[], datetime],
 ) -> None:
-    """Retain the exact host-owned root under its input's existing mutation fence."""
-    from uuid import uuid4
+    """Retain the exact host-owned root under its input's existing mutation fence.
+
+    Under an agent's own grant a refusal fails the turn, as it always has. Under
+    the computed default (every agent, nothing configured), a turn that can't
+    become a fleet root is an ordinary turn: it answers with fleet off and the
+    fleet tools say why. The default never makes a chat turn fail.
+    """
+    from daimon.core.fleet_configuration import is_default_fleet
+    from daimon.core.neutral_resources import fleet_root_obstacle
+    from daimon.core.turn_origin import current_origin_id
+
+    try:
+        value = await read_agent_fleet_grant(deps, prepared.admission, now=now())
+    except Exception as error:
+        from daimon.core.channel_backend import AgentBackendRefused
+
+        if isinstance(error, (WorkerSpecRefused, AgentBackendRefused)):
+            raise
+        # The grant can't be read: retain nothing; the turn answers with fleet off.
+        log.error("fleet.read_failed", error_type=type(error).__name__, at="freeze")
+        if (origin_id := current_origin_id.get()) is not None:
+            _remember_root_refusal(origin_id, "unavailable")
+        return
+    if value is None:
+        if prepared._source is not None or prepared._preparation is not None:  # pyright: ignore[reportPrivateUsage]
+            raise WorkerSpecRefused("origin", "stale")
+        return
+    if not is_default_fleet(value):
+        await _freeze_root(deps, prepared, value, intent_id=intent_id, now=now)
+        return
+    try:
+        await _freeze_root(deps, prepared, value, intent_id=intent_id, now=now)
+    except Exception as error:
+        # Any failure (a refusal, a conflict, the database) only turns fleet off for this
+        # turn. Cancellation is a BaseException and still propagates.
+        source = prepared._source  # pyright: ignore[reportPrivateUsage]
+        if prepared.admission.hold is not None:
+            obstacle = "held"
+        elif prepared.admission.shared_owner is not None:
+            obstacle = "shared_thread"
+        else:
+            obstacle = (fleet_root_obstacle(source) if source is not None else None) or (
+                "unavailable"
+            )
+        from daimon.core.turn.persistence import BindingSuperseded
+        from mux.state.lease import StaleFence
+
+        # A lost fence or binding means another writer moved on: worth an error line.
+        (log.error if isinstance(error, (StaleFence, BindingSuperseded)) else log.warning)(
+            "fleet.default_root_skipped",
+            error_type=type(error).__name__,
+            field=getattr(error, "field", None),
+            reason=getattr(error, "reason", None),
+            obstacle=obstacle,
+        )
+        if (origin_id := current_origin_id.get()) is not None:
+            _remember_root_refusal(origin_id, obstacle)
+
+
+async def _freeze_root(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    value: AgentFleetGrant,
+    *,
+    intent_id: UUID,
+    now: Callable[[], datetime],
+) -> None:
+    from uuid import uuid5
 
     from daimon.core.authz import FleetFacts
     from daimon.core.mux_compat import source_environment_record
@@ -626,11 +720,6 @@ async def freeze_prepared_root(
     from daimon.core.turn_origin import current_origin_id
     from mux.state.operations import request_digest
 
-    value = await read_agent_fleet_grant(deps, prepared.admission, now=now())
-    if value is None:
-        if prepared._source is not None or prepared._preparation is not None:  # pyright: ignore[reportPrivateUsage]
-            raise WorkerSpecRefused("origin", "stale")
-        return
     persistence, origin_id = current_persistence.get(), current_origin_id.get()
     grant, source = prepared.admission.grant, prepared._source  # pyright: ignore[reportPrivateUsage]
     if not (persistence and origin_id and grant and source):
@@ -708,7 +797,9 @@ async def freeze_prepared_root(
                 root=binding.thread,
                 origin_id=origin_id,
                 account_id=prepared.admission.account_id,
-                run_id=uuid4(),
+                # A placeholder, replaced by the run's id; derived, so a root draws no
+                # random id (shared legacy/mux goldens replay the same id sequence).
+                run_id=uuid5(origin_id, "fleet-root-placeholder"),
                 place=grant.run_place,
                 enabled=True,
                 active=True,

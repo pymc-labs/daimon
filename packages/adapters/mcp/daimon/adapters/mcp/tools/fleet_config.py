@@ -27,6 +27,7 @@ from daimon.core.fleet_configuration import (
     configuration_refusal,
     configured_fleet_grant,
     fleet_config_from_grant,
+    fleet_default_line,
     fleet_detail_lines,
     fleet_worker_names,
     provider_preview_digest,
@@ -152,11 +153,13 @@ async def _request_fleet_config_impl(
         )
 
         await _require_agent_editor(service, agent, _actor(auth), auth)
-        existing = await service.read_fleet_grant(auth.tenant_id, agent.agent_id, now=now)
+        setting = await service.fleet_setting(auth.tenant_id, agent.agent_id, now=now)
+        # With no custom grant, a change starts from the default limits.
+        existing = setting.base
         if config is None and not revoke:
             if preview_digest is not None:
                 raise ToolError("A change needs the exact configuration from its preview.")
-            if existing is None:
+            if setting.grant is None:
                 return FleetConfigInfo(
                     status="not_configured",
                     agent_name=agent_name,
@@ -167,11 +170,9 @@ async def _request_fleet_config_impl(
                     preview_digest="",
                     details=(),
                     summary="Fleet is off for this agent. Ask the agent's owner or an admin: "
-                    '"Turn on fleet for '
-                    + agent_name
-                    + ", with the research and writing agents, up to 4 workers, $2 per run,"
-                    ' and a 120-second deadline."',
+                    '"Turn on fleet for ' + agent_name + ', with the default limits."',
                 )
+            existing = setting.grant
             saved = fleet_config_from_grant(
                 existing,
                 worker_names=await fleet_worker_names(
@@ -186,11 +187,20 @@ async def _request_fleet_config_impl(
                 expected_revision=preview.setting_revision,
                 preview_digest=preview.digest,
                 details=fleet_detail_lines(preview, worker_names=saved.worker_agents),
-                summary="Current fleet limits.",
+                summary=(
+                    "Fleet is on with the default limits; nobody has changed them. The "
+                    "agent's owner or an admin can tighten them or turn fleet off."
+                    if setting.kind == "default"
+                    else "Current fleet limits (custom)."
+                ),
             )
         if config is not None:
             config = await complete_fleet_config(
-                config, existing, runtime.client, tenant_id=auth.tenant_id
+                config,
+                existing,
+                runtime.client,
+                tenant_id=auth.tenant_id,
+                default=setting.kind != "custom",
             )
         if revoke and config is not None:
             raise ToolError("Choose either fleet limits or turning fleet off. Nothing changed.")
@@ -205,6 +215,9 @@ async def _request_fleet_config_impl(
         frozen = (
             config.model_copy(update={"expires_at": value.expires_at}) if config and value else None
         )
+        if value is not None:
+            # A non-admin owner may only tighten; say so before showing a card.
+            await service.check_owner_fleet_ceiling(agent, value, _actor(auth), now=now)
         preview = await service.preview_fleet_grant(agent, value, now=now, check_root=True)
         status = "preview"
         summary = (
@@ -255,8 +268,13 @@ async def _request_fleet_config_impl(
             config=frozen,
             expected_revision=preview.setting_revision,
             preview_digest=preview.digest,
-            details=fleet_detail_lines(
-                preview, worker_names=frozen.worker_agents if frozen else None, previous=existing
+            details=(
+                *(fleet_default_line(setting.kind, revoke=revoke) if status == "preview" else ()),
+                *fleet_detail_lines(
+                    preview,
+                    worker_names=frozen.worker_agents if frozen else None,
+                    previous=existing if setting.kind == "custom" else None,
+                ),
             ),
             summary=summary,
         )
@@ -405,6 +423,11 @@ def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str | None = None,
     ) -> FleetConfigInfo:
         """Configure this agent's fleet of worker agents, with owner/admin confirmation.
+
+        Every agent already has a fleet with default limits (4 workers, $2 a run);
+        call this only when the agent's owner or an admin asks to change or turn off
+        those limits. Never use it to get around a fleet refusal or a limit someone
+        else hit: tell them the limit and who can change it instead.
 
         Use agent names, never model lists: e.g. "let this agent work with the
         research and writing agents, up to 4 workers and $2 per run". config sets

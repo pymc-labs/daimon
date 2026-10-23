@@ -1398,12 +1398,23 @@ async def bind_session_impl(
         result = await run_controlled_preparation(request, preparing)
         try:
             if deps.fleet_enabled and worker is None:
+                from daimon.core.fleet_configuration import is_default_fleet
                 from daimon.core.turn.runtime_manifest import (
                     capture_preparation_source,
-                    read_agent_fleet_grant,
+                    read_agent_fleet_grant_or_off,
                 )
+                from daimon.core.turn_origin import current_origin_id
 
-                if await read_agent_fleet_grant(deps, result.admission, now=now()) is not None:
+                fleet_grant = await read_agent_fleet_grant_or_off(deps, result.admission, now=now())
+                if (
+                    fleet_grant is not None
+                    and is_default_fleet(fleet_grant)
+                    and (current_origin_id.get() is None or result.admission.hold is not None)
+                ):
+                    # No root can be frozen here (no origin, or a held turn), so under
+                    # the default skip the capture and its API call altogether.
+                    fleet_grant = None
+                if fleet_grant is not None:
                     root_scope = admitted_session_scope(
                         result.admission,
                         tenant_id=tenant_id,
@@ -1411,9 +1422,20 @@ async def bind_session_impl(
                         prepared=result._scope,  # pyright: ignore[reportPrivateUsage]
                     )
                     root_request = replace(request, admission=result.admission, scope=root_scope)
-                    source = await capture_preparation_source(root_request)
+                    try:
+                        source = await capture_preparation_source(root_request)
+                    except Exception as error:
+                        # The default fleet never fails a chat turn: without a captured
+                        # source the root freeze skips fleet and the tools say why.
+                        if not is_default_fleet(fleet_grant):
+                            raise
+                        log.warning(
+                            "fleet.default_capture_skipped", error_type=type(error).__name__
+                        )
+                        source = None
                     remaining_s(effective_deadline, now=now(), refuse_expired=True)
-                    result = replace(result, _source=source, _preparation=root_request)
+                    if source is not None:
+                        result = replace(result, _source=source, _preparation=root_request)
             if worker is not None:
                 remaining_s(effective_deadline, now=now(), refuse_expired=True)
             if _on_prepared is not None:

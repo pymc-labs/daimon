@@ -114,7 +114,8 @@ async def test_real_caller_binds_acknowledged_identity_and_unwinds_once(
 
     async def bind(deps, admission, **kwargs):
         origin_id = current_origin_id.get()
-        early = enabled and granted
+        # Without a grant the agent still has the default fleet (J10), so fleet on = early.
+        early = enabled
         assert (origin_id is not None) is early
         assert ("turn_card_intent_id" in kwargs) is early
         async with db_session_factory() as db:

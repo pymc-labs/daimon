@@ -119,8 +119,10 @@ once (`--collect-only`, no database), places its files the way CI will, and
 fails if a shard is empty or the shards omit or repeat a test, so a new test
 file lands in exactly one shard without any edit.
 
-The turn-relevant suites (`packages/core/tests/turn`, `tests/parity` and the
-Slack and Discord adapters) also run on a second, blocking `pytest-mux-leg` job
+The turn-relevant suites (`packages/core/tests/turn`, `tests/parity`, the
+Slack, Discord, Teams and scheduler adapters, `daimon run`, and the non-chat
+turn files: headless, routines, smoke, workspace transfer and session
+preparation) also run on a second, blocking `pytest-mux-leg` job
 with `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`; its suites
 carry a `-mux` suffix. Fixtures read the leg through `daimon.testing.turn_leg`
 (`deps_for` and the parity drivers), so run a suite locally on the mux leg by

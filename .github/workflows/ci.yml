@@ -160,6 +160,9 @@ jobs:
   # Suites carry a `-mux` suffix so shard-check proves each one is covered once.
   # The whole core suite is not doubled: most of its ~6 shards never read the
   # turn path, so a second pass would spend minutes without testing a new path.
+  # nonchat-mux, cli-run-mux, scheduler-mux and teams-mux cover the non-chat
+  # turns (headless, routines, smoke, CLI run, workspace transfer, session
+  # preparation) and the Teams adapter on mux.
   pytest-mux-leg:
     name: pytest-${{ matrix.suite }}${{ matrix.shards > 1 && format(' ({0}/{1})', matrix.shard, matrix.shards) || '' }}
     runs-on: ubuntu-latest
@@ -173,6 +176,26 @@ jobs:
           - { suite: slack-mux, shard: 0, shards: 1, paths: packages/adapters/slack }
           - { suite: discord-mux, shard: 0, shards: 2, paths: packages/adapters/discord }
           - { suite: discord-mux, shard: 1, shards: 2, paths: packages/adapters/discord }
+          - { suite: teams-mux, shard: 0, shards: 1, paths: packages/adapters/teams }
+          - { suite: scheduler-mux, shard: 0, shards: 1, paths: packages/adapters/scheduler }
+          - { suite: cli-run-mux, shard: 0, shards: 1, paths: packages/adapters/cli/tests/run }
+          - suite: nonchat-mux
+            shard: 0
+            shards: 1
+            paths: >-
+              packages/core/tests/test_headless_runner.py
+              packages/core/tests/test_headless_ports.py
+              packages/core/tests/test_headless_tool_safety.py
+              packages/core/tests/test_routine_delivery_headless.py
+              packages/core/tests/test_scheduler_dispatch.py
+              packages/core/tests/test_smoke.py
+              packages/core/tests/test_workspace_transfer.py
+              packages/core/tests/test_transfer_checkpoint_paths.py
+              packages/core/tests/test_session_preparation.py
+              packages/core/tests/test_channel_backend.py
+              packages/core/tests/test_shared_threads.py
+              tests/integration/test_routines_end_to_end.py
+              tests/integration/test_direct_messages.py
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine

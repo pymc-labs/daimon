@@ -34,7 +34,9 @@ from urllib.parse import unquote
 from daimon.core.fleet_configuration import (
     ConfigurationReference,
     complete_fleet_config,
+    configuration_refusal,
     configured_fleet_grant,
+    fleet_default_line,
     fleet_detail_lines,
     provider_preview_digest,
 )
@@ -756,18 +758,22 @@ def backend_switch_callbacks(
                 )
                 if not await service.may_edit(agent, actor):
                     raise ValueError("This change needs the agent's owner or a current admin.")
-                previous = await service.read_fleet_grant(
+                setting = await service.fleet_setting(
                     tenant_id, agent.agent_id, now=datetime.now(prompt.expires_at.tzinfo)
                 )
+                previous = setting.base
                 complete = (
                     await complete_fleet_config(
-                        reference.config, previous, anthropic, tenant_id=tenant_id
+                        reference.config,
+                        previous,
+                        anthropic,
+                        tenant_id=tenant_id,
+                        default=setting.kind != "custom",
                     )
                     if reference.config
                     else None
                 )
-                preview = await service.preview_fleet_grant(
-                    agent,
+                value = (
                     await configured_fleet_grant(
                         complete,
                         service,
@@ -777,8 +783,15 @@ def backend_switch_callbacks(
                         now=datetime.now(prompt.expires_at.tzinfo),
                     )
                     if complete
-                    else None,
-                    now=datetime.now(prompt.expires_at.tzinfo),
+                    else None
+                )
+                if value is not None:
+                    # A non-admin owner may only tighten; the write re-checks at the click.
+                    await service.check_owner_fleet_ceiling(
+                        agent, value, actor, now=datetime.now(prompt.expires_at.tzinfo)
+                    )
+                preview = await service.preview_fleet_grant(
+                    agent, value, now=datetime.now(prompt.expires_at.tzinfo)
                 )
                 if (
                     preview.setting_revision != reference.expected_revision
@@ -790,12 +803,18 @@ def backend_switch_callbacks(
                     if reference.operation == "fleet_revoke"
                     else "Configure fleet for "
                 ) + agent.name
-                details = fleet_detail_lines(
-                    preview,
-                    worker_names=complete.worker_agents if complete else None,
-                    previous=previous,
+                details = (
+                    *fleet_default_line(setting.kind, revoke=reference.operation == "fleet_revoke"),
+                    *fleet_detail_lines(
+                        preview,
+                        worker_names=complete.worker_agents if complete else None,
+                        # The default's fixed expiry isn't a limit an owner set.
+                        previous=previous if setting.kind == "custom" else None,
+                    ),
                 )
         except AgentBackendRefused as exc:
+            if exc.reason == "fleet_raise_admin_required":
+                raise ValueError(configuration_refusal(exc.reason)) from exc
             raise ValueError("This preview changed. Preview and confirm again.") from exc
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)

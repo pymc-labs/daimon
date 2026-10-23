@@ -199,7 +199,9 @@ async def create_run(
         await session.execute(
             insert(FleetRunRow)
             .values(
-                id=uuid.uuid4(),
+                # Derived from the tenant's unique key (a retry hits the same row anyway),
+                # so creating a run draws no random id.
+                id=uuid.uuid5(tenant_id, "fleet-run:" + operation_key),
                 tenant_id=tenant_id,
                 operation_key=operation_key,
                 status="running",
@@ -279,7 +281,9 @@ async def add_worker(
         if run.status != "running":
             raise FleetConflict(f"run {run_id} is {run.status}")
         if not 0 <= ordinal < 2 * run.max_workers:
-            raise FleetConflict(f"run {run_id} allows {run.max_workers} workers")
+            raise FleetConflict(
+                f"run {run_id} allows {run.max_workers} workers", reason="worker_limit"
+            )
         rows = (
             await session.scalars(select(FleetWorkerRow).where(FleetWorkerRow.run_id == run_id))
         ).all()
@@ -287,7 +291,9 @@ async def add_worker(
             sum(1 for other in rows if other.started_at is not None or holds_slot(_worker(other)))
             >= run.max_workers
         ):
-            raise FleetConflict(f"run {run_id} allows {run.max_workers} workers")
+            raise FleetConflict(
+                f"run {run_id} allows {run.max_workers} workers", reason="worker_limit"
+            )
         if deadline_at > run.deadline_at:
             raise FleetConflict("a worker's deadline cannot outlast its run")
         row = FleetWorkerRow(

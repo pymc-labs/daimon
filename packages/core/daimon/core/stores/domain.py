@@ -1226,6 +1226,11 @@ class _BackendConsentFacts(_Facts):
         return self.drop_consent.declared_drops if self.drop_consent is not None else ()
 
 
+#: Stored in `fleet_grant` when an owner or admin turned fleet off. Without it a
+#: revision with no grant reads as the deployment's default fleet (on).
+FLEET_OFF: dict[str, JsonValue] = {"disabled": True}
+
+
 class AgentBackendRevision(_BackendConsentFacts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
@@ -1246,7 +1251,7 @@ class AgentBackendRevision(_BackendConsentFacts):
 
     @model_validator(mode="after")
     def _read_fleet_grant(self) -> AgentBackendRevision:
-        if self.fleet_grant is None:
+        if self.fleet_grant is None or self.fleet_off:
             return self
         from daimon.core.neutral_resources import AgentFleetGrant
 
@@ -1264,6 +1269,11 @@ class AgentBackendRevision(_BackendConsentFacts):
                 revision=self.local,
             )
         return self
+
+    @property
+    def fleet_off(self) -> bool:
+        """Fleet was turned off explicitly; the default never applies to it."""
+        return self.fleet_grant == FLEET_OFF
 
 
 class CompatibilityPreview(_BackendConsentFacts):

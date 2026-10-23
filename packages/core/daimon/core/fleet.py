@@ -76,6 +76,7 @@ type FleetConflictReason = Literal[
     "source_lineage_changed",
     "intent_changed",
     "financial_admission_refused",
+    "worker_limit",
     "private_slot_mismatch",
     "source_intent_changed",
     "result_journal_missing",
@@ -86,6 +87,37 @@ type FleetConflictReason = Literal[
     "result_not_successful",
     "wake_pending",
 ]
+
+
+#: What a worker's closed error code means, for the fleet card. Unknown codes stay codes.
+WORKER_ERROR_TEXT: Mapping[str, str] = {
+    "dispatch_refused": "it couldn't start on that model here",
+    "preparation_refused": "it couldn't be set up on that model here",
+    "financial_admission_refused": "it would have gone over the fleet or server budget",
+    "not_admitted": "it would have gone over the fleet or server budget",
+    "budget_exceeded": "it ran out of its budget",
+    "worker_budget_exceeded": "it ran out of its budget",
+    "run_budget_exceeded": "the fleet's budget for this run ran out",
+    "provider_budget_exceeded": "the fleet's budget for that provider ran out",
+    "tenant_budget_exceeded": "this server's spending limit was reached",
+    "channel_budget_exceeded": "this channel's spending limit was reached",
+    "admission_channel_budget_exceeded": "this channel's spending limit was reached",
+    "cap_exceeded": "a spending limit was reached",
+    "admission_cap_exceeded": "a spending limit was reached",
+    "timed_out": "it ran out of time",
+    "deadline_expired": "it ran out of time",
+    "preparation_deadline_exceeded": "it took too long to start",
+    "run_deadline": "the fleet ran out of time",
+    "worker_lost": "it was lost during a restart",
+    "stop_requested": "it was stopped",
+    "watch_ended": "the fleet ended before it finished",
+    "shutdown": "Daimon restarted before it finished",
+    "usage_unavailable": "its spending couldn't be measured, so it was stopped",
+}
+
+
+def worker_error_text(code: str | None) -> str | None:
+    return WORKER_ERROR_TEXT.get(code) if code else None
 
 
 class FleetConflict(Exception):

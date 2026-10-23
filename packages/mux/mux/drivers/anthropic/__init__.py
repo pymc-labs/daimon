@@ -85,7 +85,11 @@ from mux.drivers.anthropic.sessions_lifecycle import (
     SessionWalk,
     WorkspaceTransfer,
 )
-from mux.drivers.anthropic.transport import LegacyTurnTransport, single_attempt_mutation
+from mux.drivers.anthropic.transport import (
+    LegacyTurnTransport,
+    classify_mutation_failure,
+    single_attempt_mutation,
+)
 from mux.drivers.anthropic.turn import AnthropicEventHistoryWalk, AnthropicEvents, EventHistoryWalk
 from mux.drivers.anthropic.usage import AnthropicUsage, UsageWalk, observation_from_event
 from mux.errors import ExtensionVersionError, UnsupportedCapability
@@ -305,6 +309,7 @@ __all__ = [
     "agent_payload",
     "agent_record",
     "agent_tools",
+    "classify_mutation_failure",
     "create_environment_ignored",
     "environment_payload",
     "environment_record",

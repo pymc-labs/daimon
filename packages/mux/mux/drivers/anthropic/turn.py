@@ -11,7 +11,6 @@ import httpx
 from anthropic import (
     NOT_GIVEN,
     APIConnectionError,
-    APITimeoutError,
     AsyncAnthropic,
     AsyncStream,
     omit,
@@ -33,7 +32,7 @@ from mux.drivers.anthropic.resources._authorization import (
     check_ref,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
-from mux.drivers.anthropic.transport import mutation_client
+from mux.drivers.anthropic.transport import mutation_client, never_written
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 
 
@@ -171,7 +170,10 @@ class AnthropicEvents:
                 mutation_client(self._client).beta.sessions.events.send(session.id, events=inputs)
             )
         except ProviderError as error:
-            if isinstance(error.__cause__, APIConnectionError | APITimeoutError):
+            cause = error.__cause__
+            # A request that never left this process is a refusal, not a lost
+            # acknowledgement: it raises, so the host may take a fresh attempt.
+            if isinstance(cause, APIConnectionError) and never_written(cause) is None:
                 return SendReceipt(operation_id=key, status="outcome_unknown", input_ids=())
             raise
         return SendReceipt(
@@ -264,7 +266,10 @@ class AnthropicEvents:
                 )
             )
         except ProviderError as error:
-            if isinstance(error.__cause__, APIConnectionError | APITimeoutError):
+            cause = error.__cause__
+            # A request that never left this process is a refusal, not a lost
+            # acknowledgement: it raises, so the host may take a fresh attempt.
+            if isinstance(cause, APIConnectionError) and never_written(cause) is None:
                 return CancelReceipt(
                     operation_id=key,
                     session=session,

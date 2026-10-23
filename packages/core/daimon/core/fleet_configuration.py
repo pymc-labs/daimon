@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
-from daimon.core.stores.domain import CompatibilityPreview, TenantBackendPolicy
-from mux.contracts.config import ConfigRevision
+from daimon.core.stores.domain import FLEET_OFF, CompatibilityPreview, TenantBackendPolicy
+from mux.contracts.config import ConfigRevision, ResolvedBackend
 from mux.contracts.ids import ModelRef, Provider
 from mux.profiles import MANAGED_AGENTS, backend_selection
 from pydantic import (
@@ -115,6 +115,128 @@ class FleetConfigInput(BaseModel):
         )
 
 
+#: The fleet every agent has until its owner or an admin sets one or turns it off.
+DEFAULT_FLEET_MAX_WORKERS = 4
+DEFAULT_FLEET_BUDGET_USD = Decimal("2")
+#: Native spend-capped dispatch (e.g. Astra) needs a worker deadline of at most 120 s.
+DEFAULT_FLEET_WORKER_SECONDS = 120
+DEFAULT_FLEET_RUN_SECONDS = 600
+#: Fixed, so the default reads the same on every call and a frozen root never goes stale
+#: just because time passed; a policy or catalog change still changes its digest.
+DEFAULT_FLEET_EXPIRES_AT = datetime(2100, 1, 1, tzinfo=UTC)
+
+
+def default_fleet_grant(policy: TenantBackendPolicy) -> AgentFleetGrant | None:
+    """The computed default: the tenant's enabled providers' selectable models, small caps.
+
+    Nothing is stored. Models come from the priced, runnable, selectable catalog
+    (`agent_catalog`), so worker-only and unpriced models are out, and Pro is never
+    offered. A provider the tenant hasn't enabled (an unkeyed one under the deployment
+    default) contributes nothing. The root's own model is added by the runtime.
+    """
+    from daimon.core.agent_model_names import agent_catalog
+    from daimon.core.channel_backend import backend_is_enabled
+    from mux.profiles import RUNNABLE_PROFILES, get_profile, runnable_selection
+
+    limits = WorkerLimits(
+        budget_usd=DEFAULT_FLEET_BUDGET_USD,
+        deadline=DEFAULT_FLEET_EXPIRES_AT,
+        max_turns=1,
+    )
+    choices: list[tuple[ResolvedBackend, ModelRef]] = []
+    for entry in agent_catalog():
+        model = ModelRef(provider=entry.model.provider, id=entry.model.id)
+        tokens = model.id.casefold().replace("_", "-").split("-")
+        if "pro" in tokens or "fast" in tokens:
+            # Never Pro; never a "-fast" speed preset (a local preset key, at a higher price).
+            continue
+        if not backend_is_enabled(model.provider, policy.enabled_backends):
+            continue
+        backend = backend_selection(model.provider).model_copy(
+            update={"model": model.id} if model.provider != MANAGED_AGENTS.provider else {}
+        )
+        if backend.profile not in RUNNABLE_PROFILES or not runnable_selection(backend):
+            continue
+        try:
+            limits.require_profile(get_profile(backend.profile))
+        except ValueError:
+            continue
+        if (model.provider, model.id) not in {(m.provider, m.id) for _b, m in choices}:
+            choices.append((backend, model))
+    if not choices:
+        return None
+    return AgentFleetGrant(
+        worker_agents="any",
+        max_workers=DEFAULT_FLEET_MAX_WORKERS,
+        choices=tuple(choices),
+        limits=limits,
+        max_run_seconds=DEFAULT_FLEET_RUN_SECONDS,
+        max_worker_seconds=DEFAULT_FLEET_WORKER_SECONDS,
+        max_root_turns=3,
+    )
+
+
+def _choice_keys(grant: AgentFleetGrant) -> set[str]:
+    return {
+        json.dumps([backend.model_dump(mode="json"), model.model_dump(mode="json")], sort_keys=True)
+        for backend, model in grant.choices
+    }
+
+
+def fleet_grant_within(new: AgentFleetGrant, ceiling: AgentFleetGrant) -> bool:
+    """Whether `new` only tightens `ceiling`, in every dimension (an owner's edit)."""
+
+    def capped(value: Decimal | int | None, limit: Decimal | int | None) -> bool:
+        # An absent limit on the ceiling allows any finite value; a present one bounds it.
+        return limit is None or (value is not None and value <= limit)
+
+    a, b = new.limits, ceiling.limits
+    if b.provider_limits_usd is not None and (
+        a.provider_limits_usd is None
+        or any(
+            value > b.provider_limits_usd.get(provider, Decimal(0))
+            for provider, value in a.provider_limits_usd.items()
+        )
+    ):
+        return False
+    if isinstance(ceiling.worker_agents, tuple):
+        workers_ok = new.worker_agents is None or (
+            isinstance(new.worker_agents, tuple)
+            and set(new.worker_agents) <= set(ceiling.worker_agents)
+        )
+    elif ceiling.worker_agents is None:
+        workers_ok = new.worker_agents is None
+    else:
+        workers_ok = True
+    return (
+        workers_ok
+        and new.max_workers <= ceiling.max_workers
+        and _choice_keys(new) <= _choice_keys(ceiling)
+        and a.budget_usd <= b.budget_usd
+        and a.deadline <= b.deadline
+        and a.max_turns <= b.max_turns
+        and capped(a.max_model_requests, b.max_model_requests)
+        and capped(a.max_input_tokens, b.max_input_tokens)
+        and capped(a.max_output_tokens, b.max_output_tokens)
+        and capped(a.native_budget_usd, b.native_budget_usd)
+        and new.max_run_seconds <= ceiling.max_run_seconds
+        and new.max_worker_seconds <= ceiling.max_worker_seconds
+        and new.max_root_turns <= ceiling.max_root_turns
+        # Root spending controls are an admin's to grant: only within one already granted.
+        and _within_granted(new.native_root_budget_usd, ceiling.native_root_budget_usd)
+        and _within_granted(new.root_cash_budget_usd, ceiling.root_cash_budget_usd)
+    )
+
+
+def _within_granted(value: Decimal | None, limit: Decimal | None) -> bool:
+    return value is None or (limit is not None and value <= limit)
+
+
+def is_default_fleet(grant: AgentFleetGrant) -> bool:
+    """A stored grant always has epoch >= 1; only the computed default has 0."""
+    return grant.epoch == 0
+
+
 def fleet_config_from_grant(
     grant: AgentFleetGrant,
     *,
@@ -172,7 +294,9 @@ async def complete_fleet_config(
     client: AsyncAnthropic,
     *,
     tenant_id: UUID,
+    default: bool = False,
 ) -> FleetConfigInput:
+    """Fill omitted fields from `existing`; `default` says it is the computed default."""
     if existing is None:
         return config
     names = (
@@ -180,10 +304,11 @@ async def complete_fleet_config(
         if "worker_agents" in config.model_fields_set
         else await fleet_worker_names(existing, client, tenant_id=tenant_id)
     )
-    base = fleet_config_from_grant(existing, worker_names=names)
-    return FleetConfigInput.model_validate(
-        {**base.model_dump(), **config.model_dump(exclude_unset=True)}
-    )
+    base = fleet_config_from_grant(existing, worker_names=names).model_dump()
+    if default:
+        # Custom limits get their own expiry (90 days unless chosen), never the default's.
+        base.pop("expires_at")
+    return FleetConfigInput.model_validate({**base, **config.model_dump(exclude_unset=True)})
 
 
 async def configured_fleet_grant(
@@ -208,8 +333,12 @@ async def configured_fleet_grant(
         or (agent.model if provider == MANAGED_AGENTS.provider else selection.model)
         or DEFAULT_AGENT_MODEL,
     )
-    existing = await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=now)
-    config = await complete_fleet_config(config, existing, client, tenant_id=agent.tenant_id)
+    # No custom grant: the edit starts from the default, so "2 workers" tightens it.
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=now)
+    existing, default = setting.base, setting.kind != "custom"
+    config = await complete_fleet_config(
+        config, existing, client, tenant_id=agent.tenant_id, default=default
+    )
     models = existing.models if existing else (root,)
     worker_ids: Literal["any"] | tuple[UUID, ...] | None = None
     if config.worker_agents == "any":
@@ -231,6 +360,19 @@ async def configured_fleet_grant(
     value = config.grant(now, models=models, worker_ids=worker_ids)
     if existing is not None:
         # Editing agent eligibility or ceilings must not silently rewrite legacy profiles.
+        caps = value.limits.provider_limits_usd
+        if default and caps is not None:
+            # Provider caps chosen over the default: the root's own model, as for any
+            # new fleet, plus the default's models on the providers given a cap.
+            models = (
+                root,
+                *(
+                    model
+                    for model in existing.models
+                    if caps.get(model.provider, Decimal(0)) > 0 and model != root
+                ),
+            )
+            return config.grant(now, models=models, worker_ids=worker_ids)
         data = value.model_dump(mode="json")
         data["choices"] = existing.model_dump(mode="json")["choices"]
         value = AgentFleetGrant.model_validate_json(json.dumps(data))
@@ -312,14 +454,27 @@ def provider_preview_digest(policy: TenantBackendPolicy, providers: tuple[Provid
     ).hexdigest()
 
 
+def fleet_default_line(kind: str, *, revoke: bool) -> tuple[str, ...]:
+    """Say plainly that the agent runs on the default fleet before a change replaces it."""
+    if kind != "default":
+        return ()
+    if revoke:
+        return ("Now: fleet is on with the default limits.",)
+    return ("Now: fleet is on with the default limits. Confirming saves these as custom limits.",)
+
+
 def fleet_detail_lines(
     preview: CompatibilityPreview,
     *,
     worker_names: tuple[str, ...] | Literal["any"] | None = None,
     previous: AgentFleetGrant | None = None,
 ) -> tuple[str, ...]:
-    if preview.fleet_grant is None:
-        return ("Removed: fleet access for this agent, including all worker permissions.",)
+    if preview.fleet_grant is None or preview.fleet_grant == FLEET_OFF:
+        return (
+            "Removed: fleet access for this agent, including all worker permissions.",
+            "Fleet stays off for this agent, default limits included, until its owner "
+            "or an admin turns it on again.",
+        )
     grant = AgentFleetGrant.model_validate_json(json.dumps(preview.fleet_grant))
     providers = grant.limits.provider_limits_usd
     budget = (
@@ -449,6 +604,10 @@ def configuration_refusal(reason: str) -> str:
             "The provider caps add up to more than the run budget. "
             "Lower them or raise the run budget before saving."
         ),
+        "fleet_raise_admin_required": (
+            "Only an admin can raise fleet limits above the default (4 workers, $2 a run) "
+            "or above what an admin set. You can lower them, or turn fleet off."
+        ),
         "invalid_fleet_grant": (
             "These fleet limits cannot be used. "
             "Check the worker agents, deadline, expiry and token caps before saving."
@@ -456,8 +615,9 @@ def configuration_refusal(reason: str) -> str:
         "stale_preview": "This preview changed. Preview and confirm again.",
         "stale_revision": "This setting changed. Preview and confirm again.",
         "feature_disabled": (
-            "Fleet and provider configuration is currently turned off. "
-            "Ask an admin to make it available."
+            "Fleet and provider settings are switched off for this whole Daimon "
+            "installation (an emergency stop), so nobody can change them from chat right "
+            "now. Try again later, or tell whoever runs this Daimon installation."
         ),
         "admin_required": "A current admin must confirm this change.",
     }.get(
