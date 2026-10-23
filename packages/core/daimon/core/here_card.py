@@ -19,6 +19,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import (
     agent_permissions,
     channel_permissions,
@@ -81,6 +82,8 @@ class HereCard(BaseModel):
     reads_kept_inside: bool
     memory_writable_here: bool | None = None
     publishing_needs_approval: bool | None = None
+    outsiders_can_view: bool | None = None
+    outsider_note: str | None = None
     bot_can_view: bool | None = None
     caller_can_view: bool | None = None
     bot_can_read_history: bool | None = None
@@ -179,9 +182,14 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
         )
     else:
         state, title, colour, subline = "channel", f"{name} answers here", "#2ECC71", None
+    visibility_lines = OutsiderVisibility(
+        outsiders_can_view=card.outsiders_can_view, note=card.outsider_note
+    ).lines(readers=card.effective_readers)
     if state in {"no_view", "no_replies", "no_agent"}:
         # Nothing answers here, so reading and publishing scope would mislead.
-        return HereCardPresentation(state=state, title=title, colour=colour, subline=subline)
+        return HereCardPresentation(
+            state=state, title=title, colour=colour, subline=subline, extras=visibility_lines
+        )
     reading = {
         "any": "Any conversation",
         "inside": "Conversations here only",
@@ -195,6 +203,7 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
         else None
     )
     extras = (
+        *visibility_lines,
         *(("Only own agents answer here",) if card.effective_writers == "own" else ()),
         *(("No access to earlier messages",) if card.bot_can_read_history is False else ()),
     )

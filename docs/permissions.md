@@ -658,3 +658,54 @@ records. Read-only tools do not require send permission.
 Lead tools use only the origin bound to the caller’s signed session grant and
 require attended provenance for human actions. Concurrent conversations of the
 same user and agent cannot lend their channel read or approval authority.
+
+### Channels visible outside the organisation
+
+Discord and Slack show a warning in `/here` and the current channel's Permissions
+screen when people outside the organisation can view a channel whose readers are
+not **Only its own agents** (`own`). Admins can click **Make confidential** to set
+readers to `own` through the existing channel-rule controls. Posting becomes
+`own` unless replies are already off (`none`). The click checks admin access
+again. This controls which agents can read the content; platform membership and
+channel visibility still belong to Discord or Slack.
+
+On Discord, admins name the organisation's internal roles using **Name your
+internal roles** on the Permissions screen. Any one of these roles counts as
+internal. Without a selection, the panel asks you to name them and does not claim
+to have checked outsider visibility. Server admins use this in-product Permissions
+panel. The CLI is a **deployment-operator** interface: possession of the deployment's
+DB/config grants policy access; it does not check a Discord identity or platform-admin
+attestation. This applies to every access-policy option, including `--internal-role`,
+`--clear-internal-roles`, and the general `--clear` (which removes internal roles and
+the rest of the policy). Operators can replace or clear the selection:
+
+```sh
+daimon tenants access-policy set discord GUILD_ID --internal-role ROLE_ID --internal-role OTHER_ROLE_ID
+daimon tenants access-policy set discord GUILD_ID --clear-internal-roles
+```
+
+The Discord check uses current role permissions and channel overwrites, including
+category-synced permissions. Non-internal roles with access trigger a warning.
+Member overwrites granting access are checked with individual member lookups,
+without the privileged members intent. More than 100 such overwrites, or a failed
+lookup, conservatively triggers a warning.
+
+On Slack, `/here` and the current channel's Permissions screen each use one fresh
+`conversations.info` response. External sharing, sharing across workspaces within
+an Enterprise organisation, and pending sharing trigger the warning. The check
+uses Slack's sharing flags (`is_shared`, `is_ext_shared`, `is_org_shared`,
+`is_ext_ws_shared`, `is_pending_ext_shared`, `is_global_shared` and org-wide channel
+flags), plus workspace-ID lists showing current or pending sharing with another
+workspace. A list containing only this workspace does not by itself trigger a
+warning. See Slack's [conversation fields](https://docs.slack.dev/reference/objects/conversation-object/)
+and [channel fields](https://docs.slack.dev/reference/objects/channel-object/).
+
+Nothing is cached, and no member or workspace directory is read for this check.
+When readers is not `own`, the screen always says: **Guest accounts aren't checked
+on Slack; if this channel has guests, make it confidential.** An unshared channel
+is not certified free of outsiders. Failed or incomplete sharing lookups show
+**Outsider check skipped** as well. If later Slack metadata lookups fail, `/here`
+still shows known outsider evidence against the current reading rule, with no admin
+actions or unrelated channel details. If the bot cannot see the channel, `/here`
+asks you to invite it and says that the outsider check was skipped.
+Teams does not use this check.

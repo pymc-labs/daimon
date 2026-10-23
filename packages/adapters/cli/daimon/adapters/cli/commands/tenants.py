@@ -580,6 +580,7 @@ def _print_policy(
         console.print("  invoker_admin_bypass: true")
         return
     console.print(f"{label} access policy:")
+    console.print(f"  internal_role_ids: {', '.join(policy.internal_role_ids) or '-'}")
     console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
     console.print(f"  invoker_admin_bypass: {str(policy.invoker_admin_bypass).lower()}")
@@ -727,6 +728,21 @@ def tenants_access_policy_set_command(
             help="Discord role id allowed to start turns (repeatable). Replaces the role list."
         ),
     ] = None,
+    internal_role: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "Operator-only: internal Discord role id (repeatable). "
+                "Replaces internal roles for outsider visibility checks."
+            )
+        ),
+    ] = None,
+    clear_internal_roles: Annotated[
+        bool,
+        typer.Option(
+            help="Operator-only: clear internal roles; outsider checks then ask you to name them."
+        ),
+    ] = False,
     clear_invoker_roles: Annotated[
         bool, typer.Option("--clear-invoker-roles", help="Clear the Discord invoker role list.")
     ] = False,
@@ -752,11 +768,19 @@ def tenants_access_policy_set_command(
         ),
     ] = False,
     clear: Annotated[
-        bool, typer.Option("--clear", help="Remove the policy and every rule: back to open.")
+        bool,
+        typer.Option(
+            "--clear",
+            help="Operator-only: remove the whole policy, including internal roles and every rule.",
+        ),
     ] = False,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
-    """Set who may start turns and DM memory.
+    """Deployment-operator command: set access policy using deployment DB/config access.
+
+    All flags, including --internal-role, --clear-internal-roles and --clear,
+    use the operator trust boundary; no Discord identity or platform-admin
+    attestation is checked. Server admins use the in-product Permissions panel.
 
     --invoker replaces the stored list.
     Rules are set with `daimon channels rule set` and `daimon agents rule set`.
@@ -775,6 +799,8 @@ def tenants_access_policy_set_command(
                 external_id=external_id,
                 invoker=invoker,
                 invoker_role=invoker_role,
+                internal_role=internal_role,
+                clear_internal_roles=clear_internal_roles,
                 clear_invoker_roles=clear_invoker_roles,
                 invoker_admin_bypass=invoker_admin_bypass,
                 dm_memory_read_only=dm_memory_read_only,
@@ -812,6 +838,8 @@ async def tenants_access_policy_set(
     invoker: list[str] | None = None,
     invoker_role: list[str] | None = None,
     clear_invoker_roles: bool = False,
+    internal_role: list[str] | None = None,
+    clear_internal_roles: bool = False,
     invoker_admin_bypass: bool | None = None,
     dm_memory_read_only: bool | None = None,
     drop_agent_rules: bool = False,
@@ -820,6 +848,17 @@ async def tenants_access_policy_set(
 ) -> None:
     validated_platform = _validate_platform(platform)
     changes: dict[str, object] = {}
+    if internal_role is not None and clear_internal_roles:
+        raise typer.BadParameter("--internal-role cannot be combined with --clear-internal-roles")
+    if internal_role is not None or clear_internal_roles:
+        if validated_platform != "discord":
+            raise typer.BadParameter("internal_role_ids are supported only for Discord")
+        roles = tuple(value.strip() for value in (internal_role or []))
+        if any(not is_discord_snowflake(value) or value == external_id for value in roles):
+            raise typer.BadParameter(
+                "internal_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
+            )
+        changes["internal_role_ids"] = tuple(dict.fromkeys(roles))
     if invoker_role is not None and clear_invoker_roles:
         raise typer.BadParameter("--invoker-role cannot be combined with --clear-invoker-roles")
     if invoker_role is not None:

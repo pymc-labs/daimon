@@ -458,3 +458,19 @@ Scheduled routine deliveries use the same file uploader as interactive turns,
 including thread destinations and creator fallback DMs. The file limits, the
 per-file rechecks and the at-most-once delivery guarantee are in
 [routines](routines.md#generated-files).
+
+The outsider warning on `/here` and the current channel's Permissions screen uses
+one fresh `conversations.info` response for external, Enterprise workspace and
+pending sharing. Sharing flags and workspace-ID lists are described in Slack's
+[conversation object](https://docs.slack.dev/reference/objects/conversation-object/).
+Nothing is cached, and no guest directory or channel member list is read for this
+check. No new OAuth scope is required.
+
+When readers is not `own`, both screens always say: **Guest accounts aren't checked
+on Slack; if this channel has guests, make it confidential.** An unshared channel
+is not certified free of outsiders. Failed or incomplete sharing lookups also say
+**Outsider check skipped**. Admins can use **Make confidential** when the sharing
+warning is shown; their admin status is checked again on click. Later metadata
+failures on `/here` preserve known warnings without admin controls or unrelated
+channel details. In a private channel the bot cannot see, `/here` asks you to invite
+it and reports that the outsider check was skipped.

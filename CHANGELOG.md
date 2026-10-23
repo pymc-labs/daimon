@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord and Slack warn when outsiders can view a channel that is not
+  confidential, with an admin-only Make confidential action. Discord admins can
+  name internal roles in Permissions or deployment operators can use the CLI.
+  Slack checks external, Enterprise workspace and pending sharing from one fresh
+  channel-info response, with no cache or guest lookups. Both Slack screens state
+  that guest accounts aren't checked and recommend making guest channels
+  confidential; failed sharing reads say Outsider check skipped. Known warnings
+  survive later Slack metadata failures, and private channels the bot cannot see
+  retain the invite-the-bot card. CLI access-policy help identifies its
+  deployment-operator trust boundary explicitly, including both clear paths.
 - Human-approved long jobs in isolated Managed Agents workers, with admin tenant/agent policy, owner billing, durable restart recovery, retained source privacy and read-only completion wakes on Discord after current owner access checks. Slack and Teams completion delivery fails closed pending equivalent access proof.
 
 ### Changed
