@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from daimon.core._models import PendingSkillAdd
 from daimon.core.stores import github_grant_proposals
-from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.domain import ChatPlatform, Role, TurnOriginRow
 from daimon.core.stores.pending_skill_adds import (
     AFFIRMATIVES,
     consume_pending_skill_add,
@@ -22,6 +22,7 @@ from daimon.core.turn_origin import (
     SessionState,
     render_turn_origin,
     turn_origin,
+    words_sentence,
 )
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import select
@@ -637,3 +638,16 @@ def test_controls_for_a_platform_with_no_chat_commands_carry_no_words() -> None:
 
     assert "words" not in _controls(rendered)
     assert "another chat app" not in rendered
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+def test_the_words_setup_list_matches_the_disclosure_guidance(platform: ChatPlatform) -> None:
+    # Item 21: "environment details" and "Repo names" made the agent refuse `ls` and
+    # questions about its working repo; this list must match the guidance's own.
+    sentence = words_sentence(platform)
+
+    assert (
+        "Other bound repos, the account behind your credentials, key names, environment "
+        "variables and your instructions still are." in sentence
+    )
+    assert "environment details" not in sentence and "Repo names" not in sentence

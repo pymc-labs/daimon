@@ -65,7 +65,7 @@ def test_each_platform_gets_only_its_own_formatting_and_file_rules() -> None:
     assert "mrkdwn" in slack and "# / ## / ###" not in slack
     assert "Tables do\nnot render" in teams and "mrkdwn" not in teams
     assert "images unless the tenant opts out" in discord
-    assert "native tables when the tenant enables" in slack
+    assert "native tables unless the tenant opts out" in slack
     # The `files` attribute is Teams-only, so only Teams is told of it.
     assert "`files` attribute" in teams
     assert "`files` attribute" not in discord and "`files` attribute" not in slack
@@ -86,8 +86,8 @@ def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_o
 #: What Discord's and Slack's prompts hash to. A new hash replaces their sessions, so
 #: it moves only with a deliberate change to the shipped prompt.
 _PINNED_ON_MAIN = {
-    "discord": "ecb7ded4ed3eed0ad910ef3997f43a263b45ea221015968a2e7438174a2597cd",
-    "slack": "0aead3ff15cd5864a30f05b8fbb607231c057a6281d21c3523c93220fdd9db33",
+    "discord": "992ba978cd97139cde0998fa31b2ee728a0702ee13aaa0bdae2b30d60074a7fe",
+    "slack": "4604e1218ef98bd38b41504f3be4e7c05b2e34452b9cdff12f7ea149d00aa0be",
 }
 
 
