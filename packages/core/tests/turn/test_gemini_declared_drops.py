@@ -655,3 +655,46 @@ async def test_missing_or_stale_consent_refuses_before_publication(
     with pytest.raises(AdmissionDenied):
         await read_preparation_counterpart(scoped)
     assert not [c for c in calls if c.method == "POST"], "nothing published without consent"
+
+
+def _dropped_mcp(canonical):
+    """The prepared target as a switch that also dropped the agent's MCP confirms it."""
+    drops = tuple(sorted({"mcp", *canonical.target_spec.declared_drops}))
+    target = canonical.target_spec.model_copy(update={"declared_drops": drops, "mcp_servers": ()})
+    return replace(canonical, target_spec=target)
+
+
+def test_an_mcp_template_serves_a_target_that_dropped_mcp_with_no_mcp(
+    ordinary, tmp_path, monkeypatch
+):
+    """J2: a copy's confirmed switch to Gemini dropped its MCP. The code-default
+    agent template keeps MCP for an agent that kept it; it must still serve this
+    one, with no MCP at all, rather than refuse it as backend_unsupported."""
+    canonical = _dropped_mcp(ordinary[2])
+    assert canonical.target_spec.mcp_servers == ()
+    row = _as_template(ordinary[1], tmp_path, monkeypatch).model_copy(
+        update={"template_capabilities": "mcp"}
+    )
+
+    deployment = row.deployment(canonical)
+
+    assert deployment.agent == canonical.target_spec
+    assert deployment.agent.mcp_servers == ()
+
+
+def test_an_mcp_template_never_gives_mcp_to_a_target_that_dropped_it(
+    ordinary, tmp_path, monkeypatch
+):
+    """Never more than the template allows: a target that dropped MCP but still
+    names a server is refused, as on a template without MCP."""
+    canonical = _dropped_mcp(ordinary[2])
+    server = MCPConnection(name="daimon-mcp", url="https://mcp.invalid/mcp")
+    smuggled = replace(
+        canonical, target_spec=canonical.target_spec.model_copy(update={"mcp_servers": (server,)})
+    )
+    for capabilities in ("mcp", None):
+        row = _as_template(ordinary[1], tmp_path, monkeypatch).model_copy(
+            update={"template_capabilities": capabilities}
+        )
+        with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+            row.deployment(smuggled)
