@@ -2151,7 +2151,8 @@ class DaimonBot(commands.Bot):
         if event == "guild_join" and isinstance(subject, discord.Guild):
             channel = _pick_post_channel(subject)
             if channel is not None:
-                self._spawn(self._tell_not_enabled(channel, key=subject.id, guild=True))
+                key = channel.id if isinstance(channel, discord.abc.GuildChannel) else subject.id
+                self._spawn(self._tell_not_enabled(channel, key=key, guild=True))
             return
         if event != "message" or not isinstance(subject, discord.Message):
             return

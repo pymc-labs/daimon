@@ -98,13 +98,13 @@ def cold_dm_text(platform: ChatPlatform, *, dms_on: bool | None) -> str:
     if dms_on:
         return (
             f"To talk here, run `{command}` in a channel first and I'll continue with you here.\n"
-            "Or mention me in the channel."
+            "Or mention me in any channel."
         )
     if dms_on is None:
         return (
             f"To talk here, run `{command}` in a {words.space} channel first "
             "and I'll continue with you here.\n"
-            "Or mention me in the channel. If private chats are off there, "
+            "Or mention me in any channel. If private chats are off there, "
             f"ask {words.admin} to run `{command} enable`."
         )
     return (

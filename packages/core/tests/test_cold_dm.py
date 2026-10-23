@@ -19,7 +19,7 @@ def test_private_chats_off_names_the_platforms_own_admin_and_command() -> None:
 def test_private_chats_on_points_to_dm_me_in_a_channel() -> None:
     assert cold_dm_text("slack", dms_on=True) == (
         "To talk here, run `/dm-me` in a channel first and I'll continue with you here.\n"
-        "Or mention me in the channel."
+        "Or mention me in any channel."
     )
 
 

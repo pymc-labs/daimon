@@ -259,17 +259,23 @@ async def test_install_to_an_unlisted_guild_posts_one_line_and_provisions_nothin
     bot, spawned = await _staging_bot(member=False)
     guild = _guild(333)
     channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 60
     channel.send = AsyncMock()
     cast(AsyncMock, bot._provision_joined_guild).reset_mock()  # pyright: ignore[reportPrivateUsage]
+    mention = _guild_message(333, 60, mentions_bot=True)
     with (
         patch("daimon.adapters.discord.bot._pick_post_channel", return_value=channel),
         patch.object(commands.Bot, "dispatch") as inherited_dispatch,
     ):
         bot.dispatch("guild_join", guild)
         await _run(spawned)
+        bot.dispatch("message", mention)
+        await _run(spawned)
     inherited_dispatch.assert_not_called()
     channel.send.assert_awaited_once()
     assert "isn't enabled in this server yet" in channel.send.await_args.args[0]
+    # The install line counts for its channel's hour.
+    mention.channel.send.assert_not_awaited()
     cast(AsyncMock, bot._provision_joined_guild).assert_not_awaited()  # pyright: ignore[reportPrivateUsage]
     await bot.close()  # type: ignore[attr-defined]
 
@@ -299,3 +305,41 @@ def test_notice_limiter_allows_one_per_key_per_cooldown() -> None:
     limiter.allow(2)
     limiter.allow(3)
     assert limiter.allow(1) is True, "the oldest key is forgotten past the limit"
+
+
+@pytest.mark.asyncio
+async def test_a_notice_that_could_not_be_sent_is_tried_again() -> None:
+    bot, spawned = await _staging_bot(member=False)
+    first = _guild_message(222, 70, mentions_bot=True)
+    first.channel.send = AsyncMock(
+        side_effect=[discord.HTTPException(MagicMock(status=500), "boom"), None]
+    )
+    with patch.object(commands.Bot, "dispatch"):
+        bot.dispatch("message", first)
+        await _run(spawned)
+        bot.dispatch("message", first)
+        await _run(spawned)
+    assert first.channel.send.await_count == 2, "a failed send must not use up the hour"
+    await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_bots_and_webhooks_are_never_answered() -> None:
+    """Two non-production bots mentioning each other must not trade notices."""
+    bot, spawned = await _staging_bot(member=False)
+    from_bot = _guild_message(222, 80, mentions_bot=True)
+    from_bot.author = SimpleNamespace(id=6, bot=True)
+    from_webhook = _guild_message(222, 81, mentions_bot=True)
+    from_webhook.webhook_id = 12345
+    bot_dm = _dm(9)
+    bot_dm.author = SimpleNamespace(id=9, bot=True)
+    with patch.object(commands.Bot, "dispatch") as inherited_dispatch:
+        for message in (from_bot, from_webhook, bot_dm):
+            bot.dispatch("message", message)
+        await _run(spawned)
+    inherited_dispatch.assert_not_called()
+    assert not spawned
+    from_bot.channel.send.assert_not_awaited()
+    from_webhook.channel.send.assert_not_awaited()
+    bot_dm.channel.send.assert_not_awaited()
+    await bot.close()  # type: ignore[attr-defined]

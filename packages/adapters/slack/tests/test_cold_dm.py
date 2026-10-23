@@ -20,7 +20,7 @@ _OFF = (
 )
 _ON = (
     "To talk here, run `/dm-me` in a channel first and I'll continue with you here.\n"
-    "Or mention me in the channel."
+    "Or mention me in any channel."
 )
 
 
