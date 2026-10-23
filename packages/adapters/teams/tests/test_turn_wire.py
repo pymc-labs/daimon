@@ -356,7 +356,7 @@ async def test_long_answer_splits_into_ordered_parts_and_keeps_its_code_block_wh
     assert all(labels), "every part is labelled AI generated"
 
 
-_RUNNING_BASH = "🖋️ Running a command"
+_RUNNING_BASH = "⏳ Running a command"
 
 
 async def test_tool_use_edits_the_status_card_before_the_answer_replaces_it(
