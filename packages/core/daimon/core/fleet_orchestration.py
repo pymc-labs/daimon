@@ -668,7 +668,7 @@ class FleetOrchestrator:
             )
             return resolve(limits.model_copy(update=tokens))
         if model == ARGON_MODEL:
-            # Argon runs workers only on the bounded envelope, never the 4096-token cap.
+            # Argon runs workers only on the bounded envelope, never the unbounded token cap.
             raise FleetRefused("argon_requires_bounded_worker")
         # About four characters per token: an estimate, used only to refuse early.
         if (len(system) + len(trigger)) // 4 >= WORKER_MAX_TOTAL_TOKENS:

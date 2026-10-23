@@ -48,6 +48,10 @@ def _plain_seconds(seconds: int) -> str:
     return "1 minute" if minutes == 1 else f"{minutes} minutes"
 
 
+def _replies(count: int) -> str:
+    return "1 reply" if count == 1 else f"{count} replies"
+
+
 class FleetConfigInput(BaseModel):
     """Chat-facing ceilings; the grant expiry and worker duration are distinct."""
 
@@ -517,9 +521,9 @@ def fleet_detail_lines(
         f"Up to {grant.max_workers} workers; ${grant.limits.budget_usd} per run.",
         "Each worker runs as its selected agent, using that agent's own model and settings.",
         f"Each worker: up to {_plain_seconds(grant.max_worker_seconds)}; "
-        f"{grant.limits.max_turns} replies.",
+        f"{_replies(grant.limits.max_turns)}.",
         f"Each run: up to {_plain_seconds(grant.max_run_seconds)} and "
-        f"{grant.max_root_turns} replies from the coordinating agent.",
+        f"{_replies(grant.max_root_turns)} from the coordinating agent.",
         f"Fleet access expires: {grant.expires_at.isoformat()}.",
         budget,
         *(

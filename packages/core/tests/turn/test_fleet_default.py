@@ -126,7 +126,7 @@ def test_default_gives_each_worker_10_minutes_and_a_run_20_and_the_card_says_so(
     assert (grant.max_worker_seconds, grant.max_run_seconds) == (600, 1200)
     preview = cast(CompatibilityPreview, SimpleNamespace(fleet_grant=grant.model_dump(mode="json")))
     lines = fleet_detail_lines(preview)
-    assert "Each worker: up to 10 minutes; 1 replies." in lines
+    assert "Each worker: up to 10 minutes; 1 reply." in lines
     assert any(line.startswith("Each run: up to 20 minutes and ") for line in lines)
 
 

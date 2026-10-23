@@ -15,7 +15,9 @@ WORKER_MODEL = "gemini-3.5-flash-lite"
 # Opt-in model: one attempt, never the Flash fallback chain. A channel runs it
 # directly; a fleet worker runs it only on the bounded token envelope.
 ARGON_MODEL = "gemini-4-argon"
-WORKER_MAX_TOTAL_TOKENS = 4096
+# A whole unbounded worker turn (input + output). At the highest output tariff it
+# may run on (Flash), its worst case stays under the $0.49 worker hold.
+WORKER_MAX_TOTAL_TOKENS = 65_536
 WORKER_MAX_RUNTIME_S = 600
 
 INLINE_REUSE = Profile(

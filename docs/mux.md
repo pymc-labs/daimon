@@ -2923,7 +2923,7 @@ primary model.
 
 The Gemini managed-agent token budget is best-effort and excludes cached tokens.
 It is not a hard spending ceiling. Worker runtime admission refuses a deadline
-more than 120 seconds away. Worker execution retains its admitted deadline,
+more than 600 seconds away. Worker execution retains its admitted deadline,
 cancellation and financial guard; complete measured usage is required for exact
 settlement.
 The session creator accepts complete scoped worker preparation through its existing
