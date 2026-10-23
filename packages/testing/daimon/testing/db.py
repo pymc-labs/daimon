@@ -89,6 +89,9 @@ _IDENTIFIER_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
 _INTERVAL_PATTERN = re.compile(r"^\d+(ms|s|min)?$")
 _SWEEP_LOCK_KEY = "daimon:test-schema-sweep"
 _LOCK_NOT_AVAILABLE_SQLSTATE = "55P03"
+_DEADLOCK_DETECTED_SQLSTATE = "40P01"
+# A wipe that loses a deadlock to an earlier test's late writer retries this often.
+_WIPE_ATTEMPTS = 3
 _CREATE_CHUNK_SIZE = 8
 _DROP_CHUNK_SIZE = 4
 _LOCK_TIMEOUT = "60s"
@@ -393,6 +396,29 @@ def _is_lock_timeout(err: DBAPIError) -> bool:
     # The asyncpg dialect stamps the SQLSTATE on the error it translates to.
     sqlstate: str | None = getattr(err.orig, "sqlstate", None)
     return sqlstate == _LOCK_NOT_AVAILABLE_SQLSTATE
+
+
+def _is_deadlock(err: DBAPIError) -> bool:
+    sqlstate: str | None = getattr(err.orig, "sqlstate", None)
+    return sqlstate == _DEADLOCK_DETECTED_SQLSTATE
+
+
+async def wipe_schema(engine: AsyncEngine, schema: str, *, lock_timeout: str = "5s") -> None:
+    """``truncate_all`` in its own transaction, retried when Postgres picks it as a deadlock victim.
+
+    The child-first DELETEs can deadlock with a write an earlier test left running
+    (its FK check holds ``FOR KEY SHARE`` on a parent row the wipe deletes later,
+    while it waits on a row the wipe already deleted). Postgres aborts one side; when
+    it is the wipe, the other side commits and a retry deletes its rows too.
+    """
+    for attempt in range(1, _WIPE_ATTEMPTS + 1):
+        try:
+            async with engine.begin() as conn:
+                await truncate_all(conn, schema, lock_timeout=lock_timeout)
+            return
+        except DBAPIError as err:
+            if not _is_deadlock(err) or attempt == _WIPE_ATTEMPTS:
+                raise
 
 
 async def truncate_all(conn: AsyncConnection, schema: str, *, lock_timeout: str = "5s") -> None:
@@ -947,8 +973,7 @@ async def db_clean(
     _raise_on_leaked_transactions(db_engine.pool, f"{_last_db_test} (or a test between)")
     if item.get_closest_marker("fresh_schema") is None:
         try:
-            async with db_engine.begin() as conn:
-                await truncate_all(conn, db_schema, lock_timeout="5s")
+            await wipe_schema(db_engine, db_schema, lock_timeout="5s")
         except RuntimeError as err:
             raise RuntimeError(
                 f"{err}; the previous DB test in this worker was {_last_db_test}"

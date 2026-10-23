@@ -27,8 +27,10 @@ from daimon.testing.db import (
     _require_test_dsn,  # pyright: ignore[reportPrivateUsage]
     _schema_fingerprint,  # pyright: ignore[reportPrivateUsage]
     build_test_engine,
+    sibling_nullpool_engine,
     sweep_orphan_schemas,
     truncate_all,
+    wipe_schema,
 )
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -389,6 +391,53 @@ async def test_truncate_all_raises_when_another_connection_holds_a_row_lock(
                 await truncate_all(conn, db_schema, lock_timeout="200ms")
     finally:
         await db_session.rollback()
+
+
+@pytest.mark.parametrize("attempts", [1, 3], ids=["no-retry", "retry"])
+async def test_wipe_schema_retries_when_it_loses_a_deadlock_to_a_late_writer(
+    db_engine: AsyncEngine,
+    db_schema: str,
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    attempts: int,
+) -> None:
+    """A write an earlier test left running deadlocks with the next test's wipe.
+
+    The late writer holds FOR KEY SHARE on the second tenant (as an FK check
+    does) while the wipe, having deleted the first tenant, waits on it; the
+    writer then waits on the first tenant. Postgres aborts the wipe, the first
+    waiter to check. One attempt fails the setup (the CI flake); a retry wipes.
+    """
+    import daimon.testing.db as db_module
+    from sqlalchemy.exc import DBAPIError
+
+    monkeypatch.setattr(db_module, "_WIPE_ATTEMPTS", attempts)
+    first = await make_tenant(db_session)
+    second = await make_tenant(db_session)
+    await db_session.commit()
+    tenants = f'"{db_schema}".tenants'
+    late = sibling_nullpool_engine(db_engine)
+    try:
+        async with late.connect() as writer:
+            await writer.execute(
+                text(f"SELECT 1 FROM {tenants} WHERE id = :id FOR KEY SHARE"), {"id": second.id}
+            )
+            wipe = asyncio.create_task(wipe_schema(db_engine, db_schema, lock_timeout="10s"))
+            await asyncio.sleep(0.3)  # the wipe has deleted the first tenant, waits on the second
+            await writer.execute(
+                text(f"UPDATE {tenants} SET id = id WHERE id = :id"), {"id": first.id}
+            )
+            await writer.commit()
+            if attempts == 1:
+                with pytest.raises(DBAPIError, match="deadlock"):
+                    await wipe
+                return
+            await wipe
+    finally:
+        await late.dispose()
+    async with db_engine.connect() as fresh:
+        count = (await fresh.execute(text(f"SELECT count(*) FROM {tenants}"))).scalar_one()
+    assert count == 0
 
 
 async def test_sweep_orphan_schemas_drops_dead_pid_and_keeps_live_pid(
