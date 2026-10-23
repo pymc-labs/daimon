@@ -273,6 +273,12 @@ def test_depleted_refusal_names_the_billing_command() -> None:
     assert notice.next_step == "An admin can top up with `billing` in a 1:1 chat with me."
 
 
+def test_a_server_that_never_had_credit_is_not_told_it_ran_out() -> None:
+    assert admission_refusal_text("balance_depleted", _NOUNS, cause="no_credit_yet") == (
+        "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
+    )
+
+
 def test_nouns_for_a_platform_come_from_the_words_table() -> None:
     teams = RefusalNouns.for_platform("teams")
     assert (teams.scope, teams.admin) == ("organisation", "an admin")

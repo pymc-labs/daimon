@@ -92,6 +92,16 @@ async def get_balance(session: AsyncSession, *, tenant_id: uuid.UUID) -> Decimal
     return (await session.execute(stmt)).scalar_one()  # type: ignore[no-any-return]
 
 
+async def ever_credited(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether any credit (signup, top-up or grant) was ever added to this tenant."""
+    stmt = select(
+        select(TenantLedger.id)
+        .where(TenantLedger.tenant_id == tenant_id, TenantLedger.delta_usd > 0)
+        .exists()
+    )
+    return bool((await session.execute(stmt)).scalar_one())
+
+
 async def get_channel_spend(
     session: AsyncSession,
     *,
