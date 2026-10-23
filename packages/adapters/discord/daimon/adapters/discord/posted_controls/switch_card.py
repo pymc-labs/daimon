@@ -107,6 +107,9 @@ class SwitchCardControl(
         if press is None:
             await interaction.followup.send(NOT_YOURS, ephemeral=True)
             return
+        if not press.closed:
+            await interaction.followup.send(press.text, ephemeral=True)
+            return
         await interaction.message.edit(
             view=build_card_view(answered_switch_card(press)),
             allowed_mentions=discord.AllowedMentions.none(),

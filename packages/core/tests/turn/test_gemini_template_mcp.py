@@ -673,3 +673,61 @@ async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimo
     allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
     assert allowed == {"search_tools", "call_tool", "request_agent_backend_switch"}
     assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
+
+
+@pytest.fixture
+def consent_recorded_before_self_cards(monkeypatch):
+    """While on, gated-tool handling is as before Daimon posted the switch card itself.
+
+    The catalogue also lists the switch tool and one other gated tool, so the
+    consent has something to drop.
+    """
+    from daimon.core import tool_safety
+    from daimon.core.mcp_oauth import discovery
+
+    listed = discovery.list_mcp_tools
+
+    async def with_gated_tools(url, token):
+        return frozenset(await listed(url, token)) | {"request_agent_backend_switch", "add_skill"}
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", with_gated_tools)
+    real = tool_safety.self_carded_tools
+    state = {"old": True}
+    monkeypatch.setattr(
+        tool_safety, "self_carded_tools", lambda: frozenset() if state["old"] else real()
+    )
+    return state
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
+    consent_recorded_before_self_cards, template
+):
+    """Agents switched before the switch tool was offered keep working without re-confirming."""
+    request, quote, *_ = template
+    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+    assert switch_drop in quote.declared_drops, "the consent was recorded the old way"
+    consent_recorded_before_self_cards["old"] = False
+    selected, _ = await _prepared(request)
+    allowed = _connection(selected).tool_policy["allowed_tools"]
+    assert "request_agent_backend_switch" in allowed, "the tool is offered from now on"
+    assert switch_drop not in selected.target_spec.declared_drops
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
+    consent_recorded_before_self_cards, template, monkeypatch
+):
+    from daimon.core import tool_safety
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, *_ = template
+    consent_recorded_before_self_cards["old"] = False
+    # One more gated tool now offered as well: more than the switch tool changed.
+    monkeypatch.setattr(
+        tool_safety,
+        "self_carded_tools",
+        lambda: frozenset({"request_agent_backend_switch", "add_skill"}),
+    )
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
+        await _prepared(request)

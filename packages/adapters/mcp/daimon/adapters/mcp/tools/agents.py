@@ -1581,7 +1581,7 @@ async def _post_own_switch_card(
         backend_switch_callbacks,
     )
     from daimon.core.stores import backend_switch_cards as cards
-    from daimon.core.switch_cards import requested_switch_card
+    from daimon.core.switch_cards import SWITCH_CARD_MAX_S, requested_switch_card
 
     if auth.platform != "discord" or auth.platform_user_id is None:
         raise ToolError(
@@ -1589,12 +1589,26 @@ async def _post_own_switch_card(
             "switch the agent from its Details. Nothing changed."
         )
     now = datetime.datetime.now(datetime.UTC)
+    # Outside any turn, so not capped by one; never past a day, and the card says when.
     expires_at = now + datetime.timedelta(
-        seconds=runtime.settings.tool_safety.confirmation_timeout_s
+        seconds=min(runtime.settings.tool_safety.confirmation_timeout_s, SWITCH_CARD_MAX_S)
     )
+    async with runtime.session_factory() as session:
+        waiting = await cards.waiting_for(
+            session,
+            tenant_id=auth.tenant_id,
+            requester_platform_user_id=auth.platform_user_id,
+            agent_name=reference.agent,
+            now=now,
+        )
+    if waiting:
+        raise ToolError(
+            f"There's already a Confirm card waiting for you to switch {reference.agent}. "
+            "Press it, or let it expire, before asking again. Nothing changed."
+        )
 
     async def current_admin(_clicker: str) -> bool:
-        return auth.is_admin
+        return auth.is_admin and not auth.client
 
     prepare, _ = backend_switch_callbacks(
         service,
@@ -1634,6 +1648,7 @@ async def _post_own_switch_card(
             thread_id=origin.thread_id,
             setup_thread=origin.is_setup,
             requester_platform_user_id=auth.platform_user_id,
+            client=auth.client,
             answering_agent_name=origin.responder_name,
             reference=reference.model_dump(mode="json"),
             expires_at=expires_at,

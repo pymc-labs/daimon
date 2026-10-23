@@ -60,8 +60,12 @@ async def post_switch_card(
             raise ToolError("channel does not support sending messages")
         sent = await channel.send(
             view=view,
+            # The footer's mention pings the requester alone.
             allowed_mentions=discord.AllowedMentions(
-                users=True, everyone=False, roles=False, replied_user=False
+                users=[discord.Object(id=int(requester_id))],
+                everyone=False,
+                roles=False,
+                replied_user=False,
             ),
         )
         return str(sent.id)

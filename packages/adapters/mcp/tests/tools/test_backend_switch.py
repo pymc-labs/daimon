@@ -1339,6 +1339,19 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
     assert row is not None and row.status == "pending" and row.message_id == "message-1"
     assert (row.channel_id, row.thread_id) == ("channel", "thread")
     assert row.reference["preview_digest"] == preview.preview_digest
+    # One waiting card per requester and agent: asking again while it waits posts nothing.
+    agent()
+    with pytest.raises(ToolError, match="already a Confirm card waiting"):
+        agent()
+        await _request_agent_backend_switch_impl(
+            runtime,
+            provider_turn,
+            **switch,
+            expected_revision=0,
+            preview_digest=preview.preview_digest,
+            accepted_drops=preview.declared_drops,
+        )
+    assert post.await_count == 1
 
 
 async def test_a_provider_turn_card_is_refused_when_the_preview_moved(active_chat, monkeypatch):
@@ -1405,3 +1418,37 @@ async def load_backend_agent_for(runtime, auth):
     return await load_backend_agent(
         runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
     )
+
+
+async def test_a_provider_turn_switch_that_carries_a_hand_off_posts_no_card(
+    active_chat, monkeypatch
+):
+    """The hand-off a switch carries runs at the write, which a self-posted press doesn't do."""
+    from unittest.mock import AsyncMock
+
+    import daimon.adapters.mcp.tools.discord._switch_card as switch_card_mod
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    provider_turn = replace(auth, no_confirmation_surface=True)
+    post = AsyncMock(return_value="message-1")
+    monkeypatch.setattr(switch_card_mod, "post_switch_card", post)
+    switch = {
+        "agent_name": "Researcher",
+        "target_backend": "gemini",
+        "origin_context_id": str(origin.id),
+        "unsaved_work": "leave",
+    }
+    agent()
+    preview = await _request_agent_backend_switch_impl(runtime, provider_turn, **switch)
+    agent()
+    with pytest.raises(ToolError, match="hands the conversation over"):
+        await _request_agent_backend_switch_impl(
+            runtime,
+            provider_turn,
+            **switch,
+            expected_revision=0,
+            preview_digest=preview.preview_digest,
+            accepted_drops=preview.declared_drops,
+        )
+    post.assert_not_awaited()

@@ -42,6 +42,7 @@ def upgrade() -> None:
         sa.Column("thread_id", sa.Text(), nullable=False),
         sa.Column("setup_thread", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("requester_platform_user_id", sa.Text(), nullable=False),
+        sa.Column("client", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("answering_agent_name", sa.Text(), nullable=True),
         sa.Column("reference", postgresql.JSONB(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'pending'")),
