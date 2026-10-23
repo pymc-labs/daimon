@@ -31,6 +31,7 @@ class SwitchCardRow:
     thread_id: str
     setup_thread: bool
     requester_platform_user_id: str
+    client: bool
     answering_agent_name: str | None
     reference: dict[str, Any]
     status: SwitchCardStatus
@@ -49,6 +50,7 @@ def _row(record: BackendSwitchCard) -> SwitchCardRow:
         thread_id=record.thread_id,
         setup_thread=record.setup_thread,
         requester_platform_user_id=record.requester_platform_user_id,
+        client=record.client,
         answering_agent_name=record.answering_agent_name,
         reference=dict(record.reference),
         status=record.status,  # pyright: ignore[reportArgumentType]
@@ -68,6 +70,7 @@ async def create_card(
     thread_id: str,
     setup_thread: bool,
     requester_platform_user_id: str,
+    client: bool,
     answering_agent_name: str | None,
     reference: dict[str, Any],
     expires_at: datetime,
@@ -80,6 +83,7 @@ async def create_card(
         thread_id=thread_id,
         setup_thread=setup_thread,
         requester_platform_user_id=requester_platform_user_id,
+        client=client,
         answering_agent_name=answering_agent_name,
         reference=reference,
         expires_at=expires_at,
@@ -100,6 +104,29 @@ async def get_card(
         )
     )
     return _row(record) if record is not None else None
+
+
+async def waiting_for(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    requester_platform_user_id: str,
+    agent_name: str,
+    now: datetime,
+) -> bool:
+    """Whether this requester already has an unanswered, unexpired card for this agent."""
+    found = await session.scalar(
+        select(BackendSwitchCard.id)
+        .where(
+            BackendSwitchCard.tenant_id == tenant_id,
+            BackendSwitchCard.requester_platform_user_id == requester_platform_user_id,
+            BackendSwitchCard.reference["agent"].astext == agent_name,
+            BackendSwitchCard.status.in_(("pending", "claimed")),
+            BackendSwitchCard.expires_at > now,
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 async def mark_posted(session: AsyncSession, *, card_id: uuid.UUID, message_id: str) -> None:
@@ -128,17 +155,33 @@ async def claim(
     return _row(record) if record is not None else None
 
 
+async def cancel(
+    session: AsyncSession, *, tenant_id: uuid.UUID, card_id: uuid.UUID, outcome: str
+) -> bool:
+    """Cancel a card nobody has pressed Confirm on; False when a Confirm claimed it first."""
+    cancelled = await session.scalar(
+        update(BackendSwitchCard)
+        .where(
+            BackendSwitchCard.id == card_id,
+            BackendSwitchCard.tenant_id == tenant_id,
+            BackendSwitchCard.status == "pending",
+        )
+        .values(status="cancelled", outcome=outcome)
+        .returning(BackendSwitchCard.id)
+    )
+    return cancelled is not None
+
+
 async def finish(
     session: AsyncSession,
     *,
     card_id: uuid.UUID,
-    status: Literal["applied", "refused", "cancelled"],
+    status: Literal["applied", "refused"],
     outcome: str,
 ) -> None:
-    """Record how a card ended. Only a claimed card (or a pending one cancelled) ends."""
-    allowed = ("claimed", "pending") if status == "cancelled" else ("claimed",)
+    """Record how a claimed card ended; a card no Confirm claimed is never finished."""
     await session.execute(
         update(BackendSwitchCard)
-        .where(BackendSwitchCard.id == card_id, BackendSwitchCard.status.in_(allowed))
+        .where(BackendSwitchCard.id == card_id, BackendSwitchCard.status == "claimed")
         .values(status=status, outcome=outcome)
     )

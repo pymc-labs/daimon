@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
     from daimon.core.config import TurnSettings
     from daimon.core.posted_controls import PostedCard
+    from daimon.core.stores.backend_switch_cards import SwitchCardRow
     from daimon.core.turn.deps import TurnDeps
 
 log = structlog.get_logger()
@@ -147,6 +148,10 @@ async def move_this_thread(
     )
 
 
+#: A self-posted card lives outside any turn, so a turn's ceiling doesn't cap
+#: it; it never waits past a day (#1414's longest card), and says when it ends.
+SWITCH_CARD_MAX_S: Final[int] = 86400
+
 #: The requested card's footer; each renderer fills the requester and the expiry.
 SWITCH_FOOTER: Final[str] = "Only {requester} can confirm. Expires {expires}."
 
@@ -194,7 +199,10 @@ def answered_switch_card(press: SwitchCardPress) -> PostedCard:
 
 @dataclass(frozen=True)
 class SwitchCardPress:
-    """What a press did: the card's new words, and whether the card is now closed."""
+    """What a press did: the card's new words, and whether the card is now closed.
+
+    An open (not closed) press leaves the card as it is and only answers the presser.
+    """
 
     text: str
     closed: bool
@@ -203,6 +211,11 @@ class SwitchCardPress:
 
 EXPIRED_TEXT: Final[str] = "This request ended before anyone clicked. Ask again to redo it."
 ANSWERED_TEXT: Final[str] = "This card was already answered."
+CANCELLED_TEXT: Final[str] = "Cancelled. Nothing changed."
+CONFIRMING_TEXT: Final[str] = "This switch is already being confirmed."
+FAILED_TEXT: Final[str] = (
+    "Something went wrong confirming this switch. Ask which model it's on before trying again."
+)
 
 
 async def press_switch_card(
@@ -219,7 +232,7 @@ async def press_switch_card(
     current_admin: Callable[[str], Awaitable[bool]],
     place_word: str,
     now: datetime.datetime,
-    message_id: str | None = None,
+    message_id: str,
 ) -> SwitchCardPress | None:
     """Answer one press. None: not the requester's (the card stays as it is).
 
@@ -227,6 +240,83 @@ async def press_switch_card(
     can use it up. A claimed card is applied or refused exactly once. `deps`
     None reads no source (only for a service whose previews read none).
     """
+    from daimon.core.stores import backend_switch_cards as cards
+
+    async with sessionmaker() as session:
+        card = await cards.get_card(session, tenant_id=tenant_id, card_id=card_id)
+    if (
+        card is None
+        or card.requester_platform_user_id != clicker
+        # Only the message the card was posted as can press it.
+        or card.message_id != message_id
+    ):
+        return None
+    if card.status == "claimed":
+        # A Confirm is still applying: it edits the card when it is done.
+        return SwitchCardPress(CONFIRMING_TEXT, closed=False)
+    if card.status != "pending":
+        return SwitchCardPress(card.outcome or ANSWERED_TEXT, closed=True)
+    if action == "cancel":
+        async with sessionmaker.begin() as session:
+            cancelled = await cards.cancel(
+                session, tenant_id=tenant_id, card_id=card_id, outcome=CANCELLED_TEXT
+            )
+        if cancelled:
+            return SwitchCardPress(CANCELLED_TEXT, closed=True)
+        # A Confirm claimed it first: never say "cancelled" over what that press does.
+        async with sessionmaker() as session:
+            now_card = await cards.get_card(session, tenant_id=tenant_id, card_id=card_id)
+        if now_card is not None and now_card.status == "claimed":
+            # Still applying: that press edits the card when it is done.
+            return SwitchCardPress(CONFIRMING_TEXT, closed=False)
+        return SwitchCardPress(
+            (now_card.outcome if now_card is not None else None) or ANSWERED_TEXT, closed=True
+        )
+    async with sessionmaker.begin() as session:
+        claimed = await cards.claim(session, tenant_id=tenant_id, card_id=card_id, now=now)
+    if claimed is None:
+        expired = card.expires_at <= now
+        return SwitchCardPress(EXPIRED_TEXT if expired else ANSWERED_TEXT, closed=True)
+
+    async def end(status: Literal["applied", "refused"], text: str) -> SwitchCardPress:
+        async with sessionmaker.begin() as session:
+            await cards.finish(session, card_id=card_id, status=status, outcome=text)
+        return SwitchCardPress(text, closed=True, applied=status == "applied")
+
+    try:
+        return await _apply(
+            claimed,
+            end,
+            deps=deps,
+            sessionmaker=sessionmaker,
+            anthropic=anthropic,
+            turn_settings=turn_settings,
+            deployment_default=deployment_default,
+            tenant_id=tenant_id,
+            clicker=clicker,
+            current_admin=current_admin,
+            place_word=place_word,
+        )
+    except Exception:
+        # Claimed, so no other press will try: close it in plain words.
+        log.exception("switch_card.apply_failed", card_id=str(card_id))
+        return await end("refused", FAILED_TEXT)
+
+
+async def _apply(
+    claimed: SwitchCardRow,
+    end: Callable[[Literal["applied", "refused"], str], Awaitable[SwitchCardPress]],
+    *,
+    deps: TurnDeps | None,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    turn_settings: TurnSettings,
+    deployment_default: DeploymentDefault,
+    tenant_id: uuid.UUID,
+    clicker: str,
+    current_admin: Callable[[str], Awaitable[bool]],
+    place_word: str,
+) -> SwitchCardPress:
     from daimon.core.authz import Place, build_subject
     from daimon.core.channel_backend import (
         AgentBackendRefused,
@@ -242,41 +332,20 @@ async def press_switch_card(
         reference_settings,
     )
     from daimon.core.scope import ScopeContext
-    from daimon.core.stores import backend_switch_cards as cards
     from daimon.core.turn.admission import capture_backend_source
     from daimon.core.turn.notices import provider_name, switched_meanwhile_text
 
-    async with sessionmaker() as session:
-        card = await cards.get_card(session, tenant_id=tenant_id, card_id=card_id)
-    if (
-        card is None
-        or card.requester_platform_user_id != clicker
-        # Only the message the card was posted as can press it.
-        or (message_id is not None and card.message_id != message_id)
-    ):
-        return None
-    if card.status != "pending":
-        return SwitchCardPress(card.outcome or ANSWERED_TEXT, closed=True)
-    if action == "cancel":
-        async with sessionmaker.begin() as session:
-            await cards.finish(
-                session, card_id=card_id, status="cancelled", outcome="Cancelled. Nothing changed."
-            )
-        return SwitchCardPress("Cancelled. Nothing changed.", closed=True)
-    async with sessionmaker.begin() as session:
-        claimed = await cards.claim(session, tenant_id=tenant_id, card_id=card_id, now=now)
-    if claimed is None:
-        expired = card.expires_at <= now
-        return SwitchCardPress(EXPIRED_TEXT if expired else ANSWERED_TEXT, closed=True)
-
-    async def end(status: Literal["applied", "refused"], text: str) -> SwitchCardPress:
-        async with sessionmaker.begin() as session:
-            await cards.finish(session, card_id=card_id, status=status, outcome=text)
-        return SwitchCardPress(text, closed=True, applied=status == "applied")
-
+    card_id = claimed.id
     reference = BackendSwitchReference.model_validate(claimed.reference)
-    is_admin = await current_admin(clicker)
-    subject = build_subject(is_admin=is_admin, platform_user_id=clicker)
+
+    platform_admin = current_admin
+
+    async def admin_now(user: str) -> bool:
+        # A requester from another organisation is never an admin here.
+        return not claimed.client and await platform_admin(user)
+
+    is_admin = await admin_now(clicker)
+    subject = build_subject(is_admin=is_admin, platform_user_id=clicker, client=claimed.client)
     # The source is read in the card's own conversation, as the MCP tool read it
     # for the preview, so the same agent setup yields the same preview digest.
     capture = (
@@ -314,7 +383,7 @@ async def press_switch_card(
         anthropic=anthropic,
         tenant_id=tenant_id,
         account_id=claimed.account_id,
-        current_admin=current_admin,
+        current_admin=admin_now,
         default_agent_name=deployment_default.agent_name,
         place_word=place_word,
         answering_agent_name=claimed.answering_agent_name,

@@ -70,3 +70,12 @@ async def test_a_failed_press_is_reported_privately(monkeypatch):
     interaction = _interaction()
     await _control().callback(interaction)
     interaction.followup.send.assert_awaited_once_with(module.UNAVAILABLE, ephemeral=True)
+
+
+async def test_a_press_while_a_confirm_is_applying_answers_privately(monkeypatch):
+    press = SwitchCardPress("This switch is already being confirmed.", closed=False)
+    monkeypatch.setattr(module, "press_switch_card", AsyncMock(return_value=press))
+    interaction = _interaction()
+    await _control("cancel").callback(interaction)
+    interaction.followup.send.assert_awaited_once_with(press.text, ephemeral=True)
+    interaction.message.edit.assert_not_awaited()

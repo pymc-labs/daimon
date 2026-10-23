@@ -3671,6 +3671,8 @@ class BackendSwitchCard(Base):
         Boolean, nullable=False, server_default=text("false")
     )
     requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The requester is from another organisation: never an admin at the press.
+    client: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     answering_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     reference: Mapped[Any] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))

@@ -14,7 +14,17 @@ from datetime import datetime
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Final,
+    Literal,
+    Protocol,
+    Self,
+    cast,
+    get_type_hints,
+    overload,
+)
 from uuid import UUID
 
 import structlog
@@ -63,7 +73,12 @@ from pydantic import (
 if TYPE_CHECKING:
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
-    from daimon.core.stores.domain import BackendAgent, SourceRepresentation, TaskContinuationRow
+    from daimon.core.stores.domain import (
+        BackendAgent,
+        SourceRepresentation,
+        TaskContinuationRow,
+        _BackendDropConsent,  # pyright: ignore[reportPrivateUsage]
+    )
     from daimon.core.stores.mux_state import BeforeClaim
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.deps import TurnDeps
@@ -2801,6 +2816,60 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     return target
 
 
+#: The template drop a provider turn's consent named before Daimon posted the
+#: switch card itself (`tool_safety.self_carded_tools`).
+_SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
+
+
+def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
+    return (
+        target is not None
+        and target.declared_drops == consent.declared_drops
+        and request_digest(target.model_dump(mode="json")) == consent.target_digest
+    )
+
+
+def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+    """`target` as a consent recorded before the switch tool was offered names it.
+
+    That consent declared the tool a loss: not allowed on Daimon's MCP, one more
+    drop, and the drops line in the instructions. Only that one difference is
+    rebuilt; anything else still differs and still needs a fresh confirmation.
+    """
+    if _SWITCH_TOOL_DROP in target.declared_drops:
+        return None
+    tool = _SWITCH_TOOL_DROP.rsplit(":", 1)[1]
+    from mux.contracts.resources import MCPConnection
+
+    servers: list[MCPConnection] = []
+    found = False
+    for server in target.mcp_servers or ():
+        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
+        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list) and tool in allowed:
+            found = True
+            server = server.model_copy(
+                update={
+                    "tool_policy": {
+                        **server.tool_policy,
+                        "allowed_tools": [name for name in allowed if name != tool],
+                    }
+                }
+            )
+        servers.append(server)
+    if not found:
+        return None
+    drops = tuple(sorted((*target.declared_drops, _SWITCH_TOOL_DROP)))
+    return target.model_copy(
+        update={
+            "mcp_servers": tuple(servers),
+            "declared_drops": drops,
+            "system": compose_source_instructions(
+                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
+            ),
+        }
+    )
+
+
 def source_preservation_pin(source: BackendAgent) -> str:
     """Pin complete owner-captured intent independently of the current caller address."""
     updates: dict[str, object] = {"resource_scope": None}
@@ -2972,9 +3041,8 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if (
-            target.declared_drops != consent.declared_drops
-            or request_digest(target.model_dump(mode="json")) != consent.target_digest
+        if not _consented(target, consent) and not _consented(
+            _with_switch_tool_dropped(target, spec.system), consent
         ):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
