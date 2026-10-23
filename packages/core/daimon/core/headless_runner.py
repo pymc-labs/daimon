@@ -123,6 +123,7 @@ from mux.contracts.events import TextPart
 from mux.contracts.ids import ChannelRef, Scope, ThreadRef
 from mux.contracts.resources import Agent, AgentPatch, AgentSpec, ProviderBinding
 from mux.errors import ScopeViolation
+from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Lease, Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.mutation_retry import MutationRetryPolicy
@@ -566,8 +567,8 @@ async def run_turn_impl(
             binding = ProviderBinding(
                 id=str(uuid.uuid4()),
                 thread=slot.thread,
-                provider="anthropic",
-                profile="anthropic.managed_agents",
+                provider=MANAGED_AGENTS.provider,
+                profile=MANAGED_AGENTS.profile_id,
                 native_refs={"session": session.id, "agent": agent_id},
                 generation=1,
                 config_revision=0,
