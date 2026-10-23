@@ -78,7 +78,6 @@ async def j10_root(
     db_preflight,
     db_committing_engine,
 ):
-    memory = True
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
@@ -97,21 +96,50 @@ async def j10_root(
             reason="trial_credit",
             idempotency_key=f"j10-credit:{tenant.id}",
         )
+    async for value in root_turn_harness(sm, tenant.id, account.id):
+        yield value
+
+
+async def root_turn_harness(
+    sm,
+    tenant_id,
+    account_id,
+    *,
+    channel_id: str | None = None,
+    thread_id: str | None = None,
+    root_answer: str | None = None,
+):
+    """A root agent's turn in one channel of one tenant, over fake provider APIs.
+
+    `channel_id`/`thread_id` place it (J10's fixed place by default); `root_answer`
+    is what the root agent says before it goes idle (nothing by default).
+    """
+    memory = True
     root = parent("anthropic")
     scope = resource_scope(
-        tenant_id=str(tenant.id), account_id=str(account.id), authorization_id="admitted-turn"
+        tenant_id=str(tenant_id), account_id=str(account_id), authorization_id="admitted-turn"
     )
+    place = root.fleet.place
+    if channel_id is not None:
+        place = replace(place, channel_id=thread_id or channel_id, parent_channel_id=channel_id)
+        root = replace(root, fleet=replace(root.fleet, place=place))
     thread = root.fleet.root.model_copy(
-        update={"channel": root.fleet.root.channel.model_copy(update={"tenant_id": str(tenant.id)})}
+        update={
+            "channel": root.fleet.root.channel.model_copy(
+                update={"tenant_id": str(tenant_id)}
+                | ({} if channel_id is None else {"channel_id": channel_id})
+            ),
+        }
+        | ({} if thread_id is None else {"thread_id": thread_id})
     )
     native = ma_agent(
         id="root-source",
         name="root",
-        tenant_id=str(tenant.id),
+        tenant_id=str(tenant_id),
         system="Root",
         model="claude-haiku-5-5",
     )
-    environment = ma_environment(tenant_id=str(tenant.id))
+    environment = ma_environment(tenant_id=str(tenant_id))
     session_id = "root-session-" + str(uuid4())
     snapshot = ma_session(id=session_id, agent=native, environment_id=environment.id)
     router = MARouter()
@@ -134,7 +162,7 @@ async def j10_root(
         payload = json.loads(call.content)
         opus["agent"] = ma_agent(
             id="opus-worker",
-            tenant_id=str(tenant.id),
+            tenant_id=str(tenant_id),
             name=payload["name"],
             model=payload["model"],
             system=payload.get("system"),
@@ -220,8 +248,20 @@ async def j10_root(
 
         async def __aiter__(self):
             await input_sent.wait()
+            said = (
+                []
+                if root_answer is None
+                else [
+                    make_agent_message(
+                        event_id="root-answer-" + str(uuid4()), text=root_answer
+                    ).model_dump(mode="json")
+                ]
+            )
             response = sse_response(
-                [make_status_idle(event_id="root-idle-" + str(uuid4())).model_dump(mode="json")]
+                [
+                    *said,
+                    make_status_idle(event_id="root-idle-" + str(uuid4())).model_dump(mode="json"),
+                ]
             )
             yield response.content
 
@@ -243,13 +283,13 @@ async def j10_root(
     async with transport.client() as client:
         actual = await retrieve_agent(client, native.id, scope=scope)
         captured = await load_backend_agent(
-            client, sm, tenant_id=tenant.id, agent_name="root", actual_agent=actual
+            client, sm, tenant_id=tenant_id, agent_name="root", actual_agent=actual
         )
         if memory:
             async with sm.begin() as db:
                 await agent_memory_stores.insert_memory_store(
                     db,
-                    tenant_id=tenant.id,
+                    tenant_id=tenant_id,
                     agent_id=captured.agent_id,
                     memory_store_id="warm-root-memory",
                 )
@@ -258,9 +298,9 @@ async def j10_root(
             agent=actual,
             environment=environment,
             session_factory=sm,
-            tenant_id=tenant.id,
+            tenant_id=tenant_id,
             agent_uuid=captured.agent_id,
-            account_id=account.id,
+            account_id=account_id,
             resource_scope=scope,
             memory_read_only=True,
         )
@@ -285,7 +325,7 @@ async def j10_root(
         )
         subject = Subject(platform_user_id="requester")
         grant = AdmissionGrant(
-            tenant.id,
+            tenant_id,
             subject,
             Surface.CHANNEL,
             root.fleet.place,
@@ -297,7 +337,7 @@ async def j10_root(
             platform="discord",
         )
         admission = Admission(
-            account.id,
+            account_id,
             actual,
             environment,
             ResolvedConfig(agent_name="root", environment_name="default"),
@@ -308,7 +348,7 @@ async def j10_root(
         async with sm.begin() as db:
             intent = await turn_card_intents.create_turn_card_intent(
                 db,
-                tenant_id=tenant.id,
+                tenant_id=tenant_id,
                 platform="discord",
                 channel_id=thread.channel.channel_id,
                 thread_id=thread.thread_id,
@@ -316,8 +356,8 @@ async def j10_root(
             )
         async with turn_origin(
             sm,
-            tenant_id=tenant.id,
-            account_id=account.id,
+            tenant_id=tenant_id,
+            account_id=account_id,
             platform="discord",
             parent_channel_id=thread.channel.channel_id,
             thread_id=thread.thread_id,
@@ -330,7 +370,7 @@ async def j10_root(
             root = replace(
                 root,
                 fleet=replace(
-                    root.fleet, scope=scope, root=thread, origin_id=origin.id, account_id=account.id
+                    root.fleet, scope=scope, root=thread, origin_id=origin.id, account_id=account_id
                 ),
                 subject=subject,
                 agent=grant.agent,
@@ -354,7 +394,7 @@ async def j10_root(
                 native_refs={"session": acknowledged.id, "agent": actual.id},
                 generation=1,
                 config_revision=0,
-                legacy_account_id=str(account.id),
+                legacy_account_id=str(account_id),
             )
             await store.put_binding(binding, expected_generation=0)
             grants = [root]
@@ -382,7 +422,7 @@ async def j10_root(
                 None,
                 None,
                 False,
-                account.id,
+                account_id,
                 record,
                 backend=backend,
                 session_ref=resource_ref(backend, "session", acknowledged.id, scope=scope),
@@ -392,11 +432,11 @@ async def j10_root(
                     deps,
                     admission,
                     scope,
-                    tenant.id,
+                    tenant_id,
                     "discord",
                     "requester",
                     thread.thread_id,
-                    account.id,
+                    account_id,
                     False,
                     DEFAULT_MA_CAPABILITIES,
                     None,
@@ -510,7 +550,9 @@ class J10:
     gemini_counted: list[dict]
 
 
-async def run_j10(j10_root, monkeypatch, gemini: str) -> J10:
+async def run_j10(
+    j10_root, monkeypatch, gemini: str, *, lifecycle=None, message: str | None = None
+) -> J10:
     """The member's one message, then the root's three fleet_spawn calls and fleet_collect."""
     import mux.drivers.gemini as gemini_sdk
     import mux.drivers.openai as openai_sdk
@@ -569,7 +611,9 @@ async def run_j10(j10_root, monkeypatch, gemini: str) -> J10:
                 openai_sdk, "configured_transport", lambda **kwargs: SDKTransport(sdk)
             )
             # The member's message in the fresh channel: a real root turn freezes the root.
-            await run_root_input((*j10_root[:4], origin, *j10_root[5:]))
+            await run_root_input(
+                (*j10_root[:4], origin, *j10_root[5:]), lifecycle=lifecycle, message=message
+            )
             root, policy = await read_frozen_root(
                 deps, scope, origin_id=origin.id, now=datetime.now(UTC)
             )

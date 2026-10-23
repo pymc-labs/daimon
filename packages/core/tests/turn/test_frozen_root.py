@@ -1107,13 +1107,13 @@ async def test_one_intent_cannot_be_reserved_by_another_account(root_turn, statu
         assert len(other_transport.requests) == 2
 
 
-async def run_root_input(value, *, intent_id=None, completion=None):
+async def run_root_input(value, *, intent_id=None, completion=None, lifecycle=None, message=None):
     deps, prepared, _, intent, origin, _, _, _ = value
 
     async def reseed():
-        return "root input"
+        return message or "root input"
 
-    lifecycle = RecordingLifecycle()
+    lifecycle = lifecycle or RecordingLifecycle()
     return await run_prepared_turn(
         deps,
         prepared,
@@ -1121,7 +1121,7 @@ async def run_root_input(value, *, intent_id=None, completion=None):
         platform="discord",
         thread_id=origin.thread_id,
         external_user_id="requester",
-        user_message="root input",
+        user_message=message or "root input",
         lifecycle=lifecycle,
         cancel=asyncio.Event(),
         reseed_user_message=reseed,
