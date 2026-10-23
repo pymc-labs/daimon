@@ -85,6 +85,7 @@ async def _save_named_agents(j10_root) -> dict[str, str]:
                 },
             ],
             mcp_servers=[{"name": "daimon-mcp", "type": "url", "url": "https://mcp.invalid"}],
+            description=f"{name}, a saved agent",
         )
         for name in NAMED
     }

@@ -166,6 +166,8 @@ async def root_turn_harness(
             name=payload["name"],
             model=payload["model"],
             system=payload.get("system"),
+            # Managed Agents echoes the description it was given.
+            description=payload.get("description"),
             tools=payload.get("tools") or (),
             skills=payload.get("skills") or (),
         ).model_copy(update={"metadata": payload.get("metadata")})

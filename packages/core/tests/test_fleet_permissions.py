@@ -2197,3 +2197,14 @@ def test_granted_argon_worker_spec_resolves_only_inside_its_price_window(monkeyp
     else:
         with pytest.raises(WorkerSpecRefused, match="backend: unsupported"):
             resolve(root)
+
+
+@pytest.mark.parametrize(
+    ("backend", "kept"), [("anthropic", True), ("gemini", True), ("openai", False)]
+)
+def test_a_worker_keeps_its_description_wherever_the_provider_has_one(backend, kept) -> None:
+    """Only an OpenAI worker goes without it: OpenAI agents have no description (J4)."""
+    root = parent(backend)
+    spec = root.spec.model_copy(update={"description": "A saved agent people pick by name."})
+    resolved = resolve_worker_spec(root, spec, policy=POLICY, now=NOW)
+    assert resolved.spec.description == (spec.description if kept else None)

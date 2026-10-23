@@ -75,6 +75,7 @@ from mux.contracts.resources import (
 )
 from mux.errors import InvalidConfig, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import (
+    CONVERSATION_ONLY,
     MANAGED_AGENTS,
     get_profile,
     native_agent_tools,
@@ -2218,6 +2219,11 @@ def resolve_worker_spec(
     profile = get_profile(selected.profile)
     resolved = resolved.model_copy(
         update={
+            # An OpenAI agent has no description (its driver refuses one). It is a
+            # label for people, not a capability, so an OpenAI worker goes without it.
+            "description": None
+            if profile.provider == CONVERSATION_ONLY.provider
+            else resolved.description,
             "skills": () if "skills" in drops else resolved.skills,
             "mcp_servers": () if "mcp" in drops or "tools" in drops else resolved.mcp_servers,
             "tools": tuple(
