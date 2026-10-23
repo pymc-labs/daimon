@@ -162,3 +162,39 @@ async def test_the_setup_bound_never_cuts_a_slow_native_bind(native_worker, monk
         cancel=asyncio.Event(),
     )
     assert result.status == "succeeded" and result.turns_used == 1
+
+
+@pytest.mark.parametrize("shutting_down", [True, False])
+async def test_a_shutdown_cancel_before_native_start_records_shutdown(
+    native_worker, monkeypatch, shutting_down
+):
+    """SMOKE d75dd687: a worker cancelled by a host shutdown mid-preparation read
+    "couldn't be set up on that model here". Only a cancel during a shutdown reads as
+    the restart; any other failure keeps its own code."""
+    from daimon.core import headless_runner
+    from daimon.core.fleet import worker_error_text
+
+    request, root, claimed, _, _ = native_worker
+
+    async def cut_short(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", cut_short)
+    if shutting_down:
+        request.deps.running_turns.begin_shutdown()
+    with pytest.raises(asyncio.CancelledError):
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    ended = await _ended(request, claimed)
+    assert ended.status == "failed"
+    if shutting_down:
+        assert ended.error_code == "shutdown"
+        assert worker_error_text(ended.error_code) == "Daimon restarted before it finished"
+    else:
+        assert ended.error_code != "shutdown"

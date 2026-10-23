@@ -1273,7 +1273,12 @@ async def run_worker(
             from daimon.core.fleet_orchestration import worker_failure_code
 
             # A bug before native start is ours, never "couldn't be set up on that model".
-            failure_code = worker_failure_code(error, "preparation_refused")
+            # A shutdown's cancel is the restart's, never a refusal or a time-out.
+            failure_code = (
+                "shutdown"
+                if deps.running_turns.shutting_down and isinstance(error, asyncio.CancelledError)
+                else worker_failure_code(error, "preparation_refused")
+            )
             await asyncio.shield(
                 commit_worker_failure(request, parent, claim, failure_code=failure_code)
             )

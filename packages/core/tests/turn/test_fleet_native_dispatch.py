@@ -1351,3 +1351,46 @@ async def test_dispatch_skips_a_second_failure_commit_run_worker_already_recorde
         assert commits == ([] if recorded else ["setup_error"])
     finally:
         await ports.close()
+
+
+async def test_a_host_shutdown_records_its_workers_as_restarted_and_frees_their_slots(
+    worker_root, monkeypatch
+):
+    """SMOKE d75dd687: an MCP rollout cancelled three workers; one read "couldn't be set up"
+    and two stayed running (holding the tenant's worker slots) until the deadline sweep."""
+    from daimon.core import headless_runner
+    from daimon.core.fleet import worker_error_text
+
+    request, root, _, resolved, prices, _, _, _, _ = worker_root
+    entered = asyncio.Event()
+
+    async def hang(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def preparation(parent):
+        return request
+
+    monkeypatch.setattr(headless_runner, "run_worker", hang)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2),
+        deps=replace(request.deps, fleet_enabled=True),
+    )
+    reply = await FleetOrchestrator(ports).spawn(
+        root, await _policy(request), **_spawn_terms(request, root, resolved, "shutdown")
+    )
+    async with asyncio.timeout(10):
+        await entered.wait()
+    request.deps.running_turns.begin_shutdown()
+    async with asyncio.timeout(20):
+        await ports.close()
+    _, rows = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=root.fleet.scope.tenant_id, run_id=root.fleet.run_id
+    )
+    ended = next(row for row in rows if str(row.id) == reply["worker_id"])
+    assert ended.status == "failed" and ended.error_code == "shutdown"
+    assert worker_error_text(ended.error_code) == "Daimon restarted before it finished"
