@@ -118,8 +118,7 @@ async def _create_environment_impl(
 ) -> EnvironmentInfo:
     # Deliberately ungated, unlike update/archive below. A freshly created
     # environment is inert: nothing runs in it until an admin picks it for a
-    # channel or the workspace, or a channel's admin for their channel, via
-    # set_channel_environment, which is gated. So
+    # channel or the workspace via set_channel_environment, which is gated. So
     # the gate here bought no isolation while blocking the ordinary onboarding
     # ask -- "make me an agent that can run pymc" -- for every non-admin.
     # Matches create_agent, which is ungated for the same reason (fork_agent is
@@ -255,7 +254,7 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     # Mutations carry tags={"admin"} plus the _require_admin impl gate, with one
     # deliberate exception:
     # create_environment is ungated, because a new environment is inert until an
-    # admin or a channel's admin picks it. See the comment on _create_environment_impl.
+    # admin picks it. See the comment on _create_environment_impl.
     @mcp.tool(tags=scope_tags("tenant:read"))
     async def list_environments(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
@@ -291,8 +290,8 @@ def register_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Always send the full intended list for every ecosystem you care about.
 
         The new environment is inert until an admin picks it for a channel or
-        the workspace, or a channel's admin picks it for their channel, with
-        ``set_channel_environment``; creating one here changes nothing yet.
+        the workspace with ``set_channel_environment``; creating one here
+        changes nothing yet.
         """
         return await _create_environment_impl(runtime, await _auth(ctx), spec)
 

@@ -146,8 +146,8 @@ _PASS_ORIGIN = "Call add_skill again with your origin_context_id."
 #: Why no card can show, and what lets the person get one, if anything does.
 _NO_CARD: dict[NoCardReason, tuple[str, str | None]] = {
     "cards_off": (
-        "approval cards are turned off here (tool safety is disabled); whoever runs Daimon "
-        "can turn them on with the tool_safety.enabled setting",
+        "approval cards are turned off on this Daimon install; the team running Daimon "
+        "can turn them on",
         None,
     ),
     "agent_key": ("this call runs on an agent key, not in a person's chat", None),

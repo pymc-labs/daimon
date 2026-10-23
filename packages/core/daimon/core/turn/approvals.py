@@ -358,7 +358,10 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
     if verdict.reason == "denied_by_operator":
         return f"Refused: an admin does not allow {call.key}. Do not retry it."
     if verdict.reason == "agent_rule_deny":
-        return f"Refused: this agent's tool rule denies {call.key}. Do not retry it."
+        return (
+            f"Refused: a tool rule set on this agent blocks {call.key}. Only an admin can "
+            "change this agent's tool rules. Do not retry it."
+        )
     if verdict.reason == "agent_rule_ask":
         return (
             f"Refused: this agent's tool rule requires approval for {call.key}, "

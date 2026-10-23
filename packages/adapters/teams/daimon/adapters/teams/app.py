@@ -157,7 +157,7 @@ from daimon.core.turn.errors import (
     TurnNotStarted,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text, resolver_miss_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
@@ -241,8 +241,9 @@ def _not_set_up(nouns: RefusalNouns) -> str:
     )
 
 
-def _resolver_miss(nouns: RefusalNouns) -> str:
-    return f"This channel's setup is out of date.\n\nAsk {nouns.who} to check {nouns.setup}."
+def _resolver_miss(nouns: RefusalNouns, *, kind: str | None = None, name: str | None = None) -> str:
+    """The setup-out-of-date notice; a gone agent is named, with where to pick another."""
+    return resolver_miss_text(nouns, kind=kind or "", name=name)
 
 
 _NOT_SET_UP = _not_set_up(TEAMS_REFUSAL_NOUNS)
@@ -334,7 +335,7 @@ def _admission_refusal(
         return _not_set_up(nouns)
     if isinstance(err, MAResolverMissError):
         log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
-        return _resolver_miss(nouns)
+        return _resolver_miss(nouns, kind=err.kind, name=err.daimon_tag)
     log.info(_DENIALS[err.reason], tenant_id=str(tenant_id))
     # A protected channel hears nothing, a refusal included.
     if err.reason == "writers_none":

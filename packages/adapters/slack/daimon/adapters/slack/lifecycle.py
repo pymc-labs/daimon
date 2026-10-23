@@ -910,6 +910,7 @@ class SlackTurnLifecycle:
                     billing_command="the billing command" if foreign else nouns.billing,
                     admin=nouns.who if foreign else "an admin",
                     agent_name=self._agent_name,
+                    nouns=None if foreign else nouns,
                 )
                 if notice is not None:
                     label, body = notice.headline, format_termination_notice(notice)

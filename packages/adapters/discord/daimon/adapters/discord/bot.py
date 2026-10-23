@@ -33,11 +33,11 @@ from daimon.adapters.discord.context import (
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
-    SETUP_OUT_OF_DATE_NOTICE,
     bound_request_id,
     generate_request_id,
     render_error,
     render_wake_refused,
+    setup_out_of_date_notice,
 )
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.gating import (
@@ -509,6 +509,7 @@ def admission_refusal_message(
     in_dm: bool = False,
     cause: BackendRefusalCause | None = None,
     provider: str | None = None,
+    channels: tuple[str, ...] = (),
 ) -> str:
     """The shared admission refusal in Discord's nouns, naming this deployment's bot."""
     return admission_refusal_text(
@@ -518,7 +519,26 @@ def admission_refusal_message(
         in_dm=in_dm,
         cause=cause,
         provider=provider,
+        channels=channels,
     )
+
+
+def public_channel_ids(
+    guild: discord.Guild | None, channel_ids: tuple[str, ...]
+) -> tuple[str, ...]:
+    """The ids among `channel_ids` that everyone in `guild` can see, from its cache.
+
+    A refusal is posted where anyone there reads it, so it names only channels every
+    member can open; a private or uncached channel is left out.
+    """
+    if guild is None:
+        return ()
+    shown: list[str] = []
+    for channel_id in channel_ids:
+        channel = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+        if channel is not None and channel.permissions_for(guild.default_role).view_channel:
+            shown.append(channel_id)
+    return tuple(shown)
 
 
 async def _resolve_agent_display_name(
@@ -675,7 +695,7 @@ def protected_channel_notice(protection: ConfirmedProtection, *, channel_id: str
     if protection.scope == "category":
         return (
             f"Daimon can't reply in <#{channel_id}>: the **Who can post** rule on its "
-            "category is **Nobody**. Whoever runs Daimon for this server can change it."
+            "category is **Nobody**. The team running Daimon can change it."
         )
     return (
         f"Daimon can't reply in <#{protection.rule_id}>: its **Who can post** rule is "
@@ -4865,7 +4885,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return
             target = thread or message.channel
-            await target.send(SETUP_OUT_OF_DATE_NOTICE)
+            await target.send(setup_out_of_date_notice(kind=err.kind, name=err.daimon_tag))
             return
         except AdmissionDenied as err:
             if unprompted:
@@ -4942,7 +4962,11 @@ class DaimonBot(commands.Bot):
             if err.reason != "writers_none":
                 await target.send(
                     admission_refusal_message(
-                        err.reason, self.runtime.settings, cause=err.cause, provider=err.provider
+                        err.reason,
+                        self.runtime.settings,
+                        cause=err.cause,
+                        provider=err.provider,
+                        channels=public_channel_ids(message.guild, err.channels),
                     )
                 )
             return

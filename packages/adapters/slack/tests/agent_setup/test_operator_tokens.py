@@ -154,5 +154,6 @@ async def test_a_forged_deployment_scope_is_refused(
     )
     tokens, _ = await _state(db_session_factory)
     assert (
-        tokens == [] and "mint-operator-token" in client.chat_postEphemeral.call_args.kwargs["text"]
+        tokens == []
+        and "can't be granted from this panel" in client.chat_postEphemeral.call_args.kwargs["text"]
     )

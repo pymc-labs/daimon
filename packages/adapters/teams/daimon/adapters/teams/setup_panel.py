@@ -105,7 +105,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 log = structlog.get_logger()
 
 GONE = "That agent is no longer available. It may have been deleted."
-NOT_CONFIGURED = "Coding-tool access isn't set up yet. Ask the operator."
+NOT_CONFIGURED = (
+    "Coding-tool access isn't set up on this Daimon install yet; ask the team running Daimon."
+)
 #: The panel is outside channels, so minting requires a server admin.
 NEEDS_ADMIN = (
     "You can't create this token.\n\n"
@@ -113,7 +115,9 @@ NEEDS_ADMIN = (
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
 OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
-OPERATOR_NOT_CONFIGURED = "Operator tokens aren't set up yet. Ask whoever runs Daimon."
+OPERATOR_NOT_CONFIGURED = (
+    "Operator tokens aren't set up on this Daimon install yet; ask the team running Daimon."
+)
 DM_ONLY = "Open setup from our 1:1 chat to start a setup conversation."
 STARTED = "Setup conversation started. Reply in this chat."
 ALREADY_ENDED = "This setup conversation has already ended."

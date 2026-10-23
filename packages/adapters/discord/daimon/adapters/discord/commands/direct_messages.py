@@ -54,7 +54,11 @@ def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
     """Person-facing copy for a failure; an admission refusal is never shown as its code."""
     if isinstance(exc, AdmissionDenied):
         return admission_refusal_message(
-            exc.reason, settings, in_dm=True, cause=exc.cause, provider=exc.provider
+            exc.reason,
+            settings,
+            in_dm=True,
+            cause=exc.cause,
+            provider=exc.provider,
         )
     return str(exc) if isinstance(exc, DaimonError) else fallback
 

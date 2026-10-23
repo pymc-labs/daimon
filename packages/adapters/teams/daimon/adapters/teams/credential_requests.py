@@ -157,22 +157,21 @@ _REPO_KINDS = ("repo", "skill_repo")
 _MAX_GITHUB_TOKEN_CHARS = 255
 _COLLISION_LINES_SHOWN = 3
 _SHARED_AGENT = (
-    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Changing this agent's repo or keys needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _SHARED_AGENT_SKILLS = (
-    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Adding skills to this agent needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _WRONG_ORG = "This request isn't for this organisation — ask again where it was posted."
 _AGENT_GONE = "That agent no longer exists — ask again and a fresh request will be posted."
 _UNCONFIGURED = (
-    "Daimon isn't fully set up yet. Ask the operator to finish setup, "
-    "then try again. Nothing was saved."
+    "This isn't set up on this Daimon install yet; ask the team running Daimon. Nothing was saved."
 )
 _UNCONFIGURED_OAUTH = (
-    "Sign-in isn't set up yet. Ask whoever runs Daimon to finish it, "
-    "then ask again. Nothing was saved."
+    "Sign-in isn't set up on this Daimon install yet; ask the team running Daimon. "
+    "Nothing was saved."
 )
 _MESSAGES: dict[Refusal, str] = {
     "invalid": NO_LONGER_VALID_MESSAGE,

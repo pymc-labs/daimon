@@ -276,7 +276,9 @@ async def request_github_access_impl(
             link_url=url,
         )
         return GitHubRequestResult(
-            status="waiting", message="I've asked an admin.", request_id=request.id
+            status="waiting",
+            message="I sent you a link to connect your GitHub.",
+            request_id=request.id,
         )
     connected_names = (connected.repo_full_name,) if connected is not None else ()
     ability: Literal["write"] = "write"
@@ -351,8 +353,13 @@ async def request_github_access_impl(
         platform_user_id=auth.platform_user_id,
         card=status_card,
     )
+    # Say what the card says: an admin was asked only if one can see the channel and the
+    # admin card went out (now, or recently enough that it wasn't posted again).
+    asked = bool(visible_admins) and (posted or updated.admin_notified_at is not None)
     return GitHubRequestResult(
-        status="waiting", message="I've asked an admin.", request_id=request.id
+        status="waiting",
+        message="I've asked an admin." if asked else status_card.text,
+        request_id=request.id,
     )
 
 

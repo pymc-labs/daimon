@@ -1217,9 +1217,17 @@ def test_a_channel_without_setup_gets_one_plain_notice(missing: tuple[str, ...])
 
 
 def test_a_stale_setup_says_it_is_out_of_date() -> None:
-    err = MAResolverMissError(kind="agent", tenant_id=uuid.uuid4(), daimon_tag="gone")
+    err = MAResolverMissError(kind="environment", tenant_id=uuid.uuid4(), daimon_tag="gone")
     assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
         "This channel's setup is out of date.\n\nAsk an admin to check `setup` in a 1:1 chat with me."
+    )
+
+
+def test_a_deleted_agent_is_named_with_where_to_pick_another() -> None:
+    err = MAResolverMissError(kind="agent", tenant_id=uuid.uuid4(), daimon_tag="gone")
+    assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
+        "This channel's agent `gone` can't be found.\n\n"
+        "Ask an admin to pick another in `setup` in a 1:1 chat with me."
     )
 
 

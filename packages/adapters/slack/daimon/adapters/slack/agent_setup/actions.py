@@ -36,7 +36,7 @@ the read path for these existing workflows:
     this channel's extra skills, submitted in channel_skills.py. Workspace
     admins only, re-checked live on the click and on the submission.
   - This channel's environment, on Who answers where, saves the pick through
-    channel_environment.py. Workspace admins and this channel's admins,
+    channel_environment.py. Workspace admins,
     re-checked live on the pick.
   - The setup-conversation button opens a thread with Daimon for other agent
     and routing changes, where the chat tool owns the authorization.

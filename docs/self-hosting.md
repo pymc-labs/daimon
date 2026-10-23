@@ -1342,7 +1342,7 @@ Left empty or unset, the setting changes nothing. A value that does not
 parse stops Daimon at startup with an error naming the bad entry, like any
 other setting. If the authorization server refuses a configured client (a
 wrong or rotated secret, a redirect URI or scope it does not accept), the
-sign-in page tells the person to ask the operator, and the reason is logged
+sign-in page tells the person to ask the team running Daimon, and the reason is logged
 as `mcp_oauth.callback_failed` or `mcp_oauth.authorization_declined`.
 
 ## Backup and disaster recovery

@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -1953,6 +1954,37 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
         )
 
     assert exc_info.value.reason == "runs_elsewhere"
+    assert exc_info.value.channels == ("rx-chan",), "the refusal can name where it runs"
+
+
+def test_a_pinned_refusal_names_only_channels_every_rule_allows_and_none_for_a_client() -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.authz import AgentRef, Place, Subject
+    from daimon.core.turn.admission import _runs_in  # pyright: ignore[reportPrivateUsage]
+
+    policy = TenantAccessPolicy(agent_channel_pins={"a": ("c1", "c2"), "b": ("c2", "c3")})
+
+    def grant(subject: Subject, *names: str) -> Any:
+        return SimpleNamespace(agent=AgentRef.of(*names), subject=subject, run_place=Place("c9"))
+
+    assert _runs_in(policy, grant(Subject(), "a", "b")) == ("c2",)
+    assert _runs_in(policy, grant(Subject(), "a")) == ("c1", "c2")
+    assert _runs_in(policy, grant(Subject(), "nobody")) == ()
+    assert _runs_in(policy, grant(Subject(client=True), "a")) == (), "never to another org"
+
+    from daimon.core.access_policy import AgentRule, ChannelRule
+
+    kept = TenantAccessPolicy(
+        agent_rules={"a": AgentRule(runs_in=("open", "kept"))},
+        channel_rules={"kept": ChannelRule(readers="own", writers="own")},
+    )
+    assert _runs_in(kept, grant(Subject(), "a")) == ("open",), (
+        "a member elsewhere never learns of a channel kept to its own agents"
+    )
+    assert _runs_in(kept, grant(Subject(is_admin=True), "a")) == ("open",), (
+        "the refusal is read by everyone here, so an admin's names no kept channel either"
+    )
 
 
 @pytest.mark.parametrize(

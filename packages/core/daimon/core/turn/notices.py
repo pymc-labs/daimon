@@ -10,9 +10,10 @@ import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.errors import TurnError
 from daimon.core.github_app_session import GitHubTokenMintUnavailable
-from daimon.core.platform_words import Place, words_for
+from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.platform_words import NEUTRAL_SPACE, Place, words_for
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
-from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
+from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.config import DEFAULT_BACKEND
@@ -26,11 +27,13 @@ __all__ = [
     "fit_notice",
     "is_stuck_session",
     "render_termination_notice",
+    "resolver_miss_text",
     "short_ref",
 ]
 
 _IN_FLIGHT_SHOWN = 5
 _SERVERS_SHOWN = 3
+_CHANNELS_SHOWN = 3
 _NAME_MAX = 60
 _STUCK_SESSION_MARK = "waiting on responses to events"
 
@@ -160,6 +163,16 @@ _COPY: dict[TerminationReason, _Copy] = {
     ),
 }
 _FALLBACK = _Copy("Something went wrong.", _RETRY, "Send your message again.")
+# A `RESOLVER_MISS` whose missing piece is a named agent: it was deleted.
+_AGENT_GONE = _Copy(
+    "This channel's agent {agent} can't be found.", "Ask {who} to pick another in {setup}."
+)
+
+
+# Discord renders `<#id>` as a link to the channel, and its adapter can tell from its cache
+# which channels the requester sees. Slack would need an API call per channel to know, and
+# Teams has no such syntax, so both keep "other channels".
+_CHANNEL_MENTIONS: dict[ChatPlatform, str] = {"discord": "<#{}>"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +188,9 @@ class RefusalNouns:
     #: Who to ask for what needs an admin; for a sender from another organisation, who
     #: acts for them, since Teams opens no private chat with them.
     who: str = "an admin"
+    #: How a channel id is written so it reads as a link to the channel ("<#{}>"),
+    #: or None where the platform has no such syntax and channels go unnamed.
+    channel_mention: str | None = None
 
     @classmethod
     def for_platform(
@@ -191,6 +207,7 @@ class RefusalNouns:
             setup=words.phrase("setup", place=place, foreign=foreign) or "an admin",
             verb=words.verb,
             who=words.host_admin if foreign and place != "dm" else "an admin",
+            channel_mention=_CHANNEL_MENTIONS.get(platform),
         )
 
     @classmethod
@@ -223,9 +240,11 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "This agent's model provider isn't available here right now.",
         "Ask {who} to check which provider {agent_mid} uses.",
     ),
+    # The hold frees itself as running attempts settle, and a never-settled one expires
+    # after a day (`HOLD_TTL`); nobody can release it sooner.
     "provider_hold_cap_reached": _Copy(
-        "This model's prepaid spending hold is used up.",
-        "Ask {who} to release or raise it.",
+        "This model is at its spending limit for the moment.",
+        "It clears as running requests finish, at most within a day. Try again later.",
     ),
     "provider_setup_pending": _Copy(
         "Couldn't set up GPT for this {scope} yet.",
@@ -264,6 +283,9 @@ def provider_name(provider: str | None) -> str:
     return _PROVIDER_NAMES.get(provider or "", "a model provider")
 
 
+# A pinned agent's refusal when its channels can be named.
+_RUNS_IN = _Copy("{agent} only works in {channels}.", "Ask it there.")
+
 _DM_REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _Copy("{agent} only works in other channels.", "Ask it there."),
     "own_agents_only": _Copy("This channel only uses its own agents.", "Ask in that channel."),
@@ -282,16 +304,26 @@ def admission_refusal_text(
     in_dm: bool = False,
     cause: BackendRefusalCause | None = None,
     provider: str | None = None,
+    channels: Sequence[str] = (),
 ) -> str:
     """Two approved lines for an admission refusal.
 
     `bot_name` remains accepted for adapter callers; a pinned agent's name
     must come from `agent_name`, not the deployment bot's display name.
-    A `backend_unsupported` refusal with a `cause` names it and its fix.
+    A `backend_unsupported` refusal with a `cause` names it and its fix; a
+    `runs_elsewhere` one names the `channels` the agent runs in where the
+    platform can link them.
     """
     copy = (_DM_REFUSALS.get(reason) if in_dm else None) or _REFUSALS[reason]
     if reason == "backend_unsupported" and cause is not None:
         copy = _BACKEND_REFUSALS[cause]
+    named_channels = ""
+    if reason == "runs_elsewhere" and channels and nouns.channel_mention is not None:
+        copy = _RUNS_IN
+        named_channels = _listed(
+            [nouns.channel_mention.format(channel) for channel in channels],
+            shown=_CHANNELS_SHOWN,
+        )
     agent = agent_name or "This agent"
     named = provider_name(provider)
     words = {
@@ -306,8 +338,29 @@ def admission_refusal_text(
         "verb": nouns.verb,
         "who": nouns.who,
         "Who": _capitalised(nouns.who),
+        "channels": named_channels,
     }
     return "\n\n".join((copy.title.format(**words), copy.next_step.format(**words)))
+
+
+def resolver_miss_text(nouns: RefusalNouns, *, kind: str, name: str | None) -> str:
+    """The refusal for a channel whose agent or environment can't be found.
+
+    A missing agent is named, quoted so its name can't render as markup, with
+    where to pick another; anything else keeps the out-of-date wording."""
+    copy = _AGENT_GONE if kind == "agent" and name else _COPY[TerminationReason.RESOLVER_MISS]
+    words = {
+        "agent": _quoted(name or ""),
+        "who": nouns.who,
+        "verb": nouns.verb,
+        "setup": nouns.setup,
+    }
+    return "\n\n".join((copy.title.format(**words), copy.next_step.format(**words)))
+
+
+def _quoted(name: str) -> str:
+    """`name` as inline code, so a chat renders no mention or markup inside it."""
+    return f"`{_clip(name.replace('`', ''), _NAME_MAX)}`"
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,13 +416,33 @@ def render_termination_notice(
     setup_verb: str = "run",
     admin: str = "an admin",
     agent_name: str | None = None,
+    nouns: RefusalNouns | None = None,
 ) -> TerminationNotice | None:
-    """Render one reason using the same words on every platform."""
+    """Render one reason using the same words on every platform.
+
+    An `ADMISSION_DENIED` or `RESOLVER_MISS` notice is worded from the error that
+    caused it, as at admission, since those reasons cover several causes; `nouns`
+    (else words built from the command arguments) supply the platform's words.
+    """
     if reason is TerminationReason.COMPLETED:
         return None
     copy = _COPY.get(reason, _FALLBACK)
     failure = error or (state.error if state is not None else None)
-    if any(isinstance(cause, GitHubTokenMintUnavailable) for cause in _error_chain(failure)):
+    chain = _error_chain(failure)
+    nouns = nouns or RefusalNouns(
+        scope=NEUTRAL_SPACE,
+        admin=admin,
+        billing=billing_command,
+        setup=setup_command,
+        verb=setup_verb,
+        who=admin,
+    )
+    specific = (
+        _specific_lines(chain, nouns, agent_name=agent_name, in_dm=in_dm)
+        if reason in _WORDED_BY_ERROR
+        else None
+    )
+    if any(isinstance(cause, GitHubTokenMintUnavailable) for cause in chain):
         copy = _Copy(
             "GitHub access is temporarily unavailable.",
             "@mention Daimon to try again.",
@@ -397,6 +470,8 @@ def render_termination_notice(
         who=admin,
         Who=_capitalised(admin),
     )
+    if specific is not None:
+        title, next_step = specific
     in_flight: tuple[str, ...] = ()
     finished = 0
     if state is not None:
@@ -421,6 +496,41 @@ def render_termination_notice(
         finished_tools=finished,
         request_id=request_id,
     )
+
+
+# Reasons that stand for several causes: the error in the chain says which.
+_WORDED_BY_ERROR = frozenset({TerminationReason.ADMISSION_DENIED, TerminationReason.RESOLVER_MISS})
+
+
+def _specific_lines(
+    chain: Sequence[BaseException],
+    nouns: RefusalNouns,
+    *,
+    agent_name: str | None,
+    in_dm: bool,
+) -> tuple[str, str] | None:
+    """The admission or missing-agent wording an error in `chain` carries, if any.
+
+    Every denial reason has its own copy (`_REFUSALS`), including those that have no
+    `TerminationReason` member of their own and would otherwise read as the generic
+    `ADMISSION_DENIED` notice."""
+    for cause in chain:
+        if isinstance(cause, AdmissionDenied):
+            text = admission_refusal_text(
+                cause.reason,
+                nouns,
+                agent_name=agent_name,
+                in_dm=in_dm,
+                cause=cause.cause,
+                provider=cause.provider,
+            )
+        elif isinstance(cause, MAResolverMissError) and cause.kind == "agent":
+            text = resolver_miss_text(nouns, kind=cause.kind, name=cause.daimon_tag)
+        else:
+            continue
+        title, _, next_step = text.partition("\n\n")
+        return title, next_step
+    return None
 
 
 def _capitalised(text: str) -> str:

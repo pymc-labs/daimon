@@ -120,7 +120,7 @@ look like "Daimon is down". A direct @mention of Daimon in a `writers: none`
 channel gets a 🔒 reaction, and its author a direct message naming the rule.
 For a channel rule, the message says a server admin can change it in
 `/agent-setup` → **Who answers where** → **Permissions**. For a category rule,
-it says whoever runs Daimon for the server can. The exception is bounded:
+it says the team running Daimon can. The exception is bounded:
 
 - only a direct @mention, never a plain message or a reply without one;
 - at most one reaction per message, and at most one notice per person per

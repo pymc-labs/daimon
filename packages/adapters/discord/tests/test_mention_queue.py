@@ -676,7 +676,7 @@ async def test_handle_mention_renders_a_neutral_provider_error_as_a_provider_car
     assert "turn.failed" in events and "turn.failed.unexpected" not in events
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
-    assert error_text.startswith("Daimon's AI service couldn't accept the request.")
+    assert error_text.startswith("Daimon stopped this request to keep a credential safe.")
     assert "gcs_token_echo" not in error_text
 
 

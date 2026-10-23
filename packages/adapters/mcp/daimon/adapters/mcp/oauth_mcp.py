@@ -83,7 +83,7 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
     ),
     "unconfigured": (
         "Daimon cannot finish sign-in yet",
-        "Ask the operator to finish the daimon setup, then try again.",
+        "This isn't set up on this Daimon install yet; ask the team running Daimon.",
         500,
     ),
     "discovery_failed": (
@@ -111,8 +111,8 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
     "client_misconfigured": (
         "Sign-in to this server is not set up correctly",
         "Daimon's sign-in with this server was refused or does not fit it, so nothing was "
-        "connected. Ask the operator to check it; signing in again will not help until it "
-        "is fixed.",
+        "connected. Ask the team running Daimon to check it; signing in again will not "
+        "help until it is fixed.",
         502,
     ),
     "agent_gone": (

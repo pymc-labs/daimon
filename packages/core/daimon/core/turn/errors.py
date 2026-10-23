@@ -29,8 +29,8 @@ AdmissionDenialReason = Literal[
     # The channel's backend configuration (`daimon.core.channel_backend`) names
     # a profile that cannot meet it, or one this release cannot run yet.
     "backend_unsupported",
-    # The operator's prepaid hold for a provider's attempts (Gemini Flash) is used
-    # up. Nothing to do with a channel budget; an admin releases or raises it.
+    # The prepaid hold for a provider's attempts (Gemini Flash) is used up for now.
+    # Nothing to do with a channel budget; it clears as running attempts settle.
     "provider_hold_cap_reached",
     # A provider resource this turn needs is still being set up (the tenant's
     # first GPT environment): nothing is wrong; the same request works shortly.
@@ -49,9 +49,10 @@ class AdmissionDenied(DaimonError):
     """Raised by `admit()` when the invoker policy, channel protection, balance, cap
     or channel budget gate rejects the turn.
 
-    Carries only closed literals — no rendered user-facing text. Denial copy
-    stays adapter-side. A `backend_unsupported` refusal may name its `cause`
-    and the `provider` involved, so the copy can name the fix.
+    Carries only closed literals and ids — no rendered user-facing text. Denial
+    copy stays adapter-side. A `backend_unsupported` refusal may name its `cause`
+    and the `provider` involved, so the copy can name the fix; a `runs_elsewhere`
+    refusal may name the `channels` the agent runs in, so the copy can point there.
     """
 
     def __init__(
@@ -60,11 +61,13 @@ class AdmissionDenied(DaimonError):
         reason: AdmissionDenialReason,
         cause: BackendRefusalCause | None = None,
         provider: str | None = None,
+        channels: tuple[str, ...] = (),
     ) -> None:
         super().__init__(reason)
         self.reason: AdmissionDenialReason = reason
         self.cause: BackendRefusalCause | None = cause
         self.provider: str | None = provider
+        self.channels: tuple[str, ...] = channels
 
 
 class DmSourceSealedError(DaimonError):

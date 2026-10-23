@@ -76,13 +76,14 @@ from daimon.adapters.discord.bot import (
     _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     admission_refusal_message,
+    public_channel_ids,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
-    SETUP_OUT_OF_DATE_NOTICE,
     generate_request_id,
     render_error,
+    setup_out_of_date_notice,
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
 from daimon.adapters.discord.post_transport import DiscordPostTransport
@@ -512,7 +513,7 @@ async def run_wizard_submit_turn_observed(
                 daimon_tag=err.daimon_tag,
                 tenant_id=str(err.tenant_id),
             )
-            await channel.send(SETUP_OUT_OF_DATE_NOTICE)
+            await channel.send(setup_out_of_date_notice(kind=err.kind, name=err.daimon_tag))
             return
         except AdmissionDenied as err:
             if err.reason == "writers_none":
@@ -538,7 +539,11 @@ async def run_wizard_submit_turn_observed(
                 await channel.send(
                     "Your answers were recorded.\n\n"
                     + admission_refusal_message(
-                        err.reason, bot.runtime.settings, cause=err.cause, provider=err.provider
+                        err.reason,
+                        bot.runtime.settings,
+                        cause=err.cause,
+                        provider=err.provider,
+                        channels=public_channel_ids(interaction.guild, err.channels),
                     )
                 )
             return

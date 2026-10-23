@@ -1281,9 +1281,37 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
         hold=grant.hold,
     )
     if not decision:
-        raise AdmissionDenied(
-            reason="own_agents_only" if decision.reason == "own_agents_only" else "runs_elsewhere"
-        )
+        if decision.reason == "own_agents_only":
+            raise AdmissionDenied(reason="own_agents_only")
+        raise AdmissionDenied(reason="runs_elsewhere", channels=_runs_in(policy, grant))
+
+
+def _runs_in(policy: TenantAccessPolicy, grant: AdmissionGrant) -> tuple[str, ...]:
+    """The channels every rule on the agent allows, for the refusal to name.
+
+    Only those on this place's side of every line, as the here card shows them: the
+    refusal is posted where anyone here reads it, so nobody here learns of a channel
+    kept to its own agents elsewhere, admin or not. A requester from another
+    organisation is told of none.
+    """
+    rules = agent_permissions(policy, grant.agent.names).runs_in
+    if not rules or grant.subject.client:
+        return ()
+    allowed = set(rules[0])
+    for rule in rules[1:]:
+        allowed &= rule
+    place = grant.run_place
+    here = channel_permissions(
+        policy,
+        channel_id=place.channel_id,
+        parent_channel_id=place.parent_channel_id,
+    ).home
+    allowed = {
+        channel
+        for channel in allowed
+        if channel_permissions(policy, channel_id=channel).home == here
+    }
+    return tuple(sorted(allowed))
 
 
 def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:

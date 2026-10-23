@@ -294,7 +294,13 @@ def details_card(
         data = OpenDialogData(TOKEN_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="🧰 Use from your coding tools", data=data))
     elif is_admin:
-        body.append(_text("Coding-tool access isn't set up yet.", subtle=True))
+        body.append(
+            _text(
+                "Coding-tool access isn't set up on this Daimon install yet; "
+                "ask the team running Daimon.",
+                subtle=True,
+            )
+        )
     actions.append(_button("Back", "agents", page=page))
     return _card(details.name, body, actions)
 

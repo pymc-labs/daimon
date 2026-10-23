@@ -663,7 +663,9 @@ async def test_callback_mcp_oauth_kind_refuses_the_click_when_the_deployment_has
     )
 
     text = interaction.followup.send.call_args.args[0]
-    assert "isn't set up yet" in text, "the person learns the operator must finish setup"
+    assert "isn't set up on this Daimon install yet" in text, (
+        "the person learns the team running Daimon must finish setup"
+    )
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=token)
     assert spent is not None and spent.used_at is None, "the request survives for a later click"

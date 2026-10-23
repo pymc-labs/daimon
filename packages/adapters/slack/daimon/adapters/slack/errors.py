@@ -25,7 +25,8 @@ from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
-from daimon.core.turn.notices import short_ref
+from daimon.core.turn.notices import RefusalNouns, resolver_miss_text, short_ref
+from mux.errors import ProviderError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from ulid import ULID
@@ -73,8 +74,16 @@ def not_set_up_notice(*, foreign: bool = False) -> str:
     return _NOT_SET_UP_FOREIGN if foreign else NOT_SET_UP_NOTICE
 
 
-def setup_out_of_date_notice(*, foreign: bool = False) -> str:
-    """The setup-out-of-date notice, for the same two audiences."""
+def setup_out_of_date_notice(
+    *, foreign: bool = False, kind: str | None = None, name: str | None = None
+) -> str:
+    """The setup-out-of-date notice, for the same two audiences.
+
+    A channel whose agent is gone names it: the `kind` and `name` a resolver miss carries.
+    """
+    if kind == "agent" and name:
+        nouns = RefusalNouns.for_platform("slack", foreign=foreign)
+        return resolver_miss_text(nouns, kind=kind, name=name)
     return _SETUP_OUT_OF_DATE_FOREIGN if foreign else SETUP_OUT_OF_DATE_NOTICE
 
 
@@ -84,7 +93,30 @@ _USAGE_LIMIT = (
 )
 _AI_BUSY = ("Daimon's AI service is busy.", "Try again in a minute.")
 _AI_UNREACHABLE = ("Daimon couldn't reach its AI service.", "Try again in a minute.")
-_AI_REFUSED = ("Daimon's AI service couldn't accept the request.", "Ask an admin to check it.")
+_AI_REFUSED = (
+    "Daimon's AI service couldn't accept the request.",
+    "Try again, or start a new thread. If it keeps happening, tell the team running Daimon.",
+)
+_AI_TOO_LARGE = (
+    "That was too much for Daimon's AI service to take in at once.",
+    "Shorten it, or start a new thread.",
+)
+_AI_KEY_REJECTED = (
+    "The AI provider rejected Daimon's request.",
+    "The team running Daimon needs to check its key for this provider.",
+)
+_AI_CREDENTIAL_GUARD = (
+    "Daimon stopped this request to keep a credential safe.",
+    "Tell the team running Daimon.",
+)
+_AI_CREDENTIAL_MISSING = (
+    "A credential Daimon needs isn't available right now.",
+    "Tell the team running Daimon.",
+)
+_AI_MODEL_GONE = (
+    "The model this agent uses isn't offered any more.",
+    "Switch the agent's model, or ask its owner or an admin to.",
+)
 _NO_PERMISSION = (
     "Daimon doesn't have permission to do that in Slack.",
     "Ask a workspace admin to check Daimon's permissions and reinstall it.",
@@ -138,6 +170,50 @@ def _guidance(exc: BaseException) -> str | None:
     return None
 
 
+def _provider_lines(exc: ProviderError) -> tuple[str, str]:
+    """Any provider behind the neutral driver layer (Gemini, OpenAI...), by category."""
+    if exc.category in {"rate_limited", "overloaded"}:
+        return _AI_BUSY
+    if exc.category == "transient_network" or (exc.category == "upstream" and exc.retryable):
+        return _AI_UNREACHABLE
+    codes = {exc.native_code, exc.native_error_code}
+    if codes & _REQUEST_TOO_LARGE:
+        return _AI_TOO_LARGE
+    if _guards_a_credential(exc.native_code):
+        return _AI_CREDENTIAL_GUARD
+    if (exc.native_code or "").endswith("_secret_unavailable"):
+        return _AI_CREDENTIAL_MISSING
+    if exc.category in {"auth", "permission"} and codes & _PROVIDER_REJECTED:
+        return _AI_KEY_REJECTED
+    if exc.category == "not_found" and _names_the_model(exc):
+        return _AI_MODEL_GONE
+    return _AI_REFUSED
+
+
+# What a provider says when the request itself was too big: the HTTP status (OpenAI and
+# self-hosted keep it bare, Gemini as `http_413`) or Anthropic's error type. A workspace
+# snapshot or an artifact over its limit is not the person's message, so it is not here.
+_REQUEST_TOO_LARGE = frozenset({"413", "http_413", "request_too_large"})
+# A key or permission the provider itself refused, in the same three spellings.
+_PROVIDER_REJECTED = frozenset(
+    {"401", "403", "http_401", "http_403", "authentication_error", "permission_error"}
+)
+
+
+def _guards_a_credential(code: str | None) -> bool:
+    """Whether Daimon's own driver stopped the call before it reached the provider,
+    because a credential would have been echoed or used outside its binding."""
+    code = code or ""
+    return code.endswith(("_echo", "_secret_outside_binding")) or code == "gcs_downscoping_failed"
+
+
+def _names_the_model(exc: ProviderError) -> bool:
+    """Whether a not-found is about the model: other ids (a past reply, a file) miss too."""
+    return exc.native_param == "model" or any(
+        "model" in (field or "").lower() for field in (exc.native_error_code, exc.native_message)
+    )
+
+
 def _cause_lines(exc: BaseException) -> tuple[str, str]:
     """What happened and what to do, by cause. Never the exception's text."""
     if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
@@ -147,12 +223,20 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, anthropic.APIStatusError):
         if exc.status_code in {429, 529}:
             return _AI_BUSY
+        if exc.status_code == 413:
+            return _AI_TOO_LARGE
+        if exc.status_code in {401, 403}:
+            return _AI_KEY_REJECTED
         if 400 <= exc.status_code < 500:
+            # A 404 here is a missing session or agent as often as a model, so it
+            # keeps the general wording.
             return _AI_REFUSED
         return _AI_UNREACHABLE
     if isinstance(exc, anthropic.APIError):
         # Connection failures, timeouts and errors with no status.
         return _AI_UNREACHABLE
+    if isinstance(exc, ProviderError):
+        return _provider_lines(exc)
     if isinstance(exc, SlackApiError):
         response = cast(Any, exc.response)  # pyright: ignore[reportUnknownMemberType]  # SlackApiError.response is untyped
         if response.get("error") == "missing_scope":

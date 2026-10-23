@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 PINNED_AGENT_MESSAGE = "Connect this repository directly for the pinned agent."
 CHANNEL_LIMITED_REPO_MESSAGE = (
     "This agent only works in some channels, so it can't use the shared repos. "
-    "Ask whoever runs Daimon here to connect repos for it."
+    "Ask an admin to connect repos for it directly."
 )
 
 

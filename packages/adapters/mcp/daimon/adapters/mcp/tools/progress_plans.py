@@ -58,7 +58,7 @@ _MAX_STEPS: Final = 12
 _WRONG_PLATFORM = "Progress plans show on the chat card, so there is nothing to turn on here."
 _DEPLOYMENT_DISABLED = (
     "Progress plans are turned off for all of Daimon and cannot be turned on; "
-    "the operator would have to change that."
+    "the team running Daimon would have to change that."
 )
 _DISABLED_NEEDS_A_WIDER_SCOPE = (
     "'disabled' is not a thread-level setting — use mode='off' to stop showing "

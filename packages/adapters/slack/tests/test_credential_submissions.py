@@ -676,7 +676,7 @@ async def test_mcp_submission_with_unconfigured_mcp_refuses_before_the_consume(
     )
     assert ("POST", _EPHEMERAL_URL) in fake_slack_web_client.mock.requests
     receipt = " ".join(_ephemeral_texts(fake_slack_web_client))
-    assert "Ask the operator" in receipt and "Nothing was saved" in receipt, (
+    assert "ask the team running Daimon" in receipt and "Nothing was saved" in receipt, (
         "an unconfigured deployment should give an operator handoff and truthful save status"
     )
     assert "public_url" not in receipt and "jwt_secret" not in receipt, (

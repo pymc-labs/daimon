@@ -58,3 +58,29 @@ async def test_on_call_tool_does_not_swallow_tool_error() -> None:
 
     with pytest.raises(ToolError, match="not found"):
         await mw.on_call_tool(object(), call_next)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("status", "retry"),
+    [(409, True), (429, True), (500, True), (503, True), (400, False), (401, False), (404, False)],
+)
+async def test_only_a_busy_or_failing_service_says_to_try_again(status: int, retry: bool) -> None:
+    """A 4xx other than 429 fails the same way on retry, so it never says to retry."""
+    mw = MaErrorMiddleware()
+
+    async def call_next(_ctx: Any) -> Any:
+        raise anthropic.APIStatusError(
+            "private",
+            response=httpx.Response(
+                status, request=httpx.Request("POST", "https://api.anthropic.com/v1/x")
+            ),
+            body=None,
+        )
+
+    with pytest.raises(ToolError) as refused:
+        await mw.on_call_tool(object(), call_next)  # type: ignore[arg-type]
+    message = str(refused.value)
+    assert f"HTTP {status}" in message
+    assert ("Try again shortly" in message) is retry
+    assert "Managed Agents" not in message
+    assert "private" not in message

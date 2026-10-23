@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
+from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.turn import TerminationReason, render_termination_notice
-from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.notices import (
     RefusalNouns,
     admission_refusal_text,
     fit_notice,
+    resolver_miss_text,
     short_ref,
 )
 from daimon.core.turn.state import McpServerFailure, ToolUseBlock, TurnState
@@ -354,3 +357,102 @@ def test_an_unknown_provider_is_named_generically():
         "backend_unsupported", _NOUNS, cause="agent_backend", provider=None
     )
     assert rendered.startswith("This agent runs on a model provider,")
+
+
+def test_a_gemini_hold_says_it_is_temporary_and_names_no_one_to_ask() -> None:
+    text = admission_refusal_text("provider_hold_cap_reached", _NOUNS)
+    assert "at most within a day" in text and "Try again later" in text
+    assert "admin" not in text and "release" not in text
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["backend_unsupported", "provider_hold_cap_reached", "invoker_not_allowed", "client_requester"],
+)
+def test_a_denial_with_no_reason_of_its_own_keeps_its_specific_copy_mid_turn(
+    reason: AdmissionDenialReason,
+) -> None:
+    """A denial raised after the turn started reads as at admission, never the generic one."""
+    notice = render_termination_notice(
+        TerminationReason.ADMISSION_DENIED,
+        error=AdmissionDenied(reason=reason),
+        agent_name="team-020-analyst",
+        request_id="01a7c3qx2",
+    )
+    assert notice is not None
+    expected = admission_refusal_text(
+        reason, RefusalNouns.for_caller(None), agent_name="team-020-analyst"
+    )
+    assert f"{notice.title}\n\n{notice.next_step}" == expected
+    assert "couldn't accept this request" not in notice.plain_text()
+    assert notice.ref_line == "Ref 7C3QX2"
+
+
+def test_a_pinned_agent_names_its_channels_where_the_platform_links_them() -> None:
+    discord = admission_refusal_text(
+        "runs_elsewhere",
+        RefusalNouns.for_platform("discord"),
+        agent_name="analyst",
+        channels=("111", "222"),
+    )
+    assert discord == "analyst only works in <#111>, <#222>.\n\nAsk it there."
+    many = admission_refusal_text(
+        "runs_elsewhere",
+        RefusalNouns.for_platform("discord"),
+        agent_name="analyst",
+        channels=("1", "2", "3", "4"),
+    )
+    assert many.startswith("analyst only works in <#1>, <#2>, <#3> and 1 more.")
+    for platform in ("slack", "teams"):
+        unnamed = admission_refusal_text(
+            "runs_elsewhere",
+            RefusalNouns.for_platform(platform),
+            agent_name="analyst",
+            channels=("C1",),
+        )
+        assert unnamed == "analyst only works in other channels.\n\nAsk it there.", platform
+    assert (
+        admission_refusal_text(
+            "runs_elsewhere", RefusalNouns.for_platform("discord"), agent_name="analyst"
+        )
+        == "analyst only works in other channels.\n\nAsk it there."
+    ), "none left to name"
+
+
+def test_only_reasons_with_several_causes_are_worded_by_the_error() -> None:
+    """A reason with copy of its own keeps it, and its work lines, whatever is in the chain."""
+    state = TurnState(
+        content=[_tool("Bash", "pending")],
+    )
+    notice = render_termination_notice(
+        TerminationReason.UPSTREAM,
+        state=state,
+        error=AdmissionDenied(reason="backend_unsupported"),
+    )
+    assert notice is not None
+    assert notice.title == "Daimon's AI service failed on this reply."
+    held = render_termination_notice(
+        TerminationReason.ADMISSION_DENIED,
+        state=state,
+        error=AdmissionDenied(reason="provider_hold_cap_reached"),
+    )
+    assert held is not None and "at most within a day" in held.next_step
+    assert held.in_flight == ("Bash",), "the work lines stay"
+
+
+def test_a_deleted_agent_is_named_with_where_to_pick_another() -> None:
+    nouns = RefusalNouns.for_platform("discord")
+    assert resolver_miss_text(nouns, kind="agent", name="re`search") == (
+        "This channel's agent `research` can't be found.\n\n"
+        "Ask an admin to pick another in `/agent-setup`."
+    )
+    assert resolver_miss_text(nouns, kind="environment", name="py") == (
+        "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
+    )
+    notice = render_termination_notice(
+        TerminationReason.RESOLVER_MISS,
+        error=MAResolverMissError(kind="agent", tenant_id=uuid.uuid4(), daimon_tag="research"),
+        nouns=nouns,
+    )
+    assert notice is not None
+    assert notice.title == "This channel's agent `research` can't be found."

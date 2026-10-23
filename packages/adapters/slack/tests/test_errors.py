@@ -17,6 +17,7 @@ from daimon.adapters.slack.errors import (
     generate_request_id,
     render_error,
     render_error_payload,
+    setup_out_of_date_notice,
     surface_command_error,
 )
 from daimon.adapters.slack.setup_conversations import create_setup_conversation
@@ -29,6 +30,7 @@ from daimon.core.errors import (
     UserFacingError,
 )
 from daimon.core.turn.errors import SessionAgentMismatch
+from mux.errors import ProviderError
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import DBAPIError, OperationalError
@@ -51,7 +53,28 @@ REF = "_Ref 000000_"
 OUR_SIDE = "Something went wrong on our side.\n\nTry again. If it keeps happening, tell an admin."
 BUSY = "Daimon's AI service is busy.\n\nTry again in a minute."
 UNREACHABLE = "Daimon couldn't reach its AI service.\n\nTry again in a minute."
-REFUSED = "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it."
+REFUSED = (
+    "Daimon's AI service couldn't accept the request.\n\n"
+    "Try again, or start a new thread. If it keeps happening, tell the team running Daimon."
+)
+TOO_LARGE = (
+    "That was too much for Daimon's AI service to take in at once.\n\n"
+    "Shorten it, or start a new thread."
+)
+KEY_REJECTED = (
+    "The AI provider rejected Daimon's request.\n\n"
+    "The team running Daimon needs to check its key for this provider."
+)
+CREDENTIAL_GUARD = (
+    "Daimon stopped this request to keep a credential safe.\n\nTell the team running Daimon."
+)
+CREDENTIAL_MISSING = (
+    "A credential Daimon needs isn't available right now.\n\nTell the team running Daimon."
+)
+MODEL_GONE = (
+    "The model this agent uses isn't offered any more.\n\n"
+    "Switch the agent's model, or ask its owner or an admin to."
+)
 
 
 def _status_error(
@@ -85,8 +108,10 @@ class TestRenderError:
             (500, UNREACHABLE),
             (502, UNREACHABLE),
             (400, REFUSED),
-            (401, REFUSED),
+            (401, KEY_REJECTED),
+            (403, KEY_REJECTED),
             (404, REFUSED),
+            (413, TOO_LARGE),
         ],
     )
     def test_anthropic_status_errors_map_to_their_cause(self, status: int, expected: str) -> None:
@@ -221,6 +246,61 @@ class TestRenderError:
             {"type": "section", "text": {"type": "mrkdwn", "text": BUSY}},
             {"type": "context", "elements": [{"type": "mrkdwn", "text": "Ref 000000"}]},
         ]
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (ProviderError("auth", retryable=False, native_code="401"), KEY_REJECTED),
+            (ProviderError("permission", retryable=False, native_code="403"), KEY_REJECTED),
+            (ProviderError("upstream", retryable=False, native_code="413"), TOO_LARGE),
+            (
+                ProviderError("invalid_request", retryable=False, native_code="artifact_too_large"),
+                REFUSED,
+            ),
+            (
+                ProviderError("auth", retryable=False, native_error_code="http_401"),
+                KEY_REJECTED,
+            ),
+            (
+                ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
+                CREDENTIAL_GUARD,
+            ),
+            (
+                ProviderError("permission", retryable=False, native_code="gcs_secret_unavailable"),
+                CREDENTIAL_MISSING,
+            ),
+            (
+                ProviderError(
+                    "not_found",
+                    retryable=False,
+                    native_code="404",
+                    native_error_code="model_not_found",
+                ),
+                MODEL_GONE,
+            ),
+            (ProviderError("not_found", retryable=False, native_code="404"), REFUSED),
+            (ProviderError("rate_limited", retryable=True), BUSY),
+            (ProviderError("upstream", retryable=False, native_code="malformed_event"), REFUSED),
+        ],
+    )
+    def test_neutral_provider_failures_name_their_cause(
+        self, error: ProviderError, expected: str
+    ) -> None:
+        """Too large, a rejected key and a gone model each say what fixes them."""
+        result = render_error(TurnError(kind="upstream", cause=error), request_id=TEST_RID)
+        assert result == f"{expected}\n\n{REF}"
+        assert error.native_code is None or error.native_code not in result
+
+    def test_a_deleted_agent_is_named(self) -> None:
+        assert setup_out_of_date_notice(kind="agent", name="research") == (
+            "This channel's agent `research` can't be found.\n\n"
+            "Ask an admin to pick another in `/agent-setup`."
+        )
+        foreign = setup_out_of_date_notice(foreign=True, kind="agent", name="research")
+        assert foreign.endswith(
+            "Ask someone in the workspace that added Daimon to pick another in `/agent-setup`."
+        )
+        assert setup_out_of_date_notice(kind="environment", name="py") == SETUP_OUT_OF_DATE_NOTICE
 
     def test_setup_notices_use_the_approved_words(self) -> None:
         assert NOT_SET_UP_NOTICE == (

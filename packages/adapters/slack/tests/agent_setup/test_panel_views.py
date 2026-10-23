@@ -843,7 +843,7 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
     assert ACTION_CODING_TOOLS not in _action_ids(unavailable), (
         "a button that cannot produce a working connection is not offered"
     )
-    assert "Coding-tool access isn't set up yet." in _joined(unavailable), (
+    assert "Coding-tool access isn't set up on this Daimon install yet" in _joined(unavailable), (
         "the reason the button is missing is stated"
     )
 

@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 PUBLIC_URL = "https://mcp.example.com/mcp"
 ENTRY_URL = "https://mcp.example.com/mcp/"  # an agent's entry: a trailing slash is the same server
 ON = ToolSafetyPolicy(enabled=True, agent_rules=True)
-REFUSED = "this agent's tool rule denies post_update"
+REFUSED = "a tool rule set on this agent blocks post_update"
 
 Rule = Literal["allow", "ask", "deny"]
 
@@ -410,7 +410,7 @@ async def test_a_failed_rule_read_refuses_the_call(
 
 # The `daimon-mcp/*` wildcard: a default-deny for the agent's whole Daimon surface.
 
-ALL_REFUSED = "this agent's tool rules deny all Daimon tools"
+ALL_REFUSED = "a tool rule set on this agent blocks all Daimon tools"
 
 
 async def test_a_wildcard_deny_refuses_every_call_including_the_search_proxies(

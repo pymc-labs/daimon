@@ -89,11 +89,19 @@ def test_the_adapters_build_their_refusals_from_the_table() -> None:
 
 def test_nouns_keep_each_platforms_current_words() -> None:
     assert RefusalNouns.for_platform("discord") == RefusalNouns(
-        scope="server", admin="a server admin", billing="`/billing`", setup="`/agent-setup`"
+        scope="server",
+        admin="a server admin",
+        billing="`/billing`",
+        setup="`/agent-setup`",
+        channel_mention="<#{}>",
     )
     assert RefusalNouns.for_platform("slack") == RefusalNouns(
-        scope="workspace", admin="a workspace admin", billing="`/billing`", setup="`/agent-setup`"
+        scope="workspace",
+        admin="a workspace admin",
+        billing="`/billing`",
+        setup="`/agent-setup`",
     )
+    assert RefusalNouns.for_platform("teams").channel_mention is None
     assert RefusalNouns.for_platform("teams").billing == "`billing` in a 1:1 chat with me"
     assert RefusalNouns.for_platform("teams").admin == "an admin"
 
