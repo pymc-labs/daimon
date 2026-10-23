@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
@@ -382,6 +383,8 @@ def high_demand(error: Exception) -> bool:
 
 
 _QUOTA_FAILURE = "type.googleapis.com/google.rpc.QuotaFailure"
+# "limit: 0" wherever the line ends: before ", model:", a newline or the end.
+_ZERO_LIMIT = re.compile(r"limit: 0\b")
 
 
 def quota_failure(error: Exception) -> tuple[str, str | None] | None:
@@ -423,7 +426,7 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
     }
     model = next(iter(models)) if len(models) == 1 else None
     message = payload.get("message")
-    zero = isinstance(message, str) and "limit: 0," in message
+    zero = isinstance(message, str) and _ZERO_LIMIT.search(message) is not None
     return ("quota_zero" if zero else "quota_exhausted"), model
 
 

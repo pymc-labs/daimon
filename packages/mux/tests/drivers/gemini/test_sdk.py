@@ -554,9 +554,16 @@ async def test_sdk_errors_record_the_http_status_for_logs(status: int, category:
         await client.aio.aclose()
 
 
-def _quota_body(limit: int, model: str = "gemini-4-argon") -> dict[str, JsonValue]:
-    """Google's 429 shape (smoke 2026-10-23), trimmed to the fields read."""
+def _quota_body(
+    limit: int, model: str = "gemini-4-argon", *, line_end: str = ", ", also: str | None = None
+) -> dict[str, JsonValue]:
+    """Google's 429 shape (smoke 2026-10-23), trimmed to the fields read.
+
+    `line_end` ends the "limit: N" line; `also` names a second model's violation
+    (one 429 can name several, and then no single model is named on the card).
+    """
     quota = "free_tier_requests"
+    models = [model, *([also] if also else [])]
     return {
         "error": {
             "code": 429,
@@ -564,7 +571,7 @@ def _quota_body(limit: int, model: str = "gemini-4-argon") -> dict[str, JsonValu
             "message": (
                 "You exceeded your current quota.\n* Quota exceeded for metric: "
                 f"generativelanguage.googleapis.com/generate_content_{quota}, "
-                f"limit: {limit}, model: {model}\nPlease retry in 17h26m16s."
+                f"limit: {limit}{line_end}model: {model}\nPlease retry in 17h26m16s."
             ),
             "details": [
                 {
@@ -573,8 +580,9 @@ def _quota_body(limit: int, model: str = "gemini-4-argon") -> dict[str, JsonValu
                         {
                             "quotaMetric": f"generativelanguage.googleapis.com/generate_content_{quota}",
                             "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
-                            "quotaDimensions": {"location": "global", "model": model},
+                            "quotaDimensions": {"location": "global", "model": named},
                         }
+                        for named in models
                     ],
                 },
                 {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "62776s"},
@@ -588,6 +596,9 @@ def _quota_body(limit: int, model: str = "gemini-4-argon") -> dict[str, JsonValu
     [
         (_quota_body(0), "quota_zero", False, "gemini-4-argon"),
         (_quota_body(10), "quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(0, line_end="\n"), "quota_zero", False, "gemini-4-argon"),
+        (_quota_body(100), "quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(0, also="gemini-3.8-flash"), "quota_zero", False, None),
         ({"error": {"code": 429, "message": "slow down"}}, None, True, None),
     ],
 )

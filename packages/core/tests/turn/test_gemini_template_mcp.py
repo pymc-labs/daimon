@@ -123,7 +123,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path):
         account_id="*",
         configuration_grant={
             "profiles": ["gemini.inline_reuse"],
-            "models": [FLASH_PRIMARY],
+            "models": list(dict.fromkeys([FLASH_PRIMARY, revision.model])),
             "thread_modes": ["per_caller"],
             "requires": {},
         },
@@ -166,7 +166,11 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path):
         )
 
     consenting = AgentBackendService(sessions, enabled=True, capture_source=capture_bound_source)
-    quote = await consenting.preview(source, "gemini")
+    from mux.profiles import backend_selection
+
+    # The admitted revision's model: the provider default unless a test picked one.
+    picked = None if revision.model == backend_selection("gemini").model else revision.model
+    quote = await consenting.preview(source, "gemini", picked)
     confirmed = await consenting.set_backend(
         source,
         "gemini",
@@ -174,6 +178,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path):
         actor,
         accepted_drops=quote.declared_drops,
         expected_preview_digest=quote.digest,
+        model=picked,
     )
     linked = ConfigRevision.create(revision.channel, 2, revision)
     async with sessions.begin() as db:
