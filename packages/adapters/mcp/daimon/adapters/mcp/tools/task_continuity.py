@@ -27,6 +27,7 @@ from typing import Annotated, Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
@@ -332,6 +333,9 @@ async def _hand_off_task_impl(
                     account_id=auth.account_id,
                     admin=admin,
                     via_agent_key=auth.agent_id is not None,
+                    # A person's own unheld credential: a copy they own may take
+                    # this thread even before it answers anywhere.
+                    may_own=may_own(auth) and auth.hold is None,
                 ),
                 destination=handoff_destination,
                 current_responder_ma_agent_id=origin.responder_ma_agent_id,

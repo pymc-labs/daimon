@@ -55,6 +55,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import (
     Action,
+    AgentReach,
     AgentRef,
     Place,
     SessionFacts,
@@ -130,6 +131,9 @@ class HandoffCaller:
     account_id: uuid.UUID | None
     admin: AdminCaller
     via_agent_key: bool = False
+    # A person's own unheld credential (not a client): their own agents count. Only a
+    # caller that checked this sets it; the ownership itself is read here, never passed.
+    may_own: bool = False
 
 
 log = structlog.get_logger(__name__)
@@ -321,6 +325,17 @@ async def hand_over_thread(
         session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
     )
     subject = await _subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+    owned = False
+    if caller.may_own and caller.account_id is not None and not caller.via_agent_key:
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.stores import agent_owners
+
+        owner = await agent_owners.owner_of(
+            session,
+            tenant_id,
+            derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=destination.ma_agent_id),
+        )
+        owned = owner is not None and owner == caller.account_id
     reachable = await is_agent_reachable_in_tenant(
         session, tenant_id=tenant_id, agent_name=destination.name, default=default
     )
@@ -340,6 +355,7 @@ async def hand_over_thread(
         # A DM scope runs in no channel, so it is outside every pin.
         place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
         answers_here=answers_here,
+        reach=AgentReach(owned=owned),
         recorded_seal_ids=snapshot_seals
         | frozenset(seal for item in recorded for seal in item.facts.seal_ids),
     )
@@ -351,6 +367,7 @@ async def hand_over_thread(
         origin_responder_ma_agent_id=current_responder_ma_agent_id,
         access=access,
         caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
+        caller_owns=owned,
     )
     if isinstance(decision, HandoffRefused):
         raise ThreadHandoffRefused(decision)
