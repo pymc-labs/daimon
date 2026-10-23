@@ -212,7 +212,10 @@ def gateway_message(clock: Clock) -> tuple[discord.Client, discord.Message, Offl
         (
             "balance_depleted",
             "turn.skipped.over_balance",
-            admission_refusal_text("balance_depleted", DISCORD_REFUSAL_NOUNS),
+            # The fixture tenant never had credit.
+            admission_refusal_text(
+                "balance_depleted", DISCORD_REFUSAL_NOUNS, cause="no_credit_yet"
+            ),
         ),
         # Main a5097ab195a3d94d999f606e216b7d25120abaec: approved monthly-limit notice (A/O/G).
         (
