@@ -267,3 +267,38 @@ async def test_a_source_change_during_resolve_is_still_refused(native_worker, mo
         call.method == "POST" and call.path in ("/v1/agents", "/v1/sessions")
         for call in trace.requests
     )
+
+
+async def test_the_resolve_transaction_never_takes_the_tenant_fleet_lock(
+    native_worker, monkeypatch
+):
+    """#1426 review: re-running the funding check inside the resolve transaction held the
+    tenant fleet lock until that transaction committed, and a refusal there rolled back
+    the overrun evidence the check wrote. The resolve transaction re-verifies only the
+    policy and the source intent; funding is checked outside it."""
+    import traceback
+
+    from daimon.core import headless_runner
+    from daimon.core.stores import fleet as fleet_store
+
+    request, root, claimed, _, _ = native_worker
+    real = fleet_store.lock_budget
+    inside_resolve: list[bool] = []
+
+    async def watched(*args, **kwargs):
+        inside_resolve.append(
+            any(frame.name == "resolve_turn_backend" for frame in traceback.extract_stack())
+        )
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_store, "lock_budget", watched)
+    result = await headless_runner.run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    assert inside_resolve and not any(inside_resolve)

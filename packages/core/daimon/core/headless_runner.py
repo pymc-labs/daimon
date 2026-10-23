@@ -1029,6 +1029,19 @@ async def run_worker(
                 markup=deps.markup,
             )
 
+            async def verify_source(db: AsyncSession, source: BackendAgent):
+                """The current policy, if the source still resolves to the admitted intent."""
+                policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
+                if (
+                    normalize(policy=policy, now=request.now(), captured_source=source).digest
+                    != worker.spec_digest
+                ):
+                    raise FleetConflict(
+                        "worker source intent changed since its admission",
+                        reason="source_intent_changed",
+                    )
+                return policy
+
             async def recapture(
                 db: AsyncSession | None = None, *, captured: BackendAgent | None = None
             ):
@@ -1040,24 +1053,14 @@ async def run_worker(
                 async with (
                     _setup_transaction(deps.sessionmaker) if db is None else _bounded_locks(db)
                 ) as db:
-                    policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
-                    if (
-                        normalize(policy=policy, now=request.now(), captured_source=source).digest
-                        != worker.spec_digest
-                    ):
-                        raise FleetConflict(
-                            "worker source intent changed since its admission",
-                            reason="source_intent_changed",
-                        )
+                    policy = await verify_source(db, source)
                     return await require_admission(db, policy=policy, binding=binding)
 
-            async def guard(
-                db: AsyncSession | None = None, *, captured: BackendAgent | None = None
-            ) -> None:
+            async def guard(*, captured: BackendAgent | None = None) -> None:
                 remaining_s(bound, now=request.now(), refuse_expired=True)
                 if cancel.is_set():
                     raise asyncio.CancelledError
-                fresh = await recapture(db, captured=captured)
+                fresh = await recapture(captured=captured)
                 if not fresh.admitted:
                     raise FleetConflict(
                         "worker financial admission refused", reason="financial_admission_refused"
@@ -1065,6 +1068,15 @@ async def run_worker(
                 remaining_s(bound, now=request.now(), refuse_expired=True)
                 if cancel.is_set():
                     raise asyncio.CancelledError
+
+            async def origin_check(db: AsyncSession, source: BackendAgent) -> None:
+                # Inside the resolve transaction: only the policy and the source intent.
+                # Funding (and with it the tenant fleet lock) stays out of this
+                # transaction; the pre-check, before_native and the input claim check it.
+                remaining_s(bound, now=request.now(), refuse_expired=True)
+                if cancel.is_set():
+                    raise asyncio.CancelledError
+                await verify_source(db, source)
 
             async def orphan(result: PreparedTurn) -> None:
                 if result.ma_session_id in archived:
@@ -1207,9 +1219,9 @@ async def run_worker(
                     async with _worker_stage(worker, "resolve", setup_at=setup_at):
                         # The source is read over HTTP once, before the resolve transaction:
                         # that transaction holds a connection (and the shared policy fence)
-                        # from its first statement, so its origin checks re-verify this
-                        # capture on the same session instead of reading again and opening
-                        # a second pooled session for the fleet lock (SMOKE d75dd687).
+                        # from its first statement, so its origin checks re-verify the policy
+                        # and this capture's intent on the same session, without another
+                        # read, a second pooled session or the fleet lock (SMOKE d75dd687).
                         resolve_source = await capture_preparation_source(source_request)
                         await guard(captured=resolve_source)
                         async with deps.sessionmaker.begin() as db:
@@ -1220,8 +1232,8 @@ async def run_worker(
                                 enabled=True,
                                 retained_revision=revision.local,
                                 worker=resolved,
-                                validate_origin=lambda selection, origin, retained: guard(
-                                    db, captured=resolve_source
+                                validate_origin=lambda selection, origin, retained: origin_check(
+                                    db, resolve_source
                                 ),
                             )
                     if retained != revision or origin != "agent":
