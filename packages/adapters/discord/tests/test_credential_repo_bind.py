@@ -204,7 +204,7 @@ async def test_defaults_managed_target_member_refuses_with_shared_agent_message(
     assert refused is True, "a member must not bind a repo to a defaults-managed agent"
     assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
     assert _sent_message(interaction) == (
-        "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+        "Connecting a repo to this agent needs an admin.\n\n"
         "Ask me to draft a request for an admin, or to make you a new agent."
     ), "section 4's words, the same on every platform"
 
