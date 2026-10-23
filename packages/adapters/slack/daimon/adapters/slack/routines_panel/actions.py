@@ -43,9 +43,16 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.routines import can_manage_routine, routine_label
+from daimon.core.routines import (
+    GONE_AGENT_NOTICE,
+    can_manage_routine,
+    channel_agent,
+    may_schedule_agent,
+    routine_label,
+)
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
+from daimon.core.turn.notices import RefusalNouns
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -329,22 +336,52 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             )
 
         elif action_value == "create":
-            # Admin gate at click time. Refused → ephemeral.
+            # The rule asking in chat applies: a member schedules the agent
+            # this channel answers with, an admin any agent. Re-checked on submit.
             is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
-            if not is_admin:
-                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel_id or user_id,
-                    user=user_id,
-                    text=":x: Only a workspace admin can create routines.",
-                )
-                return
-
             agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
             agent_names: list[str] = []
             for agent in agents:
                 name = agent.metadata.get(MA_METADATA_KEY_NAME)
                 if name is not None:
                     agent_names.append(name)
+            known = list(agent_names)
+            here: str | None = None
+            if not is_admin:
+                async with runtime.sessionmaker() as session:
+                    here = await channel_agent(
+                        session,
+                        tenant_id=tenant_id,
+                        channel_id=channel_id or None,
+                        default=runtime.deployment_default,
+                    )
+                agent_names = [
+                    name
+                    for name in agent_names
+                    if may_schedule_agent(name, is_admin=False, answers_here=here)
+                ]
+            if not agent_names and here is not None and here not in known:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=GONE_AGENT_NOTICE.format(agent=here),
+                )
+                return
+            if not agent_names:
+                nouns = RefusalNouns.for_platform("slack")
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id,
+                    user=user_id,
+                    text=(
+                        "No agent answers here, so there's none you can schedule from this "
+                        "channel.\n\nOpen this in a channel with an agent, or ask a workspace "
+                        "admin."
+                        if not is_admin
+                        else "There are no agents to schedule yet.\n\n"
+                        f"To add one, {nouns.verb} {nouns.setup}."
+                    ),
+                )
+                return
 
             await client.views_push(  # pyright: ignore[reportUnknownMemberType]
                 trigger_id=payload.get("trigger_id") or "",

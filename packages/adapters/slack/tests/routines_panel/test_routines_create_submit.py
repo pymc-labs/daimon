@@ -30,6 +30,7 @@ from daimon.adapters.slack.routines_panel.submit import (
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
@@ -206,9 +207,12 @@ def _override_users_info_admin(mock: Any) -> None:
     )
 
 
-def _build_runtime(handler: Any, db_session_factory: Any) -> SlackRuntime:
+def _build_runtime(
+    handler: Any, db_session_factory: Any, *, channel_agent: str | None = None
+) -> SlackRuntime:
     settings: MagicMock = MagicMock()
     return SlackRuntime(
+        deployment_default=DeploymentDefault(agent_name=channel_agent),
         settings=settings,
         anthropic=build_fake_anthropic(handler),
         sessionmaker=db_session_factory,
@@ -268,6 +272,9 @@ async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
     texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
     assert any("✅ Routine created for" in t for t in texts)
     assert any("every day at 18:00 UTC" in t for t in texts), "schedule is shown in words"
+    assert any("aren't posted anywhere" in t and "View last output" in t for t in texts), (
+        "a panel routine says it is record-only and how to read it"
+    )
     assert not any("0 18 * * *" in t for t in texts), "the raw cron is not echoed"
 
 
@@ -280,7 +287,7 @@ async def test_run_routines_create_when_bad_cron_creates_no_row_and_posts_error(
     names the rejected expression.
 
     The assertion deliberately does not settle for the bare ``:x:`` prefix: the
-    non-admin refusal in ``_refuse_non_admin`` also posts ``:x:`` and also
+    agent refusal in ``_refuse_agent`` also posts ``:x:`` and also
     writes no row, so ``:x:`` alone proves nothing about cron validation.
     """
     _override_users_info_admin(fake_slack_web_client.mock)
@@ -316,3 +323,91 @@ async def test_run_routines_create_when_bad_cron_creates_no_row_and_posts_error(
     assert any(
         "That schedule or time zone isn't valid.\n\nCheck both and try again." in t for t in texts
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_agent", [_AGENT_NAME, "elsewhere"])
+async def test_run_routines_create_by_a_member_follows_the_chat_rule(
+    fake_slack_web_client: Any,
+    db_session_factory: Any,
+    channel_agent: str,
+) -> None:
+    """As in chat, a member may schedule the agent this channel answers with and
+    no other; only an admin may schedule any agent."""
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
+    async with db_session_factory() as session:
+        await make_tenant(session, platform="slack", workspace_id=_TEAM_ID, id=tenant_id)
+        await session.commit()
+    runtime = _build_runtime(
+        _agent_handler(str(tenant_id)), db_session_factory, channel_agent=channel_agent
+    )
+
+    await run_routines_create_submission(
+        runtime,
+        fake_slack_web_client.client,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        extra={
+            "agent_name": _AGENT_NAME,
+            "cron_expr": "0 18 * * *",
+            "timezone": "UTC",
+            "trigger_message": "daily standup",
+        },
+    )
+
+    async with db_session_factory() as session:
+        rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
+    ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
+    texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
+    if channel_agent == _AGENT_NAME:
+        assert [row.created_by_user_id for row in rows] == [_USER_ID]
+        assert any("✅ Routine created for" in t for t in texts)
+    else:
+        assert rows == [], "another channel's agent is an admin's call"
+        assert texts == [
+            f":x: {_AGENT_NAME} doesn't answer in this channel, so only a workspace admin "
+            "can schedule it here."
+        ]
+
+
+@pytest.mark.asyncio
+async def test_run_routines_create_refuses_a_routine_no_fire_would_run(
+    fake_slack_web_client: Any,
+    db_session_factory: Any,
+) -> None:
+    """Chat's create_routine runs inside an admitted turn; the panel runs the same
+    checks, so it never confirms a routine that every fire would refuse."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
+    async with db_session_factory() as session:
+        await make_tenant(session, platform="slack", workspace_id=_TEAM_ID, id=tenant_id)
+        await set_access_policy(
+            session, tenant_id=tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("U_OTHER",))
+        )
+        await session.commit()
+    runtime = _build_runtime(
+        _agent_handler(str(tenant_id)), db_session_factory, channel_agent=_AGENT_NAME
+    )
+
+    await run_routines_create_submission(
+        runtime,
+        fake_slack_web_client.client,
+        team_id=_TEAM_ID,
+        user_id=_USER_ID,
+        channel_id=_CHANNEL_ID,
+        extra={
+            "agent_name": _AGENT_NAME,
+            "cron_expr": "0 18 * * *",
+            "timezone": "UTC",
+            "trigger_message": "daily standup",
+        },
+    )
+
+    async with db_session_factory() as session:
+        assert await list_routines_for_tenant(session, tenant_id=tenant_id) == []
+    ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
+    texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
+    assert texts == ["Daimon can't accept your request here.\n\nAsk an admin to add you."]
