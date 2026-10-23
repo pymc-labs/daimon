@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, TypedDict, cast
@@ -817,6 +817,18 @@ async def _replace_dead_session_locked(
     )
 
 
+@contextlib.contextmanager
+def _create_deadline(deadline: datetime) -> Iterator[None]:
+    """A rate-limited Gemini create retries only while this turn can still answer."""
+    from mux.drivers.gemini import CREATE_DEADLINE
+
+    token = CREATE_DEADLINE.set(deadline)
+    try:
+        yield
+    finally:
+        CREATE_DEADLINE.reset(token)
+
+
 async def run_prepared_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -859,8 +871,15 @@ async def run_prepared_turn(
         if prepared.admission.backend_footer_profile is not None and deps.backend_selection_enabled
         else None
     )
+    # One effective deadline for the whole turn: the ceiling and a rate-limited
+    # create's wait (`_create_deadline`) read the same instant.
+    deadline = deadline if deadline is not None else turn_deadline(now=now())
     try:
-        with observation.activate(), deps.running_turns.track():
+        with (
+            observation.activate(),
+            deps.running_turns.track(),
+            _create_deadline(deadline),
+        ):
             result = await run_prepared_turn_impl(
                 deps,
                 prepared,

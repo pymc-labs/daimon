@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
@@ -125,3 +126,108 @@ async def test_a_skipped_mcp_representation_is_logged_without_content(
     else:
         assert entry["reason"] is None
         assert "secret-content" not in repr(entry)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("retry_delay", ["5s", "900s"])
+async def test_a_free_tier_rate_limit_is_waited_out_within_the_turn(
+    template, monkeypatch: pytest.MonkeyPatch, retry_delay: str
+) -> None:
+    """Free-tier Flash (no paid key): Google's 429 with a refilling quota is
+    retried inside the turn's deadline and answered; a delay past the deadline
+    ends the turn at once with the free-quota words."""
+    import httpx
+    from daimon.core.turn.notices import provider_quota_copy
+    from mux.drivers.gemini import flash
+
+    request, _quote, _native, calls, _posts = template
+    monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    monkeypatch.setenv(DEFAULT_KEY_ENV[INLINE_REUSE.provider], "offline-code-default")
+    slept: list[float] = []
+
+    async def no_wait(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(flash, "_sleep", no_wait)
+    original = httpx.MockTransport.handle_async_request
+    limited = {"left": 1}
+
+    async def free_tier(self, call):
+        if call.method == "POST" and "interactions" in call.url.path and limited["left"]:
+            limited["left"] -= 1
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "code": 429,
+                        "status": "RESOURCE_EXHAUSTED",
+                        "message": "Quota exceeded, limit: 15, model: gemini-3.8-flash",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                                "violations": [
+                                    {
+                                        "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+                                        "quotaDimensions": {"model": "gemini-3.8-flash"},
+                                    }
+                                ],
+                            },
+                            {
+                                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                "retryDelay": retry_delay,
+                            },
+                        ],
+                    }
+                },
+            )
+        return await original(self, call)
+
+    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", free_tier)
+    assert flash.CREATE_DEADLINE.get() is None
+    scoped, _lookup = scope_channel_runtimes(request)
+    await read_preparation_counterpart(scoped)
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=True,
+    )
+
+    async def no_recovery() -> None:
+        pytest.fail("a rate-limited create changed its admitted source/session")
+
+    outcome = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        thread_id=request.thread_id,
+        external_user_id=request.external_user_id,
+        user_message="hi copy",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=no_recovery,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        operation_key=f"free-tier:{retry_delay}",
+        # Two minutes left: Google's 5 s fits before it, its 15 min does not.
+        deadline=datetime.now(UTC) + timedelta(minutes=2),
+    )
+    assert flash.CREATE_DEADLINE.get() is None, "the turn's deadline ends with the turn"
+    # The 429 is answered above, before the fixture's provider records a call.
+    assert limited["left"] == 0, "Google rate-limited the first create"
+    created = [c for c in calls if c.method == "POST" and "interactions" in c.url.path]
+    if retry_delay == "5s":
+        assert outcome.state.error is None
+        assert extract_final_response(outcome.state.content) == "answer"
+        assert slept == [5.0] and len(created) == 1, "one retry, then the answer"
+    else:
+        assert outcome.state.error is not None
+        assert slept == [] and created == [], "no retry past the deadline"
+        assert provider_quota_copy(outcome.state.error) == (
+            "Google's free quota is used up.",
+            "Try again in 15 min.",
+        )

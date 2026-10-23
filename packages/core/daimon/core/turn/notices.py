@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -500,7 +501,7 @@ def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
     """
     for cause in _error_chain(error):
         if isinstance(cause, ProviderError) and cause.category == "rate_limited":
-            if cause.native_code not in ("quota_zero", "quota_exhausted"):
+            if cause.native_code not in ("quota_zero", "free_quota_exhausted", "quota_exhausted"):
                 continue
             model = _model_words(cause.native_param)
             if cause.native_code == "quota_zero":
@@ -508,11 +509,24 @@ def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
                     f"{_capitalised(model)} isn't available on this server's Google plan.",
                     "Pick another model or ask an admin to upgrade it.",
                 )
+            if cause.native_code == "free_quota_exhausted":
+                return ("Google's free quota is used up.", f"Try again {_retry_words(cause)}.")
             return (
                 f"Google is rate-limiting {model} right now.",
-                "Try again in a minute.",
+                f"Try again {_retry_words(cause)}.",
             )
     return None
+
+
+def _retry_words(error: ProviderError) -> str:
+    """ "in 3 min" from the provider's retry delay, rounded up; "about N hours" past two."""
+    delay = error.retry_after_s
+    if delay is None or delay <= 0:
+        return "in a few minutes"
+    minutes = math.ceil(delay / 60)
+    if minutes <= 120:
+        return f"in {minutes} min"
+    return f"in about {round(minutes / 60)} hours"
 
 
 def _model_words(model_id: str | None) -> str:

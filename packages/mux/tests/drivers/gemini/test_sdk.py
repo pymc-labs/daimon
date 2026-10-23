@@ -555,7 +555,12 @@ async def test_sdk_errors_record_the_http_status_for_logs(status: int, category:
 
 
 def _quota_body(
-    limit: int, model: str = "gemini-4-argon", *, line_end: str = ", ", also: str | None = None
+    limit: int,
+    model: str = "gemini-4-argon",
+    *,
+    line_end: str = ", ",
+    also: str | None = None,
+    tier: str = "-FreeTier",
 ) -> dict[str, JsonValue]:
     """Google's 429 shape (smoke 2026-10-23), trimmed to the fields read.
 
@@ -579,7 +584,7 @@ def _quota_body(
                     "violations": [
                         {
                             "quotaMetric": f"generativelanguage.googleapis.com/generate_content_{quota}",
-                            "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                            "quotaId": f"GenerateRequestsPerDayPerProjectPerModel{tier}",
                             "quotaDimensions": {"location": "global", "model": named},
                         }
                         for named in models
@@ -595,9 +600,11 @@ def _quota_body(
     ("body", "native_code", "retryable", "model"),
     [
         (_quota_body(0), "quota_zero", False, "gemini-4-argon"),
-        (_quota_body(10), "quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(10), "free_quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(10, tier=""), "quota_exhausted", True, "gemini-4-argon"),
         (_quota_body(0, line_end="\n"), "quota_zero", False, "gemini-4-argon"),
-        (_quota_body(100), "quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(0, line_end=".5, "), "free_quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(100), "free_quota_exhausted", True, "gemini-4-argon"),
         (_quota_body(0, also="gemini-3.8-flash"), "quota_zero", False, None),
         ({"error": {"code": 429, "message": "slow down"}}, None, True, None),
     ],

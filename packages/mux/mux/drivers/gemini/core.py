@@ -58,6 +58,7 @@ from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
+    CreateNeverSent,
     Object,
     OwnedStream,
     Transport,
@@ -1070,6 +1071,14 @@ class GeminiEvents(Base):
             records.sends[(*owner(scope), key)] = scope.principal_id, digest, unknown
         try:
             raw = await self._transport.create(request)
+        except CreateNeverSent:
+            # Stopped while waiting out a rate limit: Google created nothing, so
+            # the send failed rather than leaving its delivery unknown (which
+            # would refuse this thread's next send as unreconciled).
+            await self._state_store.advance_operation(scope, key, "failed", now=now(), fence=None)
+            async with self._storage.transaction(after_dispatch=True) as records:
+                self._record(records, scope, session).unknown_delivery = False
+            raise
         except ProviderError as exc:
             if exc.category in ("transient_network", "upstream", "overloaded"):
                 await self._state_store.advance_operation(

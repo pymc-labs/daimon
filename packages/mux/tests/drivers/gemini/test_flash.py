@@ -283,6 +283,8 @@ def http(category: str, status: int, *, code: str | None = None) -> ProviderErro
         (http("permission", 403), 403),
         (http("not_found", 404), 404),
         (http("invalid_request", 422), 422),
+        # Rate-limited (no deadline here, so not retried): Google created nothing.
+        (http("rate_limited", 429), 429),
     ],
 )
 async def test_definite_4xx_on_create_is_a_refusal_that_never_falls_back(
@@ -306,7 +308,6 @@ async def test_definite_4xx_on_create_is_a_refusal_that_never_falls_back(
     [
         http("upstream", 500),
         http("upstream", 408),
-        http("rate_limited", 429),
         http("conflict", 409),
         http("overloaded", 500, code="high_demand"),
         ProviderError("transient_network", retryable=True),
@@ -408,13 +409,11 @@ async def test_a_failed_release_never_breaks_the_call() -> None:
 
 @pytest.mark.parametrize(
     ("native_code", "rejected"),
-    [("quota_zero", 429), ("quota_exhausted", 429), (None, None)],
+    [("quota_zero", 429), ("quota_exhausted", 429), ("free_quota_exhausted", 429), (None, 429)],
 )
-def test_a_429_naming_its_quota_is_a_definite_rejection(
-    native_code: str | None, rejected: int | None
-) -> None:
-    """Google refused a QuotaFailure before any interaction: its hold frees at once.
-    A bare 429 may still have been accepted, so it stays unknown."""
+def test_a_429_is_a_definite_rejection(native_code: str | None, rejected: int | None) -> None:
+    """Google refused a rate-limited create before any interaction, with or
+    without its QuotaFailure: its hold frees at once."""
     from mux.drivers.gemini.flash import definite_rejection
 
     error = ProviderError(
@@ -561,3 +560,164 @@ async def test_a_failed_receipt_never_replaces_the_cancel_in_flight() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def _rate_limited(
+    *, code: str | None = "quota_exhausted", retry_after_s: float | None = None
+) -> ProviderError:
+    return ProviderError(
+        "rate_limited",
+        retryable=code != "quota_zero",
+        native_code=code,
+        native_error_code="http_429",
+        native_param=FLASH_PRIMARY if code else None,
+        retry_after_s=retry_after_s,
+    )
+
+
+@pytest.fixture
+def turn_deadline(monkeypatch: pytest.MonkeyPatch):
+    """A turn with `seconds` left; sleeps are recorded, never slept.
+
+    Set from the test body: each async test runs in its own context copy, so
+    the deadline never outlives it.
+    """
+    from datetime import timedelta
+
+    from mux.drivers.gemini import flash
+
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(flash, "_sleep", sleep)
+
+    def start(seconds: float) -> list[float]:
+        flash.CREATE_DEADLINE.set(datetime.now(UTC) + timedelta(seconds=seconds))
+        return slept
+
+    return start
+
+
+@pytest.mark.parametrize("retry_after_s", [None, 7.0])
+async def test_a_rate_limited_create_retries_within_the_deadline_on_one_hold(
+    turn_deadline, retry_after_s: float | None
+) -> None:
+    """Free-tier Flash: a 429 that refills is waited out (Google's delay when it
+    gives one, else backoff), then answered: one hold, two POSTs, one answer."""
+    slept = turn_deadline(300)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend(
+        [_rate_limited(retry_after_s=retry_after_s), {"id": "answered", "status": "completed"}]
+    )
+    reply = await FlashTransport(source, accounting).create(request())
+    assert reply["id"] == "answered"
+    assert len(source.requests) == 2
+    assert len(accounting.held) == 1, "the retry reuses the attempt's one hold"
+    assert [r.outcome for r in accounting.receipts] == ["accepted"]
+    assert len(slept) == 1
+    if retry_after_s is not None:
+        assert slept == [retry_after_s]
+    else:
+        assert 1.6 <= slept[0] <= 2.4
+
+
+async def test_a_retry_delay_past_the_deadline_refuses_at_once_in_plain_words(
+    turn_deadline,
+) -> None:
+    slept = turn_deadline(60)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(_rate_limited(retry_after_s=600.0))
+    with pytest.raises(ProviderError) as exc:
+        await FlashTransport(source, accounting).create(request())
+    assert (exc.value.native_code, exc.value.retry_after_s) == ("quota_exhausted", 600.0)
+    assert len(source.requests) == 1 and slept == []
+    assert [(r.outcome, r.http_status) for r in accounting.receipts] == [("refused", 429)]
+
+
+async def test_a_quota_of_zero_is_never_retried(turn_deadline) -> None:
+    slept = turn_deadline(300)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([_rate_limited(code="quota_zero"), {"id": "x", "status": "completed"}])
+    with pytest.raises(ProviderError) as exc:
+        await FlashTransport(source, accounting).create(request())
+    assert exc.value.native_code == "quota_zero"
+    assert len(source.requests) == 1 and slept == []
+
+
+async def test_retries_run_out_as_a_spent_quota(turn_deadline) -> None:
+    slept = turn_deadline(3600)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([_rate_limited(code=None) for _ in range(10)])
+    with pytest.raises(ProviderError) as exc:
+        await FlashTransport(source, accounting).create(request())
+    from mux.drivers.gemini.flash import CREATE_RETRIES
+
+    assert exc.value.native_code == "quota_exhausted"
+    assert len(source.requests) == CREATE_RETRIES + 1 and len(slept) == CREATE_RETRIES
+    assert len(accounting.held) == 1
+    assert [(r.outcome, r.http_status) for r in accounting.receipts] == [("refused", 429)]
+
+
+async def test_a_free_tier_limit_keeps_its_code_when_retries_end(turn_deadline) -> None:
+    """A FreeTier quota still says so on the card once the turn gives up."""
+    turn_deadline(60)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(_rate_limited(code="free_quota_exhausted", retry_after_s=600.0))
+    with pytest.raises(ProviderError) as exc:
+        await FlashTransport(source, accounting).create(request())
+    assert exc.value.native_code == "free_quota_exhausted"
+    assert [(r.outcome, r.http_status) for r in accounting.receipts] == [("refused", 429)]
+
+
+async def test_with_no_deadline_a_rate_limit_is_not_retried() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([_rate_limited(), {"id": "x", "status": "completed"}])
+    with pytest.raises(ProviderError) as exc:
+        await FlashTransport(source, accounting).create(request())
+    assert exc.value.native_code == "quota_exhausted" and len(source.requests) == 1
+
+
+async def test_a_bare_429_is_retried_within_the_deadline(turn_deadline) -> None:
+    slept = turn_deadline(300)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([_rate_limited(code=None), {"id": "ok", "status": "completed"}])
+    assert (await FlashTransport(source, accounting).create(request()))["id"] == "ok"
+    assert len(source.requests) == 2 and len(slept) == 1 and len(accounting.held) == 1
+
+
+async def test_backoff_is_capped_by_the_time_left(turn_deadline) -> None:
+    """No delay from Google and little time left: wait what's left, not give up."""
+    from mux.drivers.gemini.flash import CREATE_DEADLINE_MARGIN_S
+
+    slept = turn_deadline(CREATE_DEADLINE_MARGIN_S + 1.0)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([_rate_limited(code=None), {"id": "ok", "status": "completed"}])
+    assert (await FlashTransport(source, accounting).create(request()))["id"] == "ok"
+    assert len(slept) == 1 and 0 < slept[0] <= 1.0
+
+
+async def test_a_stop_while_waiting_out_a_rate_limit_frees_the_hold(
+    turn_deadline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only 429s, nothing created: the stop is still a cancel, but the attempt is
+    `refused` and never sent, so its hold is released at once."""
+    import asyncio
+
+    from mux.drivers.gemini import flash
+    from mux.drivers.gemini.transport import CreateNeverSent
+
+    turn_deadline(300)
+
+    async def stopped(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(flash, "_sleep", stopped)
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(_rate_limited())
+    with pytest.raises(CreateNeverSent):
+        await FlashTransport(source, accounting).create(request())
+    assert [(r.outcome, r.http_status, r.sent) for r in accounting.receipts] == [
+        ("refused", 429, False)
+    ]
