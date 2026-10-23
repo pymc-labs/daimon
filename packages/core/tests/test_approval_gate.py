@@ -40,7 +40,10 @@ async def test_off_allows_third_party_write_without_card_and_logs_setter(scope: 
             ON,
             requester_platform_user_id="requester",
             confirm=card,
-            approval_gate=ApprovalGate("off", scope, "admin-1", tenant_id),
+            approval_gate_for=AsyncMock(
+                return_value=ApprovalGate("off", scope, "admin-1", tenant_id)
+            ),
+            server_urls={"third-party": "https://third.example/mcp"},
         )(WRITE)
     assert result.allow
     card.assert_not_awaited()
@@ -60,7 +63,8 @@ async def test_every_fixed_daimon_gate_still_asks(tool: str) -> None:
         confirm=card,
         trusted_servers=TRUSTED,
         confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )(
         ToolCall(
             tool_use_id="t1",
@@ -93,7 +97,8 @@ async def test_admin_prompt_still_asks() -> None:
         confirm=card,
         trusted_servers=TRUSTED,
         confirmed_tools=frozenset({"request_agent_backend_switch"}),
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )(
         ToolCall(
             tool_use_id="t1",
@@ -120,7 +125,8 @@ async def test_only_off_bypasses_card(value: Approvals) -> None:
             ON,
             requester_platform_user_id="requester",
             confirm=card,
-            approval_gate=ApprovalGate(value, "server", "admin"),
+            approval_gate_for=AsyncMock(return_value=ApprovalGate(value, "server", "admin")),
+            server_urls={"third-party": "https://third.example/mcp"},
         )(WRITE)
     ).allow
     card.assert_awaited_once()
@@ -133,7 +139,8 @@ async def test_operator_disabled_ignores_stored_off() -> None:
             ToolSafetyPolicy(enabled=True),
             requester_platform_user_id="requester",
             confirm=card,
-            approval_gate=OFF,
+            approval_gate_for=AsyncMock(return_value=OFF),
+            server_urls={"third-party": "https://third.example/mcp"},
         )(WRITE)
     ).allow
     card.assert_awaited_once()
@@ -148,7 +155,8 @@ async def test_agent_rule_never_loosened(rule: str) -> None:
         requester_platform_user_id="requester",
         confirm=card,
         rules_for=lookup,
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )(WRITE)
     assert not result.allow
     assert card.await_count == (1 if rule == "ask" else 0)
@@ -160,7 +168,8 @@ async def test_operator_deny_still_denies_without_a_card() -> None:
         ON.model_copy(update={"denied": (WRITE.key,)}),
         requester_platform_user_id="requester",
         confirm=card,
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )(WRITE)
     assert not result.allow
     card.assert_not_awaited()
@@ -173,7 +182,8 @@ async def test_failed_rule_lookup_still_asks() -> None:
         requester_platform_user_id="requester",
         confirm=card,
         rules_for=AsyncMock(side_effect=RuntimeError("unavailable")),
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )(WRITE)
     assert not result.allow
     card.assert_awaited_once()
@@ -186,7 +196,8 @@ async def test_ambiguous_server_does_not_bypass(server: str | None) -> None:
         ON,
         requester_platform_user_id="requester",
         confirm=card,
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )(WRITE.model_copy(update={"server_name": server}))
     if server is not None:
         assert not result.allow
@@ -204,7 +215,8 @@ async def test_off_without_provenance_fails_closed() -> None:
             ON,
             requester_platform_user_id="requester",
             confirm=card,
-            approval_gate=ApprovalGate("off", "server", None),
+            approval_gate_for=AsyncMock(return_value=ApprovalGate("off", "server", None)),
+            server_urls={"third-party": "https://third.example/mcp"},
         )(WRITE)
     ).allow
     card.assert_awaited_once()
@@ -218,7 +230,8 @@ async def test_unattended_still_follows_unattended_writes(allow: bool) -> None:
         requester_platform_user_id="requester",
         attended=False,
         confirm=card,
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )
     assert isinstance(posture, PolicyApproval)
     assert (await posture.decide(WRITE)).allow is allow
@@ -329,7 +342,8 @@ async def test_proxy_cannot_use_gate_override_to_bypass_fixed_tools(tool: str) -
         confirm=card,
         trusted_servers=TRUSTED,
         confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
-        approval_gate=OFF,
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls={"third-party": "https://third.example/mcp"},
     )(
         ToolCall(
             tool_use_id="t1",
@@ -358,3 +372,124 @@ def test_channel_access_edit_keeps_approval_choice() -> None:
     )
     assert changed.channel_rules["C1:1.2"].approvals == "on"
     assert changed.channel_rules["C1:1.2"].readers == "inside"
+
+
+@pytest.mark.parametrize("read_failure", [False, True])
+async def test_missing_or_unreadable_live_gate_never_uses_cached_off(read_failure: bool) -> None:
+    card = AsyncMock(return_value="denied")
+    lookup = AsyncMock(side_effect=RuntimeError("database unavailable")) if read_failure else None
+    result = await interactive_decider(
+        ON,
+        requester_platform_user_id="requester",
+        confirm=card,
+        approval_gate_for=lookup,
+        server_urls={"third-party": "https://third.example/mcp"},
+    )(WRITE)
+    assert not result.allow
+    card.assert_awaited_once()
+
+
+@pytest.mark.parametrize("own_endpoint", [False, True])
+@pytest.mark.parametrize(
+    "tool", ["microsoft_write", "publish_report", "request_agent_backend_switch"]
+)
+async def test_endpoint_alias_keeps_fixed_gates_but_name_collisions_are_third_party(
+    own_endpoint: bool,
+    tool: str,
+) -> None:
+    from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
+    from daimon.core.session_snapshot import session_tools
+    from daimon.core.tool_safety import trusted_servers_for
+    from daimon.testing.ma_models import ma_agent
+
+    public_url = "https://daimon.example/mcp"
+    endpoint = public_url + "?alias=office" if own_endpoint else "https://office.example/mcp"
+    bindings = {"office": endpoint}
+    assert (
+        bool(get_reserved_mcp_rejection(server_name="office", url=endpoint, public_url=public_url))
+        is own_endpoint
+    )
+    agent = ma_agent(
+        id="ag_1",
+        mcp_servers=[{"name": "office", "url": endpoint, "type": "url"}],
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "office",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+    )
+    gated = session_tools(
+        agent,
+        frozenset(),
+        tool_safety=ON,
+        public_url=public_url,
+        asks_before_publishing=True,
+        confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
+    )
+    toolset = gated[0].model_dump(mode="json")
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    if own_endpoint:
+        assert next(c for c in toolset["configs"] if c["name"] == tool)["permission_policy"] == {
+            "type": "always_ask"
+        }
+    else:
+        assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    card = AsyncMock(return_value="denied")
+    result = await interactive_decider(
+        ON,
+        requester_platform_user_id="requester",
+        confirm=card,
+        trusted_servers=trusted_servers_for(public_url, bindings),
+        confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls=bindings,
+    )(
+        ToolCall(
+            tool_use_id="t1",
+            server_name="office",
+            tool_name=tool,
+            input={
+                "method": "POST",
+                "preview_digest": "a" * 64,
+                "agent_name": "agent",
+                "target_backend": "anthropic",
+                "expected_revision": 1,
+            },
+        )
+    )
+    assert result.allow is not own_endpoint
+    assert card.await_count == int(own_endpoint)
+
+    if own_endpoint and tool == "request_agent_backend_switch":
+        assert card.await_args.args[0].admin is True
+
+
+async def test_own_endpoint_alias_deny_is_read_without_reserved_rule_index() -> None:
+    from daimon.core.tool_safety import trusted_servers_for
+
+    bindings = {"office": "https://daimon.example/mcp?alias=office"}
+    lookup = AsyncMock(return_value=ResolvedAgentToolRule(rule="deny"))
+    card = AsyncMock(return_value="approved")
+    result = await interactive_decider(
+        ON.model_copy(update={"agent_rules": True}),
+        requester_platform_user_id="user",
+        confirm=card,
+        rules_for=lookup,
+        trusted_servers=trusted_servers_for("https://daimon.example/mcp", bindings),
+        confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
+        approval_gate_for=AsyncMock(return_value=OFF),
+        server_urls=bindings,
+    )(
+        ToolCall(
+            tool_use_id="t1",
+            server_name="office",
+            tool_name="microsoft_write",
+            input={"method": "POST"},
+        )
+    )
+    assert not result.allow
+    lookup.assert_awaited_once()
+    card.assert_not_awaited()

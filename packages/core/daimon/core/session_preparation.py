@@ -510,7 +510,7 @@ async def _run_replacement(
                 destination_agent_name=admission.agent.name,
                 requested_work=None,
                 unsaved_work=row.pending_unsaved_work,
-                before_send=decide_before_send(deps, admission),
+                before_send=decide_before_send(deps, admission, attended=False),
             )
             stage = "upload"
             await _advance(

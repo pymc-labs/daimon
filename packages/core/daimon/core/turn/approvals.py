@@ -260,7 +260,13 @@ def _skips_daimon_rules(
     Such an agent keeps today's behaviour on every daimon card, and a paused
     `add_skill`, publish or backend-switch call costs no query.
     """
-    return call.server_name in trusted_servers and not daimon_rules
+    # The precomputed rule index covers the reserved name only. Legacy endpoint
+    # aliases still need their own name-bound rules read on every paused call.
+    return (
+        call.server_name == DAIMON_SERVER_NAME
+        and call.server_name in trusted_servers
+        and not daimon_rules
+    )
 
 
 def _proxied_approval_refusal(
@@ -567,7 +573,8 @@ def interactive_decider(
     rule_card_for: RuleCardFor | None = None,
     daimon_rules: bool = False,
     annotations_for: AnnotationLookup | None = None,
-    approval_gate: ApprovalGate | None = None,
+    approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
+    server_urls: Mapping[str, str] | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -575,6 +582,8 @@ def interactive_decider(
     surface without cards gets. A hook that raises is logged and the write is
     refused, with words saying the card could not be shown — a write never
     runs because the card failed to post.
+    Overrides require an effective server binding and a fresh `approval_gate_for`
+    read after classification. A missing or failed read falls back to the card.
     """
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
@@ -601,9 +610,8 @@ def interactive_decider(
         if (
             policy.enabled
             and policy.allow_gate_overrides
-            and approval_gate is not None
-            and approval_gate.value == "off"
-            and approval_gate.set_by
+            and approval_gate_for is not None
+            and call.server_name in (server_urls or {})
             and not read_error
             and verdict.outcome == "ask"
             and verdict.reason == "write_needs_confirmation"
@@ -611,19 +619,25 @@ def interactive_decider(
             and call.server_name not in trusted_servers
             and "/" not in call.server_name
         ):
-            log.info(
-                "tool_safety.gate_override_allowed",
-                tool=call.key,
-                outcome="allow",
-                reason="approval_gate_off",
-                attended=True,
-                scope=approval_gate.scope,
-                set_by=approval_gate.set_by,
-                tenant_id=str(approval_gate.tenant_id)
-                if approval_gate.tenant_id is not None
-                else None,
-            )
-            return ToolConfirmationResult(allow=True)
+            # The admission value is diagnostic only. Re-read after all rule and
+            # annotation awaits, immediately before granting automatic authority.
+            try:
+                gate = await approval_gate_for()
+            except Exception:
+                log.warning("tool_safety.gate_override_read_failed", tool=call.key)
+                gate = None
+            if gate is not None and gate.value == "off" and gate.set_by:
+                log.info(
+                    "tool_safety.gate_override_allowed",
+                    tool=call.key,
+                    outcome="allow",
+                    reason="approval_gate_off",
+                    attended=True,
+                    scope=gate.scope,
+                    set_by=gate.set_by,
+                    tenant_id=str(gate.tenant_id) if gate.tenant_id is not None else None,
+                )
+                return ToolConfirmationResult(allow=True)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -649,6 +663,7 @@ def interactive_decider(
                 requester_platform_user_id=requester_platform_user_id,
                 now=asked,
                 timeout=timeout,
+                trusted_servers=trusted_servers,
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})
@@ -721,7 +736,8 @@ def chat_tool_confirmation(
     annotations_for: AnnotationLookup | None = None,
     daimon_rules: bool = False,
     provider_permissions: bool = False,
-    approval_gate: ApprovalGate | None = None,
+    approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
+    server_urls: Mapping[str, str] | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -748,7 +764,8 @@ def chat_tool_confirmation(
             rule_card_for=rule_card_for,
             annotations_for=annotations_for,
             daimon_rules=daimon_rules,
-            approval_gate=approval_gate,
+            approval_gate_for=approval_gate_for,
+            server_urls=server_urls,
         )
         if attended
         else unattended_decider(
