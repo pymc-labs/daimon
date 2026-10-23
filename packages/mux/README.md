@@ -1015,6 +1015,12 @@ out the same Retry-After and budget. A claimed Anthropic mutation never follows
 an HTTP redirect, and a failure that belongs to a redirected request is
 `unknown`. Other drivers classify nothing yet, so their failures stay `unknown`.
 
+Ordinary Daimon headless turns use this policy with a private `MemoryStateStore`
+for the running turn. They preserve the caller's SDK attempt allowance and turn
+deadline, and disable hidden SDK retries for each claimed write. They create no
+durable transcript copy and cannot recover claims after a process restart.
+Session assembly and legacy requests retain their existing retry behavior.
+
 ## Test doubles: `mux.testing`
 
 `mux.testing` ships in the `daimon-mux` wheel and is never imported by product

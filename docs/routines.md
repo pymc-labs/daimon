@@ -418,8 +418,16 @@ such a channel never falls back to a DM. See
 
 ## When a run fails
 
-There is no retry, no backoff, no failure counter and no disable-after-N. A
-failed run writes `last_error` and clears `last_result_tail`; a successful one
+The scheduler does not retry a failed run, count consecutive failures, or
+disable a routine after repeated failures. On the mux turn path, an individual
+provider write can retry within the caller's existing attempt allowance and
+the turn deadline when the provider definitely refused it, such as a rate
+limit with `Retry-After`. A timeout or lost response that may follow acceptance
+never causes that write to be sent again. Retry state lasts for that running
+turn only; a process restart does not resume the routine or its retry allowance.
+Session setup and the legacy turn path retain their existing SDK retry policy.
+
+A failed run writes `last_error` and clears `last_result_tail`; a successful one
 does the reverse. Both columns are overwritten every run, so `last_error is
 not null` means exactly "the most recent run failed" — which is what the
 Discord, Slack and Teams panels render.

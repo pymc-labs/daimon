@@ -18,20 +18,15 @@ from __future__ import annotations
 import datetime as dt
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from decimal import Decimal
-from types import SimpleNamespace
-from typing import cast
-from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsSendSessionEvents,
-    BetaManagedAgentsSessionEvent,
-)
+from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
 )
@@ -65,7 +60,16 @@ from daimon.core.turn import driver as turn_driver
 from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO, TurnIO
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
-from mux.testing.drivers.anthropic.ma_models import ma_model_config
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    json_body,
+    list_response,
+    make_fake_memory_store_handler,
+    send_events_response,
+    sse_response,
+)
+from mux.testing.drivers.anthropic.ma_models import ma_model_config, ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -111,40 +115,7 @@ def _assert_ran_on_configured_path(built: list[TurnIO], *, fires: int) -> None:
             assert isinstance(io, LegacyTurnIO), f"legacy leg ran {type(io).__name__}"
 
 
-# Reuse the conftest fake-anthropic builder shape — but inline here to avoid
-# depending on tests/integration/conftest.py importing private package internals.
-# Each test inlines real SDK constructors per guideline:testing.
-
 _NOW = dt.datetime(2026, 5, 8, 12, 0, 0, tzinfo=dt.UTC)
-
-
-class _EmptySessionPage:
-    """Empty async-iterable for ``beta.sessions.list()``.
-
-    The scheduler tick now runs ``sweep_headless_usage``, which lists sessions.
-    These routine-fire tests don't exercise the sweep, so their session fakes
-    yield no sessions.
-    """
-
-    def __aiter__(self) -> _EmptySessionPage:
-        return self
-
-    async def __anext__(self) -> object:
-        raise StopAsyncIteration
-
-
-class _FakeMemoryStores:
-    """Stub for ``client.beta.memory_stores`` (Phase: agent-memory).
-
-    ``create_session`` now unconditionally calls
-    ``ensure_memory_store_and_mount``, which calls
-    ``anthropic.beta.memory_stores.create(...)`` on the cold path (no DB row
-    yet). These e2e tests exercise the routine-fire path, not memory
-    provisioning itself, so the stub just returns an id — mirroring how
-    ``_FakeVaults`` stubs vault provisioning above.
-    """
-
-    create = AsyncMock(return_value=SimpleNamespace(id="memstore_fake"))
 
 
 def _test_dsn() -> str:
@@ -168,6 +139,74 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_SCHEDULER__ADVISORY_LOCK_KEY", str(uuid.uuid4().int >> 65))
 
 
+def _anthropic_factory(
+    *,
+    agents: list[BetaManagedAgentsAgent],
+    environments: list[BetaEnvironment],
+    events: list[BetaManagedAgentsSessionEvent],
+) -> Callable[[Settings], Awaitable[AsyncAnthropic]]:
+    """Serve a routine fire through the real SDK and an isolated MA transport."""
+    router = MARouter()
+    router.add_agent_list(*(agent for agent in agents if agent.archived_at is None))
+    router.add_environment_list(*environments)
+    for agent in agents:
+        router.add_agent(agent)
+    for environment in environments:
+        router.add_environment(environment)
+
+    memory_handler = make_fake_memory_store_handler()
+    router.add("POST", r"/v1/memory_stores", lambda request, _match: memory_handler(request))
+    router.add("GET", r"/v1/vaults", lambda _request, _match: list_response([]))
+    router.add(
+        "POST",
+        r"/v1/vaults",
+        lambda _request, _match: httpx.Response(200, json={"id": "vault_test"}),
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults/vault_test/credentials",
+        lambda _request, _match: httpx.Response(200, json={}),
+    )
+
+    def create_session(request: httpx.Request, _match: object) -> httpx.Response:
+        body = json_body(request)
+        agent = next(agent for agent in agents if agent.id == body["agent"])
+        session = ma_session(
+            id="ses_test",
+            agent=agent,
+            environment_id=body["environment_id"],
+            metadata=body.get("metadata", {}),
+            resources=body.get("resources", []),
+            vault_ids=body.get("vault_ids", []),
+        )
+        router.add_session(session)
+        return httpx.Response(200, json=session.model_dump(mode="json"))
+
+    router.add("POST", r"/v1/sessions", create_session)
+    router.add("GET", r"/v1/sessions", lambda _request, _match: list_response([]))
+    router.add(
+        "POST",
+        r"/v1/sessions/ses_test/events",
+        lambda _request, _match: send_events_response(),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/ses_test/events/stream",
+        lambda _request, _match: sse_response([event.model_dump(mode="json") for event in events]),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/ses_test/events",
+        lambda _request, _match: list_response([event.model_dump(mode="json") for event in events]),
+    )
+    transport = ScriptedTransport(router=router)
+
+    async def factory(_settings: Settings) -> AsyncAnthropic:
+        return transport.client(max_retries=0)
+
+    return factory
+
+
 def _build_fake_anthropic_factory(
     events: list[BetaManagedAgentsSessionEvent],
     *,
@@ -175,166 +214,25 @@ def _build_fake_anthropic_factory(
     agent_id: str = "agent_x",
     agent_name: str = "daimon",
     env_id: str = "env_default",
-) -> object:
-    """Construct an ``_anthropic_factory`` that returns an event-shaped fake.
-
-    Also wires up resolver-facing surface: ``beta.agents.retrieve`` returns a
-    live agent matching ``agent_id`` (cached_id liveness path), and
-    ``beta.environments.list`` yields one daimon-tagged ``default`` env so
-    ``resolve_environment`` resolves on the tag-lookup branch.
-    """
+) -> Callable[[Settings], Awaitable[AsyncAnthropic]]:
     now_dt = dt.datetime.now(dt.UTC)
-    now_iso = now_dt.isoformat()
-    live_agent = ma_agent(
-        id=agent_id,
-        name=agent_name,
-        model=ma_model_config(speed="standard"),
-        tenant_id=tenant_id,
-        created_at=now_dt,
+    return _anthropic_factory(
+        agents=[
+            ma_agent(
+                id=agent_id,
+                name=agent_name,
+                model=ma_model_config(speed="standard"),
+                tenant_id=tenant_id,
+                created_at=now_dt,
+            )
+        ],
+        environments=[
+            ma_environment(
+                id=env_id, name="default", tenant_id=tenant_id, created_at=now_dt.isoformat()
+            )
+        ],
+        events=events,
     )
-    live_env = ma_environment(id=env_id, name="default", tenant_id=tenant_id, created_at=now_iso)
-
-    class _EnvList:
-        """Async-iterable wrapper for `client.beta.environments.list(...)`."""
-
-        def __init__(self, envs: list[BetaEnvironment]) -> None:
-            self._envs = envs
-
-        def __aiter__(self) -> _EnvList:
-            self._iter = iter(self._envs)
-            return self
-
-        async def __anext__(self) -> BetaEnvironment:
-            try:
-                return next(self._iter)
-            except StopIteration as err:
-                raise StopAsyncIteration from err
-
-    def _envs_list(**_kwargs: object) -> _EnvList:
-        return _EnvList([live_env])
-
-    class _FakeAsyncIter:
-        def __init__(self, evts: list[BetaManagedAgentsSessionEvent]) -> None:
-            self._evts = evts
-
-        def __await__(self):
-            async def _self() -> _FakeAsyncIter:
-                return self
-
-            return _self().__await__()
-
-        def __aiter__(self) -> _FakeAsyncIter:
-            self._iter = iter(self._evts)
-            return self
-
-        async def __anext__(self) -> BetaManagedAgentsSessionEvent:
-            try:
-                return next(self._iter)
-            except StopIteration as err:
-                raise StopAsyncIteration from err
-
-        async def close(self) -> None:
-            # Driver closes the abandoned stream on a clean close (no
-            # terminal event) before checking MA's session status —
-            # `_EmptyEventsPage`/`_events_page` below serve that status
-            # check + the replay-and-refold read that follows.
-            return None
-
-    class _EmptyEventsPage:
-        """Async-iterable stand-in for `client.beta.sessions.events.list(...)`
-        when a script's events must be replayed (no terminal event was seen,
-        so the driver's eventless-cycle finalize path re-reads the full log).
-        """
-
-        def __init__(self, evts: list[BetaManagedAgentsSessionEvent]) -> None:
-            self._evts = evts
-
-        def __aiter__(self) -> _EmptyEventsPage:
-            self._iter = iter(self._evts)
-            return self
-
-        async def __anext__(self) -> BetaManagedAgentsSessionEvent:
-            try:
-                return next(self._iter)
-            except StopIteration as err:
-                raise StopAsyncIteration from err
-
-    stream_factory = _FakeAsyncIter(events)
-    create_mock = AsyncMock(
-        return_value=SimpleNamespace(
-            id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
-        )
-    )
-    send_mock = AsyncMock(return_value=BetaManagedAgentsSendSessionEvents())
-    close_mock = AsyncMock(return_value=None)
-    # Post-19-09: any script that does not end in a real terminal event
-    # (session.status_idle / session.status_terminated) makes the driver
-    # check MA's session status on the resulting clean close, then replay
-    # the full event log to fold in whatever the (single, non-terminal)
-    # script already delivered — status "idle" finalizes without reopening
-    # the stream.
-    retrieve_mock = AsyncMock(return_value=SimpleNamespace(status="idle"))
-
-    class _FakeEvents:
-        stream = AsyncMock(return_value=stream_factory)
-        send = send_mock
-
-        @staticmethod
-        def list(**_kwargs: object) -> _EmptyEventsPage:
-            return _EmptyEventsPage(events)
-
-    class _FakeSessions:
-        events = _FakeEvents()
-        create = create_mock
-        retrieve = retrieve_mock
-
-        @staticmethod
-        def list(**_kwargs: object) -> _EmptySessionPage:
-            return _EmptySessionPage()
-
-    class _FakeAgents:
-        retrieve = AsyncMock(return_value=live_agent)
-
-    class _FakeEnvs:
-        list = staticmethod(_envs_list)
-        # run_turn bridges string ids to SDK objects via environments.retrieve
-        # before delegating to create_session (95-04 collapse).
-        retrieve = AsyncMock(return_value=live_env)
-
-    class _EmptyVaultPage:
-        def __aiter__(self) -> _EmptyVaultPage:
-            return self
-
-        async def __anext__(self) -> object:
-            raise StopAsyncIteration
-
-    class _FakeVaultCredentials:
-        create = AsyncMock(return_value=None)
-
-    class _FakeVaults:
-        create = AsyncMock(return_value=SimpleNamespace(id="vault_test"))
-        credentials = _FakeVaultCredentials()
-
-        @staticmethod
-        def list(**_kwargs: object) -> _EmptyVaultPage:
-            return _EmptyVaultPage()
-
-    class _FakeBeta:
-        sessions = _FakeSessions()
-        agents = _FakeAgents()
-        environments = _FakeEnvs()
-        vaults = _FakeVaults()
-        memory_stores = _FakeMemoryStores()
-
-    class _FakeClient:
-        beta = _FakeBeta()
-        close = close_mock
-
-    async def factory(_settings: Settings) -> AsyncAnthropic:
-        return cast(AsyncAnthropic, _FakeClient())
-
-    return factory
 
 
 async def test_end_to_end_tick_populates_last_result_tail(
@@ -376,7 +274,7 @@ async def test_end_to_end_tick_populates_last_result_tail(
 
     rc = await scheduler_run(
         ["--once"],
-        _anthropic_factory=_build_fake_anthropic_factory(events, tenant_id=tenant_id),  # pyright: ignore[reportArgumentType]
+        _anthropic_factory=_build_fake_anthropic_factory(events, tenant_id=tenant_id),
         _engine_override=engine,
     )
     assert rc == 0, "scheduler --once should exit 0 on success"
@@ -428,7 +326,7 @@ async def test_failure_records_last_error(
 
     rc = await scheduler_run(
         ["--once"],
-        _anthropic_factory=_build_fake_anthropic_factory(events, tenant_id=tenant_id),  # pyright: ignore[reportArgumentType]
+        _anthropic_factory=_build_fake_anthropic_factory(events, tenant_id=tenant_id),
         _engine_override=engine,
     )
     assert rc == 0, "scheduler exits 0 even when a fire fails — error is per-routine"
@@ -482,7 +380,7 @@ async def test_advisory_lock_blocks_second_run(
     try:
         rc = await scheduler_run(
             ["--once"],
-            _anthropic_factory=_build_fake_anthropic_factory([], tenant_id=tenant_id),  # pyright: ignore[reportArgumentType]
+            _anthropic_factory=_build_fake_anthropic_factory([], tenant_id=tenant_id),
             _engine_override=engine,
         )
         assert rc == 1, "second scheduler must exit non-zero when lock is held"
@@ -508,21 +406,15 @@ def _build_archived_agent_factory(
     fresh_agent_id: str,
     agent_name: str = "daimon",
     env_id: str = "env_default",
-) -> object:
-    """Like ``_build_fake_anthropic_factory``, but ``agents.retrieve(stale_id)``
-    returns a row with ``archived_at`` populated, forcing the resolver into the
-    tag-lookup branch where ``agents.list`` yields the fresh agent. Used by
-    ``test_fire_heals_archived_agent_id`` (success criterion).
-    """
+) -> Callable[[Settings], Awaitable[AsyncAnthropic]]:
     now_dt = dt.datetime.now(dt.UTC)
-    now_iso = now_dt.isoformat()
     archived_agent = ma_agent(
         id=stale_agent_id,
         name=agent_name,
         model=ma_model_config(speed="standard"),
         tenant_id=tenant_id,
         created_at=now_dt,
-        archived_at=now_dt,  # archived_at populated -> resolver treats as not-live
+        archived_at=now_dt,
     )
     fresh_agent = ma_agent(
         id=fresh_agent_id,
@@ -531,134 +423,15 @@ def _build_archived_agent_factory(
         tenant_id=tenant_id,
         created_at=now_dt,
     )
-    live_env = ma_environment(id=env_id, name="default", tenant_id=tenant_id, created_at=now_iso)
-
-    class _AgentList:
-        def __init__(self, agents: list[BetaManagedAgentsAgent]) -> None:
-            self._agents = agents
-
-        def __aiter__(self) -> _AgentList:
-            self._iter = iter(self._agents)
-            return self
-
-        async def __anext__(self) -> BetaManagedAgentsAgent:
-            try:
-                return next(self._iter)
-            except StopIteration as err:
-                raise StopAsyncIteration from err
-
-    class _EnvList:
-        def __init__(self, envs: list[BetaEnvironment]) -> None:
-            self._envs = envs
-
-        def __aiter__(self) -> _EnvList:
-            self._iter = iter(self._envs)
-            return self
-
-        async def __anext__(self) -> BetaEnvironment:
-            try:
-                return next(self._iter)
-            except StopIteration as err:
-                raise StopAsyncIteration from err
-
-    def _agents_list(**_kwargs: object) -> _AgentList:
-        return _AgentList([fresh_agent])  # archived not returned (include_archived=False)
-
-    def _envs_list(**_kwargs: object) -> _EnvList:
-        return _EnvList([live_env])
-
-    class _FakeAsyncIter:
-        def __init__(self, evts: list[BetaManagedAgentsSessionEvent]) -> None:
-            self._evts = evts
-
-        def __await__(self):
-            async def _self() -> _FakeAsyncIter:
-                return self
-
-            return _self().__await__()
-
-        def __aiter__(self) -> _FakeAsyncIter:
-            self._iter = iter(self._evts)
-            return self
-
-        async def __anext__(self) -> BetaManagedAgentsSessionEvent:
-            try:
-                return next(self._iter)
-            except StopIteration as err:
-                raise StopAsyncIteration from err
-
-    stream_factory = _FakeAsyncIter(events)
-    create_mock = AsyncMock(
-        return_value=SimpleNamespace(
-            id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
-        )
+    return _anthropic_factory(
+        agents=[archived_agent, fresh_agent],
+        environments=[
+            ma_environment(
+                id=env_id, name="default", tenant_id=tenant_id, created_at=now_dt.isoformat()
+            )
+        ],
+        events=events,
     )
-
-    class _FakeEvents:
-        stream = AsyncMock(return_value=stream_factory)
-        send = AsyncMock(return_value=BetaManagedAgentsSendSessionEvents())
-
-    class _FakeSessions:
-        events = _FakeEvents()
-        create = create_mock
-
-        @staticmethod
-        def list(**_kwargs: object) -> _EmptySessionPage:
-            return _EmptySessionPage()
-
-    _agents_by_id = {stale_agent_id: archived_agent, fresh_agent_id: fresh_agent}
-
-    class _FakeAgents:
-        # Keyed by id: the resolver retrieves the stale id (gets the archived
-        # row, forcing tag lookup), then run_turn retrieves the HEALED fresh id
-        # (95-04 collapse) — that call must return the live agent whose .id
-        # feeds create_session, not the archived one.
-        @staticmethod
-        async def retrieve(agent_id: str, **_kwargs: object) -> BetaManagedAgentsAgent:
-            return _agents_by_id[agent_id]
-
-        list = staticmethod(_agents_list)
-
-    class _FakeEnvs:
-        list = staticmethod(_envs_list)
-        # run_turn bridges string ids to SDK objects via environments.retrieve
-        # before delegating to create_session (95-04 collapse).
-        retrieve = AsyncMock(return_value=live_env)
-
-    class _EmptyVaultPage:
-        def __aiter__(self) -> _EmptyVaultPage:
-            return self
-
-        async def __anext__(self) -> object:
-            raise StopAsyncIteration
-
-    class _FakeVaultCredentials:
-        create = AsyncMock(return_value=None)
-
-    class _FakeVaults:
-        create = AsyncMock(return_value=SimpleNamespace(id="vault_test"))
-        credentials = _FakeVaultCredentials()
-
-        @staticmethod
-        def list(**_kwargs: object) -> _EmptyVaultPage:
-            return _EmptyVaultPage()
-
-    class _FakeBeta:
-        sessions = _FakeSessions()
-        agents = _FakeAgents()
-        environments = _FakeEnvs()
-        vaults = _FakeVaults()
-        memory_stores = _FakeMemoryStores()
-
-    class _FakeClient:
-        beta = _FakeBeta()
-        close = AsyncMock(return_value=None)
-
-    async def factory(_settings: Settings) -> AsyncAnthropic:
-        return cast(AsyncAnthropic, _FakeClient())
-
-    return factory
 
 
 async def test_fire_heals_archived_agent_id(
@@ -703,7 +476,7 @@ async def test_fire_heals_archived_agent_id(
 
     rc = await scheduler_run(
         ["--once"],
-        _anthropic_factory=_build_archived_agent_factory(  # pyright: ignore[reportArgumentType]
+        _anthropic_factory=_build_archived_agent_factory(
             events,
             tenant_id=tenant_id,
             stale_agent_id="ag_stale",
@@ -734,177 +507,50 @@ def _build_two_tenant_fake_anthropic_factory(
     agent_id_b: str = "agent_b",
     env_id_a: str = "env_a",
     env_id_b: str = "env_b",
-) -> object:
-    """Fake factory for 2-tenant SCHED-01 proof.
-
-    ``agents.retrieve(id)`` returns the matching live agent keyed by id.
-    ``environments.list(...)`` returns both envs; the resolver filters by
-    ``MA_METADATA_KEY_TENANT`` so each tenant sees only its own environment.
-    The event stream uses ``side_effect`` so each of the two fires gets a
-    fresh ``_FakeAsyncIter`` (the single-tenant factory's shared stream would
-    exhaust on the first fire).
-    """
+) -> Callable[[Settings], Awaitable[AsyncAnthropic]]:
+    """Both tenants share one SDK transport and resolve their own MA resources."""
     now_dt = dt.datetime.now(dt.UTC)
-    now_iso = now_dt.isoformat()
-
-    agent_a = ma_agent(
-        id=agent_id_a,
-        name="daimon",
-        model=ma_model_config(speed="standard"),
-        tenant_id=tenant_id_a,
-        created_at=now_dt,
-    )
-    agent_b = ma_agent(
-        id=agent_id_b,
-        name="daimon",
-        model=ma_model_config(speed="standard"),
-        tenant_id=tenant_id_b,
-        created_at=now_dt,
-    )
-    env_a = ma_environment(id=env_id_a, name="default", tenant_id=tenant_id_a, created_at=now_iso)
-    env_b = ma_environment(id=env_id_b, name="default", tenant_id=tenant_id_b, created_at=now_iso)
-
-    _agents_by_id = {agent_id_a: agent_a, agent_id_b: agent_b}
-    _envs_by_id = {env_id_a: env_a, env_id_b: env_b}
-
-    class _EnvList:
-        """Async-iterable over both envs; resolver filters by tenant metadata."""
-
-        def __init__(self, envs: list[BetaEnvironment]) -> None:
-            self._envs = envs
-
-        def __aiter__(self) -> _EnvList:
-            self._iter = iter(self._envs)
-            return self
-
-        async def __anext__(self) -> BetaEnvironment:
-            try:
-                return next(self._iter)
-            except StopIteration as err:
-                raise StopAsyncIteration from err
-
-    def _envs_list(**_kwargs: object) -> _EnvList:
-        return _EnvList([env_a, env_b])
-
-    def _make_stream(tail_text: str) -> object:
-        """Fresh _FakeAsyncIter for each fire so state is not shared."""
-        events: list[BetaManagedAgentsSessionEvent] = [
-            BetaManagedAgentsAgentMessageEvent(
-                id="evt_msg",
-                type="agent.message",
-                processed_at=_NOW,
-                content=[BetaManagedAgentsTextBlock(type="text", text=tail_text)],
+    events: list[BetaManagedAgentsSessionEvent] = [
+        BetaManagedAgentsAgentMessageEvent(
+            id="evt_msg",
+            type="agent.message",
+            processed_at=_NOW,
+            content=[BetaManagedAgentsTextBlock(type="text", text="FIRED_OK")],
+        ),
+        BetaManagedAgentsSessionStatusIdleEvent(
+            id="evt_idle",
+            type="session.status_idle",
+            processed_at=_NOW,
+            stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+        ),
+    ]
+    return _anthropic_factory(
+        agents=[
+            ma_agent(
+                id=agent_id_a,
+                name="daimon",
+                model=ma_model_config(speed="standard"),
+                tenant_id=tenant_id_a,
+                created_at=now_dt,
             ),
-            BetaManagedAgentsSessionStatusIdleEvent(
-                id="evt_idle",
-                type="session.status_idle",
-                processed_at=_NOW,
-                stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+            ma_agent(
+                id=agent_id_b,
+                name="daimon",
+                model=ma_model_config(speed="standard"),
+                tenant_id=tenant_id_b,
+                created_at=now_dt,
             ),
-        ]
-
-        class _FakeAsyncIter:
-            def __await__(self):
-                async def _self() -> _FakeAsyncIter:
-                    return self
-
-                return _self().__await__()
-
-            def __aiter__(self) -> _FakeAsyncIter:
-                self._iter = iter(events)
-                return self
-
-            async def __anext__(self) -> BetaManagedAgentsSessionEvent:
-                try:
-                    return next(self._iter)
-                except StopIteration as err:
-                    raise StopAsyncIteration from err
-
-        return _FakeAsyncIter()
-
-    # stream mock uses side_effect so each call gets a fresh iterator
-    # (returning the same stateful object would exhaust on the first fire).
-    # Both fires return the same "FIRED_OK" tail — the per-tenant proof is
-    # in the resolver path (each tenant finds its own agent/env via metadata
-    # filtering), not in distinct tail content.
-    stream_mock = AsyncMock(
-        side_effect=[
-            _make_stream("FIRED_OK"),
-            _make_stream("FIRED_OK"),
-        ]
+        ],
+        environments=[
+            ma_environment(
+                id=env_id_a, name="default", tenant_id=tenant_id_a, created_at=now_dt.isoformat()
+            ),
+            ma_environment(
+                id=env_id_b, name="default", tenant_id=tenant_id_b, created_at=now_dt.isoformat()
+            ),
+        ],
+        events=events,
     )
-    create_mock = AsyncMock(
-        return_value=SimpleNamespace(
-            id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
-        )
-    )
-
-    class _FakeEvents:
-        stream = stream_mock
-        send = AsyncMock(return_value=BetaManagedAgentsSendSessionEvents())
-
-    class _FakeSessions:
-        events = _FakeEvents()
-        create = create_mock
-
-        @staticmethod
-        def list(**_kwargs: object) -> _EmptySessionPage:
-            return _EmptySessionPage()
-
-    class _FakeAgents:
-        @staticmethod
-        async def retrieve(agent_id: str, **_kwargs: object) -> BetaManagedAgentsAgent:
-            return _agents_by_id[agent_id]
-
-        @staticmethod
-        def list(**_kwargs: object) -> object:
-            # Never called in the cached-id liveness path (both agents are live).
-            raise NotImplementedError("agents.list not expected in 2-tenant test")
-
-    class _FakeEnvs:
-        list = staticmethod(_envs_list)
-
-        # run_turn bridges string ids to SDK objects via environments.retrieve
-        # before delegating to create_session (95-04 collapse). Keyed by id so
-        # each tenant's fire gets its own resolved environment back.
-        @staticmethod
-        async def retrieve(environment_id: str, **_kwargs: object) -> BetaEnvironment:
-            return _envs_by_id[environment_id]
-
-    class _EmptyVaultPage:
-        def __aiter__(self) -> _EmptyVaultPage:
-            return self
-
-        async def __anext__(self) -> object:
-            raise StopAsyncIteration
-
-    class _FakeVaultCredentials:
-        create = AsyncMock(return_value=None)
-
-    class _FakeVaults:
-        create = AsyncMock(return_value=SimpleNamespace(id="vault_test"))
-        credentials = _FakeVaultCredentials()
-
-        @staticmethod
-        def list(**_kwargs: object) -> _EmptyVaultPage:
-            return _EmptyVaultPage()
-
-    class _FakeBeta:
-        sessions = _FakeSessions()
-        agents = _FakeAgents()
-        environments = _FakeEnvs()
-        vaults = _FakeVaults()
-        memory_stores = _FakeMemoryStores()
-
-    class _FakeClient:
-        beta = _FakeBeta()
-        close = AsyncMock(return_value=None)
-
-    async def factory(_settings: Settings) -> AsyncAnthropic:
-        return cast(AsyncAnthropic, _FakeClient())
-
-    return factory
 
 
 async def test_end_to_end_tick_fires_each_routine_under_own_tenant(
@@ -960,7 +606,7 @@ async def test_end_to_end_tick_fires_each_routine_under_own_tenant(
 
     rc = await scheduler_run(
         ["--once"],
-        _anthropic_factory=_build_two_tenant_fake_anthropic_factory(  # pyright: ignore[reportArgumentType]
+        _anthropic_factory=_build_two_tenant_fake_anthropic_factory(
             tenant_id_a=tenant_id_a,
             tenant_id_b=tenant_id_b,
         ),

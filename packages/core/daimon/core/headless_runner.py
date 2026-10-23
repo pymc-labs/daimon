@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -98,7 +99,7 @@ from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.persistence import TurnPersistence, current_persistence
+from daimon.core.turn.persistence import MutationRetry, TurnPersistence, current_persistence
 from daimon.core.turn.posture import (
     Billed,
     BillingExempt,
@@ -119,10 +120,12 @@ from daimon.core.turn_hold import TurnHold
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import TextPart
-from mux.contracts.ids import Scope
+from mux.contracts.ids import ChannelRef, Scope, ThreadRef
 from mux.contracts.resources import Agent, AgentPatch, AgentSpec, ProviderBinding
 from mux.errors import ScopeViolation
-from mux.state.lease import Lease
+from mux.state.lease import Lease, Slot
+from mux.state.memory import MemoryStateStore
+from mux.state.mutation_retry import MutationRetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -281,9 +284,10 @@ def _outside_turn_persistence[**P, R](run: Callable[P, Awaitable[R]]) -> Callabl
     tool call) inherits that turn's `current_persistence` through the
     context. On mux the driver binds it, and `check_session` then refuses the
     headless run's own session as one the outer turn does not own. A
-    headless run owns nothing the outer turn does, so it starts clean. The
-    fleet worker's own persistence is activated by `run_prepared_turn` and
-    read inside that run (`run_worker`'s `publish`), not here.
+    headless run owns nothing the outer turn does, so it starts clean and
+    binds its own session after assembly. The fleet worker's own persistence
+    is activated by `run_prepared_turn` and read inside that run
+    (`run_worker`'s `publish`), not here.
     """
 
     @functools.wraps(run)
@@ -543,49 +547,99 @@ async def run_turn_impl(
         else:
             billing = BillingExempt(reason="headless-unrecorded")
 
+        cancel = asyncio.Event()  # Headless has no external cancel source.
+        persistence: TurnPersistence | None = None
+        if selected_path == "mux":
+            assert turn_scope is not None and account_id is not None and tenant_id is not None
+            # The newly assembled session owns a private synthetic slot. Its
+            # claims live for this fire only; no new transcript copy is stored.
+            store = MemoryStateStore()
+            slot = Slot(
+                thread=ThreadRef(
+                    channel=ChannelRef(
+                        tenant_id=str(tenant_id), platform="headless", channel_id=session.id
+                    ),
+                    thread_id=session.id,
+                ),
+                account_id=str(account_id),
+            )
+            binding = ProviderBinding(
+                id=str(uuid.uuid4()),
+                thread=slot.thread,
+                provider="anthropic",
+                profile="anthropic.managed_agents",
+                native_refs={"session": session.id, "agent": agent_id},
+                generation=1,
+                config_revision=0,
+                legacy_account_id=str(account_id),
+            )
+            try:
+                binding = await asyncio.wait_for(
+                    store.put_binding(binding, expected_generation=0),
+                    timeout=remaining_s(effective_deadline, now=datetime.now(UTC)),
+                )
+            except TimeoutError as err:
+                raise ceiling_error() from err
+            persistence = TurnPersistence(
+                store,
+                binding,
+                turn_scope,
+                operation_key=f"turn:{session.id}:{uuid.uuid4()}",
+                source_agent_id=agent_id,
+                retry=MutationRetry(
+                    policy=MutationRetryPolicy(max_attempts=anthropic.max_retries + 1),
+                    deadline=time.monotonic()
+                    + remaining_s(effective_deadline, now=datetime.now(UTC)),
+                    cancel=cancel,
+                ),
+            )
+
         # Driver's own run_turn builds and sends the `user.message` event itself
         # from `user_message=trigger_message` — the drain (steps 3-6 of the old
         # bespoke loop) is fully delegated below.
-        state: TurnState = await drive_turn(
-            anthropic=anthropic,
-            path=selected_path,
-            scope=turn_scope,
-            session_id=session.id,
-            user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
-            lifecycle=_NoOpLifecycle(),
-            cancel=asyncio.Event(),  # never set — headless has no cancel source
-            render_interval_s=2.0,  # nothing renders; do not spin the diff timer
-            billing=billing,
-            tool_confirmation=headless_tool_confirmation(
-                tool_safety,
-                rules_for=(
-                    agent_rule_lookup(
-                        session_factory,
-                        tenant_id=tenant_id,
-                        agent_id=agent_id,
-                        server_urls={s.name: s.url for s in session.agent.mcp_servers},
-                        also_urls=daimon_endpoint(
-                            str(mcp_settings.public_url)
-                            if mcp_settings is not None and mcp_settings.public_url is not None
-                            else None
-                        ),
-                        channel_id=origin_place.channel_id if origin_place is not None else None,
-                    )
-                    if tool_safety.enabled
-                    and tool_safety.agent_rules
-                    and session_factory is not None
-                    and tenant_id is not None
-                    else None
+        with persistence.activate() if persistence is not None else contextlib.nullcontext():
+            state: TurnState = await drive_turn(
+                anthropic=anthropic,
+                path=selected_path,
+                scope=turn_scope,
+                session_id=session.id,
+                user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
+                lifecycle=_NoOpLifecycle(),
+                cancel=cancel,
+                render_interval_s=2.0,  # nothing renders; do not spin the diff timer
+                billing=billing,
+                tool_confirmation=headless_tool_confirmation(
+                    tool_safety,
+                    rules_for=(
+                        agent_rule_lookup(
+                            session_factory,
+                            tenant_id=tenant_id,
+                            agent_id=agent_id,
+                            server_urls={s.name: s.url for s in session.agent.mcp_servers},
+                            also_urls=daimon_endpoint(
+                                str(mcp_settings.public_url)
+                                if mcp_settings is not None and mcp_settings.public_url is not None
+                                else None
+                            ),
+                            channel_id=origin_place.channel_id
+                            if origin_place is not None
+                            else None,
+                        )
+                        if tool_safety.enabled
+                        and tool_safety.agent_rules
+                        and session_factory is not None
+                        and tenant_id is not None
+                        else None
+                    ),
+                    daimon_rules=bool(daimon_rule_tools),
+                    trusted_servers=trusted_servers_for(
+                        str(mcp_settings.public_url)
+                        if mcp_settings is not None and mcp_settings.public_url is not None
+                        else None
+                    ),
                 ),
-                daimon_rules=bool(daimon_rule_tools),
-                trusted_servers=trusted_servers_for(
-                    str(mcp_settings.public_url)
-                    if mcp_settings is not None and mcp_settings.public_url is not None
-                    else None
-                ),
-            ),
-            deadline=effective_deadline,
-        )
+                deadline=effective_deadline,
+            )
 
         if (observation := current_outcome.get()) is not None:
             observation.finish(state=state)

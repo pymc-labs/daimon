@@ -1028,6 +1028,11 @@ a legacy-host authorization escape. The default legacy caller stays unchanged.
 Headless routine turns on the mux path pass the caller's authorized tenant and
 account to the shared turn driver. A missing identity is rejected before session
 assembly or provider I/O. The default legacy path retains its existing requests.
+After session assembly, each headless turn owns in-memory mutation claims and
+bounded retries. A definitely refused write can retry within the caller's SDK
+attempt allowance and the turn deadline; a write with an unknown outcome is
+never resent. The SDK cannot add hidden retries to a claimed write. This adds
+no durable transcript copy and does not resume a routine after a process restart.
 
 Prepared turns also carry their admitted tenant/account scope through legacy
 replay, interruption and confirmation recovery. Seal publication commits before
