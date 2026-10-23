@@ -164,6 +164,15 @@ _CANCEL_CODES: dict[str, WorkerFailureCode] = {
     "watch_cancelled": "watch_ended",
 }
 
+
+def cancel_failure_code(cancel: asyncio.Event) -> WorkerFailureCode | None:
+    """Why the budget watch cancelled this worker, as its failure code; None when it
+    didn't (not set, or no reason the watch names)."""
+    if not cancel.is_set():
+        return None
+    return _CANCEL_CODES.get(getattr(cancel, "reason", None) or "")
+
+
 # Admission refusals a person can act on, by their closed reason.
 _ADMISSION_REASON_CODES: dict[str, WorkerFailureCode] = {
     "balance_depleted": "balance_depleted",
@@ -1733,17 +1742,13 @@ class HostFleetPorts:
                                         code = worker_failure_code(
                                             cause, failure_code, backend=claimed.backend
                                         )
-                                        if cancel.is_set() or isinstance(
-                                            cause, asyncio.CancelledError
-                                        ):
-                                            # The budget watch says why it cancelled (a
-                                            # restart, the run's deadline, a limit). A turn
-                                            # it cancelled after bind ends non-COMPLETED,
-                                            # so the cancel shows as result_not_successful
-                                            # rather than a CancelledError (SMOKE 5ad12cc3).
-                                            code = _CANCEL_CODES.get(
-                                                getattr(cancel, "reason", None) or "", code
-                                            )
+                                        # The budget watch says why it cancelled (a
+                                        # restart, the run's deadline, a limit). A turn it
+                                        # cancelled after bind ends non-COMPLETED, so the
+                                        # cancel shows as result_not_successful rather
+                                        # than a CancelledError (SMOKE 5ad12cc3).
+                                        if (watched := cancel_failure_code(cancel)) is not None:
+                                            code = watched
                                         # run_worker records its own pre-native failures;
                                         # a second commit would only wait on the lock again.
                                         if not getattr(error, FAILURE_RECORDED, False):
