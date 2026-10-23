@@ -652,6 +652,10 @@ def settings_line(settings: Mapping[str, object]) -> str:
     return "; ".join(parts) or "the model provider's defaults"
 
 
+class _SwitchedMeanwhile(ValueError):
+    """Another switch of the agent landed after the card was posted; says where it is now."""
+
+
 def backend_switch_callbacks(
     service: AgentBackendService,
     *,
@@ -705,11 +709,27 @@ def backend_switch_callbacks(
             agent, reference.target_backend, reference.model, reference_settings(reference)
         )
         if (
+            preview.tenant_id == tenant_id
+            and preview.agent_id == agent.agent_id
+            and preview.setting_revision != reference.expected_revision
+        ):
+            # Another switch of this agent landed after this card was posted.
+            from daimon.core.turn.notices import switched_meanwhile_text
+            from mux.contracts.config import DEFAULT_BACKEND
+
+            setting = await service.current(agent)
+            raise _SwitchedMeanwhile(
+                switched_meanwhile_text(
+                    reference.agent,
+                    (setting.backend if setting is not None else None) or DEFAULT_BACKEND,
+                    reference.target_backend,
+                )
+            )
+        if (
             preview.tenant_id != tenant_id
             or preview.agent_id != agent.agent_id
             or preview.target_backend != reference.target_backend
             or not preview.allowed
-            or preview.setting_revision != reference.expected_revision
             or preview.digest != reference.preview_digest
             or (preview.declared_drops and reference.accepted_drops != preview.declared_drops)
             or (not preview.declared_drops and reference.accepted_drops not in (None, ()))
@@ -970,6 +990,8 @@ def backend_switch_callbacks(
                 await verified_configuration(prompt, clicker)
             else:
                 await verified(prompt, clicker)
+        except _SwitchedMeanwhile as exc:
+            return str(exc)
         except ValueError:
             return "This preview or your permission changed. Preview and confirm again."
         return None

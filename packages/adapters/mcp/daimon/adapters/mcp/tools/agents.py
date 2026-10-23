@@ -1245,7 +1245,7 @@ def _backend_switch_refusal(
     ``with_code`` appends the stable reason for direct API and coding-tool callers.
     Never shows an exception type or an internal string.
     """
-    from daimon.core.turn.notices import provider_name
+    from daimon.core.turn.notices import provider_name, switched_meanwhile_text
 
     refused = exc if isinstance(exc, channel_backend.AgentBackendRefused) else None
     reason = (
@@ -1322,9 +1322,7 @@ def _backend_switch_refusal(
                 f"A self-hosted model is set per channel, not per agent. Ask {admin}."
             ),
             "stale_preview": f"'{agent_name}' changed since the preview. Ask me to preview again.",
-            "stale_revision": (
-                f"'{agent_name}''s provider changed since the preview. Ask me to preview again."
-            ),
+            "stale_revision": switched_meanwhile_text(agent_name, current, target),
             "re_confirm": "This change needs a fresh confirmation. Ask me to preview again.",
             "drops_required": "The confirmation didn't accept what this switch drops. "
             "Ask me to preview again.",
@@ -1337,6 +1335,37 @@ def _backend_switch_refusal(
             "If it repeats, tell whoever runs Daimon.",
         )
     return ToolError(f"{text} Nothing changed." + (f" [{reason}]" if with_code else ""))
+
+
+async def _answers_by_default(runtime: McpRuntime, auth: AuthIdentity, agent_name: str) -> bool:
+    """Whether `agent_name` is the server's default or built-in agent.
+
+    Switching one changes it for everyone on the server, not just for this
+    conversation: the deployment's default, or the server's own default.
+    """
+    from daimon.core.scope import TenantScopeRef
+    from daimon.core.stores.scoped_config_read import get_scope
+
+    if agent_name == runtime.deployment_default.agent_name:
+        return True
+    async with runtime.session_factory() as session:
+        tenant = await get_scope(session, scope=TenantScopeRef(tenant_id=auth.tenant_id))
+    return tenant is not None and tenant.agent_name == agent_name
+
+
+def _default_agent_switch_text(
+    agent_name: str, target: Provider, platform: str | None, *, me: bool
+) -> str:
+    """Why an in-chat switch of the default agent didn't happen, and the copy instead."""
+    from daimon.core.turn.notices import provider_name
+
+    provider = provider_name(target)
+    return (
+        f"Switching {agent_name} changes it for everyone on this {space_noun(platform)}. "
+        f"To try {provider} just here, I can make a copy of {'me' if me else agent_name} "
+        f"on {provider}. Nothing changed. (Only if they say it's for everyone: its owner "
+        f"or {admin_noun(platform)} asks again and you pass for_everyone=true.)"
+    )
 
 
 async def _provider_now(
@@ -1440,14 +1469,24 @@ async def _set_agent_backend_impl(
             agent_name=name,
         )
         local = preview.setting_revision if expected_revision is None else expected_revision
-        if backend is None:
-            revision = await service.clear_backend(
-                current, local, actor, expected_preview_digest=preview.digest
-            )
-        else:
-            revision = await service.set_backend(
-                current, backend, local, actor, expected_preview_digest=preview.digest, model=model
-            )
+        try:
+            if backend is None:
+                revision = await service.clear_backend(
+                    current, local, actor, expected_preview_digest=preview.digest
+                )
+            else:
+                revision = await service.set_backend(
+                    current,
+                    backend,
+                    local,
+                    actor,
+                    expected_preview_digest=preview.digest,
+                    model=model,
+                )
+        except channel_backend.AgentBackendRefused as exc:
+            if exc.reason == "stale_revision":
+                on_now = await _provider_now(service, current)
+            raise
     except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
         raise _backend_switch_refusal(
             exc, name, backend, auth, with_code=True, current=on_now
@@ -1519,6 +1558,7 @@ async def _request_agent_backend_switch_impl(
     model: str | None = None,
     thread_mode: ThreadMode | None = None,
     required_capabilities: tuple[Capability, ...] | None = None,
+    for_everyone: bool = False,
 ) -> AgentBackendSwitchInfo:
     model = _resolve_agent_model(target_backend, model)
     _require_selectable_model(target_backend, model)
@@ -1564,6 +1604,15 @@ async def _request_agent_backend_switch_impl(
             tenant_id=auth.tenant_id,
             agent_name=agent_name,
         )
+        if not for_everyone and await _answers_by_default(runtime, auth, agent.name):
+            raise ToolError(
+                _default_agent_switch_text(
+                    agent.name,
+                    target_backend,
+                    auth.platform,
+                    me=origin.responder_name == agent.name,
+                )
+            )
         await _require_agent_editor(
             service,
             agent,
@@ -1620,20 +1669,26 @@ async def _request_agent_backend_switch_impl(
 
             before = await service.current(agent)
             old_provider = provider_name((before.backend if before else None) or DEFAULT_BACKEND)
-            await service.set_backend(
-                agent,
-                target_backend,
-                reference.expected_revision,
-                actor,
-                expected_preview_digest=reference.preview_digest,
-                model=reference.model,
-                settings=reference_settings(reference),
-                **(
-                    {"accepted_drops": reference.accepted_drops}
-                    if reference.accepted_drops is not None
-                    else {}
-                ),
-            )
+            try:
+                await service.set_backend(
+                    agent,
+                    target_backend,
+                    reference.expected_revision,
+                    actor,
+                    expected_preview_digest=reference.preview_digest,
+                    model=reference.model,
+                    settings=reference_settings(reference),
+                    **(
+                        {"accepted_drops": reference.accepted_drops}
+                        if reference.accepted_drops is not None
+                        else {}
+                    ),
+                )
+            except channel_backend.AgentBackendRefused as exc:
+                if exc.reason == "stale_revision":
+                    # Another switch landed first: name where the agent is now.
+                    on_now = await _provider_now(service, agent)
+                raise
             status = "changed"
             summary = (
                 f"Model provider changed. New conversations with {agent_name} use "
@@ -1939,6 +1994,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             model: str | None = None,
             thread_mode: ThreadMode | None = None,
             required_capabilities: tuple[Capability, ...] | None = None,
+            for_everyone: bool = False,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
@@ -1955,13 +2011,14 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             The switch applies to
             new conversations wherever the agent answers, and to this conversation
             from the next message when the switched agent answers here (the result's
-            summary says which); switching the default agent applies to every channel on
-            this server. For "make a copy of yourself on Gemini": copy the agent with
-            fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
-            one; use the name and id it returns from here on), hand this conversation
-            to the copy with hand_off_task while it is still on this provider, then
-            switch the copy here; the confirmed switch moves
-            this conversation to Gemini from the next message.
+            summary says which). The server's default or built-in agent switches only
+            when the person says it's for everyone (for_everyone=true, on both calls);
+            otherwise offer the copy below. For "make a copy of yourself on Gemini":
+            copy the agent with fork_agent and new_copy_if_taken=true (always a NEW
+            copy, never an earlier one; use the name and id it returns from here on),
+            hand this conversation to the copy with hand_off_task while it is still on
+            this provider, then switch the copy here; the confirmed switch moves this
+            conversation to Gemini from the next message.
             First call without preview_digest and show the returned compatibility,
             shared-thread limits, what won't be available, and the cost line. Call again
             with the same model and that preview's expected_revision, preview_digest and
@@ -1986,4 +2043,5 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 model=model,
                 thread_mode=thread_mode,
                 required_capabilities=required_capabilities,
+                for_everyone=for_everyone,
             )

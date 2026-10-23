@@ -288,7 +288,14 @@ async def test_click_rechecks_real_preview_and_rejects_changed_facts(owned_previ
     elif change == "revision":
         await service.set_backend(agent, "anthropic", 0, actor)
     trace.queue(reply())
-    assert await check(prompt, "requester") is not None
+    refused = await check(prompt, "requester")
+    assert refused is not None
+    if change == "revision":
+        # Someone else's switch landed after this card was posted: say where it is now.
+        assert refused.startswith(
+            f"Someone just switched {prompt.backend_switch.agent}; it's now on Anthropic. "
+            "Ask again if you still want"
+        ), refused
     current = await service.current(agent)
     assert current is None if change != "revision" else current.local == 1
     assert not trace.violations and not trace.replies
