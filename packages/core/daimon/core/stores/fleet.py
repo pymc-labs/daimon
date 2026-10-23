@@ -744,12 +744,18 @@ async def set_run_status(
     wake of this run refuses the move in the same transaction (FleetConflict),
     so a turn already owed to the root is never cancelled under it.
     """
-    # An ended run owes its thread a terminal card until one is rendered.
+    # An ended run with a worker owes its thread a terminal card until one is
+    # rendered. One nothing was spawned into (every turn holds a run) owes none.
+    spawned = (
+        select(FleetWorkerRow.id)
+        .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run_id)
+        .exists()
+    )
     finished = (
         {
             "finished_at": func.now(),
-            "end_notice": "owed",
-            "end_notice_due_at": func.now() + END_NOTICE_GRACE,
+            "end_notice": case((spawned, "owed"), else_=None),
+            "end_notice_due_at": case((spawned, func.now() + END_NOTICE_GRACE), else_=None),
         }
         if status not in RUN_TRANSITIONS
         else {}
@@ -837,6 +843,20 @@ async def claim_end_notices(
         ).all()
         for row in rows:
             run = _run(row)
+            workers = (
+                await session.scalars(
+                    select(FleetWorkerRow)
+                    .where(
+                        FleetWorkerRow.tenant_id == run.tenant_id, FleetWorkerRow.run_id == run.id
+                    )
+                    .order_by(FleetWorkerRow.ordinal)
+                )
+            ).all()
+            if not workers:
+                # Nothing was spawned into it: there is no fleet to tell anyone about.
+                row.end_notice = None
+                row.end_notice_due_at = None
+                continue
             started, delivered = await task_continuations.run_end_wakes(session, run=run)
             if started is not None and started + WAKE_TURN_GRACE > now:
                 row.end_notice_due_at = started + WAKE_TURN_GRACE
@@ -849,15 +869,6 @@ async def claim_end_notices(
             row.end_notice_due_at = now + min(
                 _END_NOTICE_BACKOFF * 2 ** (row.end_notice_attempts - 1), _END_NOTICE_BACKOFF_CAP
             )
-            workers = (
-                await session.scalars(
-                    select(FleetWorkerRow)
-                    .where(
-                        FleetWorkerRow.tenant_id == run.tenant_id, FleetWorkerRow.run_id == run.id
-                    )
-                    .order_by(FleetWorkerRow.ordinal)
-                )
-            ).all()
             claimed.append(
                 EndNotice(
                     run=run,

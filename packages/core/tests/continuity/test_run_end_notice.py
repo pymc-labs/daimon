@@ -93,6 +93,7 @@ async def test_a_rendered_terminal_card_settles_the_notice(pooled):
 
 async def test_a_live_card_is_remembered_for_the_notice(pooled):
     run = await _run(pooled)
+    await _worker(pooled, run, 0)
     await fleet.record_card(
         pooled, tenant_id=run.tenant_id, run_id=run.id, message_id="901", terminal=False
     )
@@ -212,3 +213,33 @@ async def test_settle_never_reopens_a_closed_notice(pooled):
     assert not await fleet.settle_end_notice(
         pooled, tenant_id=uuid.uuid4(), run_id=run.id, outcome="shown"
     )
+
+
+async def test_a_run_nothing_was_spawned_into_owes_no_notice(pooled):
+    # smoke-1: every turn holds a run and cancels it; it is not a fleet.
+    run = await _run(pooled)
+    run = await _end(pooled, run, "cancelled")
+    row = await _row(pooled, run)
+    assert row.finished_at is not None
+    assert row.end_notice is None and row.end_notice_due_at is None
+    post = _Post()
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 0
+    assert post.notices == []
+
+
+async def test_an_owed_run_without_workers_is_cleared_unposted(pooled):
+    # Backstop for a row owed before the guard: claim clears it, posts nothing.
+    run = await _run(pooled)
+    run = await _end(pooled, run, "cancelled")
+    async with pooled.begin() as db:
+        await db.execute(
+            update(FleetRunRow)
+            .where(FleetRunRow.id == run.id)
+            .values(end_notice="owed", end_notice_due_at=func.now())
+        )
+    await _due(pooled, run)
+    post = _Post()
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 0
+    assert post.notices == []
+    row = await _row(pooled, run)
+    assert row.end_notice is None and row.end_notice_attempts == 0

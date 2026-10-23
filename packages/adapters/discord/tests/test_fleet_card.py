@@ -2458,7 +2458,8 @@ async def test_the_answer_shows_a_running_fleets_card_never_posted_by_a_render()
         TurnState(content=[TextBlock(kind="text", text="Started the workers.")])
     )
     assert "**Fleet — running**" in _headlines(send, edit)
-def _ended_thread(card=None):
+
+
 def _ended_thread(card=None, stored=None):
     async def history(limit):
         if card is not None:
