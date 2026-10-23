@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, replace
@@ -1607,6 +1608,10 @@ async def capture_preparation_source(
     )
 
 
+#: A connector name a declared `mcp_server:<name>` loss can spell (mux contracts).
+_CONNECTOR_NAME = re.compile(r"[A-Za-z0-9_.-]+")
+
+
 async def _capture_source_capabilities(
     request: ProviderPreparationRequest, source: BackendAgent, *, capability_preview: bool = False
 ) -> BackendAgent:
@@ -1830,6 +1835,9 @@ async def _capture_source_capabilities(
                 for server in spec.mcp_servers or ()
                 if server.name != DAIMON_SERVER_NAME
             )
+            if any(_CONNECTOR_NAME.fullmatch(name) is None for name in connectors):
+                # No named loss can spell it: represent nothing, so MCP drops whole.
+                raise ValueError("unrepresentable connector name")
             connector_losses = tuple(f"mcp_server:{name}" for name in sorted(connectors))
             tools = tuple(
                 tool

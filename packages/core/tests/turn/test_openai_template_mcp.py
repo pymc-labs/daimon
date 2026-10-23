@@ -110,7 +110,10 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     from daimon.core.turn.admission import capture_backend_source
     from daimon.testing.asgi import mcp_session
 
-    model = getattr(request, "param", "gpt-6-luna")
+    param = getattr(request, "param", "gpt-6-luna")
+    # {"legacy": True}: consent was given before this deploy's template kept MCP.
+    model = param if isinstance(param, str) else param.get("model", "gpt-6-luna")
+    legacy = isinstance(param, dict) and param.get("legacy", False)
     request, _, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
@@ -174,7 +177,8 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         },
     )
     manifest = tmp_path / "runtime.json"
-    manifest.write_text(json.dumps([row]))
+    before = {key: value for key, value in row.items() if key != "template_capabilities"}
+    manifest.write_text(json.dumps([before if legacy else row]))
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
     monkeypatch.setenv(KEY, "offline")
 
@@ -200,25 +204,38 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         )
 
     consenting = AgentBackendService(sessions, enabled=True, capture_source=capture_bound_source)
-    quote = await consenting.preview(source, "openai", model)
-    confirmed = await consenting.set_backend(
-        source,
-        "openai",
-        accepted.local,
-        actor,
-        model=model,
-        accepted_drops=quote.declared_drops,
-        expected_preview_digest=quote.digest,
-    )
     revision = request.admission.backend_revision
-    linked = ConfigRevision.create(
-        revision.channel, 2, revision.model_copy(update={"model": model})
-    )
-    async with sessions.begin() as db:
-        await mux_state.put_config_revision(db, linked, origin="agent", agent_revision=confirmed)
-    request = replace(request, admission=replace(request.admission, backend_revision=linked))
+    state = {"expected": accepted.local, "local": 1}
+
+    async def consent(current):
+        """Preview and confirm the switch here, as a person on the card would."""
+        quote = await consenting.preview(source, "openai", model)
+        confirmed = await consenting.set_backend(
+            source,
+            "openai",
+            state["expected"],
+            actor,
+            model=model,
+            accepted_drops=quote.declared_drops,
+            expected_preview_digest=quote.digest,
+        )
+        state["expected"], state["local"] = confirmed.local, state["local"] + 1
+        linked = ConfigRevision.create(
+            revision.channel, state["local"], revision.model_copy(update={"model": model})
+        )
+        async with sessions.begin() as db:
+            await mux_state.put_config_revision(
+                db, linked, origin="agent", agent_revision=confirmed
+            )
+        return quote, replace(
+            current, admission=replace(current.admission, backend_revision=linked)
+        )
+
+    quote, request = await consent(request)
+    if legacy:
+        manifest.write_text(json.dumps([row]))  # this deploy: the template keeps MCP
     wire.requests.clear()
-    yield request, quote, wire
+    yield request, quote, wire, consent
     assert all(client.is_closed() for client in clients)
 
 
@@ -265,7 +282,7 @@ async def _revoked(request, token: str) -> bool:
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_consent_keeps_daimon_tools_and_drops_only_what_the_template_lacks(template):
-    _, quote, _ = template
+    _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
     assert {"memory", "skills", "tools"} <= set(quote.declared_drops)
 
@@ -278,7 +295,7 @@ async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revoke
     """J6 e2e: a copy on Luna or Astra keeps Daimon MCP across turns of one session."""
     from daimon.testing.asgi import mcp_session
 
-    request, _, wire = template
+    request, _, wire, _ = template
     await _turn(request, 0)
     assert len(wire.posts) == 1
     body = wire.posts[0]
@@ -366,7 +383,7 @@ async def test_a_user_connector_drops_only_itself_never_daimon_mcp(template):
     """An agent with its own connector keeps Daimon MCP; the card names the connector."""
     from daimon.core.confirmation import drop_words
 
-    request, quote, wire = template
+    request, quote, wire, _ = template
     assert "mcp_server:linear" in quote.declared_drops
     assert "mcp" not in quote.declared_drops
     assert drop_words(("mcp_server:linear",)) == "its linear connector"
@@ -377,3 +394,74 @@ async def test_a_user_connector_drops_only_itself_never_daimon_mcp(template):
     assert "mcp.linear.app" not in json.dumps([wire.agent, body])
     # The model is told plainly what this copy can't reach.
     assert "mcp_server:linear" in wire.agent["instructions"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("template", [{"legacy": True}], indirect=True)
+async def test_a_copy_switched_before_this_deploy_is_asked_to_confirm_again_once(template):
+    """Consent that declared MCP dropped no longer matches: re_confirm, never a silent gain."""
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, quote, wire, consent = template
+    assert "mcp" in quote.declared_drops, "consented while the template had no MCP"
+    with pytest.raises(AdmissionDenied) as refused:
+        await _turn(request, 0)
+    assert isinstance(refused.value.__cause__, AgentBackendRefused)
+    assert refused.value.__cause__.reason == "re_confirm"
+    assert wire.posts == [], "nothing reached OpenAI"
+    again, request = await consent(request)
+    assert "mcp" not in again.declared_drops
+    await _turn(request, 0)
+    (body,) = wire.posts
+    assert [tool["type"] for tool in body["agent"]["tools"]].count("mcp") == 1
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            **CONNECTOR_PARAMS,
+            "mcp_servers": [
+                {"type": "url", "name": "my linear", "url": "https://mcp.linear.app/mcp"}
+            ],
+            "tools": [
+                *PARAMS["tools"],
+                {**CONNECTOR_PARAMS["tools"][-1], "mcp_server_name": "my linear"},
+            ],
+        }
+    ],
+    indirect=True,
+)
+async def test_a_connector_name_no_drop_can_spell_fails_safe(template):
+    """A name outside [A-Za-z0-9_.-] can't be a named loss: MCP drops whole, nothing leaks."""
+    request, quote, wire, _ = template
+    assert "mcp" in quote.declared_drops
+    assert not any(drop.startswith("mcp_server:") for drop in quote.declared_drops)
+    await _turn(request, 0)
+    (body,) = wire.posts
+    assert not [tool for tool in body["agent"].get("tools", []) if tool["type"] == "mcp"]
+    assert "mcp.linear.app" not in json.dumps([wire.agent, body])
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_preparation_that_fails_after_minting_revokes_the_credential(template, monkeypatch):
+    """A token minted for a turn that never starts is revoked now, not left to its TTL."""
+    from daimon.core.turn import openai_host
+
+    request, _, _, _ = template
+    minted: list[str] = []
+
+    async def mint_then_fail(preparation, runtime):
+        connection = preparation.target_spec.mcp_servers[0]
+        assert runtime.mcp_secrets is not None
+        minted.append(
+            await runtime.mcp_secrets(preparation.scope, connection.credential_ref, connection.url)
+        )
+        raise RuntimeError("preparation failed after the session create")
+
+    monkeypatch.setattr(openai_host, "_prepare_with_runtime", mint_then_fail)
+    with pytest.raises(Exception):  # noqa: B017 - whatever admission makes of it
+        await _turn(request, 0)
+    (token,) = minted
+    assert await _revoked(request, token)

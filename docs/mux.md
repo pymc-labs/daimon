@@ -2412,7 +2412,18 @@ tool to that credential's id (re-adding a credential under the same name is
 refused). So every later turn's first input replaces that credential's secret
 in place (`POST /vaults/{vault}/credentials/{credential}` with only
 `auth.token`) before it is sent, then the turn's end revokes it as on Gemini.
-Verified live against our OpenAI project on 2026-10-23.
+Verified live against our OpenAI project on 2026-10-23. The same in-place write
+runs for any session with its own MCP vault, so a session from an operator row
+with `source_capabilities` now gets its credential file's current bearer at
+every turn too (the same bearer is written again; a rotated file takes effect
+from the next turn instead of never). A preparation that fails after minting
+a template turn's credential revokes it at once.
+
+Deploying this changes what a switch to GPT keeps (MCP, where it was a
+declared drop) and, for an agent with its own connectors, what a switch to
+Gemini keeps. Such an agent's stored consent no longer matches, so its next
+turn refuses with `re_confirm`: the person confirms the switch once more and
+nothing is gained silently.
 
 A user's own MCP connectors can't follow an agent to another provider. Each
 becomes a named loss, `mcp_server:<name>` ("its <name> connector" on the
