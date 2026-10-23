@@ -2437,7 +2437,14 @@ def resolve_worker_spec(
         "memory_read_only": True,
     }
     if captured_source is not None:
-        body["capture"] = TypeAdapter(object).dump_python(dict(captured_source), mode="json")
+        # The source's facts, not how a provider may represent it: `representations`
+        # is preparation evidence that depends on which backend revision the
+        # capture ran under (a Gemini worker's revision selects the code-default
+        # agent template and adds its representation; the spawn's root revision
+        # does not). Hashed, it made run_worker's re-capture read as changed intent.
+        capture = {key: value for key, value in dict(captured_source).items()}
+        capture.pop("representations", None)
+        body["capture"] = TypeAdapter(object).dump_python(capture, mode="json")
     digest = _sha256(body)
     if digest_phase is not None:
         # Which part moved when a spawn and its run_worker disagree: ids and
