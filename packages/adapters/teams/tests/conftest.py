@@ -41,6 +41,8 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.db import db_clean as db_clean
+from daimon.testing.db import db_committing_engine as db_committing_engine
+from daimon.testing.db import db_committing_pool as db_committing_pool
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
 from daimon.testing.db import db_session as db_session
