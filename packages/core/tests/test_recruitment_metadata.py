@@ -6,7 +6,9 @@ from uuid import uuid4
 
 import discord
 import pytest
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import RecruitmentSettings
+from daimon.core.here_card import HereCard
 
 
 def policy():
@@ -186,7 +188,19 @@ async def test_here_from_ordinary_channel_filters_reserved_sibling_names(monkeyp
     monkeypatch.setattr(module, "resolve_tenant_for_interaction", AsyncMock(return_value=uuid4()))
     monkeypatch.setattr(module, "find_platform_principal", AsyncMock(return_value=None))
     monkeypatch.setattr(module, "is_guild_admin", lambda _: False)
-    card = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(module, "load_access_policy", AsyncMock(return_value=TenantAccessPolicy()))
+    card = AsyncMock(
+        return_value=HereCard(
+            agent_name=None,
+            tier=None,
+            channel_rule=ChannelRule(),
+            effective_readers="any",
+            effective_writers="any",
+            who_may_answer="",
+            reads_kept_inside=False,
+            text="",
+        )
+    )
     monkeypatch.setattr(module, "load_here_card", card)
     monkeypatch.setattr(module, "build_here_embed", lambda _: discord.Embed())
     await module.HereCog.here.callback.__wrapped__(MagicMock(), tap)

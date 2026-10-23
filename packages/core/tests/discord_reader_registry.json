@@ -414,6 +414,11 @@
       "count": 1,
       "boundary": "here"
     },
+    "packages/adapters/discord/daimon/adapters/discord/confidential.py:MakeConfidentialView:persistent_control:0dfa486c2a7a": {
+      "count": 1,
+      "boundary": "controls",
+      "note": "Ephemeral /here control inherits the raw interaction gate; the callback repeats the native admin check before setting the channel rule."
+    },
     "packages/adapters/discord/daimon/adapters/discord/context.py:_resolve_reply_target:fetch:5c21b0ab779e": {
       "count": 1,
       "boundary": "gateway"
@@ -513,6 +518,11 @@
     "packages/adapters/discord/daimon/adapters/discord/output_delivery.py:_own_attachments:history:3ed641b1d46a": {
       "count": 1,
       "boundary": "gateway"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/outsiders.py:channel_outsiders:fetch_channel:2026ea0e88f2": {
+      "count": 1,
+      "boundary": "controls",
+      "note": "Current-channel permission metadata only; guarded /here and Permissions entrypoints call it, and no channel content or sibling metadata is returned."
     },
     "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_expired_posted_card:fetch:41c0d6d4cec4": {
       "count": 1,

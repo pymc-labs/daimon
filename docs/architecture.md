@@ -2568,3 +2568,17 @@ retains its live recruiter/thread checks.
 Bulk deletion locks every affected recruitment thread in stable order and
 records all source tombstones in one transaction. Its event watermark cannot be
 covered between deleted message IDs, including parent-channel starter events.
+
+The Discord and Slack `/here` cards and current-channel Permissions screens check
+platform outsider visibility. Discord uses configured internal roles and permission
+overwrites; Slack uses current external, Enterprise and pending sharing evidence.
+Admins can set readers to `own` with **Make confidential**, with authorization checked at click.
+
+Slack uses one fresh `conversations.info` response on each `/here` and Permissions
+request for sharing flags and workspace-ID lists. It performs no guest detection
+and caches nothing. Both screens explicitly say that Slack guest accounts are not
+checked when readers is not `own`. Failed or incomplete sharing reads show
+**Outsider check skipped**. Admin facts stay live. When later Slack metadata fails,
+`/here` renders only fixed current-channel visibility facts against the stored
+reading rule, with no admin controls or unrelated channel details. A bot missing
+from a private channel still gets the invite-the-bot card with the skipped note.

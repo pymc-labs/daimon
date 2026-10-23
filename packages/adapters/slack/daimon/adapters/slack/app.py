@@ -132,7 +132,7 @@ from daimon.adapters.slack.github_connect import (
     handle_github_update_click,
 )
 from daimon.adapters.slack.help import handle_help_command
-from daimon.adapters.slack.here import handle_here_command
+from daimon.adapters.slack.here import handle_here_command, handle_make_confidential
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
@@ -1227,6 +1227,8 @@ class SlackApp:
                     self._spawn(handle_topup_select(self.runtime, payload))
                 elif action_id == REDEEM_OPEN_ACTION_ID:
                     self._spawn(handle_redeem_open(self.runtime, payload))
+                elif action_id == "here_make_confidential":
+                    self._spawn(handle_make_confidential(self.runtime, payload))
                 elif action_id in PANEL_ACTION_IDS:
                     self._spawn(handle_panel_action(self.runtime, payload))
                 elif action_id in (

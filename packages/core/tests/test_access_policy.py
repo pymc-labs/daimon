@@ -244,3 +244,11 @@ def test_admin_switch_old_json_and_round_trip() -> None:
     ).invoker_admin_bypass
     policy = TenantAccessPolicy(invoker_admin_bypass=False)
     assert TenantAccessPolicy.model_validate_json(policy.model_dump_json()) == policy
+
+
+def test_internal_roles_validate_and_deduplicate() -> None:
+    policy = TenantAccessPolicy(internal_role_ids=("222", "333", "222"))
+    assert policy.internal_role_ids == ("222", "333")
+    assert TenantAccessPolicy.model_validate_json(policy.model_dump_json()) == policy
+    with pytest.raises(ValueError):
+        TenantAccessPolicy(internal_role_ids=("not-a-role",))

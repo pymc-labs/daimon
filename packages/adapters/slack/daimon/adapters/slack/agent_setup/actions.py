@@ -114,6 +114,7 @@ from daimon.adapters.slack.errors import render_error
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import fit_title
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.adapters.slack.outsiders import channel_outsiders
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.setup_conversations import (
     create_setup_conversation,
@@ -142,6 +143,7 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.panel_operator_tokens import list_panel_operator_tokens
+from daimon.core.permissions import channel_permissions
 from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
@@ -393,6 +395,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 _RULE_ACTIONS = frozenset(
     {
         panel_views.ACTION_RULE_READERS,
+        panel_views.ACTION_RULE_CONFIDENTIAL,
         panel_views.ACTION_RULE_WRITERS,
         panel_views.ACTION_RULE_COPY,
         panel_views.ACTION_RULE_RELEASE,
@@ -569,12 +572,9 @@ async def load_routing_view(
             if is_admin and runtime.settings.mcp.jwt_secret is not None
             else None
         )
+        policy = await load_access_policy(session, tenant_id=tenant_id)
         rule_status = (
-            channel_rule_status(
-                await load_access_policy(session, tenant_id=tenant_id), meta.channel_id
-            )
-            if is_admin and meta.channel_id
-            else None
+            channel_rule_status(policy, meta.channel_id) if is_admin and meta.channel_id else None
         )
         channel_skills = (
             await list_channel_skills(
@@ -615,6 +615,12 @@ async def load_routing_view(
         user_id=user_id,
         is_admin=is_admin,
     )
+    visibility = (
+        await channel_outsiders(client, team_id=meta.team_id, channel_id=meta.channel_id)
+        if meta.channel_id.startswith(("C", "G"))
+        else None
+    )
+    readers = channel_permissions(policy, channel_id=meta.channel_id).readers
     page = paginate(answering_map.channel_overrides, page=meta.page, page_size=PANEL_PAGE_SIZE)
     return build_routing_view(
         answering_map,
@@ -627,6 +633,8 @@ async def load_routing_view(
         unrouted_agent_name=unrouted_agent_name,
         environment_picker=environment_picker,
         rule_status=rule_status,
+        outsider_lines=visibility.lines(readers=readers) if visibility else (),
+        outsider_warning=bool(visibility and visibility.outsiders_can_view and readers != "own"),
         operator_tokens=operator_tokens,
         channel_skills=channel_skills,
     )
@@ -1321,7 +1329,7 @@ async def _dispatch_panel_action(
                 readers=as_readers(value)
                 if action_id == panel_views.ACTION_RULE_READERS
                 else "own"
-                if action_id == panel_views.ACTION_RULE_COPY
+                if action_id in {panel_views.ACTION_RULE_COPY, panel_views.ACTION_RULE_CONFIDENTIAL}
                 else None,
                 writers=as_writers(value) if action_id == panel_views.ACTION_RULE_WRITERS else None,
                 copy=action_id == panel_views.ACTION_RULE_COPY,

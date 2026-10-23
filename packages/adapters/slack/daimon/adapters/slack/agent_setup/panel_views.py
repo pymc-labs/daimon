@@ -90,6 +90,7 @@ __all__ = [
     "ACTION_ROUTING",
     "ACTION_RULE_COPY",
     "ACTION_RULE_READERS",
+    "ACTION_RULE_CONFIDENTIAL",
     "ACTION_RULE_RELEASE",
     "ACTION_RULE_WRITERS",
     "CALLBACK_AGENTS",
@@ -197,6 +198,7 @@ ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 ACTION_ENVIRONMENT: Final = "agent_setup__environment"
 """This channel's environment select on Who answers where."""
 
+ACTION_RULE_CONFIDENTIAL: Final = "agent_setup__rule:confidential"
 ACTION_RULE_READERS: Final = "agent_setup__rule:readers"
 ACTION_RULE_WRITERS: Final = "agent_setup__rule:writers"
 ACTION_RULE_COPY: Final = "agent_setup__rule:copy"
@@ -818,6 +820,8 @@ def build_routing_view(
     unrouted_agent_name: str | None,
     environment_picker: EnvironmentPicker | None = None,
     rule_status: ChannelRuleStatus | None = None,
+    outsider_lines: tuple[str, ...] = (),
+    outsider_warning: bool = False,
     operator_tokens: Sequence[McpTokenRow] | None = None,
     channel_skills: Sequence[ChannelSkillRow] | None = None,
 ) -> dict[str, Any]:
@@ -876,6 +880,17 @@ def build_routing_view(
     listing = "\n".join(links) if links else "_none open_"
     blocks.append(_section(f"*Setup conversations*\n{listing}"))
     blocks.append({"type": "divider"})
+    if outsider_lines and _is_channel(channel_id):
+        blocks.append(_section("\n".join(escape_mrkdwn(line) for line in outsider_lines)))
+        if outsider_warning and is_admin:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        _button(action_id=ACTION_RULE_CONFIDENTIAL, label="Make confidential")
+                    ],
+                }
+            )
     if rule_status is not None and _is_channel(channel_id):
         blocks.extend(_permissions_blocks(channel_id=channel_id, status=rule_status))
     if channel_skills is not None and _is_channel(channel_id):
