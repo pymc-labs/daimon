@@ -45,7 +45,7 @@ from pydantic import JsonValue, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..test_native_tariffs import fixed_source_date as fixed_source_date
-from .test_openai_host import Wire
+from .test_openai_host import Wire, openai_native_spend_cap
 from .test_openai_host import composed as composed
 from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission
 
@@ -342,6 +342,8 @@ async def test_root_budget_refuses_an_existing_unverified_binding_before_native_
         )
     )
     manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    # A root native budget needs a project that honours `spend_control` (ours doesn't).
+    openai_native_spend_cap(monkeypatch)
     compiled = build_openai_runtime(replace(application, native_budget_usd=Decimal("0.04")))
     controlled = replace(runtime, controls=compiled.controls)
     candidate = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: controlled}))
