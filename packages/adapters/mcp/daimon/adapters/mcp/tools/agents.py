@@ -1337,37 +1337,6 @@ def _backend_switch_refusal(
     return ToolError(f"{text} Nothing changed." + (f" [{reason}]" if with_code else ""))
 
 
-async def _answers_by_default(runtime: McpRuntime, auth: AuthIdentity, agent_name: str) -> bool:
-    """Whether `agent_name` is the server's default or built-in agent.
-
-    Switching one changes it for everyone on the server, not just for this
-    conversation: the deployment's default, or the server's own default.
-    """
-    from daimon.core.scope import TenantScopeRef
-    from daimon.core.stores.scoped_config_read import get_scope
-
-    if agent_name == runtime.deployment_default.agent_name:
-        return True
-    async with runtime.session_factory() as session:
-        tenant = await get_scope(session, scope=TenantScopeRef(tenant_id=auth.tenant_id))
-    return tenant is not None and tenant.agent_name == agent_name
-
-
-def _default_agent_switch_text(
-    agent_name: str, target: Provider, platform: str | None, *, me: bool
-) -> str:
-    """Why an in-chat switch of the default agent didn't happen, and the copy instead."""
-    from daimon.core.turn.notices import provider_name
-
-    provider = provider_name(target)
-    return (
-        f"Switching {agent_name} changes it for everyone on this {space_noun(platform)}. "
-        f"To try {provider} just here, I can make a copy of {'me' if me else agent_name} "
-        f"on {provider}. Nothing changed. (Only if they say it's for everyone: its owner "
-        f"or {admin_noun(platform)} asks again and you pass for_everyone=true.)"
-    )
-
-
 async def _provider_now(
     service: channel_backend.AgentBackendService, agent: BackendAgent
 ) -> Provider:
@@ -1604,14 +1573,21 @@ async def _request_agent_backend_switch_impl(
             tenant_id=auth.tenant_id,
             agent_name=agent_name,
         )
-        if not for_everyone and await _answers_by_default(runtime, auth, agent.name):
+        if not for_everyone and await channel_backend.answers_for_everyone(
+            runtime.session_factory,
+            agent,
+            default_agent_name=runtime.deployment_default.agent_name,
+        ):
+            from daimon.core.turn.notices import default_agent_switch_text
+
             raise ToolError(
-                _default_agent_switch_text(
+                default_agent_switch_text(
                     agent.name,
                     target_backend,
-                    auth.platform,
+                    place=space_noun(auth.platform),
                     me=origin.responder_name == agent.name,
                 )
+                + " Nothing changed."
             )
         await _require_agent_editor(
             service,

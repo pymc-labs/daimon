@@ -1202,7 +1202,7 @@ def test_two_switches_at_once_name_where_the_agent_is_now():
     )
 
 
-@pytest.mark.parametrize("default", ["deployment", "server"])
+@pytest.mark.parametrize("default", ["deployment", "server", "managed"])
 async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone(
     active_chat, default
 ):
@@ -1211,14 +1211,19 @@ async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone
 
     runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
     _without_own_tools(payload)
-    if default == "deployment":
+    if default == "managed":
+        from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+
+        # The built-in agent is known by its managed mark, whatever its name.
+        payload["metadata"][MA_METADATA_KEY_MANAGED] = "true"
+    elif default == "deployment":
         runtime = replace(
             runtime,
             deployment_default=DeploymentDefault(
                 agent_name="Researcher", environment_name="default"
             ),
         )
-    else:
+    elif default == "server":
         async with runtime.session_factory.begin() as session:
             await set_fields(
                 session,

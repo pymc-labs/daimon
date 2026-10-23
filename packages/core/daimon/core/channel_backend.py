@@ -1678,6 +1678,29 @@ async def resolve_turn_backend(
     raise AgentBackendRefused("revision_busy")
 
 
+async def answers_for_everyone(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    agent: BackendAgent,
+    *,
+    default_agent_name: str | None,
+) -> bool:
+    """Whether switching `agent` changes it for everyone on the server.
+
+    The built-in agent (defaults-managed, or the deployment's default) and the
+    server's own default agent answer every channel that picks no other.
+    """
+    from daimon.core.agent_identity import is_builtin_agent
+    from daimon.core.scope import TenantScopeRef
+    from daimon.core.stores.scoped_config_read import get_scope
+
+    metadata = agent.source.spec.metadata if agent.source is not None else None
+    if is_builtin_agent(name=agent.name, metadata=metadata, default_agent_name=default_agent_name):
+        return True
+    async with sessionmaker() as session:
+        tenant = await get_scope(session, scope=TenantScopeRef(tenant_id=agent.tenant_id))
+    return tenant is not None and tenant.agent_name == agent.name
+
+
 async def load_backend_agent(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],

@@ -29,6 +29,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationE
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
 from daimon.core.confirmation import (
     ApprovedConfirmation,
+    CardRefusal,
     ConfirmationHook,
     ToolRuleCardReference,
     no_confirmation_surface,
@@ -519,6 +520,9 @@ def interactive_decider(
             # Named boundary: prompt validation and the adapter's card must
             # both succeed before the write may run.
             log.warning("tool_safety.confirm_failed", tool=call.key, error=str(err))
+            if isinstance(err, CardRefusal):
+                # Worded for the person (e.g. another switch landed first): pass it on.
+                return ToolConfirmationResult(allow=False, deny_message=str(err))
             return ToolConfirmationResult(allow=False, deny_message=_card_failed_message(call))
         answer = response.answer if isinstance(response, ApprovedConfirmation) else response
         log.info("tool_safety.answered", tool=call.key, answer=answer)
