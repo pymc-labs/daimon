@@ -132,7 +132,7 @@ def apply(
             return _apply_tool_result(state, event, seen)
         case "session.status_idle":
             assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
-            refusal = _refusal(event)
+            refusal = refusal_error((event.model_extra or {}).get("stop_details"))
             if refusal is not None:
                 # A refusal idles as a plain `end_turn`, usually with no text, which
                 # would otherwise finalize as an empty success.
@@ -313,15 +313,14 @@ class _StopDetails(BaseModel):
     category: object = None
 
 
-def _refusal(event: BetaManagedAgentsSessionStatusIdleEvent) -> TurnError | None:
-    """The API's refusal, read from `stop_details`, which the pinned SDK keeps as an extra.
+def refusal_error(stop_details: object) -> TurnError | None:
+    """The API's refusal from an idle's `stop_details`, which the pinned SDK keeps as an extra.
 
     Read leniently: an unexpected shape is no refusal, never a crashed turn.
     """
-    raw: object = (event.model_extra or {}).get("stop_details")
-    if not isinstance(raw, dict):
+    if not isinstance(stop_details, dict):
         return None
-    details = _StopDetails.model_validate(raw)
+    details = _StopDetails.model_validate(stop_details)
     if details.type != "refusal":
         return None
     category = details.category if isinstance(details.category, str) else "no category"

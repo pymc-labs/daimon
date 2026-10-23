@@ -116,6 +116,7 @@ from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
+from daimon.core.turn.reducers import refusal_error
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
@@ -1020,6 +1021,26 @@ def _agent_message_text(event: SessionEventOut) -> str | None:
     return text or None
 
 
+async def _turn_refused(
+    runtime: McpRuntime, auth: AuthIdentity, handle: str, turn_started_at: dt.datetime
+) -> bool:
+    """Whether this turn's latest idle is a refusal, which ends it with no reply to wait for."""
+    events = await _list_events_impl(
+        runtime,
+        auth,
+        handle,
+        None,
+        1,
+        "desc",
+        created_at_gte=turn_started_at.isoformat(),
+        types=["session.status_idle"],
+    )
+    return any(
+        refusal_error((event.model_extra or {}).get("stop_details")) is not None
+        for event in events.items
+    )
+
+
 def _event_timestamp(event: SessionEventOut) -> dt.datetime | None:
     """Read an event timestamp across current Managed Agents projections."""
     value = getattr(event, "processed_at", None)
@@ -1195,6 +1216,14 @@ async def _ask_impl(
                     message=delivery.message,
                     chart_urls=delivery.chart_urls,
                     image_blocks=delivery.image_blocks,
+                )
+
+            if await _turn_refused(runtime, auth, handle, turn_started_at):
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.REFUSED)
+                raise ToolError(
+                    "Daimon's AI declined this request; rephrase it and ask again "
+                    f"with handle {handle}"
                 )
 
         remaining = deadline - clock()

@@ -981,6 +981,65 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session,
     assert rows[0].session_id == "ses_terminated001"
 
 
+@pytest.mark.parametrize("refused", [True, False])
+async def test_ask_reports_a_refused_turn_without_waiting(
+    db_session, db_engine, refused: bool
+) -> None:
+    """A refusal idles with no reply; only its `stop_details` says the turn is over."""
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.turn.termination import TerminationReason
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    runtime = MagicMock()
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    runtime.session_factory = async_sessionmaker(db_engine)
+    auth = replace(_auth(), tenant_id=tenant.id)
+    idle: dict[str, Any] = {"id": "sevt_idle", "type": "session.status_idle"}
+    if refused:
+        idle["stop_details"] = {"type": "refusal", "category": "cyber"}
+    no_reply = MagicMock(items=[], next_page=None)
+    idle_page = MagicMock(items=[SessionEventOut.model_validate(idle)], next_page=None)
+    elapsed = 0.0
+
+    async def advance(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._start_turn_impl",
+            new=AsyncMock(return_value=_started("ses_refused001")),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
+            new=AsyncMock(return_value=MagicMock(status="idle")),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
+            new=AsyncMock(side_effect=[no_reply, idle_page] * 3),
+        ),
+        pytest.raises(ToolError, match="declined" if refused else "120 seconds"),
+    ):
+        await _ask_impl(
+            runtime,
+            auth,
+            "Question",
+            poll_interval_seconds=60.0,
+            clock=lambda: elapsed,
+            sleep=advance,
+        )
+
+    assert elapsed == (0.0 if refused else 120.0), "a refusal must not wait out the timeout"
+    await drain_outcomes()
+    async with runtime.session_factory() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert [row.reason for row in rows] == [
+        TerminationReason.REFUSED if refused else TerminationReason.CEILING
+    ]
+
+
 async def test_ask_tool_result_preserves_images_and_structured_urls() -> None:
     image = ImageContent(type="image", data="cG5n", mimeType="image/png")
     chart = ChartUrl(
