@@ -380,9 +380,9 @@ def test_a_neutral_refusal_end_maps_to_refused() -> None:
         observed_at=_FROZEN_NOW,
     )
     assert normalized_termination_reason(ended) is TerminationReason.REFUSED, ended.payload
-    # Another provider's free-form error kind can read "refusal" too.
-    other = ended.model_copy(update={"native": ended.native.model_copy(update={"provider": "x"})})
-    assert normalized_termination_reason(other) is TerminationReason.UPSTREAM
+    # A free-form native reason can read "refusal" on a turn that still completed.
+    other = ended.model_copy(update={"payload": {**ended.payload, "outcome": "completed"}})
+    assert normalized_termination_reason(other) is TerminationReason.COMPLETED
 
 
 def test_only_completed_and_interrupted_are_not_failures() -> None:
