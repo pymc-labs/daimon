@@ -773,8 +773,9 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
     assert record is not None and record.operation.status == "outcome_unknown"
 
 
-async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutations() -> None:
+async def test_reads_retry_but_legacy_mutations_never_retry_without_a_claim() -> None:
     import httpx
+    from anthropic import APIConnectionError
     from daimon.core.turn.io import LegacyTurnIO
     from daimon.testing.ma import session_response
 
@@ -787,8 +788,7 @@ async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutat
         ScriptedReply(
             "GET", "/v1/sessions/session", session_response(session_id=SESSION.id, status="idle")
         ),
-        ScriptedReply("POST", "/v1/sessions/session/events", httpx.ReadError("legacy retry")),
-        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+        ScriptedReply("POST", "/v1/sessions/session/events", httpx.ReadError("lost ack")),
     )
     async with transport.client(max_retries=MA_MAX_RETRIES) as client:
         io = default_mux_turn_io(
@@ -805,12 +805,13 @@ async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutat
             )
         )
         legacy = LegacyTurnIO(client, SESSION.id, scope=SCOPE)
-        await legacy.send(
-            ({"type": "user.message", "content": [{"type": "text", "text": "legacy"}]},)
-        )
+        with pytest.raises(APIConnectionError):
+            await legacy.send(
+                ({"type": "user.message", "content": [{"type": "text", "text": "legacy"}]},)
+            )
         assert client.max_retries == MA_MAX_RETRIES
     transport.assert_consumed()
-    assert [request.method for request in transport.requests] == ["GET", "GET", "POST", "POST"]
+    assert [request.method for request in transport.requests] == ["GET", "GET", "POST"]
 
 
 async def test_bulk_snapshot_keeps_revisions_preview_identity_and_completed_cursor(

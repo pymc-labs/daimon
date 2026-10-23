@@ -1205,7 +1205,8 @@ async def test_an_unattended_turn_gates_before_its_message_and_each_confirmation
     assert order == ["gate@0", "gate@1"]
     assert [e["result"] for e in _confirmations(fa)] == ["allow"]
     # Finding 2: every send asked for a client with no SDK retry.
-    assert fa.options and all(o == {"max_retries": 0} for o in fa.options)
+    assert sum(o == {"max_retries": 0} for o in fa.options) == 2
+    assert all(o["max_retries"] in {0, 2} for o in fa.options)
 
 
 async def test_a_failed_confirmation_gate_sends_no_confirmation() -> None:

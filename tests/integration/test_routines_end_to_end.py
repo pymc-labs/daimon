@@ -291,6 +291,7 @@ def _build_fake_anthropic_factory(
         memory_stores = _FakeMemoryStores()
 
     class _FakeClient:
+        max_retries = 8
         beta = _FakeBeta()
         close = close_mock
 
@@ -612,6 +613,7 @@ def _build_archived_agent_factory(
         memory_stores = _FakeMemoryStores()
 
     class _FakeClient:
+        max_retries = 8
         beta = _FakeBeta()
         close = AsyncMock(return_value=None)
 
@@ -859,6 +861,7 @@ def _build_two_tenant_fake_anthropic_factory(
         memory_stores = _FakeMemoryStores()
 
     class _FakeClient:
+        max_retries = 8
         beta = _FakeBeta()
         close = AsyncMock(return_value=None)
 

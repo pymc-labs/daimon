@@ -162,6 +162,8 @@ from daimon.core.turn.slots import (
 )
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
+    QUEUE_NOTICE,
+    HeldThreads,
     ThreadQueue,
     claim_dispatch,
     dispatch_and_drain,
@@ -377,7 +379,7 @@ class TeamsApp:
         # Tool-write confirmation cards awaiting a click.
         self.confirmations = TeamsConfirmationCards(self._sender, feed=feed)
         self.provider_actions = TeamsProviderActions(self._sender, feed=feed)
-        self._processing: set[str] = set()
+        self._processing: HeldThreads[str] = HeldThreads()
         self._pending: dict[str, list[TeamsInbound]] = {}
         # Controls held for a turn's output sweep, by conversation: the next turn
         # there posts them before its own card.
@@ -1105,7 +1107,14 @@ class TeamsApp:
             self._thread_queue.enqueue(key, inbound)
             allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
             self._reactions.mark_queued(inbound, allowed=allowed)
+            generation = self._processing.generation(key)
+            notify = self._processing.should_notify(key)
             self._supersede_batch(inbound)
+            if notify and await allowed() and self._processing.is_current(key, generation):
+                try:
+                    await self._say(inbound, QUEUE_NOTICE)
+                except Exception:
+                    log.warning("mention_queue.notice_failed", conversation_id=key, exc_info=True)
             return
         # Over the cap the turn queues: it posts the ordinary card and waits
         # after it (`wait_for_slot` in _run_turn). Only a full queue refuses.
@@ -1180,7 +1189,7 @@ class TeamsApp:
 
     @property
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
-        return ThreadQueue(self._processing, self._pending)
+        return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
     async def _run_turns(self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound]) -> None:
         """One turn per author, composed of the messages its fence still held."""

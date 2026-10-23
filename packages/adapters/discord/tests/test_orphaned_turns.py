@@ -72,9 +72,12 @@ def _make_bot(
     discord_settings.turn_card_unrecoverable_after_s = 86400
     discord_settings.turn_card_unrecoverable_after_attempts = 3
     settings.discord = discord_settings
+    if anthropic is None:
+        anthropic = AsyncMock(max_retries=8)
+        anthropic.with_options = MagicMock(return_value=anthropic)
     runtime = DiscordRuntime(
         settings=settings,
-        anthropic=anthropic if anthropic is not None else AsyncMock(),
+        anthropic=anthropic,
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,

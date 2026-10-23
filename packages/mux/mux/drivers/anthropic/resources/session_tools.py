@@ -25,6 +25,7 @@ from mux.drivers.anthropic.resources._authorization import (
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 from mux.drivers.anthropic.schemas import NativeConfig
+from mux.drivers.anthropic.transport import mutation_client
 
 
 class MessageText(NativeConfig):
@@ -120,7 +121,7 @@ class AnthropicSessionTools:
         self._check(scope, session, "session")
         # M0 keys pass through; preserve SDK error/echo behavior, without replay.
         result = await provider_call(
-            self._client.beta.sessions.events.send(
+            mutation_client(self._client, single_attempt=True).beta.sessions.events.send(
                 session.id, **cast(EventSendParams, config.model_dump(exclude_unset=True))
             )
         )

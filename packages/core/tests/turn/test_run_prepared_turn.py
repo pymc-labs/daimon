@@ -53,7 +53,7 @@ from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLif
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import build_test_engine
 from daimon.testing.ma import (
@@ -4138,3 +4138,79 @@ async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
         ToolCall(tool_use_id="tu", server_name=server, tool_name="list_agents")
     )
     assert decision.allow
+
+
+async def test_attended_accepted_post_with_lost_ack_is_replayed_without_resend(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An ordinary attended legacy turn has no durable send claim to disable retries."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-1",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+    from .conftest import make_agent_message
+
+    answer = make_agent_message(event_id="accepted_answer", text="Accepted exactly once")
+    done = make_status_idle(event_id="accepted_done")
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        events_by_session={
+            "sess_1": [answer.model_dump(mode="json"), done.model_dump(mode="json")]
+        },
+    )
+    accepted_posts: list[httpx.Request] = []
+
+    def accept_then_lose_ack(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions/sess_1/events":
+            accepted_posts.append(request)
+            raise httpx.ReadTimeout(
+                "provider accepted input; acknowledgement lost", request=request
+            )
+        return router.dispatch(request)
+
+    client = build_fake_anthropic(accept_then_lose_ack).with_options(max_retries=8)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), anthropic=client, turn_path="legacy"
+    )
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+    assert len(accepted_posts) == 1, "lost acknowledgement must never repeat the accepted POST"
+    assert accepted_posts[0].extensions["timeout"]["read"] == 600.0
+    assert client.max_retries == 8, "turn mutation policy must not change the shared client"
+    assert not outcome.recovered and outcome.state.error is None
+    assert outcome.state.content == [TextBlock(kind="text", text="Accepted exactly once")]
