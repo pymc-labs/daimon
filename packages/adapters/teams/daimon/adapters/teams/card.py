@@ -146,7 +146,7 @@ def live_card(state: CardState, *, now: float, cancel_key: str) -> AdaptiveCard:
     Once Stop is clicked it reads "Stopping…" and has no Stop button; the
     answer to the click is this card too (`handle_cancel`).
     A TextBlock renders no code fence and drops single line breaks, so the
-    tool lines are a monospace block with one paragraph each.
+    plan and the tool lines are monospace blocks with one paragraph each.
     """
     elapsed = now - state.started_at
     if state.stopping:

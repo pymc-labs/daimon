@@ -939,7 +939,7 @@ class DiscordTurnLifecycle:
         return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the one status embed: headline, tool lines and the last few draft lines."""
+        """Render the one status embed: headline, the last few draft lines, plan and tool lines."""
         embed = build_discord_embed(to_embed_data(self._state, now=now))
         if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
             embed.title = "Queued — waiting for a free slot…"

@@ -1792,7 +1792,7 @@ class TestStatusEmbedFromTurnState:
         assert "private words" not in description, "a tool line never shows its arguments"
 
     async def test_message_draft_shares_the_status_embed(self) -> None:
-        """The latest agent.message text is quoted under the tool lines, in the
+        """The latest agent.message text is quoted under the headline, in the
         same embed rather than a second one."""
         lc, sends, edits = _make_lifecycle()
 
@@ -1804,7 +1804,7 @@ class TestStatusEmbedFromTurnState:
         embeds = edits[-1][1]["embeds"]
         assert len(embeds) == 1, "the draft rides the status embed"
         assert (embeds[0].description or "").endswith("> Let me check the workspace config"), (
-            "agent.message text must be quoted at the bottom of the status embed"
+            "agent.message text must end the status embed's description"
         )
 
 
