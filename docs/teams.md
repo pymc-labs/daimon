@@ -66,8 +66,8 @@ is supported; government and China clouds use other Bot Framework hosts.
   adding `;messageid=<root post id>`. Where readers are limited, the agent's
   memory is read-only. See [permissions.md](permissions.md).
 
-A turn shows one status card, edited in place, with a Stop button only the
-author can use. Stop turns the card into "Stopping…", without the button, until
+A turn shows one status card, edited in place, with a Stop button the
+author, or a Daimon admin (an owner of the admin team), can use. Stop turns the card into "Stopping…", without the button, until
 the turn has stopped and the card says so. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. When a tool call named the

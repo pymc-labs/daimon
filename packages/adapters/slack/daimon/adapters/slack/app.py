@@ -316,7 +316,8 @@ _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
 # Marks a request queued behind the thread's active turn.
 _PENDING_REACTION = "hourglass_flowing_sand"
 
-_CANCEL_NOT_AUTHOR = "Only the person who asked can cancel this reply."
+_CANCEL_NOT_AUTHOR = "Only the person who asked, or a workspace admin, can stop this reply."
+_CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
 _CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
 
 
@@ -1376,13 +1377,14 @@ class SlackApp:
         )
 
     async def _handle_block_action(self, payload: dict[str, Any]) -> None:
-        """Author-gated cancel handler for block_actions interactive payloads.
+        """Author- or admin-gated cancel handler for block_actions interactive payloads.
 
         Looks up the action's per-turn key first, which is registered before
         the initial post response returns; then falls back to status_ts for
         recovered and legacy cards. If the clicker is the turn's original
-        author, sets the cancel Event so the driver cancel-race loop picks it
-        up. A refused click — non-author, or no matching registry entry — is
+        author or a current host-workspace admin, sets the cancel Event so the
+        driver cancel-race loop picks it up. A refused click — anyone else, an
+        admin check Slack could not answer, or no matching registry entry — is
         answered with an ephemeral, because a button that does nothing is
         indistinguishable from a dead bot. The missing-entry case is the same
         symptom as a turn orphaned by a deploy, so the notice is what lets the
@@ -1408,9 +1410,35 @@ class SlackApp:
             return
         cancel, author_id = entry
         if clicker != author_id:
-            await self._refuse_cancel(payload, clicker=clicker, text=_CANCEL_NOT_AUTHOR)
-            return
+            admin = await self._clicker_is_admin(team_id, clicker)
+            if admin is not True:
+                text = _CANCEL_NOT_AUTHOR if admin is False else _CANCEL_ROLE_UNKNOWN
+                await self._refuse_cancel(payload, clicker=clicker, text=text)
+                return
+        log.info(
+            "turn.stop_pressed",
+            platform="slack",
+            team_id=team_id,
+            status_ts=status_ts,
+            requester_id=author_id,
+            pressed_by=clicker,
+            by_admin=clicker != author_id,
+        )
         cancel.set()
+
+    async def _clicker_is_admin(self, team_id: str, clicker: str) -> bool | None:
+        """The clicker's live host-workspace admin status; None when Slack could not say."""
+        if not (team_id and clicker):
+            return False
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is None:
+                return None
+            requester = await resolve_requester(client, user_id=clicker, host_team_id=team_id)
+        except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.cancel_admin_check_failed", team_id=team_id, exc_info=exc)
+            return None
+        return None if requester is None else requester.is_admin
 
     def _on_member_joined_channel(self, event: dict[str, Any], *, team_id: str) -> None:
         """Hook for a member joining a channel: nothing yet.

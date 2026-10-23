@@ -42,7 +42,9 @@ store as the turn. It selects by the genuine intent, verifies a recovered run,
 and preserves the original account and host scope while refreshing the click
 subject through existing role readers. Unbound or stale authority refuses.
 Stop and Resume reload current root permissions and use the shared fleet
-operation owner with a scoped version and idempotency key. The ordinary
+operation owner with a scoped version and idempotency key. The fleet's starter
+or a current server admin may press them; each accepted press logs
+`fleet.control_pressed` with who pressed it. The ordinary
 orchestrator answer is delivered only after authoritative collection and
 required result reviews succeed. Default fleet settings create no card,
 service discovery or additional sender.
@@ -393,6 +395,14 @@ message if the answer has not arrived yet. Once an answer is delivered, a
 stale edit is logged and ignored. Stop still interrupts the turn when its
 card has been deleted; restart recovery treats a card deleted between its
 lookup and edit as already resolved. Other edit failures still propagate.
+
+A turn card's Stop is pressed by the person who asked or by a current admin,
+checked on each click: on Discord the owner or a member with
+Administrator or Manage Server, on Slack a host-workspace admin or owner, on
+Teams an owner of the admin team (read through the shared owner cache, as
+every Teams admin check is). When Slack or Teams can't say whether the
+clicker is an admin, the click is refused as "try again", not as "not an
+admin". Each accepted Stop logs `turn.stop_pressed` with who pressed it.
 
 A turn stops when its own thread is lost. Discord answering a write to the
 thread with Unknown Channel (10003), or a thread-delete event for a thread with

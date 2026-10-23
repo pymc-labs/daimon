@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import structlog
+from daimon.adapters.discord.checks import ADMIN_NOUN
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
@@ -571,6 +572,52 @@ class DiscordFleetCardFactory:
         return card
 
 
+_NOT_CONTROLLER = f"Only the person who started this fleet, or {ADMIN_NOUN}, can {{verb}} it."
+_ALREADY_ENDED = "This fleet has already stopped."
+_WORKER_ENDED = "This worker has already finished."
+_UNREACHABLE = "Couldn't reach the fleet just now. Try again in a moment."
+_NOT_HERE = "You can't control this fleet from here."
+_LIMIT_USED = "This fleet has run out of the time or steps it was given, so it can't be resumed."
+_IN_FLIGHT = "Someone's press on this fleet is still going through. Try again in a moment."
+# Refusals a newer card would not offer: the card is behind the run.
+_CARD_BEHIND = frozenset(
+    {
+        "stale_version",
+        "foreign_worker",
+        "foreign_run",
+        "ambiguous_workers",
+        # The run moved under the press (a concurrent control or wake).
+        "control_evidence_invalid",
+    }
+)
+# The same press, from this or another clicker, is still being written.
+_PRESS_IN_FLIGHT = frozenset({"operation_conflict", "control_evidence_unavailable"})
+_CHANGED = (
+    "This fleet changed since the card was drawn. Wait for the card to update, then try again."
+)
+
+
+def _refusal_text(refused: FleetRefused | WorkerSpecRefused, action: Control) -> str:
+    """Why a fleet card click did nothing, in terms of what the clicker can do."""
+    reason: str = refused.reason
+    if reason == "controller_required":
+        # The shared owner's live rule: the fleet's starter or a current server admin.
+        return _NOT_CONTROLLER.format(verb="stop" if action == "kill" else "resume")
+    if reason == "terminal_run":
+        return _ALREADY_ENDED
+    if reason == "terminal_worker":
+        return _WORKER_ENDED
+    if reason in _CARD_BEHIND:
+        return _CHANGED
+    if reason == "original_limit_exhausted":
+        return _LIMIT_USED
+    if reason in _PRESS_IN_FLIGHT:
+        return _IN_FLIGHT
+    if reason == "prerequisites_unavailable":
+        return _UNREACHABLE
+    return _NOT_HERE
+
+
 class DiscordFleetCard:
     """One orchestrator card; all reads and controls use the same core owner."""
 
@@ -739,6 +786,14 @@ class DiscordFleetCard:
                         "This action is waiting for its dependencies.", ephemeral=True
                     )
                     return False
+                log.info(
+                    "fleet.control_pressed",
+                    run_id=str(run.id),
+                    worker_id=str(worker_id) if worker_id is not None else None,
+                    action=action,
+                    pressed_by=str(interaction.user.id),
+                    presser_is_admin=parent.subject.is_admin,
+                )
                 run, workers = await self._service.read_snapshot(parent, policy, run.id)
                 view = self._render(run, workers)
 
@@ -759,10 +814,9 @@ class DiscordFleetCard:
                     edit=edit_current,
                 )
                 return True
-            except (FleetRefused, WorkerSpecRefused):
+            except (FleetRefused, WorkerSpecRefused) as refused:
                 await interaction.response.send_message(
-                    "This control is no longer available. Refresh the fleet card.",
-                    ephemeral=True,
+                    _refusal_text(refused, action), ephemeral=True
                 )
                 return False
 

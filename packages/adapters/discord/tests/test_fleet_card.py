@@ -11,6 +11,7 @@ from uuid import UUID
 
 import discord
 import pytest
+import structlog
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.posted_controls.fleet import (
     DiscordFleetCard,
@@ -21,7 +22,7 @@ from daimon.adapters.discord.posted_controls.fleet import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
 from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_digest
-from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
+from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
@@ -292,8 +293,102 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
         replace(current, subject=Subject(platform_user_id="456", is_admin=admin)),
         policy,
     )
-    await buttons(send.call_args.kwargs["view"])[0].callback(interaction(456, card=card))
+    click = interaction(456, card=card)
+    with structlog.testing.capture_logs() as logs:
+        await buttons(send.call_args.kwargs["view"])[0].callback(click)
     assert owner.control.await_count == (1 if admin else 0)
+    pressed = [entry for entry in logs if entry["event"] == "fleet.control_pressed"]
+    assert pressed == (
+        [
+            {
+                "event": "fleet.control_pressed",
+                "log_level": "info",
+                "run_id": str(RUN),
+                "worker_id": str(worker().id),
+                "action": "kill",
+                "pressed_by": "456",
+                "presser_is_admin": True,
+            }
+        ]
+        if admin
+        else []
+    ), "only an accepted press is recorded, with who pressed it"
+    if not admin:
+        click.response.send_message.assert_awaited_once_with(
+            "Only the person who started this fleet, or someone with Manage Server, can stop it.",
+            ephemeral=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("refusal", "text"),
+    [
+        ("terminal_worker", "This worker has already finished."),
+        (
+            "stale",
+            "This fleet changed since the card was drawn. Wait for the card to update, then try again.",
+        ),
+        ("inactive", "You can't control this fleet from here."),
+        ("outage", "Couldn't reach the fleet just now. Try again in a moment."),
+        (
+            "limit",
+            "This fleet has run out of the time or steps it was given, so it can't be resumed.",
+        ),
+        (
+            "operation_conflict",
+            "Someone's press on this fleet is still going through. Try again in a moment.",
+        ),
+        (
+            "control_evidence_unavailable",
+            "Someone's press on this fleet is still going through. Try again in a moment.",
+        ),
+        (
+            "control_evidence_invalid",
+            "This fleet changed since the card was drawn. Wait for the card to update, then try again.",
+        ),
+    ],
+)
+async def test_a_refused_fleet_click_names_its_real_cause(refusal, text):
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+    if refusal == "terminal_worker":
+        # The run goes on; only the clicked worker has finished.
+        owner.read_run.return_value = (run(), (worker(status="succeeded"),))
+    elif refusal == "stale":
+        owner.read_run.return_value = (run(), (worker(version=4),))
+    elif refusal == "inactive":
+        current, policy = loader.return_value
+        loader.return_value = (replace(current, fleet=replace(current.fleet, active=False)), policy)
+    elif refusal == "outage":
+        loader.side_effect = FleetRefused("prerequisites_unavailable")
+    elif refusal == "limit":
+        owner.read_run.return_value = (run(), (worker(deadline_at=NOW),))
+    else:
+        # Refused by the shared owner while writing the press.
+        owner.control.side_effect = FleetRefused(refusal)
+    label = "Resume 1" if refusal == "limit" else "Stop 1"
+    click = interaction(card=card)
+    view = send.call_args.kwargs["view"]
+    await next(item for item in buttons(view) if item.item.label == label).callback(click)
+    written = refusal in (
+        "operation_conflict",
+        "control_evidence_unavailable",
+        "control_evidence_invalid",
+    )
+    assert owner.control.await_count == (1 if written else 0)
+    click.response.send_message.assert_awaited_once_with(text, ephemeral=True)
+
+
+async def test_a_click_on_a_fleet_that_already_ended_says_so():
+    card, owner, _, send, _ = setup()
+    await card.refresh()
+    owner.read_run.return_value = (replace(run(), status="cancelled"), (worker(),))
+    click = interaction(card=card)
+    await buttons(send.call_args.kwargs["view"])[0].callback(click)
+    owner.control.assert_not_awaited()
+    click.response.send_message.assert_awaited_once_with(
+        "This fleet has already stopped.", ephemeral=True
+    )
 
 
 async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_item(

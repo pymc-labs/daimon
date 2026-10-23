@@ -5469,7 +5469,59 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
     assert body["channel"] == "C_TEST"
     assert body["user"] == "U_OTHER"
     assert "thread_ts" not in body
-    assert "person who asked" in body["text"]
+    assert body["text"] == "Only the person who asked, or a workspace admin, can stop this reply."
+
+
+@pytest.mark.parametrize("lookup", ["admin", "failed"])
+async def test_handle_block_action_when_another_person_clicks_cancel_checks_their_live_role(
+    fake_slack_web_client: Any, lookup: str
+) -> None:
+    """A current workspace admin stops anyone's reply; a failed role lookup is not 'not admin'."""
+    app = _make_app()
+    cancel = asyncio.Event()
+    app._cancel_registry[("T_TEST", "C_TEST", "1000000000.000001")] = (cancel, "U_AUTHOR")  # pyright: ignore[reportPrivateUsage]
+    requester = (
+        SlackRequester(
+            is_admin=True,
+            display_name="Admin",
+            team_id="T_TEST",
+            is_stranger=False,
+            host_team_id="T_TEST",
+        )
+        if lookup == "admin"
+        else None
+    )
+    payload = _make_block_actions_payload(user_id="U_ADMIN")
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_web_client",
+            new_callable=AsyncMock,
+            return_value=fake_slack_web_client.client,
+        ),
+        patch(
+            "daimon.adapters.slack.app.resolve_requester",
+            new_callable=AsyncMock,
+            return_value=requester,
+        ) as resolve,
+    ):
+        await app._handle_block_action(payload)  # pyright: ignore[reportPrivateUsage]
+
+    assert resolve.await_args is not None and resolve.await_args.kwargs == {
+        "user_id": "U_ADMIN",
+        "host_team_id": "T_TEST",
+    }
+    notices = [
+        req.kwargs["json"]["text"]
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postEphemeral")
+        for req in reqs
+    ]
+    if lookup == "admin":
+        assert cancel.is_set(), "a current workspace admin can stop anyone's reply"
+        assert notices == []
+    else:
+        assert not cancel.is_set()
+        assert notices == ["I couldn't check your role just now. Try again in a moment."]
 
 
 async def test_handle_block_action_when_status_ts_not_in_registry_tells_clicker_turn_ended(

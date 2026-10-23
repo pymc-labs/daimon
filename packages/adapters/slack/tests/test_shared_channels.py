@@ -745,6 +745,10 @@ async def test_an_external_stop_on_their_own_turn_works_and_on_someone_elses_is_
 
     other = _click_payload("cancel_turn")
     other["container"]["message_ts"] = "2.2"
+    # An admin of their own workspace is not an admin of the host's.
+    client.users_info = AsyncMock(
+        return_value={"user": {"id": _EXTERNAL, "team_id": _OTHER, "is_admin": True}}
+    )
     await _deliver(app, other, client)
     assert not theirs.is_set()
     assert "person who asked" in client.chat_postEphemeral.await_args.kwargs["text"]

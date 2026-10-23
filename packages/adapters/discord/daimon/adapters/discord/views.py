@@ -1,7 +1,8 @@
 """Interactive View components for Discord UI.
 
 GuardedView gates on allowed_user_id and prevents double-click via _handled flag.
-CancelView for interrupting running turns (no timeout -- lifecycle manages removal).
+CancelView for interrupting running turns (no timeout -- lifecycle manages removal);
+a current server admin may also press its Stop.
 
 All Views are non-persistent: no custom_id, no bot.add_view(). CancelView uses
 timeout=None -- lifecycle manages removal.
@@ -30,6 +31,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
+from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller
 from daimon.adapters.discord.turn_card_recovery import turn_card_custom_id
 
 import discord
@@ -38,6 +40,8 @@ if TYPE_CHECKING:
     from daimon.adapters.discord.lifecycle import EditFn
 
 log = structlog.get_logger()
+
+STOP_NOT_ALLOWED = f"Only the person who asked, or {ADMIN_NOUN}, can stop this reply."
 
 
 async def finish_control(
@@ -115,6 +119,19 @@ class CancelView(GuardedView):
         self._cancel = cancel
         if turn_id is not None:
             self.cancel_button.custom_id = turn_card_custom_id(turn_id)
+        self._turn_id = turn_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # discord.py base uses broader type
+        """The asker, or whoever is a server admin at the moment they press Stop."""
+        if interaction.user.id == self.allowed_user_id:
+            return await super().interaction_check(interaction)
+        if not admin_caller(interaction.user).is_server_admin:
+            await interaction.response.send_message(STOP_NOT_ALLOWED, ephemeral=True)
+            return False
+        if self._handled:
+            await interaction.response.send_message("Already handled.", ephemeral=True)
+            return False
+        return True
 
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.grey)
     async def cancel_button(
@@ -122,6 +139,14 @@ class CancelView(GuardedView):
         interaction: discord.Interaction,
         button: discord.ui.Button[CancelView],
     ) -> None:
+        log.info(
+            "turn.stop_pressed",
+            platform="discord",
+            turn_id=str(self._turn_id) if self._turn_id is not None else None,
+            requester_id=str(self.allowed_user_id),
+            pressed_by=str(interaction.user.id),
+            by_admin=interaction.user.id != self.allowed_user_id,
+        )
         self._cancel.set()
         self._finalize()
         await finish_control(interaction, view=self)

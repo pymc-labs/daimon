@@ -54,7 +54,9 @@ from daimon.adapters.teams.context import (
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.deployment_admins import (
+    admin_team_owners,
     boot_owner_ids,
+    deployment_role,
     inbound_is_admin,
     inbound_role,
     with_admin_team_if_asked,
@@ -207,7 +209,8 @@ CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats at once right now. Try again in a moment."
-_CANCEL_NOT_AUTHOR = "Only the person who asked can cancel this reply."
+_CANCEL_NOT_AUTHOR = "Only the person who asked, or a Daimon admin, can stop this reply."
+_CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
 _CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
 
 
@@ -2095,16 +2098,38 @@ class TeamsApp:
     async def handle_cancel(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
-        """Stop button: only the turn's author may stop it; the answer is the stopping card."""
+        """Stop button: the turn's author or a current deployment admin may stop it.
+
+        The answer is the stopping card.
+        """
         action = ctx.activity.value.action
-        entry = self._cancel_registry.get(str(action.data.get("turn") or ""))
+        turn = str(action.data.get("turn") or "")
+        entry = self._cancel_registry.get(turn)
         if entry is None:
             return toast(_CANCEL_TURN_ENDED)
-        if canonical_uuid(ctx.activity.from_.aad_object_id) != entry.author:
-            return toast(_CANCEL_NOT_AUTHOR)
+        clicker = canonical_uuid(ctx.activity.from_.aad_object_id)
+        if clicker != entry.author:
+            if clicker is None:
+                return toast(_CANCEL_NOT_AUTHOR)
+            # Live: an owner of the admin team now; None when the owners can't be read.
+            role = await deployment_role(
+                self._teams, admin_team_owners(self.runtime), user_id=clicker
+            )
+            if role is None:
+                return toast(_CANCEL_ROLE_UNKNOWN)
+            if role is not Role.ADMIN:
+                return toast(_CANCEL_NOT_AUTHOR)
         stopping = entry.lifecycle.request_stop()
         if stopping is None:  # The closing notice is already on its way.
             return toast(_CANCEL_TURN_ENDED)
+        log.info(
+            "turn.stop_pressed",
+            platform="teams",
+            turn=turn,
+            requester_id=entry.author,
+            pressed_by=clicker,
+            by_admin=clicker != entry.author,
+        )
         entry.cancel.set()
         # The clicker sees the card stopping at once; the card in the chat is
         # only ever edited by the turn's own lifecycle.

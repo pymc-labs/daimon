@@ -73,7 +73,7 @@ def _click(user: Persona, action: dict[str, object], *, channel: bool) -> dict[s
 async def test_cancel_requester_persona_matrix(
     db_session_factory: async_sessionmaker[AsyncSession], requester: Persona
 ) -> None:
-    """Mocked permission tests interrupt only the active turn's author."""
+    """Mocked permission tests: another non-admin cannot interrupt the active turn."""
     await provision_tenant(
         db_session_factory,
         platform="teams",
@@ -124,7 +124,8 @@ async def test_cancel_requester_persona_matrix(
         sender = message["from"]
         assert isinstance(sender, dict)
         sender["tenantId"] = requester.tenant_id
-    stranger = PERSONAS[1] if requester.name == "admin" else PERSONAS[0]
+    # Not an admin: a current admin may stop anyone's turn.
+    stranger = PERSONAS[2] if requester.name == "member" else PERSONAS[1]
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
     with patch("daimon.core.turn.prepare.create_session", return_value=session):
         async with running_service(runtime, fake) as service:
