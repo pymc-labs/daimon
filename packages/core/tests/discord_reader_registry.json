@@ -410,6 +410,10 @@
       "count": 1,
       "boundary": "dm"
     },
+    "packages/adapters/discord/daimon/adapters/discord/commands/here.py:ApprovalGateView:persistent_control:0dfa486c2a7a": {
+      "count": 1,
+      "boundary": "controls"
+    },
     "packages/adapters/discord/daimon/adapters/discord/commands/here.py:HereCog.here:fetch_channel:5b79bc56cf5c": {
       "count": 1,
       "boundary": "here"

@@ -399,6 +399,7 @@ class ToolSafetyPolicy(BaseModel):
     )
     allow_gate_overrides: bool = Field(
         default=False,
+        exclude_if=lambda value: not value,
         description=(
             "Let server admins override asking before third-party MCP writes at server, "
             "channel or thread scope. The most specific explicit on/off setting wins. "

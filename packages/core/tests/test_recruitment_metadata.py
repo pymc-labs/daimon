@@ -7,6 +7,7 @@ from uuid import uuid4
 import discord
 import pytest
 from daimon.core.config import RecruitmentSettings
+from daimon.core.tool_safety import ToolSafetyPolicy
 
 
 def policy():
@@ -183,6 +184,7 @@ async def test_here_from_ordinary_channel_filters_reserved_sibling_names(monkeyp
     )
     runtime.settings.github_app = SimpleNamespace(app_id=None, private_key=None)
     runtime.settings.mcp = SimpleNamespace(public_url=None)
+    runtime.settings.tool_safety = ToolSafetyPolicy()
     monkeypatch.setattr(module, "resolve_tenant_for_interaction", AsyncMock(return_value=uuid4()))
     monkeypatch.setattr(module, "find_platform_principal", AsyncMock(return_value=None))
     monkeypatch.setattr(module, "is_guild_admin", lambda _: False)
