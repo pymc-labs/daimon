@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
@@ -99,11 +102,17 @@ def build_here_attachment(card: HereCard) -> dict[str, Any]:
                         },
                         "options": [
                             {"text": {"type": "plain_text", "text": label}, "value": value}
-                            for label, value in (
-                                ("Ask before writes", "on"),
-                                ("Allow writes without asking", "off"),
-                                ("Inherit parent setting", "inherit"),
+                            for scope, scope_label in (
+                                ("server", "Server"),
+                                ("channel", "Channel"),
+                                ("thread", "Thread…"),
                             )
+                            for title, choice in (
+                                ("Ask", "on"),
+                                ("Allow writes", "off"),
+                                ("Inherit", "inherit"),
+                            )
+                            for label, value in [(f"{scope_label}: {title}", f"{scope}:{choice}")]
                         ],
                     }
                 ],
@@ -158,6 +167,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 platform="slack",
                 channel_id=channel_id,
                 thread_id=None,
+                is_dm=channel_id.startswith("D"),
                 channel_level_only=True,
                 default=runtime.deployment_default,
                 github=GitHubDeploymentFacts(
@@ -232,14 +242,12 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
     actions = cast(list[dict[str, Any]], payload.get("actions") or [])
     selected = cast(dict[str, Any], actions[0].get("selected_option") or {}) if actions else {}
     raw = selected.get("value")
-    value: Approvals
-    if raw == "on":
-        value = "on"
-    elif raw == "off":
-        value = "off"
-    elif raw == "inherit":
-        value = "inherit"
-    else:
+    if not isinstance(raw, str) or ":" not in raw:
+        return
+    scope, value = raw.split(":", 1)
+    if scope not in {"server", "channel", "thread"} or value not in {"on", "off", "inherit"}:
+        return
+    if channel_id.startswith("D"):
         return
     subject = await approval_admin(
         runtime.sessionmaker,
@@ -248,21 +256,62 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
         user_id=user_id,
     )
     try:
+        if not subject.is_admin:
+            raise DaimonError("Only a current workspace admin can change approval settings.")
+        if scope == "thread":
+            trigger = str(payload.get("trigger_id") or "")
+            if not trigger:
+                raise DaimonError("Open /here again to choose a thread.")
+            await client.views_open(  # pyright: ignore[reportUnknownMemberType]
+                trigger_id=trigger,
+                view={  # pyright: ignore[reportUnknownMemberType]
+                    "type": "modal",
+                    "callback_id": "here_approvals_thread",
+                    "title": {"type": "plain_text", "text": "Thread write approvals"},
+                    "submit": {"type": "plain_text", "text": "Save"},
+                    "close": {"type": "plain_text", "text": "Cancel"},
+                    "private_metadata": json.dumps(
+                        {"team": team_id, "channel": channel_id, "value": value}
+                    ),
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "plain_text",
+                                "text": (
+                                    f"Thread setting: {value}. Paste a root message link "
+                                    "from this channel, or its timestamp."
+                                ),
+                            },
+                        },
+                        {
+                            "type": "input",
+                            "block_id": "thread",
+                            "label": {
+                                "type": "plain_text",
+                                "text": "Thread root link or timestamp",
+                            },
+                            "element": {"type": "plain_text_input", "action_id": "root"},
+                        },
+                    ],
+                },
+            )
+            return
         await set_approval_gate(
             runtime.sessionmaker,
             tenant_id=tenant_id,
             platform="slack",
-            target=channel_id,
-            value=value,
+            target=None if scope == "server" else channel_id,
+            value=cast(Approvals, value),
             subject=subject,
         )
-        message = f"Third-party write approvals: {value}."
+        message = f"Third-party write approvals: {value} ({scope})."
         if not (
             runtime.settings.tool_safety.enabled
             and runtime.settings.tool_safety.allow_gate_overrides
         ):
             message += " Saved but ignored: deployment overrides are disabled."
-    except DaimonError as exc:
+    except (DaimonError, SlackApiError) as exc:
         message = str(exc)
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
         channel=channel_id,
@@ -270,3 +319,88 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
         text=message,
         parse="none",
     )
+
+
+def _thread_timestamp(text: str, channel_id: str) -> str:
+    """Parse only a root identifier; never fetch an administrator-supplied URL."""
+    text = text.strip()
+    if re.fullmatch(r"[0-9]{10,}\.[0-9]{6}", text):
+        return text
+    try:
+        parts = urlsplit(text).path.strip("/").split("/")
+    except ValueError:
+        parts = []
+    if (
+        len(parts) == 3
+        and parts[:2] == ["archives", channel_id]
+        and re.fullmatch(r"p[0-9]{16,}", parts[2])
+    ):
+        digits = parts[2][1:]
+        return f"{digits[:-6]}.{digits[-6:]}"
+    raise DaimonError("Use a root message link from this channel or its Slack timestamp.")
+
+
+def _fields(value: object) -> dict[str, Any]:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
+async def handle_here_approval_submission(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+    """A signed native modal submission; re-attest the clicker before any mutation."""
+    team_id = str(_fields(payload.get("team")).get("id") or "")
+    user_id = str(_fields(payload.get("user")).get("id") or "")
+    view = cast(dict[str, Any], payload.get("view") or {})
+    try:
+        metadata = _fields(json.loads(str(view.get("private_metadata") or "")))
+    except (ValueError, TypeError):
+        return
+    if metadata.get("team") != team_id or not user_id:
+        return
+    channel_id = metadata.get("channel")
+    value = metadata.get("value")
+    if (
+        not isinstance(channel_id, str)
+        or not channel_id.startswith(("C", "G"))
+        or not isinstance(value, str)
+        or value not in {"on", "off", "inherit"}
+    ):
+        return
+    client = await resolve_web_client(runtime, team_id=team_id)
+    if client is None:
+        return
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    subject = await approval_admin(
+        runtime.sessionmaker, runtime.settings, tenant_id=tenant_id, user_id=user_id
+    )
+    try:
+        if not subject.is_admin:
+            raise DaimonError("Only a current workspace admin can change approval settings.")
+        state = _fields(_fields(view.get("state")).get("values"))
+        root = _thread_timestamp(
+            str(_fields(_fields(state.get("thread")).get("root")).get("value") or ""), channel_id
+        )
+        response = await client.conversations_replies(channel=channel_id, ts=root, limit=1)  # pyright: ignore[reportUnknownMemberType]
+        messages = cast(list[dict[str, Any]], response.get("messages") or [])
+        if (
+            response.get("ok") is not True
+            or not messages
+            or messages[0].get("ts") != root
+            or messages[0].get("thread_ts", root) != root
+        ):
+            raise DaimonError("Cannot verify that thread in this workspace and channel.")
+        await set_approval_gate(
+            runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="slack",
+            target=f"{channel_id}:{root}",
+            value=cast(Approvals, value),
+            subject=subject,
+        )
+        message = f"Third-party write approvals: {value} (thread:{channel_id}:{root})."
+        if not (
+            runtime.settings.tool_safety.enabled
+            and runtime.settings.tool_safety.allow_gate_overrides
+        ):
+            message += " Saved but ignored: deployment overrides are disabled."
+    except (DaimonError, SlackApiError) as exc:
+        message = str(exc)
+    await client.chat_postEphemeral(channel=channel_id, user=user_id, text=message, parse="none")  # pyright: ignore[reportUnknownMemberType]

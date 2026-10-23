@@ -1,12 +1,10 @@
-"""CLI approval settings need current native admin authority at every scope."""
+"""Approval overrides have no CLI mutation surface or generic policy-clear bypass."""
 
 from io import StringIO
-from unittest.mock import AsyncMock
 
 import pytest
 from daimon.adapters.cli.commands import channels
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.errors import DaimonError
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
@@ -18,63 +16,21 @@ from ..harness import build_cli_runtime
 pytestmark = pytest.mark.no_cli_local_seed
 
 
-@pytest.mark.parametrize("target,thread", [(None, False), ("123", False), ("456", True)])
-@pytest.mark.parametrize("value", ["off", "inherit"])
-async def test_cli_uses_personal_credential_and_propagates_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-    target: str | None,
-    thread: bool,
-    value: str,
+@pytest.mark.parametrize("operation", ["set", "clear"])
+def test_cli_has_no_approval_mutation_commands(
+    monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
-    from typing import cast
     from unittest.mock import MagicMock
 
-    import fastmcp
-    from daimon.core.access_policy import Approvals
-    from fastmcp.exceptions import ToolError
-
-    client = AsyncMock()
-    client.call_tool.side_effect = ToolError("Only a current server admin can change approvals.")
-    factory = MagicMock()
-    factory.return_value.__aenter__ = AsyncMock(return_value=client)
-    factory.return_value.__aexit__ = AsyncMock(return_value=False)
-    monkeypatch.setattr(fastmcp, "Client", factory)
-    with pytest.raises(DaimonError, match="admin"):
-        await channels.channels_approvals_set(
-            console=Console(file=StringIO()),
-            url="https://daimon.example/mcp",
-            token="personal-member-credential",
-            value=cast(Approvals, value),
-            channel_id=target,
-            thread=thread,
-        )
-    factory.assert_called_once_with("https://daimon.example/mcp", auth="personal-member-credential")
-    client.call_tool.assert_awaited_once_with(
-        "set_approval_gate", {"value": value, "channel_id": target, "thread": thread}
-    )
-
-
-def test_cli_rejects_claimed_admin_id() -> None:
     from daimon.adapters.cli.main import app
     from typer.testing import CliRunner
 
-    result = CliRunner().invoke(
-        app,
-        [
-            "channels",
-            "approvals",
-            "set",
-            "off",
-            "--url",
-            "https://daimon.example/mcp",
-            "--token",
-            "personal-member-credential",
-            "--admin-user-id",
-            "public-owner-id",
-        ],
-    )
+    runtime = MagicMock(side_effect=AssertionError("no runtime may be opened"))
+    monkeypatch.setattr(channels, "build_runtime", runtime)
+    result = CliRunner().invoke(app, ["channels", "approvals", operation, "off"])
     assert result.exit_code == 2
-    assert "No such option" in result.output
+    assert "No such command" in result.output
+    runtime.assert_not_called()
 
 
 async def test_legacy_policy_clear_cannot_remove_gate_settings(

@@ -1,10 +1,9 @@
-"""Channel and agent rules, and the attended third-party write approval gate.
+"""Channel and agent rules.
 
 ``register_channel_rule_tools`` wires the closures. Channel and agent rules
 use ``SET_CHANNEL_RULE`` and ``SET_AGENT_RULE``: server admins and operator
-credentials with ``channels:write`` only. Approval settings use
-``SET_APPROVAL_GATE`` and require fresh native server-admin evidence from a
-person's identity. Channel authority and thread ownership never grant it.
+credentials with ``channels:write`` only. Approval-gate changes are deliberately
+absent: only native /here controls may change them.
 """
 
 from __future__ import annotations
@@ -32,10 +31,8 @@ from daimon.adapters.mcp.tools.slack._client import (
     slack_web_client,
 )
 from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client
-from daimon.core.access_policy import Approvals, ChannelReaders, ChannelWriters
+from daimon.core.access_policy import ChannelReaders, ChannelWriters
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
-from daimon.core.approval_admin import approval_admin
-from daimon.core.approval_gate import set_approval_gate
 from daimon.core.authz import Action
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule, set_channel_rule
@@ -43,7 +40,6 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.github_connect_cards import repos_come_too_line
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import thread_rule_key
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.github_connected_repos import agent_repo_summary
@@ -246,86 +242,7 @@ async def _has_repos(runtime: McpRuntime, *, tenant_id: uuid.UUID, agent_name: s
     return bool(summary.by_agent.get(derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)))
 
 
-async def _set_approval_gate_impl(
-    runtime: McpRuntime,
-    auth: AuthIdentity,
-    *,
-    value: Approvals,
-    channel_id: str | None = None,
-    thread: bool = False,
-) -> dict[str, object]:
-    require_scope(auth, "channels:write")
-    if (
-        auth.token_jti is None
-        or auth.token_kind != "cli"
-        or auth.agent_id is not None
-        or auth.chat_agent_id is not None
-        or auth.is_operator
-        or not auth.platform_user_id
-    ):
-        raise ToolError("Approval settings require a server admin's registered personal identity.")
-    subject = await approval_admin(
-        runtime.session_factory,
-        runtime.settings,
-        tenant_id=auth.tenant_id,
-        user_id=auth.platform_user_id,
-    )
-    if not subject.is_admin:
-        record_authz_denial(Action.SET_APPROVAL_GATE, "admin_required")
-        raise ToolError("Only a current server or workspace admin can change approval settings.")
-    platform = _platform(auth)
-    if thread and channel_id is None:
-        raise ToolError("A thread id is required.")
-    target = None
-    if channel_id is not None:
-        if thread and platform == "teams":
-            if ";messageid=" not in channel_id:
-                raise ToolError("Pass the full Teams thread id.")
-            target = channel_id.strip()
-        else:
-            target = thread_rule_key(platform, channel_id) if thread else _channel(auth, channel_id)
-    try:
-        result = await set_approval_gate(
-            runtime.session_factory,
-            tenant_id=auth.tenant_id,
-            platform=platform,
-            target=target,
-            value=value,
-            subject=subject,
-        )
-    except DaimonError as exc:
-        raise ToolError(str(exc)) from exc
-    active = (
-        runtime.settings.tool_safety.enabled and runtime.settings.tool_safety.allow_gate_overrides
-    )
-    return {
-        "value": result.value,
-        "scope": result.scope,
-        "active": active,
-        "note": "Saved."
-        if active
-        else "Saved but ignored: the deployment has not enabled gate overrides.",
-    }
-
-
 def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin"})
-    async def set_approval_gate(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, value: Approvals, channel_id: str | None = None, thread: bool = False
-    ) -> dict[str, object]:
-        """Set asking before third-party MCP writes: on, off, or inherit.
-
-        Requires a person's current native server/workspace admin authority. Omit
-        channel_id for the server; pass an exact channel id, or thread=True with
-        a Discord thread id, Slack channel:timestamp or full Teams thread id.
-        The most specific explicit setting wins. Stored but ignored unless the
-        deployment enables tool safety and allow_gate_overrides. Fixed Daimon
-        confirmations, admin prompts, deny rules and unattended runs are unchanged.
-        """
-        return await _set_approval_gate_impl(
-            runtime, await _auth(ctx), value=value, channel_id=channel_id, thread=thread
-        )
-
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_channel_rule(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,

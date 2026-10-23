@@ -393,7 +393,7 @@ async def test_missing_or_unreadable_live_gate_never_uses_cached_off(read_failur
 @pytest.mark.parametrize(
     "tool", ["microsoft_write", "publish_report", "request_agent_backend_switch"]
 )
-async def test_endpoint_alias_keeps_fixed_gates_but_name_collisions_are_third_party(
+async def test_fixed_gate_names_ask_on_own_endpoint_aliases_and_unrelated_servers(
     own_endpoint: bool,
     tool: str,
 ) -> None:
@@ -460,8 +460,8 @@ async def test_endpoint_alias_keeps_fixed_gates_but_name_collisions_are_third_pa
             },
         )
     )
-    assert result.allow is not own_endpoint
-    assert card.await_count == int(own_endpoint)
+    assert not result.allow
+    card.assert_awaited_once()
 
     if own_endpoint and tool == "request_agent_backend_switch":
         assert card.await_args.args[0].admin is True
@@ -493,3 +493,75 @@ async def test_own_endpoint_alias_deny_is_read_without_reserved_rule_index() -> 
     assert not result.allow
     lookup.assert_awaited_once()
     card.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://daimon.example/mcp",
+        "https://daimon-app.fly.dev/mcp",
+        "https://192.0.2.1/mcp",
+        "https://other-host.example/mcp",
+        "https://third-party.example/mcp",
+    ],
+)
+@pytest.mark.parametrize(
+    "tool",
+    sorted(
+        set(CONFIRMED_DAIMON_TOOLS)
+        | set(PUBLISH_TOOLS)
+        | {
+            "set_approval_gate",
+            "set_channel_rule",
+            "set_agent_rule",
+            "set_agent_tool_rule",
+            "clear_agent_tool_rule",
+            "set_routine_sandbox_tools",
+            "set_channel_environment",
+            "set_channel_skills",
+            "add_channel_skill",
+            "remove_channel_skill",
+            "grant_admin",
+            "revoke_admin",
+            "set_permission",
+            "configure_gate",
+            "call_tool",
+        }
+    ),
+)
+async def test_protected_names_never_auto_allow_on_any_host(endpoint: str, tool: str) -> None:
+    from daimon.core.tool_safety import trusted_servers_for
+
+    card = AsyncMock(return_value="denied")
+    gate = AsyncMock(return_value=OFF)
+    bindings = {"office": endpoint}
+    result = await interactive_decider(
+        ON.model_copy(update={"agent_rules": True, "effects": {"office": "read"}}),
+        requester_platform_user_id="requester",
+        confirm=card,
+        trusted_servers=trusted_servers_for("https://daimon.example/mcp", bindings),
+        confirmed_tools=frozenset(CONFIRMED_DAIMON_TOOLS),
+        rules_for=AsyncMock(return_value=ResolvedAgentToolRule(rule="allow")),
+        approval_gate_for=gate,
+        server_urls=bindings,
+    )(
+        ToolCall(
+            tool_use_id="t1",
+            server_name="office",
+            tool_name=tool,
+            input={
+                "method": "POST",
+                "preview_digest": "a" * 64,
+                "agent_name": "agent",
+                "expected_revision": 1,
+                "target_backend": "anthropic",
+                "name": "set_channel_rule",
+                "arguments": {"readers": "any"},
+            },
+        )
+    )
+    assert not result.allow
+    card.assert_awaited_once()
+    gate.assert_not_awaited()
+    if tool == "request_agent_backend_switch":
+        assert card.await_args.args[0].admin is True

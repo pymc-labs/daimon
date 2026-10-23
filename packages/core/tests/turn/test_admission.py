@@ -2234,11 +2234,13 @@ async def test_a_caller_in_an_isolated_channel_may_be_an_admin(
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("is_dm", [False, True])
 async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     enabled: bool,
+    is_dm: bool,
 ) -> None:
     from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
     from daimon.core.approval_gate import ApprovalGate
@@ -2272,10 +2274,12 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         platform="discord",
         external_user_id="user-1",
         channel_id="chan-1",
+        is_dm=is_dm,
+        verified_membership=True,
         now=_NOW,
     )
     assert admission.approval_gate == (
-        ApprovalGate("inherit", "server", None, tenant.id) if enabled else None
+        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
     )
     async with db_session_factory.begin() as session:
         await set_access_policy(
@@ -2284,18 +2288,41 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
             policy=TenantAccessPolicy(
                 approvals="off",
                 approvals_set_by="server-admin",
-                channel_rules={
-                    "chan-1": ChannelRule(approvals="on", approvals_set_by="channel-admin")
-                },
+                channel_rules={}
+                if is_dm
+                else {"chan-1": ChannelRule(approvals="on", approvals_set_by="channel-admin")},
             ),
         )
     fresh = await reauthorize(deps, admission)
     assert fresh.approval_gate == (
-        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id) if enabled else None
+        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id)
+        if enabled and not is_dm
+        else None
     )
     assert admission.approval_gate == (
-        ApprovalGate("inherit", "server", None, tenant.id) if enabled else None
+        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
     )
+
+    if is_dm:
+        from daimon.core.tool_safety import ToolCall
+        from daimon.core.turn.admission import refresh_approval_gate
+        from daimon.core.turn.approvals import chat_tool_confirmation
+        from daimon.core.turn.posture import PolicyApproval
+
+        assert await refresh_approval_gate(deps, fresh) is None
+        posture = chat_tool_confirmation(
+            deps.tool_safety,
+            requester_platform_user_id="user-1",
+            confirm=None,
+            approval_gate_for=lambda: refresh_approval_gate(deps, fresh),
+            server_urls={"third": "https://third.example/mcp"},
+        )
+        assert isinstance(posture, PolicyApproval)
+        assert not (
+            await posture.decide(
+                ToolCall(tool_use_id="dm-write", server_name="third", tool_name="create_issue")
+            )
+        ).allow
 
 
 @pytest.mark.parametrize("scope", ["server", "channel", "thread"])
@@ -2374,8 +2401,30 @@ async def test_gate_revocation_reaches_prepared_and_running_turns(
         assert (await posture.decide(call)).allow
         card.assert_not_awaited()
     await change(cast(Approvals, revoked))
-    with pytest.raises(SessionBusyError):
+    from daimon.core.session_fence_retry import retry_fences
+
+    attempts = 0
+
+    async def stale_send() -> None:
+        nonlocal attempts
+        attempts += 1
         await decide_before_send(deps, admission)()
+
+    with pytest.raises(SessionBusyError):
+        await retry_fences(stale_send, backoff=False)
+    assert attempts == 1, "a changed gate must escape the fence retry loop"
+    # A retry is a newly admitted turn, never a spin over the stale prepared grant.
+    readmitted = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        thread_id="thread-1",
+        now=_NOW,
+    )
+    assert readmitted.approval_gate is not None and readmitted.approval_gate.value == revoked
+    await retry_fences(decide_before_send(deps, readmitted), backoff=False)
     # Unattended policy is unaffected by approval-gate changes.
     await decide_before_send(deps, admission, attended=False)()
     assert not (await posture.decide(call.model_copy(update={"tool_use_id": "next"}))).allow

@@ -6104,50 +6104,6 @@
         'type': 'object',
       }),
     }),
-    'set_approval_gate': dict({
-      'description': '''
-        Set asking before third-party MCP writes: on, off, or inherit.
-        <blank line>
-        Requires a person's current native server/workspace admin authority. Omit
-        channel_id for the server; pass an exact channel id, or thread=True with
-        a Discord thread id, Slack channel:timestamp or full Teams thread id.
-        The most specific explicit setting wins. Stored but ignored unless the
-        deployment enables tool safety and allow_gate_overrides. Fixed Daimon
-        confirmations, admin prompts, deny rules and unattended runs are unchanged.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'thread': dict({
-            'default': False,
-            'type': 'boolean',
-          }),
-          'value': dict({
-            'enum': list([
-              'inherit',
-              'off',
-              'on',
-            ]),
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'value',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'set_channel_budget': dict({
       'description': '''
         Set or replace a channel's spending budget. Admin-only.

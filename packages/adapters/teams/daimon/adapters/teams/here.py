@@ -36,7 +36,9 @@ TITLE = "Here"
 _FAILED = "Something went wrong reading this place's settings. Try again later."
 
 
-def here_card(card: HereCard, *, target: str | None = None) -> AdaptiveCard:
+def here_card(
+    card: HereCard, *, channel_id: str | None = None, thread_id: str | None = None
+) -> AdaptiveCard:
     """The shared compact card, as literal text: names cannot format or mention."""
     shown = render_here_card(card)
     lines = [
@@ -48,19 +50,24 @@ def here_card(card: HereCard, *, target: str | None = None) -> AdaptiveCard:
     ]
     body: list[CardElement] = [heading(plain_name(shown.title))]
     body += [TextBlock(text=plain_name(line), spacing="Small", wrap=True) for line in lines]
-    if card.approval_gate_admin and target:
-        body.append(
-            ActionSet(
-                actions=[
-                    button("here_approvals", label, value, target=target)
-                    for label, value in (
-                        ("Ask before writes", "on"),
-                        ("Allow writes", "off"),
-                        ("Inherit", "inherit"),
-                    )
-                ]
+    if card.approval_gate_admin and channel_id:
+        scopes = [("server", "Server", ""), ("channel", "Channel", channel_id)]
+        if thread_id and thread_id != channel_id:
+            scopes.append(("thread", "Thread", thread_id))
+        for scope, label, target in scopes:
+            body.append(TextBlock(text=f"{label} write approvals", wrap=True))
+            body.append(
+                ActionSet(
+                    actions=[
+                        button("here_approvals", title, value, scope=scope, target=target)
+                        for title, value in (
+                            ("Ask", "on"),
+                            ("Allow writes", "off"),
+                            ("Inherit", "inherit"),
+                        )
+                    ]
+                )
             )
-        )
     return AdaptiveCard(body=body, fallback_text=TITLE)
 
 
@@ -80,6 +87,7 @@ async def _load(context: CommandContext) -> HereCard:
             platform="teams",
             channel_id=asked.channel_id,
             thread_id=thread_id,
+            is_dm=asked.kind == "dm",
             default=runtime.deployment_default,
             github=GitHubDeploymentFacts(
                 app_configured=runtime.settings.github_app.app_id is not None
@@ -102,7 +110,11 @@ async def _load(context: CommandContext) -> HereCard:
 async def show_here(context: CommandContext) -> None:
     try:
         asked = context.asked_in or context.inbound
-        card = here_card(await _load(context), target=asked.thread_id or asked.channel_id)
+        card = here_card(
+            await _load(context),
+            channel_id=asked.channel_id if asked.kind != "dm" else None,
+            thread_id=asked.thread_id if asked.kind == "channel" else None,
+        )
     except (DaimonError, anthropic.APIError) as exc:
         log.warning("teams.here.failed", exc_info=exc)
         text = str(exc) if isinstance(exc, DaimonError) else _FAILED
@@ -122,7 +134,10 @@ class HereApprovals:
             return toast("Cannot verify this administrator.")
         data = submitted_fields(ctx.activity.value.action.data)
         raw = data.get("op")
+        scope = data.get("scope")
         target = str(data.get("target") or "")
+        if scope not in {"server", "channel", "thread"}:
+            return toast("Invalid approval scope.")
         value: Approvals
         if raw == "on":
             value = "on"
@@ -132,7 +147,7 @@ class HereApprovals:
             value = "inherit"
         else:
             return toast("Invalid approval setting.")
-        if not target:
+        if scope != "server" and not target:
             return toast("Missing approval scope.")
         subject = await approval_admin(
             self.runtime.sessionmaker,
@@ -145,7 +160,7 @@ class HereApprovals:
                 self.runtime.sessionmaker,
                 tenant_id=actor.tenant_id,
                 platform="teams",
-                target=target,
+                target=None if scope == "server" else target,
                 value=value,
                 subject=subject,
             )

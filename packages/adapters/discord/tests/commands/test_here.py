@@ -104,7 +104,7 @@ def test_discord_unknown_publishing_and_history_drop_their_fields() -> None:
     assert embed["fields"] == [{"name": "Reading", "value": "Any conversation", "inline": True}]
 
 
-@pytest.mark.parametrize("target", ["channel", "thread"])
+@pytest.mark.parametrize("target", ["server", "channel", "thread"])
 async def test_approval_card_checks_live_admin_before_write(
     monkeypatch: pytest.MonkeyPatch, target: str
 ) -> None:
@@ -124,8 +124,54 @@ async def test_approval_card_checks_live_admin_before_write(
     interaction = MagicMock()
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    interaction.data = {"values": ["off"]}
-    view = here.ApprovalGateView(runtime, tenant_id, target)
+    interaction.data = {"values": [f"{target}:off"]}
+    view = here.ApprovalGateView(runtime, tenant_id, "channel", "thread")
     await view.change(interaction)
     runtime.sessionmaker.assert_not_called()
     assert "admin" in interaction.followup.send.await_args.args[0]
+
+
+@pytest.mark.parametrize("scope", ["server", "channel", "thread"])
+@pytest.mark.parametrize("value", ["on", "off", "inherit"])
+async def test_native_admin_can_set_every_approval_scope(
+    db_session_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    value: str,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from daimon.adapters.discord.commands import here
+    from daimon.core.authz import Subject
+    from daimon.core.stores.access_policy import load_access_policy
+    from daimon.core.stores.security_audit import list_events
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=True, allow_gate_overrides=True)
+    fresh = AsyncMock(return_value=Subject(is_admin=True, platform_user_id="native-admin"))
+    monkeypatch.setattr(here, "approval_admin", fresh)
+    monkeypatch.setattr(here, "resolve_tenant_for_interaction", AsyncMock(return_value=tenant.id))
+    interaction = MagicMock()
+    interaction.user.id = "native-admin"
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    interaction.data = {"values": [f"{scope}:{value}"]}
+    view = here.ApprovalGateView(runtime, tenant.id, "channel", "thread")
+    await view.change(interaction)
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant.id)
+        events = await list_events(session, tenant_id=tenant.id)
+    target = {"server": None, "channel": "channel", "thread": "thread"}[scope]
+    stored = (
+        policy.approvals
+        if target is None
+        else policy.channel_rules.get(target, ChannelRule()).approvals
+    )
+    assert stored == value
+    assert len(events) == 1 and events[0].platform_user_id == "native-admin"
+    fresh.assert_awaited_once()

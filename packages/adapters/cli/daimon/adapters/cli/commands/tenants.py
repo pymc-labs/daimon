@@ -846,7 +846,7 @@ async def tenants_access_policy_set(
                     rule.approvals != "inherit" for rule in current.channel_rules.values()
                 ):
                     raise typer.BadParameter(
-                        "clear approval overrides with `daimon channels approvals clear` "
+                        "clear approval overrides from the native /here admin control "
                         "first; each change requires a native admin and an audit event. "
                         "Nothing was changed."
                     )

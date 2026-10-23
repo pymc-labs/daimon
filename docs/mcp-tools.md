@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 138 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 137 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -119,12 +119,11 @@ Channel environment tools: which environment a channel's turns run in.
 
 ## `channel_rules`
 
-Channel and agent rules, and the attended third-party write approval gate.
+Channel and agent rules.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_agent_rule` | admin only, operator tokens with channels:write | Set where an agent runs: only in the ``runs_in`` channels and their threads, or, with null, wherever it is set to answer; an empty list runs it nowhere. |
-| `set_approval_gate` | admin only | Set asking before third-party MCP writes: on, off, or inherit. |
 | `set_channel_rule` | admin only, operator tokens with channels:write | Set who can read a channel and who can post there. |
 
 ## `channel_skills`

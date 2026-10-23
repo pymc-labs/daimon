@@ -24,7 +24,6 @@ from daimon.adapters.cli.runtime import (
     build_runtime,
     request_resource_host,
 )
-from daimon.core.access_policy import Approvals
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_backend import channel_ref, current_backend
@@ -81,8 +80,6 @@ skills_app = typer.Typer(
 channels_app.add_typer(skills_app, name="skills")
 rule_app = typer.Typer(help="A channel's rule: who can read it and who can post there.")
 channels_app.add_typer(rule_app, name="rule")
-approvals_app = typer.Typer(help="Admin approval settings for server, channel or thread.")
-channels_app.add_typer(approvals_app, name="approvals")
 channels_app.command("answerable")(channels_answerable_command)
 agent_rule_app = typer.Typer(help="An agent's rule: which channels it runs in.")
 
@@ -1098,88 +1095,3 @@ async def agents_rule_set(
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
         raise typer.Exit(1) from exc
     console.print(f"{platform}:{workspace_id} {escape(' '.join(change.notes))}")
-
-
-async def channels_approvals_set(
-    *,
-    console: Console,
-    url: str,
-    token: str,
-    value: Approvals,
-    channel_id: str | None = None,
-    thread: bool = False,
-) -> None:
-    """Authenticate remotely; the server derives both tenant and actor from the credential."""
-    from fastmcp import Client
-    from fastmcp.exceptions import ToolError
-
-    if thread and channel_id is None:
-        raise typer.BadParameter("--thread needs --channel-id")
-    try:
-        async with Client(url, auth=token) as client:
-            result = await client.call_tool(
-                "set_approval_gate",
-                {"value": value, "channel_id": channel_id, "thread": thread},
-            )
-            for block in result.content:
-                if block.type == "text":
-                    console.print(block.text, markup=False)
-    except ToolError as exc:
-        raise DaimonError(str(exc)) from exc
-
-
-@approvals_app.command("set")
-def channels_approvals_set_command(
-    value: str,
-    url: Annotated[
-        str, typer.Option(envvar="DAIMON_APPROVALS_URL", help="MCP endpoint for your tenant.")
-    ],
-    token: Annotated[
-        str,
-        typer.Option(
-            envvar="DAIMON_APPROVALS_TOKEN", help="Your personal MCP credential.", hide_input=True
-        ),
-    ],
-    channel_id: Annotated[
-        str | None, typer.Option(help="Omit for the server; exact id for a channel or thread.")
-    ] = None,
-    thread: bool = False,
-) -> None:
-    """Set on or off using your authenticated personal MCP identity."""
-    if value not in ("on", "off"):
-        raise typer.BadParameter("value must be on or off")
-    choice: Approvals = "on" if value == "on" else "off"
-    console = Console(highlight=False)
-    run_cli(
-        channels_approvals_set(
-            console=console,
-            url=url,
-            token=token,
-            value=choice,
-            channel_id=channel_id,
-            thread=thread,
-        ),
-        console=console,
-    )
-
-
-@approvals_app.command("clear")
-def channels_approvals_clear_command(
-    url: Annotated[str, typer.Option(envvar="DAIMON_APPROVALS_URL")],
-    token: Annotated[str, typer.Option(envvar="DAIMON_APPROVALS_TOKEN", hide_input=True)],
-    channel_id: str | None = None,
-    thread: bool = False,
-) -> None:
-    """Clear to inherit using your authenticated personal MCP identity."""
-    console = Console(highlight=False)
-    run_cli(
-        channels_approvals_set(
-            console=console,
-            url=url,
-            token=token,
-            value="inherit",
-            channel_id=channel_id,
-            thread=thread,
-        ),
-        console=console,
-    )
