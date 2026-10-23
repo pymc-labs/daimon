@@ -2440,8 +2440,8 @@ def classify_source_obligations(
     """One source-preservation rule for pre-allocation normalization and preparation.
 
     `shared` / `shared_servers` are a fleet run's frozen shared logins: under the
-    worker ceiling those (and only those) are proven by the worker's own vault and
-    .env, which the worker session builds from the same frozen set.
+    worker ceiling those (and only those) are proven by the worker's filtered .env,
+    which the worker session builds from the same frozen set (.env only until A-3).
     """
     from daimon.core.fleet_credentials import login_key_of
 
@@ -2587,7 +2587,7 @@ def classify_source_obligations(
         missing.add("credentials")
     for resource in source.resource_requirements:
         if worker_ceiling and login_key_of(resource) in shared:
-            # Handed over by the worker's own vault / filtered .env (fleet_credentials).
+            # Handed over by the worker's filtered .env (fleet_credentials; .env only until A-3).
             continue
         if (
             native_retained

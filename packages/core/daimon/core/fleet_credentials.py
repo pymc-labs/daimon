@@ -37,7 +37,8 @@ UNSHAREABLE_KEYS: frozenset[str] = frozenset({"env:GITHUB_TOKEN", "env:GH_TOKEN"
 #: A stored login whose server isn't on the agent any more: never shareable.
 UNMATCHED_CONNECTOR = "a connected tool"
 
-#: Only a native worker session can receive a shared login (its own vault and .env).
+#: Only a native worker session can receive a shared login: in v1 its .env only
+#: (connector logins through a per-worker vault are A-3).
 #: OpenAI/Gemini workers run without connectors.
 SHAREABLE_PROVIDERS: frozenset[str] = frozenset({MANAGED_AGENTS.provider})
 

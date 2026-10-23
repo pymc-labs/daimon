@@ -147,3 +147,23 @@ async def test_a_workers_env_has_only_its_shared_keys_at_their_approved_version(
     else:
         await call
         assert uploaded == [["SHARED_KEY"]]
+
+
+async def test_a_github_token_never_reaches_a_worker_even_if_approved(monkeypatch):
+    """#1371 review: refused at the upload too, not only when classifying."""
+    from daimon.core import credential_env
+    from mux.errors import ScopeViolation
+
+    async def list_files(session, *, tenant_id, agent_id):
+        raise AssertionError("refused before reading any stored key")
+
+    monkeypatch.setattr(credential_env, "list_agent_files", list_files)
+    for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        with pytest.raises(ScopeViolation, match="GitHub token is never shared"):
+            await credential_env.upload_env_and_mount(
+                None,
+                None,
+                tenant_id=uuid.uuid4(),
+                agent_id=uuid.uuid4(),
+                keys={name: "v1", "SHARED_KEY": "v1"},
+            )

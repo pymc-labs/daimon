@@ -2362,7 +2362,7 @@ def resolve_worker_spec(
             environment=environment,
             resources=resources,
             worker_ceiling=True,
-            # Only a native worker can receive a shared login (its own vault and .env).
+            # Only a native worker can receive a shared login (its .env only until A-3).
             shared=parent.shared_logins if native else frozenset(),
             shared_servers=parent.shared_servers if native else frozenset(),
         )

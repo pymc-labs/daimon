@@ -971,6 +971,8 @@ async def create_session(
                     session_factory,
                     tenant_id=tenant_id,
                     agent_id=agent_uuid,
+                    # Never GitHub's tokens, even if approved (refused upstream too).
+                    exclude_github=True,
                     keys=shared_keys,
                 )
                 if shared_keys

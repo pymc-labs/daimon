@@ -270,6 +270,12 @@ async def upload_env_and_mount(
     the only key names written (a fleet worker's shared keys) to their approved
     versions; a missing or changed key refuses.
     """
+    if keys is not None:
+        from daimon.core.fleet_credentials import UNSHAREABLE_KEYS
+
+        if any(f"env:{name}" in UNSHAREABLE_KEYS for name in keys):
+            # GitHub's own tokens never reach a worker, whatever was approved.
+            raise ScopeViolation("worker-resources", "a GitHub token is never shared")
     async with session_factory() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_id)
     rows = [row for row in rows if session_env_key(row.key, exclude_github=exclude_github)]
