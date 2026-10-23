@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from daimon.adapters.discord.checks import SETTING_UP_MESSAGE, start_guild_setup
+from daimon.adapters.discord.checks import guild_setup_reply
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -30,6 +30,5 @@ async def resolve_tenant_for_panel(
     async with runtime.sessionmaker() as session:
         row = await get_tenant(session, tenant_id)
     if row is None:
-        start_guild_setup(interaction)
-        raise UserFacingError(SETTING_UP_MESSAGE)
+        raise UserFacingError(guild_setup_reply(interaction))
     return tenant_id

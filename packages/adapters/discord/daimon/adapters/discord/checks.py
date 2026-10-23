@@ -40,20 +40,32 @@ ADMIN_NOUN = "someone with Manage Server"
 #: starts the same setup a mention does, so the person only has to wait.
 SETTING_UP_MESSAGE = "Setting Daimon up in this server. Try again in a moment."
 
+#: The reply when setup can't start: the bot itself isn't in the server (for
+#: example only its commands were added), so nothing is underway.
+NOT_IN_SERVER_MESSAGE = "Daimon isn't in this server yet. Invite the bot to set it up."
 
-def start_guild_setup(interaction: discord.Interaction) -> None:
+
+def start_guild_setup(interaction: discord.Interaction) -> bool:
     """Start setting up the interaction's server, as a mention would.
 
     Mentions self-heal a server with no tenant row; slash commands start the
-    same background setup so a retry a moment later works.
+    same background setup so a retry a moment later works. False when it
+    can't start: setup refuses a server the bot's gateway doesn't see.
     """
     # `DaimonBot.start_provisioning`; checks is imported by bot, so it is
     # looked up rather than typed against the bot class.
-    start: Callable[[discord.Guild], None] | None = getattr(
-        interaction.client, "start_provisioning", None
-    )
-    if interaction.guild is not None and start is not None:
-        start(interaction.guild)
+    client = interaction.client
+    start: Callable[[discord.Guild], None] | None = getattr(client, "start_provisioning", None)
+    guild = interaction.guild
+    if guild is None or start is None or client.get_guild(guild.id) is None:
+        return False
+    start(guild)
+    return True
+
+
+def guild_setup_reply(interaction: discord.Interaction) -> str:
+    """Start the server's setup and say what happens next."""
+    return SETTING_UP_MESSAGE if start_guild_setup(interaction) else NOT_IN_SERVER_MESSAGE
 
 
 def is_member_guild_admin(member: discord.Member, *, guild_owner_id: int | None) -> bool:
@@ -159,8 +171,7 @@ def require_registered_guild(  # noqa: UP047  -- ParamSpec used for decorator ge
             return
         tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
         if tenant_id is None:
-            start_guild_setup(interaction)
-            await interaction.response.send_message(SETTING_UP_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(guild_setup_reply(interaction), ephemeral=True)
             return
         await func(self, interaction, *args, **kwargs)
 

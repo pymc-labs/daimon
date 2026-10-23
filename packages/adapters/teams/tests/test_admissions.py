@@ -19,7 +19,7 @@ from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.admissions import HOLDING, NOT_HELD, TeamsAdmissions
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import fresh_start
-from daimon.adapters.teams.identity import SETTING_UP, TeamsInbound
+from daimon.adapters.teams.identity import SETUP_FAILED, TeamsInbound
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import set_provision_status
@@ -464,7 +464,7 @@ async def test_a_replay_goes_through_admission_like_a_fresh_message(
         await _boot(_app(db_session_factory, sender))
 
     turn.assert_not_awaited()
-    assert _texts(sender) == [SETTING_UP], "refused as a fresh message is"
+    assert _texts(sender) == [SETUP_FAILED], "refused as a fresh message is"
 
 
 async def test_a_process_that_lost_its_message_to_a_reclaim_neither_runs_nor_answers_it(

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import (
     refuse_if_not_admin,
     require_manage_guild,
@@ -14,6 +15,7 @@ from daimon.adapters.discord.checks import (
     resolve_tenant_for_interaction,
 )
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.errors import UserFacingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -100,6 +102,30 @@ class TestRequireRegisteredGuild:
         ), "the person learns setup is underway and only has to retry"
         assert call_kwargs.kwargs.get("ephemeral") is True
         interaction.client.start_provisioning.assert_called_once_with(interaction.guild)
+        wrapped.assert_not_awaited()
+
+    async def test_unregistered_guild_the_bot_is_not_in_says_so(self) -> None:
+        """No gateway guild means setup can't start, so the reply doesn't claim it did."""
+        wrapped = AsyncMock()
+
+        @require_registered_guild
+        async def handler(self: object, interaction: object) -> None:  # type: ignore[override]
+            await wrapped(self, interaction)  # type: ignore[arg-type]
+
+        interaction = _make_interaction()
+        interaction.client.get_guild.return_value = None
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "daimon.adapters.discord.checks.resolve_tenant_for_interaction",
+                AsyncMock(return_value=None),
+            )
+            await handler(MagicMock(), interaction)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "Daimon isn't in this server yet. Invite the bot to set it up.", ephemeral=True
+        )
+        interaction.client.start_provisioning.assert_not_called()
         wrapped.assert_not_awaited()
 
     async def test_passes_registered_guild(self) -> None:
@@ -263,3 +289,20 @@ def _role(role_id: int, *, default: bool = False) -> MagicMock:
     role.id = role_id
     role.is_default.return_value = default
     return role
+
+
+# ---------------------------------------------------------------------------
+# resolve_tenant_for_panel: a panel outliving its tenant starts setup again
+# ---------------------------------------------------------------------------
+
+
+async def test_panel_resolution_without_a_tenant_starts_setup(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    interaction = _make_interaction(guild_id=424242, sessionmaker=db_session_factory)
+
+    with pytest.raises(UserFacingError) as exc_info:
+        await resolve_tenant_for_panel(interaction.client.runtime, interaction)
+
+    assert str(exc_info.value) == "Setting Daimon up in this server. Try again in a moment."
+    interaction.client.start_provisioning.assert_called_once_with(interaction.guild)

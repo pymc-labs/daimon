@@ -58,6 +58,11 @@ DENIED = "This agent is not available for this account."
 # Why a message from an organisation with no live tenant gets no turn.
 SETTING_UP = "Daimon is still being set up for your organization. Try again in a few minutes."
 NOT_FOR_ORGANIZATION = "Daimon isn't available for your organization."
+# Teams setup runs at boot only, so a failed setup isn't retried on its own.
+SETUP_FAILED = (
+    "Daimon's setup for your organization didn't finish. "
+    "Ask your Teams admin to contact the team running Daimon."
+)
 INPUT_TOO_LONG = "That message is too long for this agent. Please shorten it."
 TEXT_ONLY = "Send your question as text, an image or a file."
 MAX_INBOUND_MESSAGE_BYTES = 16 * 1024
@@ -623,17 +628,17 @@ async def not_live_reason(
 ) -> str:
     """What to tell someone whose organisation `live_tenant_id` refused.
 
-    Setup still running (or being retried after a failure) says to try again;
-    an organisation Daimon was never set up for, or was removed from, says so.
+    Setup still running says to try again; setup that failed (nothing retries
+    it until the next restart) says who can get it fixed; an organisation
+    Daimon was never set up for, or was removed from, says so.
     """
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=entra_tenant_id)
     async with sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
-    if (
-        tenant is not None
-        and tenant.platform == "teams"
-        and tenant.archived_at is None
-        and tenant.provision_status in ("pending", "failed")
-    ):
+    if tenant is None or tenant.platform != "teams" or tenant.archived_at is not None:
+        return NOT_FOR_ORGANIZATION
+    if tenant.provision_status == "pending":
         return SETTING_UP
+    if tenant.provision_status == "failed":
+        return SETUP_FAILED
     return NOT_FOR_ORGANIZATION
