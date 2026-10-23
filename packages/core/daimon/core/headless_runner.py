@@ -1270,13 +1270,13 @@ async def run_worker(
                         await orphan(prepared)
     except BaseException as error:
         if not native_started:
-            from daimon.core.fleet_orchestration import worker_failure_code
+            from daimon.core.fleet_orchestration import ended_by_shutdown, worker_failure_code
 
             # A bug before native start is ours, never "couldn't be set up on that model".
             # A shutdown's cancel is the restart's, never a refusal or a time-out.
             failure_code = (
                 "shutdown"
-                if deps.running_turns.shutting_down and isinstance(error, asyncio.CancelledError)
+                if ended_by_shutdown(deps.running_turns, error, cancel)
                 else worker_failure_code(error, "preparation_refused")
             )
             await asyncio.shield(

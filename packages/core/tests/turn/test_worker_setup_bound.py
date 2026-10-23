@@ -198,3 +198,48 @@ async def test_a_shutdown_cancel_before_native_start_records_shutdown(
         assert worker_error_text(ended.error_code) == "Daimon restarted before it finished"
     else:
         assert ended.error_code != "shutdown"
+
+
+@pytest.mark.parametrize("how", ["stopped_then_refused", "cleanup_after_cancel", "unrelated"])
+async def test_a_shutdown_failure_reads_restarted_whatever_error_escapes(
+    native_worker, monkeypatch, how
+):
+    """J4 offline E2E (nc-fleetfix): a host shutdown stops a running worker by setting its
+    cancel event; the OpenAI driver's interrupt then refused with no active root turn, so
+    the error that escaped was that refusal and the card read "couldn't be set up". During
+    a shutdown, a failure with the worker's cancel set or a cancel in its chain is the
+    restart; a failure the shutdown didn't cause keeps its code."""
+    from daimon.core import headless_runner
+    from daimon.core.turn.errors import AdmissionDenied
+    from mux.errors import UnsupportedCapability
+
+    request, root, claimed, _, _ = native_worker
+    request.deps.running_turns.begin_shutdown()
+    cancel = asyncio.Event()
+
+    async def failing(*args, **kwargs):
+        if how == "stopped_then_refused":
+            cancel.set()  # what HostFleetPorts.close() does to every running worker
+            raise UnsupportedCapability(("host_cancel_root_identity",), "openai")
+        if how == "cleanup_after_cancel":
+            try:
+                raise asyncio.CancelledError
+            except asyncio.CancelledError as cancelled:
+                raise UnsupportedCapability(("host_cancel_root_identity",), "openai") from (
+                    cancelled
+                )
+        raise AdmissionDenied(reason="backend_unsupported")
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", failing)
+    with pytest.raises((UnsupportedCapability, AdmissionDenied)):
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=cancel,
+        )
+    ended = await _ended(request, claimed)
+    assert ended.status == "failed"
+    assert (ended.error_code == "shutdown") is (how != "unrelated")
