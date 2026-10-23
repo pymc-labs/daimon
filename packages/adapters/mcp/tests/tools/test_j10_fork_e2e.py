@@ -701,7 +701,9 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
     assert astra["agent"]["model"] == "gpt-6-astra"
     assert "spend_control" not in astra  # Astra runs with no native cap (#1394/#1398)
     (sent,) = seen.gemini_requests
-    assert sent["model"] == GEMINI[gemini] and "tools" in sent
+    # A worker sends a capped MODEL request (no agent config), where an empty tool list
+    # is correct; the never-empty sentinel is for agent requests (#1428).
+    assert sent["model"] == GEMINI[gemini] and "tools" in sent and "agent_config" not in sent
     if gemini == "argon":
         assert seen.gemini_counted  # Argon's bounded envelope was sized before the send
     # fleet_collect: three results, one per worker.
@@ -734,11 +736,3 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
     without = getattr(seen.root, "workers_run_without", ())
     for reply in seen.replies:
         assert list(reply.get("workers_run_without", [])) == list(without)
-
-
-@pytest.mark.xfail(strict=True, reason="nc-portable's tools sentinel has not landed yet")
-@pytest.mark.parametrize("gemini", sorted(GEMINI))
-async def test_the_gemini_worker_never_sends_an_empty_tools_list(j10_root, monkeypatch, gemini):
-    seen = await run_j10(j10_root, monkeypatch, gemini)
-    (sent,) = seen.gemini_requests
-    assert sent["tools"] != []
