@@ -358,10 +358,15 @@ class GeminiPlan(BaseModel):
         from daimon.core.turn.runtime_manifest import source_instructions_preserved
 
         full = self.source_capabilities is not None
-        # A template that keeps the agent's MCP serves one whose switch dropped
-        # it too, with no MCP at all: never more than the template allows.
-        mcp = self.template_capabilities == "mcp" and (
-            target is None or "mcp" not in target.declared_drops
+        # A template that keeps the agent's MCP also serves a target with none
+        # (its switch dropped it, or it never had any) with no MCP at all; a
+        # target carrying MCP must match its representation. Never more than
+        # the template allows.
+        mcp = (
+            self.template_capabilities == "mcp"
+            and target is not None
+            and bool(target.mcp_servers)
+            and "mcp" not in target.declared_drops
         )
         represented = (
             represented_source(source, target) if source is not None and (full or mcp) else None

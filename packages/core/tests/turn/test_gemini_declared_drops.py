@@ -698,3 +698,19 @@ def test_an_mcp_template_never_gives_mcp_to_a_target_that_dropped_it(
         )
         with pytest.raises(AdmissionDenied, match="backend_unsupported"):
             row.deployment(smuggled)
+
+
+def test_an_mcp_template_serves_an_agent_that_never_had_mcp(ordinary, tmp_path, monkeypatch):
+    """An agent without Daimon's MCP has nothing to represent and nothing to
+    drop: the agent template still serves it, with no MCP."""
+    canonical = ordinary[2]
+    assert "mcp" not in canonical.target_spec.declared_drops
+    assert canonical.target_spec.mcp_servers == ()
+    row = _as_template(ordinary[1], tmp_path, monkeypatch).model_copy(
+        update={"template_capabilities": "mcp"}
+    )
+
+    deployment = row.deployment(canonical)
+
+    assert deployment.agent == canonical.target_spec
+    assert deployment.agent.mcp_servers == ()

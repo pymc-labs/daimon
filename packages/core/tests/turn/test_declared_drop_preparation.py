@@ -84,10 +84,13 @@ async def consent_request(owned, request):
         return router.dispatch(request)
 
     async with build_fake_anthropic(transport) as client:
+        selection = backend_selection(backend)
+        if "backend_model" in params:  # a picked model, e.g. Argon
+            selection = selection.model_copy(update={"model": params["backend_model"]})
         revision = ConfigRevision.create(
             ChannelRef(tenant_id=str(identity.tenant_id), platform="slack", channel_id="channel"),
             1,
-            backend_selection(backend),
+            selection,
         )
         admitted = Admission(
             account_id=actor.account_id,
