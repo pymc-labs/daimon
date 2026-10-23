@@ -240,3 +240,121 @@ async def test_the_audit_row_names_kind_requester_and_digest(
     assert row.platform_user_id == QA and row.outcome == "allowed"
     assert f"digest={qa.prompt_digest(prompt)}" in row.reason
     assert row.target_channel_id == "77"
+
+
+async def test_settings_without_discord_are_off(mount: Path) -> None:
+    assert await qa.enabled_for(SimpleNamespace(), QA) is False  # type: ignore[arg-type]
+    assert await qa.enabled_for(SimpleNamespace(discord=None), QA) is False  # type: ignore[arg-type]
+
+
+async def test_a_writable_dir_or_a_symlinked_flag_is_off(mount: Path, tmp_path: Path) -> None:
+    mount.chmod(0o700)  # the file stays 0400, but the dir is ours to swap it in
+    assert await qa.enabled_for(_settings(QA), QA) is False
+    real = _write(tmp_path / "elsewhere", {"enabled": True})
+    (mount / qa.CONTROL_FILE_NAME).chmod(0o600)
+    (mount / qa.CONTROL_FILE_NAME).unlink()
+    (mount / qa.CONTROL_FILE_NAME).symlink_to(real)
+    mount.chmod(0o500)
+    assert await qa.enabled_for(_settings(QA), QA) is False
+    (tmp_path / "elsewhere").chmod(0o700)
+
+
+async def test_a_raising_gate_posts_the_normal_card(gate) -> None:
+    enabled, audit = gate
+    enabled.side_effect = RuntimeError("settings shape changed")
+    channel = _channel()
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(_prompt()))
+    try:
+        view = await _pending_card(channel, waiting)
+        assert "Approve" in _buttons(view)
+        audit.assert_not_awaited()
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+def _publish(tool: str, **data: object) -> ConfirmationPrompt:
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME
+
+    call = ToolCall(tool_use_id="tu_p", server_name=DAIMON_SERVER_NAME, tool_name=tool, input=data)
+    return prompt_for_tool_call(call, requester_platform_user_id=QA, now=datetime.now(UTC))
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        _publish("publish_report", title="Q3", recipients=["a@example.test"]),
+        _publish("create_notebook_upload_url", slug="nb", permanent=True),
+        _publish("create_notebook_upload_url", slug="nb", editable=True),
+        _publish("create_attachment_upload_url", slug="nb", name="data.csv"),
+    ],
+    ids=["report", "permanent_notebook", "editable_notebook", "attachment"],
+)
+async def test_a_lasting_public_link_stays_manual(gate, prompt: ConfirmationPrompt) -> None:
+    _, audit = gate
+    assert prompt.lasting_public_link is True
+    channel = _channel()
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(prompt))
+    try:
+        view = await _pending_card(channel, waiting)
+        assert "Approve" in _buttons(view)
+        assert audit.await_args.kwargs["outcome"] == "denied"
+        assert "lasting public link" in audit.await_args.kwargs["reason"]
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def test_a_short_lived_read_only_notebook_link_is_approved(gate) -> None:
+    prompt = _publish("create_notebook_upload_url", slug="nb", ttl_days=1)
+    assert prompt.lasting_public_link is False
+    assert isinstance(await discord_confirmation_hook(_channel())(prompt), ApprovedConfirmation)
+
+
+async def test_a_tool_rule_card_is_approved_once_without_saving_a_rule(
+    gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import uuid
+
+    from daimon.adapters.discord import tool_confirmation as confirmation_module
+    from daimon.core.confirmation import ToolRuleCardReference
+
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    channel = _channel()
+    assert isinstance(await discord_confirmation_hook(channel)(prompt), ApprovedConfirmation)
+    save.assert_not_awaited()
+    assert _buttons(channel.send.await_args.kwargs["view"]) == []
+
+
+async def test_a_card_that_fails_to_post_after_approval_is_audited_as_an_error(gate) -> None:
+    _, audit = gate
+    channel = _channel()
+    channel.send.side_effect = discord.HTTPException(MagicMock(status=503), "down")
+    with pytest.raises(discord.HTTPException):
+        await discord_confirmation_hook(channel)(_prompt())
+    assert audit.await_args.kwargs["outcome"] == "error"
+
+
+async def test_a_retired_auto_approved_card_keeps_its_qa_note(gate) -> None:
+    channel = _channel()
+    result = await discord_confirmation_hook(channel)(_prompt())
+    assert isinstance(result, ApprovedConfirmation)
+    await result.retire_unsent()
+    from daimon.core.posted_controls.lifecycle import drain_card_edits
+
+    await drain_card_edits(1)
+    view = channel.send.return_value.edit.call_args.kwargs["view"]
+    assert any(qa.NOTE in text for text in _texts(view))

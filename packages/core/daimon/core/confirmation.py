@@ -179,6 +179,9 @@ class ConfirmationPrompt(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     tool_rules_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
+    # A publish that leaves a lasting public link (a report, a permanent or
+    # editable notebook, a file in one): never answered for a test bot.
+    lasting_public_link: bool = Field(default=False, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def _aware_expiry(self) -> ConfirmationPrompt:
@@ -558,6 +561,11 @@ def prompt_for_tool_call(
         detail_lines=detail_lines,
         requester_platform_user_id=requester_platform_user_id,
         expires_at=now + timeout,
+        lasting_public_link=publishing
+        and (
+            call.tool_name != "create_notebook_upload_url"
+            or bool(data.get("permanent") or data.get("editable"))
+        ),
     )
 
 

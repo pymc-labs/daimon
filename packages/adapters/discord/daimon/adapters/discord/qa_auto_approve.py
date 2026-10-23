@@ -13,12 +13,16 @@ asks the metadata server):
 
 1. the requester is one of `discord.qa_bot_user_ids`;
 2. `qa-auto-approve.json`, beside the provider runtime file (the confirm-click
-   control directory), says exactly ``{"enabled": true}`` and is not writable
-   from inside this container;
+   control directory), says exactly ``{"enabled": true}``, is not a symlink
+   and is not writable from inside this container;
 3. the GCE metadata server names a project ending in `-staging`.
 
+Publish cards that leave a lasting public link (`lasting_public_link`: a
+report, a permanent or editable notebook, a file in a notebook) always stay
+manual, so a prompt-injected QA turn can't publish lasting public data.
+
 Every attempt that passes the gate is logged and written to the security audit
-log, approved or refused.
+log, approved or refused. A gate that fails for any reason means a normal card.
 """
 
 from __future__ import annotations
@@ -63,10 +67,12 @@ def control_path() -> Path | None:
 
 
 def load_control(path: Path | None) -> bool:
-    """True only for a read-only file that is exactly ``{"enabled": true}``."""
+    """True only for a read-only, non-symlink file that is exactly ``{"enabled": true}``."""
     if path is None:
         return False
     try:
+        if path.is_symlink() or path.parent.is_symlink():
+            return False
         if os.access(path, os.W_OK) or os.access(path.parent, os.W_OK):
             return False
         data: object = json.loads(path.read_text())
@@ -84,8 +90,9 @@ async def _staging() -> bool:
 
 async def enabled_for(settings: Settings | None, requester: str) -> bool:
     """Whether `requester`'s cards auto-approve here (see the module docstring)."""
-    discord_settings = settings.discord if settings is not None else None
-    if discord_settings is None or requester not in discord_settings.qa_bot_user_ids:
+    discord_settings: object = getattr(settings, "discord", None)
+    qa_ids: tuple[str, ...] = getattr(discord_settings, "qa_bot_user_ids", None) or ()
+    if requester not in qa_ids:
         return False
     if not load_control(control_path()):
         return False
@@ -113,7 +120,7 @@ async def audit(
     *,
     tenant_id: uuid.UUID | None,
     prompt: ConfirmationPrompt,
-    outcome: Literal["allowed", "denied"],
+    outcome: Literal["allowed", "denied", "error"],
     reason: str,
     channel_id: int | None,
 ) -> None:

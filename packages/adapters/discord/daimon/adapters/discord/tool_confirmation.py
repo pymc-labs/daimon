@@ -419,7 +419,13 @@ def discord_confirmation_hook(
         from daimon.adapters.discord import qa_auto_approve as qa
 
         requester = prompt.requester_platform_user_id
-        if not await qa.enabled_for(runtime.settings if runtime is not None else None, requester):
+        try:
+            enabled = await qa.enabled_for(getattr(runtime, "settings", None), requester)
+        except Exception:
+            # The gate never breaks a card: any failure is a normal card.
+            log.exception("discord.qa_auto_approve_gate_failed")
+            enabled = False
+        if not enabled:
             return None
         guild = getattr(channel, "guild", None)
         audit = partial(
@@ -433,6 +439,9 @@ def discord_confirmation_hook(
             prompt=prompt,
             channel_id=getattr(channel, "id", None),
         )
+        if prompt.lasting_public_link:
+            await audit(outcome="denied", reason="manual: publishes a lasting public link")
+            return None
         refusal = await view.authorize(requester, "approved")
         if refusal is not None:
             # Exactly what the requester's own click would get: no answer taken.
@@ -445,17 +454,22 @@ def discord_confirmation_hook(
             answered_by_platform_user_id=requester,
             how="once" if prompt.tool_rules_enabled else None,
         )
-        message = await channel.send(
-            view=_ConfirmationView(answered, prompt, answer=None, note=qa.NOTE),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        try:
+            message = await channel.send(
+                view=_ConfirmationView(answered, prompt, answer=None, note=qa.NOTE),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except BaseException as exc:
+            # Approved, but the card never showed: say so, then fail as a post would.
+            await audit(outcome="error", reason=f"card not posted: {type(exc).__name__}")
+            raise
         view.card_key = ("discord", message.id)
         view.answered_edit_done.set()
         await audit(outcome="allowed", reason="auto-approved for QA")
 
         async def retire_unsent() -> None:
             view.retired = True
-            await _retire(message, prompt, "stopped")
+            await _retire(message, prompt, "stopped", note=qa.NOTE)
 
         return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
 
@@ -500,13 +514,17 @@ def discord_confirmation_hook(
 
 
 async def _retire(
-    message: discord.Message, prompt: ConfirmationPrompt, state: ConfirmationCardState
+    message: discord.Message,
+    prompt: ConfirmationPrompt,
+    state: ConfirmationCardState,
+    *,
+    note: str | None = None,
 ) -> None:
     card = build_confirmation_card(prompt, state=state)
     # Bounded for the turn, finished in the background (`edit_card_within`).
     await edit_card_within(
         message.edit(
-            view=_ConfirmationView(card, prompt, answer=None),
+            view=_ConfirmationView(card, prompt, answer=None, note=note),
             allowed_mentions=discord.AllowedMentions.none(),
         ),
         card_key=("discord", message.id),
