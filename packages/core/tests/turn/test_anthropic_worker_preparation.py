@@ -490,6 +490,28 @@ async def test_a_url_sources_echo_on_web_fetch_passes_the_readback_and_runs(nati
     assert any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
 
 
+@pytest.mark.parametrize("native_worker", ["resolved_readback"], indirect=True)
+async def test_an_unrepresentable_tool_echo_refuses_instead_of_crashing(native_worker):
+    """SMOKE d75 J4: the allocation readback echoed a tool field the strict native
+    schema lacks, and a raw ValidationError surfaced as "a setup error on our side"."""
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = "echo_unknown_tool_field"
+    with pytest.raises(AdmissionDenied):
+        await run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Read the facts",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert any(call.method == "POST" and call.path == "/v1/agents" for call in trace.requests)
+    assert not any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+
+
 @pytest.mark.parametrize("native_worker", ["resolver_fresh", "clone_source"], indirect=True)
 async def test_worker_allocation_keeps_fresh_mentions_on_original_agent(native_worker):
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME

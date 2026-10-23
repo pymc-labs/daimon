@@ -1600,7 +1600,18 @@ async def bind_session_impl(
                 {name: expected.get(name) or [] for name in ("tools", "skills", "mcp_servers")}
             )
             expected.setdefault("multiagent", None)
-            actual = agent_payload(observed.spec)
+            try:
+                actual = agent_payload(observed.spec)
+            except ValueError as error:
+                # The echo carries a native field the strict schema doesn't model (SMOKE
+                # d75 J4): it can't be proved to match, so it is refused like any other
+                # mismatch, never surfaced as a bug of ours. Field paths only, no values.
+                log.warning(
+                    "fleet.worker_readback_unrepresented",
+                    fields=_validation_paths(error),
+                )
+                await archive_allocated()
+                raise AdmissionDenied(reason="backend_unsupported") from None
             echoed = actual.get("model")
             if (
                 isinstance(expected.get("model"), str)
@@ -1791,3 +1802,23 @@ async def bind_session_impl(
             deadline=effective_deadline.isoformat(),
         )
         raise ceiling_error() from err
+
+
+def _validation_paths(error: BaseException) -> list[str]:
+    """A validation error's locations and types, never its input values."""
+    from pydantic import ValidationError
+
+    if not isinstance(error, ValidationError):
+        return [type(error).__name__]
+
+    def safe(part: object) -> str:
+        # Schema field names and indexes only; anything else is shown as "?".
+        text = str(part)
+        return text if len(text) <= 40 and text.replace("_", "").isalnum() else "?"
+
+    return sorted(
+        {
+            ":".join(safe(part) for part in item["loc"]) + ":" + item["type"]
+            for item in error.errors(include_url=False, include_input=False)
+        }
+    )[:10]

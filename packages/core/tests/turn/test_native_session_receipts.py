@@ -422,6 +422,12 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
                 for config in raw["tools"][0]["configs"]:
                     if config["name"] == "web_fetch":
                         config["url_sources"] = {"type": "any"}
+            if controls["fault"] == "echo_unknown_tool_field" and agent.id == "new-worker":
+                # SMOKE d75 J4: MA echoes a tool field our strict native schema lacks.
+                raw["tools"][0]["configs"][0]["permission_policy"] = {
+                    "type": "always_allow",
+                    "unknown_field": True,
+                }
             if controls["fault"] == "builtin_widening" and agent.id == "new-worker":
                 for config in raw["tools"][0]["configs"]:
                     if config["name"] == "bash":
