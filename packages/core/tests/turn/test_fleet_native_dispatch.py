@@ -120,7 +120,7 @@ async def _settled(ports, root, identifier):
         while True:
             _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
             selected = next(row for row in rows if str(row.id) == identifier)
-            if selected.status in ("failed", "succeeded"):
+            if selected.status in ("failed", "succeeded", "cancelled"):
                 return selected
             await asyncio.sleep(0.01)
 
@@ -659,7 +659,16 @@ async def test_dispatcher_ends_only_its_known_pre_native_claim_and_allows_a_heal
             blocked[0].cancel()
         release.set()
         ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        # A person's Stop reads as stopped, never as a refusal; a cancel from outside
+        # is never a refusal either (#1413 review B3).
+        expected = (
+            ("cancelled", "stop_requested")
+            if stop
+            else ("failed", "watch_ended")
+            if fault == "cancel"
+            else ("failed", "preparation_refused")
+        )
+        assert (ended.status, ended.error_code) == expected
         assert ended.binding_id is None and ended.attempts == ended.turns_used == 0
         assert ended.reserved_usd == claimed.reserved_usd and not calls
         await _assert_completion_offered(request, wake_key)
@@ -669,7 +678,7 @@ async def test_dispatcher_ends_only_its_known_pre_native_claim_and_allows_a_heal
                 db, tenant_id=request.tenant_id, policy=original_policy
             )
         replay = await owner.spawn(root, original_policy, **terms)
-        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == "failed"
+        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == ended.status
         assert not calls
         first, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         healthy = await fleet.create_run(
@@ -906,7 +915,12 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
                     await asyncio.sleep(0.01)
         release.set()
         ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        # A Stop ends the worker as stopped, never as a refusal (#1413 review B3).
+        assert (ended.status, ended.error_code) == (
+            ("cancelled", "stop_requested")
+            if fault == "stop"
+            else ("failed", "preparation_refused")
+        )
         assert ended.binding_id is None and ended.attempts == ended.turns_used == 0
         assert ended.reserved_usd == claimed.reserved_usd > 0 and not calls
         await _assert_completion_offered(request, wake_key)
@@ -917,7 +931,7 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
                 db, tenant_id=request.tenant_id, policy=original_policy
             )
         replay = await owner.spawn(root, original_policy, **terms)
-        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == "failed"
+        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == ended.status
         assert not calls
         first, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         healthy = await fleet.create_run(
@@ -978,7 +992,7 @@ async def test_wedged_preparation_fails_promptly_and_releases_its_claim(paused_s
         async with asyncio.timeout(5):
             await entered.wait()
             ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        assert ended.status == "failed" and ended.error_code == "preparation_deadline_exceeded"
         assert ended.binding_id is None and ended.turns_used == 0 and not calls
         # A second real store claim must succeed through the same size-one pool.
         _, rows = await fleet.run_status(

@@ -857,7 +857,7 @@ async def test_partial_result_heads_the_roots_answer_with_the_failed_worker():
     final = [text for text in _texts(send, edit) if "W1 says: verified." in text]
     assert len(final) == 1
     assert final[0].startswith("Partial result: 1 of 2 workers succeeded.")
-    assert "W3: failed: it couldn't start on that model here" in final[0] and "\\_" not in final[0]
+    assert "W3: failed: Daimon refused to start it; try again" in final[0] and "\\_" not in final[0]
     assert "No reviewed result to share." not in final[0]
     assert _headlines(send, edit)[-1] == "**Fleet — partial result**"
     assert owner.settle_run.await_args.args[2] == "failed"
@@ -2711,5 +2711,7 @@ def test_a_setup_error_reads_as_ours_with_a_log_reference():
 
     failed = worker(status="failed", error_code="setup_error")
     status = _worker_status(failed)
-    assert status == f"failed: a setup error on our side (ref {str(failed.id)[:8]})"
+    assert status == (
+        f"failed: a setup error on our side; give an admin the reference (ref {str(failed.id)[:8]})"
+    )
     assert "couldn't be set up on that model" not in status

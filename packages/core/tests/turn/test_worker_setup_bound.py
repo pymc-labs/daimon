@@ -51,7 +51,7 @@ async def test_a_stuck_setup_step_fails_the_worker_within_the_setup_bound(
     assert raised.value.reason == "worker_setup_busy"
     ended = await _ended(request, claimed)
     assert ended.status == "failed" and ended.error_code == "preparation_deadline_exceeded"
-    assert worker_error_text(ended.error_code) == "it took too long to start"
+    assert worker_error_text(ended.error_code) == "it took too long to start; try again"
     stages = [(e["stage"], e["outcome"]) for e in logs if e["event"] == "fleet.worker_stage"]
     assert stages == [("policy", "ok"), ("source", "setup_timeout")]
     assert not any(call.method == "POST" for call in trace.requests)

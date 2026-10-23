@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -125,30 +125,77 @@ WorkerFailureCode = Literal[
     "dispatch_refused",
     "provider_error",
     "provider_not_configured",
+    "provider_not_allowed",
+    "channel_backend_pinned",
     "worker_runtime_missing",
     "setup_error",
+    "balance_depleted",
+    "cap_exceeded",
+    "channel_budget_exceeded",
+    "provider_hold_cap_reached",
+    "provider_setup_pending",
     "preparation_deadline_exceeded",
+    "timed_out",
+    "provider_busy",
+    "provider_quota_zero",
+    "provider_rate_limited",
+    "stop_requested",
+    "watch_ended",
+    "shutdown",
+    "run_deadline",
+    "usage_unavailable",
 ]
 
+# Why the budget watch cancelled a worker (`cancel_workers`), as its failure code.
+_CANCEL_CODES: dict[str, WorkerFailureCode] = {
+    "shutdown": "shutdown",
+    "run_deadline": "run_deadline",
+    "usage_unavailable": "usage_unavailable",
+    "budget": "cap_exceeded",
+    "terminal": "watch_ended",
+    "watch_ended": "watch_ended",
+    "watch_cancelled": "watch_ended",
+}
 
-def _admission_cause(
-    error: BaseException,
-) -> Literal["provider_not_configured", "worker_runtime_missing"] | None:
-    """A plain cause for a backend refusal, from its closed cause or its raise site."""
-    from daimon.core.turn.errors import AdmissionDenied
+# Admission refusals a person can act on, by their closed reason.
+_ADMISSION_REASON_CODES: dict[str, WorkerFailureCode] = {
+    "balance_depleted": "balance_depleted",
+    "cap_exceeded": "cap_exceeded",
+    "channel_budget_exceeded": "channel_budget_exceeded",
+    "provider_hold_cap_reached": "provider_hold_cap_reached",
+    "provider_setup_pending": "provider_setup_pending",
+}
+_BACKEND_CAUSE_CODES: dict[str, WorkerFailureCode] = {
+    "provider_not_configured": "provider_not_configured",
+    "provider_not_allowed": "provider_not_allowed",
+    "channel_pin": "channel_backend_pinned",
+    "agent_backend": "worker_runtime_missing",
+}
 
+
+def _timed_out(error: BaseException) -> bool:
+    """A timeout anywhere in the chain: a raw TimeoutError, or the turn ceiling
+    `run_worker` re-raises it as (`TurnError(kind="ceiling")`)."""
+    from daimon.core.errors import TurnError
+
+    return any(
+        isinstance(current, TimeoutError)
+        or (isinstance(current, TurnError) and current.kind == "ceiling")
+        for current in _chain(error)
+    )
+
+
+def _chain(error: BaseException) -> Iterator[BaseException]:
+    """`error` and the chain a traceback shows under it: an explicit `__cause__`, else
+    an implicit `__context__` unless `raise ... from None` suppressed it (#1380 review).
+
+    One rule for every cause this module reads (a refusal's, a timeout, a quota).
+    """
     seen: set[int] = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, AdmissionDenied) and current.reason == "backend_unsupported":
-            if current.cause == "provider_not_configured":
-                return "provider_not_configured"
-            # No installed or default runtime row serves this worker's model/profile.
-            if (current.site or "").startswith("turn.runtime_manifest.select_runtime_manifest:"):
-                return "worker_runtime_missing"
-        # The chain a traceback shows: an explicit cause, else an implicit context
-        # unless `raise ... from None` suppressed it (that refusal was replaced).
+        yield current
         current = (
             current.__cause__
             if current.__cause__ is not None
@@ -156,11 +203,45 @@ def _admission_cause(
             if current.__suppress_context__
             else current.__context__
         )
+
+
+def _quota_cause(error: BaseException) -> WorkerFailureCode | None:
+    """A provider quota refusal in `error`'s chain (the codes `provider_quota_copy` reads)."""
+    from mux.errors import ProviderError
+
+    for current in _chain(error):
+        if isinstance(current, ProviderError) and current.category == "rate_limited":
+            if current.native_code == "quota_zero":
+                return "provider_quota_zero"
+            if current.native_code == "quota_exhausted":
+                return "provider_rate_limited"
+    return None
+
+
+def _admission_cause(error: BaseException) -> WorkerFailureCode | None:
+    """A plain cause for an admission refusal, from its closed reason, cause or raise site."""
+    from daimon.core.turn.errors import AdmissionDenied
+
+    for current in _chain(error):
+        if isinstance(current, AdmissionDenied):
+            if (code := _ADMISSION_REASON_CODES.get(current.reason)) is not None:
+                return code
+            if current.reason == "backend_unsupported":
+                if (code := _BACKEND_CAUSE_CODES.get(current.cause or "")) is not None:
+                    return code
+                # No installed or default runtime row serves this worker's model/profile.
+                if (current.site or "").startswith(
+                    "turn.runtime_manifest.select_runtime_manifest:"
+                ):
+                    return "worker_runtime_missing"
     return None
 
 
 def worker_failure_code(
-    error: BaseException, phase: Literal["preparation_refused", "dispatch_refused"]
+    error: BaseException,
+    phase: Literal["preparation_refused", "dispatch_refused"],
+    *,
+    backend: str | None = None,
 ) -> WorkerFailureCode:
     """The closed code a failed worker records: a refusal keeps its phase; a bug is ours.
 
@@ -178,6 +259,20 @@ def worker_failure_code(
         # Our own setup or a busy fleet lock, in either phase: never the model's fault.
         return "preparation_deadline_exceeded"
     refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
+    if (quota := _quota_cause(error)) is not None:
+        return quota
+    if _timed_out(error):
+        if phase == "preparation_refused":
+            return "preparation_deadline_exceeded"
+        from mux.profiles import INLINE_REUSE
+
+        # Gemini can accept a turn and never start it; at the deadline that can't be
+        # told from a slow answer (usage arrives only at the end), so say both.
+        return "provider_busy" if backend == INLINE_REUSE.provider else "timed_out"
+    if isinstance(error, asyncio.CancelledError):
+        # Cancelled from outside (the run's watch, a restart): never a refusal. A
+        # person's Stop is kept as stop_requested by the transition itself.
+        return "watch_ended"
     if not isinstance(error, Exception) or isinstance(error, refusal):
         return _admission_cause(error) or phase
     if isinstance(error, _provider_failures()):
@@ -1399,6 +1494,7 @@ class HostFleetPorts:
         reviewed_result: Event | None,
     ) -> None:
         from daimon.core.channel_budget import (
+            WorkerCancel,
             WorkerCancelReason,
             cancel_workers,
             watch_fleet_budget,
@@ -1463,7 +1559,7 @@ class HostFleetPorts:
                         done.exception()
 
                 watch[2].add_done_callback(ended)
-            cancel = watch[0].setdefault(worker.id, asyncio.Event())
+            cancel = watch[0].setdefault(worker.id, WorkerCancel())
             trigger = worker_trigger(reviewed_result)
 
             async def execute() -> None:
@@ -1497,6 +1593,23 @@ class HostFleetPorts:
                                             cancel=cancel,
                                         )
                                     except BaseException as error:
+                                        # This task's own deadline (the asyncio.timeout above)
+                                        # shows here as a cancel: record it as the timeout.
+                                        cause: BaseException = (
+                                            TimeoutError()
+                                            if isinstance(error, asyncio.CancelledError)
+                                            and request.now() >= bound
+                                            else error
+                                        )
+                                        code = worker_failure_code(
+                                            cause, failure_code, backend=claimed.backend
+                                        )
+                                        if isinstance(cause, asyncio.CancelledError):
+                                            # The budget watch says why it cancelled (a
+                                            # restart, the run's deadline, a limit).
+                                            code = _CANCEL_CODES.get(
+                                                getattr(cancel, "reason", None) or "", code
+                                            )
                                         # run_worker records its own pre-native failures;
                                         # a second commit would only wait on the lock again.
                                         if not getattr(error, FAILURE_RECORDED, False):
@@ -1505,9 +1618,7 @@ class HostFleetPorts:
                                                     request,
                                                     parent,
                                                     claimed,
-                                                    failure_code=worker_failure_code(
-                                                        error, failure_code
-                                                    ),
+                                                    failure_code=code,
                                                 )
                                             )
                                         raise
@@ -2039,7 +2150,9 @@ class HostFleetPorts:
                         result={"worker_id": str(usage.worker.id)},
                     )
                     run, worker = usage.run, usage.worker
-            if worker.status == "cancelled" and worker.error_code is not None:
+            # A worker cancelled at admission carries its refusal code; one a person
+            # stopped is replayed as it stands.
+            if worker.status == "cancelled" and worker.error_code not in (None, "stop_requested"):
                 raise FleetRefused("financial_admission_refused")
             if worker.status == "pending":
                 await self._dispatch(parent, worker, resolved, reviewed_result)

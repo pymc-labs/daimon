@@ -859,7 +859,11 @@ async def test_openai_worker_refuses_unsupported_or_revoked_authority_before_nat
             run_id=worker.run_id,
         )
         ended = next(row for row in rows if row.id == worker.id)
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        # A cancel from outside is never a refusal (#1413 review B3).
+        assert (ended.status, ended.error_code) == (
+            "failed",
+            "watch_ended" if fault == "cancelled" else "preparation_refused",
+        )
         assert ended.reserved_usd > 0 and ended.binding_id is None and ended.turns_used == 0
 
 
