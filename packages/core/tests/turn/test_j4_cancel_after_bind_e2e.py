@@ -12,6 +12,7 @@ cancels as the real one does.
 import asyncio
 from uuid import UUID
 
+import structlog
 from daimon.core import channel_budget
 from daimon.core.fleet import worker_error_text
 from daimon.core.fleet_orchestration import FleetOrchestrator
@@ -49,12 +50,18 @@ async def test_a_worker_cancelled_after_bind_reads_as_the_cancel(conversation_ro
     owner = FleetOrchestrator(ports)
     spawned = await owner.spawn(parent, policy, **terms(parent, resolved))
     task = ports._tasks.get(UUID(spawned["worker_id"]))
-    if task is not None:
-        async with asyncio.timeout(60):
-            await asyncio.gather(task, return_exceptions=True)
+    with structlog.testing.capture_logs() as logs:
+        if task is not None:
+            async with asyncio.timeout(60):
+                await asyncio.gather(task, return_exceptions=True)
     worker = await _settled(ports, parent, spawned["worker_id"])
     assert streaming.is_set() and worker.binding_id is not None  # cancelled after bind
     assert worker.status == "failed"
     assert worker.error_code == "usage_unavailable"
     assert worker_error_text(worker.error_code) == worker_error_text("usage_unavailable")
     assert worker_error_text(worker.error_code) != worker_error_text("dispatch_refused")
+    (override,) = [e for e in logs if e["event"] == "fleet.worker_failure_cancel_override"]
+    assert (override["original_code"], override["failure_code"]) == (
+        "dispatch_refused",
+        "usage_unavailable",
+    )

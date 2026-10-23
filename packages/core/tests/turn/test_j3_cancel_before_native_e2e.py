@@ -9,6 +9,7 @@ CancelledError from a setup guard, which read as watch_ended whatever the watch 
 import asyncio
 
 import pytest
+import structlog
 from daimon.core.channel_budget import WorkerCancel, cancel_workers
 from daimon.core.fleet import worker_error_text
 
@@ -31,17 +32,24 @@ async def test_a_watch_cancel_during_setup_reads_as_the_watchs_reason(native_wor
         return await capture(*args, **kwargs)
 
     monkeypatch.setattr(headless_runner, "capture_preparation_source", cancelled_mid_setup)
-    async with asyncio.timeout(30):
-        with pytest.raises(asyncio.CancelledError):
-            await headless_runner.run_worker(
-                request,
-                parent=root,
-                worker=claimed,
-                trigger_message="Complete the task",
-                prices=tariffs(root),
-                cancel=cancel,
-            )
+    with structlog.testing.capture_logs() as logs:
+        async with asyncio.timeout(30):
+            with pytest.raises(asyncio.CancelledError):
+                await headless_runner.run_worker(
+                    request,
+                    parent=root,
+                    worker=claimed,
+                    trigger_message="Complete the task",
+                    prices=tariffs(root),
+                    cancel=cancel,
+                )
     ended = await _ended(request, claimed)
     assert ended.status == "failed" and ended.error_code == "usage_unavailable"
     assert worker_error_text(ended.error_code) != worker_error_text("watch_ended")
     assert not any(call.method == "POST" for call in trace.requests)  # never dispatched
+    # What the code would have been without the watch's reason stays in the log.
+    (override,) = [e for e in logs if e["event"] == "fleet.worker_failure_cancel_override"]
+    assert (override["original_code"], override["failure_code"]) == (
+        "watch_ended",
+        "usage_unavailable",
+    )
