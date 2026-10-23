@@ -1,4 +1,4 @@
-"""Migration 0121 turns plain-text mentions on for new tenants and leaves existing ones."""
+"""Migration 0125 turns plain-text mentions on for new tenants and leaves existing ones."""
 
 import importlib.util
 from pathlib import Path
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _migration() -> object:
-    path = Path(__file__).parents[1] / "alembic/versions/0121_plain_mentions_default_on.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0125_plain_mentions_default_on.py"
     spec = importlib.util.spec_from_file_location("migration_plain_mentions_default_on", path)
     assert spec and spec.loader, "the migration module must load"
     migration = importlib.util.module_from_spec(spec)

@@ -546,7 +546,7 @@ the intent active for another recovery attempt. An unprompted turn likewise reta
 intent when its card delete fails, including an unknown-webhook error.
 
 Plain-text mentions are a per-tenant switch (`tenants.plain_text_mentions`,
-on for tenants created since migration 0121 and left as it was for older ones,
+on for tenants created since migration 0125 and left as it was for older ones,
 set with the admin-only `set_plain_text_mentions`). Each
 adapter first runs the pure matcher in `daimon.core.name_mentions` on a
 person's channel or thread message: "@" plus a bot name, case-insensitive,
