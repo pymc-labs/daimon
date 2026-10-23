@@ -5,6 +5,60 @@ process slots, durable dedupe and turn execution remain with their callers.
 """
 
 from collections.abc import Awaitable, Callable, Hashable
+from time import monotonic
+
+QUEUE_NOTICE_AFTER_S = 3.0 * 60.0
+QUEUE_NOTICE = "Still working on the previous message — yours runs next."
+
+
+class HeldThreads[Key: Hashable](set[Key]):
+    """Thread ownership plus one queue notice per active turn.
+
+    Reserve the notice synchronously before platform I/O so simultaneous
+    mentions cannot post duplicates. Releasing ownership forgets all state.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = monotonic) -> None:
+        super().__init__()
+        self._clock = clock
+        self._started: dict[Key, float] = {}
+        self._notified: set[Key] = set()
+        self._generations: dict[Key, object] = {}
+
+    def start_turn(self, key: Key) -> None:
+        self._started[key] = self._clock()
+        self._generations[key] = object()
+        self._notified.discard(key)
+
+    def add(self, element: Key) -> None:
+        if element not in self:
+            self.start_turn(element)
+        super().add(element)
+
+    def discard(self, element: Key) -> None:
+        super().discard(element)
+        self._started.pop(element, None)
+        self._generations.pop(element, None)
+        self._notified.discard(element)
+
+    def generation(self, key: Key) -> object | None:
+        return self._generations.get(key)
+
+    def is_current(self, key: Key, generation: object | None) -> bool:
+        """Fence a notice delayed by platform I/O against release or a new turn."""
+        return generation is not None and key in self and self.generation(key) is generation
+
+    def should_notify(self, key: Key) -> bool:
+        started = self._started.get(key)
+        if (
+            key not in self
+            or started is None
+            or key in self._notified
+            or self._clock() - started < QUEUE_NOTICE_AFTER_S
+        ):
+            return False
+        self._notified.add(key)
+        return True
 
 
 def group_by_author[Message, Author: Hashable](
@@ -22,9 +76,16 @@ def group_by_author[Message, Author: Hashable](
 
 
 class ThreadQueue[Key: Hashable, Message]:
-    def __init__(self, processing: set[Key], pending: dict[Key, list[Message]]) -> None:
+    def __init__(
+        self,
+        processing: set[Key],
+        pending: dict[Key, list[Message]],
+        *,
+        start_turn: Callable[[Key], None] | None = None,
+    ) -> None:
         self.processing = processing
         self.pending = pending
+        self._start_turn = start_turn
 
     def enqueue(self, key: Key, message: Message) -> None:
         """Append synchronously, before a port awaits its wait response."""
@@ -49,6 +110,9 @@ class ThreadQueue[Key: Hashable, Message]:
         turns = initial if initial is not None else compose(self.pending.pop(key, []))
         while turns:
             for turn in turns:
+                # Each author batch starts a new turn while ownership stays held.
+                if self._start_turn is not None:
+                    self._start_turn(key)
                 await run(turn)
             turns = compose(self.pending.pop(key, []))
 

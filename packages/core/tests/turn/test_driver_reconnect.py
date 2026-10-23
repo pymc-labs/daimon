@@ -9,7 +9,7 @@ grouping / the untouched connection-error budget).
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import anthropic
@@ -304,14 +304,14 @@ async def test_three_consecutive_eventless_cycles_have_no_attempt_cap() -> None:
     assert len(lc.terminal_success) == 1
 
 
-async def test_status_check_error_finalizes_as_upstream_turn_error() -> None:
+async def test_definitive_status_check_error_finalizes_as_upstream_turn_error() -> None:
     """`sessions.retrieve` itself erroring must propagate into `_pump`'s
     existing upstream finalizer, not hang or get swallowed."""
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[]]  # immediate clean close
     fa.beta.sessions.events.replay_events = []
     request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
-    response = httpx.Response(500, request=request)
+    response = httpx.Response(404, request=request)
     fa.beta.sessions.retrieve_raises = anthropic.APIStatusError(
         "boom", response=response, body=None
     )
@@ -515,3 +515,226 @@ async def test_connection_error_regression_still_exhausts_at_two_attempts() -> N
     assert fa.beta.sessions.retrieve_calls == [], (
         "connection-error budget must never consult the status check"
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["hang", "sdk-timeout", "transport-timeout", "provider-network", "forbidden", "server-error"],
+)
+async def test_hung_status_is_bounded_and_keeps_probing_until_known(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    from daimon.core.turn import driver
+    from daimon.core.turn.io import LegacyTurnIO
+
+    monkeypatch.setattr(driver, "_STATUS_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(driver, "_STATUS_RETRY_DELAY_S", 0.001)
+    fa = FakeAnthropic()
+    done = make_status_idle(event_id="sevt_done", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[], [YieldEvent(done)]]
+    calls = 0
+    cancelled = 0
+
+    async def status(self: LegacyTurnIO) -> str:
+        nonlocal calls, cancelled
+        calls += 1
+        if calls == 4:
+            return "running"
+        request = httpx.Request("GET", "https://anthropic.invalid/session")
+        if failure == "sdk-timeout":
+            raise anthropic.APITimeoutError(request=request)
+        if failure == "transport-timeout":
+            raise httpx.ReadTimeout("probe timed out", request=request)
+        if failure == "provider-network":
+            from mux.errors import ProviderError
+
+            raise ProviderError("transient_network", retryable=True)
+        if failure in {"forbidden", "server-error"}:
+            raise anthropic.APIStatusError(
+                "probe unavailable",
+                response=httpx.Response(403 if failure == "forbidden" else 500, request=request),
+                body=None,
+            )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled += 1
+        raise AssertionError("the status call must be cancelled")
+
+    monkeypatch.setattr(LegacyTurnIO, "status", status)
+    lc = RecordingLifecycle()
+    final = await asyncio.wait_for(
+        run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        timeout=1,
+    )
+    assert calls == 4 and cancelled == (3 if failure == "hang" else 0)
+    assert final.error is None
+    assert lc.reconnects == ["clean_close"]
+    assert fa.beta.sessions.events.stream_calls == 2
+
+
+@pytest.mark.parametrize("ending", ["ceiling", "cancel"])
+async def test_unknown_status_wait_is_cancellable_and_ceiling_bounded(
+    monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    from daimon.core.turn import driver
+    from daimon.core.turn.io import LegacyTurnIO
+
+    monkeypatch.setattr(driver, "_STATUS_TIMEOUT_S", 0.005)
+    monkeypatch.setattr(driver, "_STATUS_RETRY_DELAY_S", 0.001)
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [],
+        [YieldEvent(make_status_idle(event_id="interrupted"))],
+    ]
+    cancel = asyncio.Event()
+    calls = 0
+
+    async def status(self: LegacyTurnIO) -> str:
+        nonlocal calls
+        calls += 1
+        if ending == "cancel" and calls == 3:
+            cancel.set()
+        await asyncio.Event().wait()
+        raise AssertionError("probe should be cancelled")
+
+    monkeypatch.setattr(LegacyTurnIO, "status", status)
+    final = await asyncio.wait_for(
+        run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            deadline=(datetime.now(UTC) + timedelta(seconds=0.2) if ending == "ceiling" else None),
+        ),
+        timeout=1,
+    )
+    assert calls >= 3
+    if ending == "ceiling":
+        assert final.error is not None and final.error.kind == "ceiling"
+    else:
+        assert final.error is None and final.termination == TerminationReason.INTERRUPTED
+        assert fa.beta.sessions.events.sent_events[-1][1] == [{"type": "user.interrupt"}]
+
+
+async def test_timed_out_probes_keep_queued_input_out_of_a_live_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider ignores new input while running and can then emit the old answer."""
+    from daimon.core.turn import driver
+    from daimon.core.turn.io import LegacyTurnIO
+    from daimon.core.turn.thread_queue import HeldThreads, ThreadQueue
+
+    monkeypatch.setattr(driver, "_STATUS_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(driver, "_STATUS_RETRY_DELAY_S", 0.001)
+    fa = FakeAnthropic()
+    events = fa.beta.sessions.events
+    events.stream_scripts = [[]]
+    running = False
+    accepted: list[str] = []
+    ignored: list[str] = []
+    probes = 0
+    timed_out = asyncio.Event()
+    first_answer_ready = asyncio.Event()
+    first_answer = make_agent_message(event_id="answer_first", text="Answer to first input")
+    first_done = make_status_idle(event_id="done_first", stop_reason=make_end_turn())
+    original_stream = events.stream
+
+    async def send(session_id, *, events):
+        nonlocal running
+        text = events[0]["content"][0]["text"]
+        if running:
+            ignored.append(text)
+        else:
+            accepted.append(text)
+            running = True
+
+    async def stream(**kwargs):
+        if events.stream_calls:
+            # A premature second turn would consume the old provider answer.
+            answer = (
+                first_answer
+                if running
+                else make_agent_message(event_id="answer_second", text="Answer to second input")
+            )
+            events.stream_scripts.append(
+                [
+                    YieldEvent(answer),
+                    YieldEvent(
+                        make_status_idle(event_id="done_second", stop_reason=make_end_turn())
+                    ),
+                ]
+            )
+        return await original_stream(**kwargs)
+
+    async def status(self: LegacyTurnIO) -> str:
+        nonlocal probes, running
+        probes += 1
+        if probes <= 3:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                if probes == 3:
+                    timed_out.set()
+        await first_answer_ready.wait()
+        running = False
+        events.replay_events = [first_answer, first_done]
+        return "idle"
+
+    monkeypatch.setattr(events, "send", send)
+    monkeypatch.setattr(events, "stream", stream)
+    monkeypatch.setattr(LegacyTurnIO, "status", status)
+    held = HeldThreads[str]()
+    held.add("thread")
+    queue = ThreadQueue[str, str](held, {}, start_turn=held.start_turn)
+    queue.enqueue("thread", "second")
+    results = []
+
+    async def run(message: str) -> None:
+        results.append(
+            await run_turn(
+                privacy=TurnPrivacy("discord", RecruitmentSettings()),
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message=message,
+                lifecycle=RecordingLifecycle(),
+                cancel=asyncio.Event(),
+                render_interval_s=0.001,
+                billing=_EXEMPT,
+            )
+        )
+
+    async def owner() -> None:
+        await run("first")
+        await queue.drain("thread", compose=lambda messages: messages, run=run)
+
+    task = asyncio.create_task(owner())
+    try:
+        await asyncio.wait_for(timed_out.wait(), timeout=1)
+        assert not task.done(), "unknown liveness must keep the thread held"
+        assert queue.pending == {"thread": ["second"]}
+        assert accepted == ["first"] and ignored == []
+        first_answer_ready.set()
+        await asyncio.wait_for(task, timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert accepted == ["first", "second"] and ignored == []
+    assert all(result.error is None for result in results)
+    assert results[0].content == [TextBlock(kind="text", text="Answer to first input")]
+    assert results[1].content == [TextBlock(kind="text", text="Answer to second input")]

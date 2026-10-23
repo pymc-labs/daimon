@@ -369,6 +369,18 @@ async def test_tool_confirmation_only_requester_can_answer(
         lambda _request, _match: streams.pop(0),
     )
     build_turn_router(str(tenant), session_id=session_id, sent_event_bodies=sent, router=router)
+    # The confirmation closes the first stream while the provider resumes work.
+    # Recovery must observe that live session and replay before opening stream two.
+    router.add_session(
+        ma_session(id=session_id, agent_id=AGENT_ID, environment_id=ENV_ID, status="running")
+    )
+    router.add(
+        "GET",
+        rf"/v1/sessions/{session_id}/events$",
+        lambda _request, _match: list_response(
+            [tool.model_dump(mode="json"), pause.model_dump(mode="json")]
+        ),
+    )
     graph = OwnerGraphFake()
     fake = PersonaTeamsApiFake(active=requester)
     settings = build_teams_runtime(db_session_factory).settings.teams

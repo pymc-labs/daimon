@@ -128,7 +128,7 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 log = structlog.get_logger(__name__)
 
 InterruptPhase = Literal[
-    "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate"
+    "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate", "status"
 ]
 
 # Module-level singleton so `run_turn`'s default arg isn't a function call in
@@ -476,7 +476,59 @@ async def _send_decision_batch(
 # connection error — the driver asks MA for the session's status before
 # deciding anything, so it does not consume the bounded 2-attempt retry
 # budget reserved for genuine connection loss.
-_CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError, TurnConnectionLost)
+_CONNECTION_LOST = (
+    _anthropic.APIConnectionError,
+    httpx.RemoteProtocolError,
+    TurnConnectionLost,
+)
+_STATUS_TIMEOUT_S = 60.0
+_STATUS_RETRY_DELAY_S = 1.0
+
+
+async def _check_status(io: TurnIO, *, cancel: asyncio.Event) -> str:
+    """Hold the turn while liveness is unknown, bounded by its caller's ceiling.
+
+    A failed probe cannot release a live session to queued input: the provider
+    may ignore that input and later deliver the previous turn's answer.
+    """
+
+    async def probe() -> str:
+        async with asyncio.timeout(_STATUS_TIMEOUT_S):
+            return await io.status()
+
+    cancel_task = asyncio.create_task(cancel.wait(), name="turn.status_cancel")
+    try:
+        while True:
+            if cancel.is_set():
+                raise _InterruptedDuringRecovery(phase="status")
+            try:
+                return await _await_or_cancel(probe(), cancel_task=cancel_task, phase="status")
+            except (
+                *_CONNECTION_LOST,
+                TimeoutError,
+                httpx.TransportError,
+                _anthropic.APIStatusError,
+                ProviderError,
+            ) as err:
+                # Missing sessions use the existing dead-session recovery.
+                # Other failed probes do not prove the running turn stopped.
+                if isinstance(err, _anthropic.APIStatusError) and err.status_code == 404:
+                    raise
+                log.warning("turn.status_unknown", error_type=type(err).__name__)
+                await _await_or_cancel(
+                    asyncio.sleep(_STATUS_RETRY_DELAY_S),
+                    cancel_task=cancel_task,
+                    phase="status",
+                )
+    except _InterruptedDuringRecovery:
+        # Input was already sent. Route Stop through the normal provider
+        # interrupt boundary rather than a pre-send cancellation.
+        raise _InterruptInConsume() from None
+    finally:
+        cancel_task.cancel()
+        with _suppress_task_exc():
+            await cancel_task
+
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
 # `lifecycle.on_render(state)` and advances the render anchor. Finalizers
@@ -1119,7 +1171,7 @@ async def _pump(
                             )
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
-                    status = await io.status()
+                    status = await _check_status(io, cancel=cancel)
                     if status in {"running", "rescheduling"}:
                         log.info(
                             "turn.eventless_cycle",
