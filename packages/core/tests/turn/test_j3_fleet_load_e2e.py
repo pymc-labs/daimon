@@ -12,6 +12,7 @@ succeed, none cancelled, well under the run deadline.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import json
 import re
@@ -20,6 +21,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 import httpx
+import pytest
 from daimon.core import channel_budget
 from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
 from daimon.core.stores import fleet
@@ -136,8 +138,74 @@ async def _row(request, root, worker_id: str):
     return next(row for row in rows if str(row.id) == worker_id)
 
 
+@contextlib.asynccontextmanager
+async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
+    """Smoke-5 J3/J10: the watch's tenant lock attempt never gets the lock.
+
+    Only the watch's own attempt (channel_budget's statement) is redirected to a
+    dedicated key that one transaction holds for the whole test, so its short lock
+    wait ends in Postgres's real lock timeout (55P03). Admissions keep the real
+    tenant key. The holder the watch names rotates, like smoke-5's admission burst.
+    """
+    from sqlalchemy import text as real_text
+
+    watch_lock = "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"
+    held, release = asyncio.Event(), asyncio.Event()
+
+    def text(sql: str, *args, **kwargs):
+        if sql == watch_lock:
+            sql = "SELECT pg_advisory_xact_lock(hashtextextended(:key || '|watch-busy', 0))"
+        return real_text(sql, *args, **kwargs)
+
+    holders = itertools.count(10_000)
+
+    async def holder(_session, _key):
+        return {"pid": next(holders), "xact_start": "admission"}
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    # Its own connection: holding one of the app's pool for the whole test would starve
+    # the workers and the watch of connections, which smoke-5 never did.
+    engine = create_async_engine(sessionmaker.kw["bind"].url, pool_size=1, max_overflow=0)
+
+    async def hold():
+        async with engine.begin() as connection:
+            await connection.execute(
+                real_text(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(:key || '|watch-busy', 0))"
+                ),
+                {"key": f"fleet:{tenant_id}"},
+            )
+            held.set()
+            await release.wait()
+
+    monkeypatch.setattr(channel_budget, "text", text)
+    monkeypatch.setattr(channel_budget, "_lock_holder", holder)
+    task = asyncio.create_task(hold())
+    ready = asyncio.create_task(held.wait())
+    async with asyncio.timeout(10):
+        await asyncio.wait({task, ready}, return_when=asyncio.FIRST_COMPLETED)
+    if task.done():
+        task.result()  # The holder failed: say why, never wait on it.
+    try:
+        yield
+    finally:
+        release.set()
+        await task
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "lock",
+    [
+        # Load + timeouts: green on main.
+        "free",
+        # Smoke-5's metering kill under load: red on main, green on the OWNER 3 fix.
+        "busy",
+    ],
+)
 async def test_three_fleets_of_three_finish_well_under_their_deadline(
-    worker_root, owned, monkeypatch
+    worker_root, owned, monkeypatch, lock
 ):
     request, root, _, resolved, prices, _, wire, _, _ = worker_root
     import mux.drivers.openai as native_transport
@@ -178,11 +246,16 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
     small = resolved.limits.model_copy(
         update={"budget_usd": min(resolved.limits.budget_usd, first.total_budget_usd / 4)}
     )
-    async with build_async_openai(
-        transport=httpx.MockTransport(native),
-        api_key="offline",
-        base_url="https://openai.invalid/v1",
-    ) as sdk:
+    async with (
+        _watch_lock_busy(request.deps.sessionmaker, request.tenant_id, monkeypatch)
+        if lock == "busy"
+        else contextlib.nullcontext(),
+        build_async_openai(
+            transport=httpx.MockTransport(native),
+            api_key="offline",
+            base_url="https://openai.invalid/v1",
+        ) as sdk,
+    ):
         monkeypatch.setattr(
             native_transport, "configured_transport", lambda **kwargs: SDKTransport(sdk)
         )
@@ -201,15 +274,24 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
                     reply = await owner.spawn(fleet_root, policy, **(terms | {"limits": small}))
                     spawned.append((fleet_root, reply["worker_id"]))
             ended = []
-            async with asyncio.timeout(budget):
-                for fleet_root, worker_id in spawned:
-                    while (row := await _row(request, fleet_root, worker_id)).status in (
-                        "pending",
-                        "starting",
-                        "running",
-                    ):
-                        await asyncio.sleep(0.1)
-                    ended.append(row)
+            try:
+                async with asyncio.timeout(budget):
+                    for fleet_root, worker_id in spawned:
+                        while (row := await _row(request, fleet_root, worker_id)).status in (
+                            "pending",
+                            "starting",
+                            "running",
+                        ):
+                            await asyncio.sleep(0.1)
+                        ended.append(row)
+            except TimeoutError:
+                rows = [
+                    await _row(request, fleet_root, worker_id) for fleet_root, worker_id in spawned
+                ]
+                states = sorted(
+                    (str(row.run_id)[:8], row.ordinal, row.status, row.error_code) for row in rows
+                )
+                pytest.fail(f"workers still unfinished at half the run deadline: {states}")
         finally:
             await ports.close()
     outcomes = sorted(
