@@ -156,7 +156,8 @@ _REPO_KINDS = ("repo", "skill_repo")
 _MAX_GITHUB_TOKEN_CHARS = 255
 _COLLISION_LINES_SHOWN = 3
 _SHARED_AGENT = (
-    "Connecting a repo to this agent needs an admin.\n\n"
+    "Changing this agent's keys or connections needs its owner or an admin, "
+    "and connecting a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _SHARED_AGENT_SKILLS = (

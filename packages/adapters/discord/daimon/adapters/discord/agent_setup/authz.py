@@ -71,7 +71,8 @@ _REACHABLE_AGENT_MESSAGE = (
     "Ask me and I'll write the request for them."
 )
 _SHARED_AGENT_MESSAGE = (
-    "Changing this agent's keys or connections needs its owner or an admin.\n\n"
+    "Changing this agent's keys or connections needs its owner or an admin, "
+    "and connecting a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 
