@@ -263,7 +263,7 @@ def _assert_the_card_is_posted_in_this_turn(*guidance: str) -> None:
         # Says it outright (SMOKE 42591c55 J5: "If they want to proceed" read as "ask for
         # a chat yes"): the second call is in this turn, and no chat yes is asked for.
         flat = " ".join(text.lower().split())
-        assert "same turn" in flat, text
+        assert "same turn" in flat or "same reply" in flat, text
         assert re.search(r"(do not|never) ask the person to reply", flat), text
 
 

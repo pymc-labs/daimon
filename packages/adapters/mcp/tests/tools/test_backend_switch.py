@@ -336,7 +336,7 @@ async def test_the_first_preview_tells_the_model_to_post_the_card_in_the_same_tu
     )
     assert preview.status == "preview"
     summary = " ".join(preview.summary.lower().split())
-    assert "same turn" in summary, preview.summary
+    assert "same reply" in summary, preview.summary
     assert "do not ask" in summary and "reply yes" in summary, preview.summary
     assert "confirm on it" in summary, preview.summary
     assert not trace.replies and not trace.violations

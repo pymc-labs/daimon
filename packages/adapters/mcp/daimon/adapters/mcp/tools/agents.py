@@ -1738,9 +1738,9 @@ async def _request_agent_backend_switch_impl(
         summary = (
             "Tell the person in plain words the compatibility, what won't be available "
             "and the cost line, then call request_agent_backend_switch again in this same "
-            "turn with its expected_revision and preview_digest. Do not ask the person to "
+            "reply with its expected_revision and preview_digest. Do not ask the person to "
             "reply yes or to confirm in chat: the second call posts the switch card, and "
-            "they Confirm on it. The request that began this turn is already the go-ahead. "
+            "they Confirm on it. Their request is already the go-ahead. "
             "Nothing has changed yet."
         )
         if preview_digest is not None:
