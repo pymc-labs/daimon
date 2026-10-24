@@ -448,6 +448,19 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
     assert posts and posts[-1]["agent_config"]["model"] == ARGON
     # The copy starts on Argon from the hand-off's summary, quoted as untrusted text.
     sent = json.dumps(posts[-1])
+    # M07g (SMOKE 455c58a6): a Gemini copy with no fleet tools wrote "hypothetical"
+    # worker verdicts. It runs with none here too, and its instructions carry the rule
+    # that a worker's answer is only what the host returns.
+    assert "FLEET WORKERS ARE REAL ONLY WHEN THE HOST RUNS THEM" in json.dumps(
+        posts[-1]["system_instruction"]
+    )
+    offered = [
+        name
+        for tool in posts[-1]["tools"]
+        for allowed in tool.get("allowed_tools") or ()
+        for name in allowed.get("tools") or ()
+    ] + [tool.get("name") or "" for tool in posts[-1]["tools"]]
+    assert not [name for name in offered if name.startswith("fleet_")], offered
     assert "<handoff_summary" in sent and summary in sent
     assert sum(json.dumps(body).count("<handoff_summary") for body in posts) == 1, "once"
     # Daimon's tools reach Gemini when they could be represented; otherwise only the
