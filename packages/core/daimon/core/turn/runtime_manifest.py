@@ -755,7 +755,8 @@ async def freeze_prepared_root(
 def _counterpart_admitted(admission: Admission, scope: Scope) -> bool:
     """A root that answers through a native counterpart (a GPT or Gemini agent) can
     coordinate a fleet: its counterpart must be the one admission verified for this
-    turn, in this tenant, on the admitted backend revision's provider and model.
+    turn, in this tenant and account, on the admitted backend revision's provider and
+    model, active.
 
     The logical agent is what the fleet freezes; the counterpart is only how it runs.
     """
@@ -766,6 +767,7 @@ def _counterpart_admitted(admission: Admission, scope: Scope) -> bool:
     return (
         revision is not None
         and agent.ref.tenant_id == scope.tenant_id
+        and agent.ref.account_id == scope.account_id
         and agent.spec.model.id == revision.model
         and agent.spec.model.provider == revision.backend
         and agent.lifecycle == "active"

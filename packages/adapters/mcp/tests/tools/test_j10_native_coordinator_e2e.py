@@ -28,6 +28,8 @@ from packages.adapters.mcp.tests.tools.test_j2_gemini_root_e2e import (
 from packages.adapters.mcp.tests.tools.test_j2_gemini_root_e2e import db_preflight as db_preflight
 from packages.adapters.mcp.tests.tools.test_j2_gemini_root_e2e import fresh_chat as fresh_chat
 
+HAIKU = "claude-haiku-4-5"
+
 
 async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit: bool = False):
     """The copy (switched to `backend`, or left on Claude) answers one message with fleet
@@ -52,32 +54,51 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
         return frozenset({"hand_off_task", "request_agent_backend_switch"})
 
     monkeypatch.setattr(discovery, "list_mcp_tools", listed)
-    copy = None
-    if backend is not None:
-        copy = await _fork_agent_impl(
+    if backend is None:
+        # Cheap models only: the control's copy is a Haiku agent.
+        source = chat.ma.agents["agent_daimon"]
+        if isinstance(source["model"], dict):
+            source["model"] = {**source["model"], "id": HAIKU}
+        else:
+            source["model"] = HAIKU
+    copy = await _fork_agent_impl(
+        chat.runtime,
+        chat.auth,
+        "Daimon",
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id),
+    )
+    if backend is None:
+        # The Claude copy takes this thread the way a person hands it over.
+        from daimon.adapters.mcp.tools.task_continuity import (
+            _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        await _hand_off_task_impl(
             chat.runtime,
             chat.auth,
-            "Daimon",
-            "Daimon",
-            expected_ma_agent_id="agent_daimon",
-            new_copy_if_taken=True,
             origin_context_id=str(chat.origin.id),
+            agent_id=copy.id,
+            keep_provider=True,
         )
     if backend == "gemini":
+        target, model = "gemini", "gemini-3.8-flash"
         preview = await _request_agent_backend_switch_impl(
             chat.runtime,
             chat.auth,
             agent_name=copy.name,
-            target_backend="gemini",
-            model="gemini-3.8-flash",
+            target_backend=target,
+            model=model,
             origin_context_id=str(chat.origin.id),
         )
         await _request_agent_backend_switch_impl(
             chat.runtime,
             chat.auth,
             agent_name=copy.name,
-            target_backend="gemini",
-            model="gemini-3.8-flash",
+            target_backend=target,
+            model=model,
             origin_context_id=str(chat.origin.id),
             expected_revision=preview.expected_revision,
             preview_digest=preview.preview_digest,
@@ -125,6 +146,127 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
             expected_preview_digest=preview.digest,
             now=now,
         )
+    if backend is None:
+        # The control: the copy stays on Claude, so its root is an MA root. The J2 fake MA reads
+        # agents only; give its session the update, send and stream a turn needs.
+        from mux.testing.drivers.anthropic.ma import (
+            make_fake_memory_store_handler,
+            send_events_response,
+            sse_response,
+        )
+
+        from packages.core.tests.turn.conftest import make_agent_message, make_status_idle
+
+        router = chat.trace.router
+        # The Claude root replaces the fixture's session; MA ids are global in the
+        # test database, so this run's must not collide with an earlier test's.
+        run = uuid.uuid4().hex[:8]
+        own = f"sess_daimon_{run}"
+        chat.ma.sessions[own] = {**chat.ma.sessions.pop("sess_daimon"), "id": own}
+        async with chat.runtime.session_factory.begin() as db:
+            await db.execute(
+                text(
+                    "UPDATE thread_sessions SET ma_session_id = :own"
+                    " WHERE ma_session_id = 'sess_daimon' AND tenant_id = :tenant"
+                ),
+                {"own": own, "tenant": chat.auth.tenant_id},
+            )
+
+        def create_session(call, match):
+            body = json.loads(call.content)
+            created = {
+                **chat.ma.sessions[own],
+                "id": f"sess_root_{run}_{len(chat.ma.sessions)}",
+                "metadata": body.get("metadata") or {},
+            }
+            chat.ma.sessions[created["id"]] = created
+            return httpx.Response(200, json=created)
+
+        router.add("POST", r"/v1/sessions", create_session)
+        memory = make_fake_memory_store_handler()
+        router.add("GET", r"/v1/memory_stores.*", lambda call, match: memory(call))
+        router.add("POST", r"/v1/memory_stores.*", lambda call, match: memory(call))
+        router.add(
+            "POST",
+            r"/v1/sessions/([^/]+)/archive",
+            lambda call, match: httpx.Response(
+                200,
+                json={
+                    **chat.ma.sessions[match.group(1)],
+                    "archived_at": datetime.now(UTC).isoformat(),
+                },
+            ),
+        )
+        vault = {
+            "id": "vlt_j10",
+            "type": "vault",
+            "display_name": "j10",
+            "metadata": None,
+            "archived_at": None,
+            "created_at": "2026-10-24T00:00:00Z",
+        }
+        router.add(
+            "GET",
+            r"/v1/vaults$",
+            lambda call, match: httpx.Response(200, json={"data": [], "next_page": None}),
+        )
+        router.add(
+            "POST",
+            r"/v1/vaults$",
+            lambda call, match: httpx.Response(
+                200, json={**vault, "display_name": json.loads(call.content)["display_name"]}
+            ),
+        )
+
+        def credential(call, match):
+            body = json.loads(call.content)
+            return httpx.Response(
+                200,
+                json={
+                    "id": f"vcrd_{len(chat.trace.requests)}",
+                    "type": "vault_credential",
+                    "vault_id": "vlt_j10",
+                    "metadata": body.get("metadata") or {},
+                    "created_at": "2026-10-24T00:00:00Z",
+                    "updated_at": "2026-10-24T00:00:00Z",
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": body["auth"]["mcp_server_url"],
+                    },
+                },
+            )
+
+        router.add("POST", r"/v1/vaults/[^/]+/credentials$", credential)
+        router.add(
+            "GET",
+            r"/v1/vaults/[^/]+/credentials",
+            lambda call, match: httpx.Response(200, json={"data": [], "next_page": None}),
+        )
+        router.add(
+            "POST",
+            r"/v1/sessions/([^/]+)",
+            lambda call, match: httpx.Response(200, json=chat.ma.sessions[match.group(1)]),
+        )
+        router.add(
+            "POST", r"/v1/sessions/([^/]+)/events", lambda call, match: send_events_response()
+        )
+        router.add(
+            "GET",
+            r"/v1/sessions/([^/]+)/events",
+            lambda call, match: httpx.Response(200, json={"data": [], "has_more": False}),
+        )
+        router.add(
+            "GET",
+            r"/v1/sessions/([^/]+)/events/stream",
+            lambda call, match: sse_response(
+                [
+                    make_agent_message(event_id="root-answer", text="answer").model_dump(
+                        mode="json"
+                    ),
+                    make_status_idle(event_id="root-idle").model_dump(mode="json"),
+                ]
+            ),
+        )
     native: dict = {}
     posts: list = []
 
@@ -138,7 +280,9 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
             return httpx.Response(200, json=interaction(f"turn-{len(posts)}"))
         return httpx.Response(200, json=interaction(call.url.path.rsplit("/", 1)[-1]))
 
-    clients_for(monkeypatch, gemini)
+    if backend == "gemini":
+        # Patches httpx.AsyncClient, which the Claude control's MA client must keep.
+        clients_for(monkeypatch, gemini)
     sm = chat.runtime.session_factory
     deps = replace(
         deps_for_pinned_mux(chat.runtime.client, sm),
@@ -163,8 +307,8 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
             platform="discord",
             parent_channel_id="fresh-channel",
             thread_id="thread",
-            responder_ma_agent_id=copy.id if copy is not None else "agent_daimon",
-            responder_name=copy.name if copy is not None else "Daimon",
+            responder_ma_agent_id=copy.id,
+            responder_name=copy.name,
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN if chat.auth.is_admin else Role.USER,
@@ -184,7 +328,7 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
         thread_id="thread",
         now=datetime.now(UTC),
     )
-    assert admission.agent.id == (copy.id if copy is not None else "agent_daimon")
+    assert admission.agent.id == (copy.id)
     prepared = await bind_session_impl(
         deps,
         admission,
@@ -252,9 +396,9 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
 
 
 @pytest.mark.parametrize("grant", ["default", "explicit"])
-@pytest.mark.parametrize("backend", ["gemini"])
+@pytest.mark.parametrize("backend", ["gemini", None])
 async def test_a_native_agent_coordinates_a_fleet(fresh_chat, monkeypatch, backend, grant):
-    """A Claude coordinator is covered by test_frozen_root and the J4 journey."""
+    """The Claude (Haiku) copy is the control: it froze before the fix too."""
     keys, refusal, prepared, frozen = await _coordinator_turn(
         fresh_chat, monkeypatch, backend, explicit=grant == "explicit"
     )
@@ -265,4 +409,7 @@ async def test_a_native_agent_coordinates_a_fleet(fresh_chat, monkeypatch, backe
     assert keys, "no fleet root was retained"
     # The root's own model is the one it runs on, so a worker that names no model runs
     # there too (not on the copy's original Claude model).
-    assert (frozen.spec.model.provider, frozen.spec.model.id) == ("gemini", "gemini-3.8-flash")
+    if backend == "gemini":
+        assert (frozen.spec.model.provider, frozen.spec.model.id) == ("gemini", "gemini-3.8-flash")
+    else:
+        assert (frozen.spec.model.provider, frozen.spec.model.id) == ("anthropic", HAIKU)

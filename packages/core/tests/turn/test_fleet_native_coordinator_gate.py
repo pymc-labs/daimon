@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from daimon.core.turn.runtime_manifest import _counterpart_admitted
 
-SCOPE = SimpleNamespace(tenant_id="tenant-a")
+SCOPE = SimpleNamespace(tenant_id="tenant-a", account_id="account-a")
 
 
 def _admission(
@@ -15,13 +15,14 @@ def _admission(
     model,
     *,
     tenant="tenant-a",
+    account="account-a",
     agent_model=None,
     lifecycle="active",
     archived=None,
     revision=True,
 ):
     agent = SimpleNamespace(
-        ref=SimpleNamespace(tenant_id=tenant),
+        ref=SimpleNamespace(tenant_id=tenant, account_id=account),
         spec=SimpleNamespace(model=SimpleNamespace(provider=provider, id=agent_model or model)),
         lifecycle=lifecycle,
         archived_at=archived,
@@ -49,6 +50,7 @@ def test_a_root_without_a_counterpart_is_unaffected():
     "fault",
     [
         {"tenant": "tenant-b"},
+        {"account": "account-b"},
         {"agent_model": "gpt-6-astra"},
         {"lifecycle": "archived"},
         {"archived": datetime(2026, 10, 1, tzinfo=UTC)},
