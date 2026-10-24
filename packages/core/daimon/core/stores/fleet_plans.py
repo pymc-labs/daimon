@@ -16,7 +16,7 @@ from typing import Any
 
 from daimon.core._models import FleetPlan as FleetPlanRecord
 from daimon.core.fleet_plan import Plan, PlanCaps, PlanRefused, check_within, plan_digest
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -293,7 +293,20 @@ async def plan_id_for_run(
     )
 
 
+#: How long an expired plan bound to a run is kept, so the run still reads as planned
+#: (a late reviewer is told the plan expired, not that the run had none).
+BOUND_PLAN_RETENTION = timedelta(days=7)
+
+
 async def sweep_expired_plans(session: AsyncSession, *, now: datetime) -> int:
-    """Delete plans past their expiry (pending, accepted or used: none can be spent)."""
-    result = await session.execute(delete(FleetPlanRecord).where(FleetPlanRecord.expires_at <= now))
+    """Delete plans past their expiry (pending, accepted or used: none can be spent).
+    A plan bound to a run is kept `BOUND_PLAN_RETENTION` longer, for that binding."""
+    result = await session.execute(
+        delete(FleetPlanRecord).where(
+            or_(
+                and_(FleetPlanRecord.run_id.is_(None), FleetPlanRecord.expires_at <= now),
+                FleetPlanRecord.expires_at <= now - BOUND_PLAN_RETENTION,
+            )
+        )
+    )
     return int(getattr(result, "rowcount", 0) or 0)

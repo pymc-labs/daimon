@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, NamedTuple, Protocol, TypedDict, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -173,6 +173,17 @@ async def _refusals_logged(
 
 #: How long a plan waits for the person before it expires (nothing ran; ask again).
 _PLAN_TTL = timedelta(minutes=30)
+
+
+class _PlanClaim(NamedTuple):
+    """A spawn's claim under its plan: `new` when this call made it (only then may a
+    failed spawn give it back), and the limits to spawn with."""
+
+    plan_id: uuid.UUID
+    new: bool
+    budget_usd: Decimal | None
+    deadline: datetime | None
+    max_turns: int | None
 
 
 class _PlanWhere(TypedDict):
@@ -442,10 +453,11 @@ class HostFleetToolService:
         deadline: datetime | None,
         max_turns: int | None,
         now: datetime,
-    ) -> tuple[uuid.UUID, Decimal | None, datetime | None, int | None] | None:
+    ) -> _PlanClaim | None:
         """With `fleet.require_plan` on, claim this chat-turn spawn under its accepted
         plan (a reviewer under its run's plan) and fit its limits inside it; None when no
-        plan is required. Returns the plan id and the limits to spawn with."""
+        plan is required. Returns the plan id, whether this call made the claim, and the
+        limits to spawn with."""
         from daimon.core.fleet_plan import PlanRefused, spawn_within_plan
         from daimon.core.stores import fleet_plans
 
@@ -464,26 +476,15 @@ class HostFleetToolService:
         try:
             async with self._plan_sessions().begin() as session:
                 if reviewer:
-                    found = await fleet_plans.plan_id_for_run(
+                    plan_id = await fleet_plans.plan_id_for_run(
                         session, tenant_id=caller.tenant_id, run_id=run
                     )
-                    if found is None:
+                    if plan_id is None:
                         raise PlanRefused(
                             "This fleet run wasn't started under an accepted plan, so it "
                             "can't be reviewed under one."
                         )
-                    if budget_usd is None:
-                        raise PlanRefused("A reviewer under a fleet plan names its budget.")
-                    await fleet_plans.claim_spawn(
-                        session,
-                        **where,
-                        run_id=run,
-                        operation_key=operation_key,
-                        budget_usd=budget_usd,
-                        worker=False,
-                    )
-                    return found, budget_usd, deadline, max_turns
-                if plan_id is None:
+                elif plan_id is None:
                     raise ToolError(
                         "This fleet needs a plan the person accepts first: call fleet_plan, "
                         "and start the workers once they accept it. Nothing was started."
@@ -494,6 +495,8 @@ class HostFleetToolService:
                         "That fleet plan isn't accepted for this conversation (it is pending, "
                         "used up, expired, or another one's)."
                     )
+                # A reviewer is held to the plan's models, budget, time and turns too; it
+                # spends from what the workers left of the plan's total.
                 budget, seconds, turns = spawn_within_plan(
                     plan,
                     model=model,
@@ -510,15 +513,17 @@ class HostFleetToolService:
                     plan_id=plan_id,
                     operation_key=operation_key,
                     budget_usd=budget,
-                    worker=True,
+                    worker=not reviewer,
                 ):
                     # A retry of a started spawn: the orchestrator reuses that worker's
                     # admitted limits, so it gets the caller's own (unset ones stay unset).
-                    return plan_id, budget_usd, deadline, max_turns
-                await fleet_plans.bind_run(
-                    session, plan_id=plan_id, tenant_id=caller.tenant_id, run_id=run
-                )
-                return plan_id, budget, now + timedelta(seconds=seconds), turns
+                    # Not this call's claim, so a failure here gives nothing back.
+                    return _PlanClaim(plan_id, False, budget_usd, deadline, max_turns)
+                if not reviewer:
+                    await fleet_plans.bind_run(
+                        session, plan_id=plan_id, tenant_id=caller.tenant_id, run_id=run
+                    )
+                return _PlanClaim(plan_id, True, budget, now + timedelta(seconds=seconds), turns)
         except PlanRefused as exc:
             raise ToolError(f"{exc} Nothing was started.") from exc
 
@@ -788,7 +793,11 @@ class HostFleetToolService:
             now=now,
         )
         if claimed is not None:
-            _, budget_usd, deadline, max_turns = claimed
+            budget_usd, deadline, max_turns = (
+                claimed.budget_usd,
+                claimed.deadline,
+                claimed.max_turns,
+            )
         try:
             return await self._spawn_admitted(
                 parent,
@@ -818,9 +827,10 @@ class HostFleetToolService:
                 reviewer_of=reviewer_of,
             )
         except BaseException:
-            if claimed is not None:
-                # Not started: the plan's slot and money go back for a retry.
-                await self._release_claim(caller, claimed[0], operation_key)
+            if claimed is not None and claimed.new:
+                # Not started: the slot and money this call claimed go back for a retry.
+                # A failed retry of a started spawn claimed nothing, so frees nothing.
+                await self._release_claim(caller, claimed.plan_id, operation_key)
             raise
 
     async def _spawn_admitted(

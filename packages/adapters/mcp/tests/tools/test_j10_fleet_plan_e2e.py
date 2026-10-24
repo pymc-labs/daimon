@@ -17,7 +17,7 @@ from decimal import Decimal
 import pytest
 from daimon.adapters.mcp.tools.fleet import HostFleetToolService, PlanWorker
 from daimon.core.config import FleetSettings
-from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
+from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused, HostFleetPorts
 from daimon.core.fleet_plan import PlanCaps, PlannedWorker, PlanRefused, build_plan, edit_plan
 from daimon.core.stores.domain import Role
 from daimon.core.stores.fleet import WorkerPool
@@ -98,7 +98,7 @@ async def _spawn(bridge, caller, origin, key: str, **kwargs):
             max_turns=kwargs.pop("max_turns", None),
             result_contract=None,
             reviewer_of=kwargs.pop("reviewer_of", None),
-            task="Say which model you run on, in one sentence.",
+            task=kwargs.pop("task", "Say which model you run on, in one sentence."),
             **kwargs,
         )
     )
@@ -268,6 +268,59 @@ async def test_j10_an_accepted_plan_runs_its_workers_once_and_no_more(j10_root):
             await _spawn(bridge, caller, origin, "W2", plan_id=plan_id)
         _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         assert len(rows) == 1
+    finally:
+        await ports.close()
+        await origin_cm.__aexit__(None, None, None)
+
+
+async def test_j10_a_failed_retry_frees_nothing_and_a_bound_plan_outlives_the_sweep(j10_root):
+    """#1546 review r2: a reused operation key that fails (here: another task) claimed
+    nothing, so it gives nothing back: the started worker keeps its slot and money, and
+    no extra worker fits. The sweep keeps an expired plan bound to its run."""
+    from daimon.core.stores.fleet_plans import plan_id_for_run, sweep_expired_plans
+    from sqlalchemy import text
+
+    origin_cm, origin, root, ports, bridge, caller = await _fleet(j10_root, require_plan=True)
+    try:
+        plan_id = await _accepted(bridge, caller, origin, 1)
+        assert (await _spawn(bridge, caller, origin, "W1", plan_id=plan_id))["status"] == "pending"
+
+        async def held():
+            async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
+                return (
+                    await session.execute(
+                        text("SELECT status, spent_usd, claimed FROM fleet_plans WHERE id = :i"),
+                        {"i": plan_id},
+                    )
+                ).one()
+
+        before = await held()
+        with pytest.raises(FleetRefused, match="operation_conflict"):
+            await _spawn(bridge, caller, origin, "W1", plan_id=plan_id, task="Something else.")
+        assert await held() == before, "a failed retry gave back the started worker's claim"
+        with pytest.raises(ToolError, match="isn't accepted|workers of the accepted fleet plan"):
+            await _spawn(bridge, caller, origin, "W2", plan_id=plan_id)
+        _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert len(rows) == 1
+
+        unbound = await _accepted(bridge, caller, origin, 1)
+        async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
+            await session.execute(
+                text(
+                    "UPDATE fleet_plans SET expires_at = now() - interval '1 minute' "
+                    "WHERE account_id = :a"
+                ),
+                {"a": caller.account_id},
+            )
+            assert await sweep_expired_plans(session, now=datetime.now(UTC)) >= 1
+            assert (
+                await plan_id_for_run(session, tenant_id=caller.tenant_id, run_id=root.fleet.run_id)
+                == plan_id
+            )
+            gone = await session.scalar(
+                text("SELECT count(*) FROM fleet_plans WHERE id = :i"), {"i": unbound}
+            )
+            assert gone == 0
     finally:
         await ports.close()
         await origin_cm.__aexit__(None, None, None)
