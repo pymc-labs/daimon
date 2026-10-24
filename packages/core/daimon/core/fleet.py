@@ -178,6 +178,10 @@ WORKER_ERROR_TEXT: Mapping[str, str] = {
         "this channel is set to run on one model provider only; ask for a model from it, "
         "or an admin can change the channel's setting"
     ),
+    "capability_unsupported": (
+        "its model can't run here with something its setup needs (e.g. its environment, "
+        "memory or a connected tool); ask for another model, or give an admin the reference"
+    ),
     "worker_runtime_missing": (
         "this server isn't set up to run that model's workers yet; ask for another model, "
         "or give an admin the reference"
@@ -192,6 +196,7 @@ _REFERENCED_CODES: Final = frozenset(
         "dispatch_refused",
         "preparation_refused",
         "worker_runtime_missing",
+        "capability_unsupported",
         "pricing_unavailable",
         "accepted_attempt_inventory_unavailable",
     }

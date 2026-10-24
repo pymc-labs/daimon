@@ -230,3 +230,28 @@ def test_a_target_is_rebuilt_as_a_pre_1483_consent_named_it(
     # An agent with no instructions of its own has the losses line alone.
     assert rebuilt.system == losses(before)
     assert _with_tools_dropped(rebuilt, instructions) is None, "no tools: nothing to rebuild"
+
+
+async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch):
+    """Smoke a1d991fb: Gemini copies and a Flash worker were refused at
+    read_preparation_counterpart's catch-all with nothing logged."""
+    from types import SimpleNamespace
+
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.errors import AdmissionDenied
+    from structlog.testing import capture_logs
+
+    async def broken(_request):
+        raise RuntimeError("catalogue read failed")
+
+    monkeypatch.setattr(runtime_manifest, "prepare_source", broken)
+    request = SimpleNamespace(
+        admission=SimpleNamespace(backend_revision=SimpleNamespace(profile="gemini.inline_reuse")),
+        worker=None,
+    )
+    with capture_logs() as logs, pytest.raises(AdmissionDenied) as refused:
+        await runtime_manifest.read_preparation_counterpart(request)  # type: ignore[arg-type]
+    assert refused.value.reason == "backend_unsupported"
+    (named,) = [e for e in logs if e["event"] == "turn.preparation_counterpart_error"]
+    assert named["error_class"] == "RuntimeError" and named["profile"] == "gemini.inline_reuse"
+    assert "catalogue read failed" in named["error"]
