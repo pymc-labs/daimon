@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator
 
-from aiohttp import ClientSession, ClientTimeout, web
+import structlog
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from daimon.adapters.sidecar.settings import SidecarSettings
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.page_events import MAX_EVENT_BYTES, SignedPageEvent
@@ -23,6 +23,8 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+log = structlog.get_logger()
 
 
 def create_app(
@@ -145,6 +147,8 @@ def run() -> None:
         request_timeout_s=settings.request_timeout_s,
     )
 
+    poll_failed = False
+
     async def cleanup(_: web.Application) -> AsyncIterator[None]:
         async with async_sessionmaker(engine).begin() as session:
             await audit_sidecar_identity(session)
@@ -158,31 +162,24 @@ def run() -> None:
                     pass  # Retry bounded cleanup; no exception/parameter logging.
                 await asyncio.sleep(3600)
 
-        async def polls() -> None:
-            async with ClientSession(timeout=ClientTimeout(total=30), trust_env=False) as http:
-                while True:
-                    with contextlib.suppress(Exception):
-                        await poll_once(
-                            async_sessionmaker(engine),
-                            http,
-                            origin=settings.os_executor_origin,
-                            executor_secret=settings.executor_secret.get_secret_value()
-                            if settings.executor_secret
-                            else None,
-                        )
-                    await asyncio.sleep(settings.poll_interval_s)
+        def poll_done(task: asyncio.Task[None]) -> None:
+            nonlocal poll_failed
+            if not task.cancelled() and (exc := task.exception()) is not None:
+                poll_failed = True
+                log.error("sidecar.poll_stopped", error_type=type(exc).__name__)
+                raise web.GracefulExit() from exc
 
-        poll_task = asyncio.create_task(polls(), name="sidecar.polls")
+        poll_task = asyncio.create_task(
+            poll_loop(async_sessionmaker(engine), settings), name="sidecar.polls"
+        )
+        poll_task.add_done_callback(poll_done)
         task = asyncio.create_task(prune(), name="sidecar.retention")
         try:
             yield
         finally:
             poll_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await poll_task
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            await asyncio.gather(poll_task, task, return_exceptions=True)
             await engine.dispose()
 
     app.cleanup_ctx.append(cleanup)
@@ -194,6 +191,27 @@ def run() -> None:
         access_log=None,
         handler_args={"request_timeout": settings.request_timeout_s},
     )
+
+    if poll_failed:
+        raise SystemExit(1)
+
+
+async def poll_loop(sessions: async_sessionmaker[AsyncSession], settings: SidecarSettings) -> None:
+    """Retry transient scheduling failures; configuration and code errors escape."""
+    async with ClientSession(timeout=ClientTimeout(total=30), trust_env=False) as http:
+        while True:
+            try:
+                await poll_once(
+                    sessions,
+                    http,
+                    origin=settings.os_executor_origin,
+                    executor_secret=settings.executor_secret.get_secret_value()
+                    if settings.executor_secret
+                    else None,
+                )
+            except (DBAPIError, ClientError, OSError) as exc:
+                log.warning("sidecar.poll_failed", error_type=type(exc).__name__)
+            await asyncio.sleep(settings.poll_interval_s)
 
 
 async def poll_once(

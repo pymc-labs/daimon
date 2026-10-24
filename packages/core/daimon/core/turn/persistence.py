@@ -36,6 +36,9 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+_CLEANUP_TIMEOUT_S = 10.0
+_PENDING_FINALIZERS: set[asyncio.Future[None]] = set()
+
 # Kinds that never pass the root budget check, and so never count an input.
 _UNCOUNTED_KINDS = frozenset({"cancel", "archive", "recovery-interrupt"})
 
@@ -323,16 +326,26 @@ class TurnPersistence:
                 await renew  # A renewal failure owns the exit, even if the pump also finished.
             return await work
         finally:
-            tasks = [task for task in (work, renew) if task is not None]
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(
-                *(cast(Awaitable[object], task) for task in tasks), return_exceptions=True
-            )
-            with contextlib.suppress(StaleFence):
-                await self.store.release_lease(self._fence())
-            self._lease = None
+
+            async def cleanup() -> None:
+                tasks = [task for task in (work, renew) if task is not None]
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    *(cast(Awaitable[object], task) for task in tasks), return_exceptions=True
+                )
+                with contextlib.suppress(StaleFence):
+                    await self.store.release_lease(self._fence())
+                self._lease = None
+
+            pending = asyncio.ensure_future(cleanup())
+            _PENDING_FINALIZERS.add(pending)
+            pending.add_done_callback(_PENDING_FINALIZERS.discard)
+            try:
+                await asyncio.wait_for(asyncio.shield(pending), timeout=_CLEANUP_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("turn.cleanup_timeout", timeout_s=_CLEANUP_TIMEOUT_S)
 
     async def mutate[M: BaseModel](
         self,
