@@ -157,15 +157,16 @@ the turn, before anything is sent or changed, when the session:
   roster's agents carry their own tools and MCP servers, which the gate cannot
   rewrite, and Managed Agents cannot remove a roster from a live session or
   override it when one is created.
-- carries an unreviewed field in a capability-bearing part: the session and
-  agent containers, resources (files, repositories and their checkouts, memory
+- carries an unreviewed field in a capability-bearing part: the
+  agent container, resources (files, repositories and their checkouts, memory
   stores), execution identity, skills, MCP servers, tools, toolset defaults,
   per-tool settings and permission policies. Unknown fields are refused even
   when empty or newly parsed by an SDK update. The refusal names the path and
-  explains that the capability behavior has not been reviewed. The session
-  envelope stays strict because it carries resource, vault and environment
-  references; a new top-level bookkeeping field also refuses unattended turns
-  until reviewed. Non-capability parts are opaque: usage and all its sub-objects,
+  explains that the capability behavior has not been reviewed. New top-level
+  session fields are ignored and their names logged once per process; known
+  resource, vault, environment and agent fields retain their capability checks.
+  Memory-store access accepts only `read_only`, `read_write` or the provider's
+  omitted/null default. Non-capability parts are opaque: usage and all its sub-objects,
   stats, budget, outcome evaluations, metadata and `agent.model` have neither
   their keys nor their values checked. Capability fields retain their reviewed
   value shapes; unknown tool, resource, skill, identity and permission-policy

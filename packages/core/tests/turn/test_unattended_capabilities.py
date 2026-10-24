@@ -148,6 +148,7 @@ _HIDDEN_SHAPES: dict[str, Callable[[dict[str, Any]], object]] = {
     "policy_list": _set("agent.tools.1.default_config.permission_policy", [_HIDDEN]),
     "tool_null": _set("agent.tools.1", None),
     "tool_list": _set("agent.tools.1", [_HIDDEN]),
+    "environment_id_object": _set("environment_id", _HIDDEN),
     "vault_id_object": _set("vault_ids", [_HIDDEN]),
     "resource_mount_object": lambda s: s["resources"].append({**_FILE, "mount_path": _HIDDEN}),
     "checkout_name_list": lambda s: s["resources"].append(
@@ -462,7 +463,6 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             id="server_field",
         ),
         pytest.param(_coordinator_session, id="multiagent"),
-        pytest.param(lambda: _mutated(lambda s: s.update(sandbox={})), id="session_field"),
         pytest.param(lambda: _with_agent_field(sandbox_policy={}), id="empty_agent_field"),
         pytest.param(lambda: _with_agent_field(sandbox_policy=None), id="null_agent_field"),
         pytest.param(
@@ -1144,8 +1144,9 @@ def test_additive_non_capability_fields_are_ignored(path: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "path",
+    "field",
     [
+        "new_bookkeeping",
         "sandbox",
         "tools",
         "mcp_servers",
@@ -1153,6 +1154,50 @@ def test_additive_non_capability_fields_are_ignored(path: str) -> None:
         "network_access",
         "callable_agents",
         "environment",
+    ],
+)
+async def test_new_session_field_is_ignored_and_logged_once(
+    field: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logger = MagicMock()
+    monkeypatch.setattr(caps, "log", logger)
+    monkeypatch.setattr(caps, "_IGNORED_SESSION_FIELDS", set[str](), raising=False)
+    snapshot = _mutated(_set(field, {"future": True}))
+    provider, result = await _drive(snapshot, "wake")
+    assert not isinstance(result, AdmissionDenied)
+    assert result.error is None
+    assert provider.at_send
+    require_allowed_capabilities(snapshot)
+    logger.info.assert_called_once_with("unattended.session_field_ignored", field=field)
+
+
+@pytest.mark.parametrize(
+    ("settings", "allowed"),
+    [
+        ({}, True),
+        ({"access": None}, True),
+        ({"access": "read_only"}, True),
+        ({"access": "read_write"}, True),
+        ({"access": "admin"}, False),
+        ({"access": "execute"}, False),
+        ({"access": ""}, False),
+        ({"access": {"future": True}}, False),
+    ],
+)
+def test_memory_store_access_is_reviewed(settings: dict[str, object], allowed: bool) -> None:
+    resource = {"type": "memory_store", "memory_store_id": "memstore_test", **settings}
+    snapshot = _mutated(lambda session: session["resources"].append(resource))
+    if allowed:
+        require_allowed_capabilities(snapshot)
+    else:
+        with pytest.raises(AdmissionDenied) as refused:
+            require_allowed_capabilities(snapshot)
+        assert "session.resources.0.access" in str(refused.value.detail)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "agent.tools.1.new_field",
         "agent.tools.1.default_config.new_field",
         "agent.tools.1.configs.0.permission_policy.new_field",

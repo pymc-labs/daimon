@@ -352,7 +352,6 @@ def _explicit_read_snapshot():
 @pytest.mark.parametrize(
     "level",
     [
-        "session",
         "agent",
         "server",
         "tool",
@@ -511,11 +510,14 @@ async def test_watch_uses_shared_watch_policy_and_named_read_projection(monkeypa
     }
 
 
-@pytest.mark.parametrize("level", ["model", "stats", "usage"])
+@pytest.mark.parametrize("level", ["session", "model", "stats", "usage"])
 def test_watch_accepts_additive_non_capability_fields(level: str) -> None:
 
     snapshot = _explicit_read_snapshot()
-    target = snapshot.agent.model if level == "model" else getattr(snapshot, level)
+    if level == "session":
+        target = snapshot
+    else:
+        target = snapshot.agent.model if level == "model" else getattr(snapshot, level)
     extras = target.__pydantic_extra__
     assert extras is not None
     extras["new_metadata"] = False

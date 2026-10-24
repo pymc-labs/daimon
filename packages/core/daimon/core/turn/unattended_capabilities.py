@@ -77,6 +77,7 @@ UnattendedEntryPoint = Literal[
 ]
 
 log = structlog.get_logger(__name__)
+_IGNORED_SESSION_FIELDS: set[str] = set()
 
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
 #: The tools `BUILTIN_TOOLSET` offers, frozen here like the reviewed fields: a
@@ -250,13 +251,18 @@ def _list(item: _Shape, *, unique: str | None = None, duplicate: str = "") -> _S
     return check
 
 
-def _object(**fields: _Shape) -> _Shape:
+def _object(*, strict: bool = True, **fields: _Shape) -> _Shape:
     def check(value: object, path: str) -> str | None:
         entries = _entries(value)
         if entries is None:
             return _value_at(path)
         if unknown := sorted(set(entries) - set(fields)):
-            return _field_at(f"{path}.{unknown[0]}")
+            if strict:
+                return _field_at(f"{path}.{unknown[0]}")
+            for name in unknown:
+                if name not in _IGNORED_SESSION_FIELDS:
+                    _IGNORED_SESSION_FIELDS.add(name)
+                    log.info("unattended.session_field_ignored", field=name)
         for key, check_field in fields.items():
             if (
                 key in entries
@@ -331,6 +337,7 @@ def _server_name(value: object, path: str) -> str | None:
 
 
 _SESSION_SHAPE = _object(
+    strict=False,
     id=_TEXT,
     type=_TEXT,
     archived_at=_TIMESTAMP,
@@ -373,7 +380,7 @@ _SESSION_SHAPE = _object(
             memory_store=_object(
                 type=_TEXT,
                 memory_store_id=_TEXT,
-                access=_TEXT,
+                access=_nullable(_exactly("read_only", "read_write")),
                 description=_TEXT,
                 instructions=_TEXT,
                 mount_path=_TEXT,
@@ -430,8 +437,10 @@ def require_allowed_capabilities(
 
     Pure: reads only `snapshot`. Raises `AdmissionDenied` for a coordinator
     roster, for skills unless `allow_skills`, for a server name holding `/`,
-    and for unknown fields in the session and agent capability containers, execution
-    identity, tools/configs/policies, MCP servers, skills and resources/files.
+    and for unknown fields in the agent capability container, execution identity,
+    tools/configs/policies, MCP servers, skills and resources/files. New session
+    fields are ignored and logged once by name; known capability fields retain
+    their checks.
     Non-capability parts (budget, outcomes, stats, usage, metadata and model)
     are opaque: neither their keys nor their values are checked. Capability
     values retain their shape checks. The refusal names the field path and

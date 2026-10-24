@@ -1223,14 +1223,16 @@ attempt; a failed gate stops the send. The gate builds the session through
 built-ins and no skills). `require_allowed_capabilities` is a pure check on the
 snapshot that refuses a coordinator (`multiagent`) and disallowed skills. One
 schema walker checks parsed SDK fields and response extras, or raw provider
-objects. Unknown fields are refused in the session and agent capability
+objects. Unknown fields are refused in the agent capability
 containers, execution identity, resources and repository checkouts, skills,
 MCP servers, tools, toolset defaults, per-tool configs and permission policies.
 Unknown tool, resource, skill, identity and policy types are refused too.
 The refusal names the field path and explains that its capability behavior
-has not been reviewed. The session envelope stays strict because it carries
-resource, vault and environment references: even a new top-level bookkeeping
-field refuses unattended turns until reviewed. Non-capability parts are opaque:
+has not been reviewed. A new top-level session field is ignored and its name
+is logged once per process, so provider bookkeeping additions cannot stop
+unattended turns. Known resource, vault, environment and agent fields keep their
+capability checks. Memory-store access accepts only `read_only`, `read_write`
+or the provider's omitted/null default. Non-capability parts are opaque:
 usage and all its sub-objects, stats, budget, outcome evaluations, metadata and
 `agent.model` have neither their keys nor their values checked. Capability
 fields retain their reviewed value shapes, and unknown capability keys or type
