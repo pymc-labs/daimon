@@ -17,6 +17,7 @@ from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools.setup_target import get_chat_origin
 from daimon.core.channel_backend import (
     AgentBackendRefused,
+    AgentBackendService,
     BackendActor,
     load_backend_agent,
     make_backend_service,
@@ -81,8 +82,34 @@ async def _require_chat(
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     if origin is None:
         raise ToolError("Request this change from your active chat conversation.")
-    if await session_card_gap(runtime, auth, origin, tool_name=tool) is not None:
+    if auth.no_confirmation_surface:
+        # An OpenAI/Gemini turn: Daimon posts the card itself (`post_own_card`).
+        from daimon.adapters.mcp.tools.agents import (
+            _private_origin,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        if _private_origin(origin):
+            raise ToolError(
+                "I can't post a confirmation card in a private conversation. Ask in a "
+                "channel or thread where I answer. Nothing changed."
+            )
+    elif await session_card_gap(runtime, auth, origin, tool_name=tool) is not None:
         raise ToolError("This conversation cannot verify the confirmation card. Nothing changed.")
+
+
+async def _post_card(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin_context_id: str | None,
+    service: AgentBackendService,
+    reference: ConfigurationReference,
+) -> str:
+    """Daimon's own Confirm card for an OpenAI/Gemini turn; the press applies it."""
+    from daimon.adapters.mcp.tools.agents import post_own_card
+
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    assert origin is not None
+    return await post_own_card(runtime, auth, origin, service, reference)
 
 
 def _actor(auth: AuthIdentity) -> BackendActor:
@@ -268,6 +295,19 @@ async def _request_fleet_config_impl(
                     "preview_digest": preview_digest,
                 }
             )
+            if auth.no_confirmation_surface:
+                summary = await _post_card(runtime, auth, origin_context_id, service, reference)
+                return FleetConfigInfo(
+                    status="awaiting_confirmation",
+                    agent_name=agent_name,
+                    config=frozen,
+                    expected_revision=preview.setting_revision,
+                    preview_digest=preview.digest,
+                    details=fleet_detail_lines(
+                        preview, worker_names=frozen.worker_agents if frozen else None
+                    ),
+                    summary=summary,
+                )
             agent = await load_backend_agent(
                 runtime.client,
                 runtime.session_factory,
@@ -358,6 +398,14 @@ async def _request_provider_allowlist_impl(
             )
             if reference.expected_revision != policy.revision or reference.preview_digest != digest:
                 raise ToolError("This preview changed. Preview and confirm again. Nothing changed.")
+            if auth.no_confirmation_surface:
+                return ProviderAllowlistInfo(
+                    status="awaiting_confirmation",
+                    providers=providers,
+                    expected_revision=policy.revision,
+                    preview_digest=digest,
+                    summary=await _post_card(runtime, auth, origin_context_id, service, reference),
+                )
             await service.set_tenant_allowlist(
                 auth.tenant_id, providers, policy.revision, _actor(auth)
             )
@@ -427,6 +475,22 @@ async def _request_channel_pin_clear_impl(
         )
     if expected_revision != pin.local or preview_digest != digest:
         raise ToolError("This channel's pin changed. Preview and confirm again. Nothing changed.")
+    if auth.no_confirmation_surface:
+        reference = ConfigurationReference.model_validate(
+            {
+                "operation": "channel_pin_clear",
+                "expected_revision": expected_revision,
+                "preview_digest": preview_digest,
+            }
+        )
+        service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+        return ChannelPinInfo(
+            status="awaiting_confirmation",
+            pinned=named,
+            expected_revision=pin.local,
+            preview_digest=digest,
+            summary=await _post_card(runtime, auth, origin_context_id, service, reference),
+        )
     try:
         async with runtime.session_factory.begin() as session:
             # Re-checked under the clear's own lock; who and which channel are audited.

@@ -114,6 +114,7 @@ from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 if TYPE_CHECKING:
     from daimon.core.confirmation import BackendSwitchReference
+    from daimon.core.fleet_configuration import ConfigurationReference
 
 log = structlog.get_logger()
 
@@ -2108,14 +2109,28 @@ async def _post_own_switch_card(
     service: channel_backend.AgentBackendService,
     reference: BackendSwitchReference,
 ) -> str:
+    return await post_own_card(runtime, auth, origin, service, reference)
+
+
+async def post_own_card(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    service: channel_backend.AgentBackendService,
+    reference: BackendSwitchReference | ConfigurationReference,
+) -> str:
     """Post the Confirm card a provider turn can't show, after the same checks as its click.
 
-    The card goes only into the verified origin's thread and only its requester
-    can press it (`daimon.core.switch_cards.press_switch_card`). Nothing changes
-    here; the press re-verifies everything before applying.
+    A provider switch or a configuration change (fleet limits, the provider
+    allowlist, this channel's pin). The card goes only into the verified origin's
+    thread and only its requester can press it
+    (`daimon.core.switch_cards.press_switch_card`). Nothing changes here; the
+    press re-verifies everything before applying.
     """
     from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
+    from daimon.core.channel_backend import channel_ref
     from daimon.core.confirmation import (
+        BackendSwitchReference,
         CardRefusal,
         ConfirmationPrompt,
         backend_switch_callbacks,
@@ -2126,8 +2141,25 @@ async def _post_own_switch_card(
     if auth.platform != "discord" or auth.platform_user_id is None:
         raise ToolError(
             "I can't post a confirmation card from this conversation here yet. An admin can "
-            "switch the agent from its Details. Nothing changed."
+            "make this change from the agent's Details. Nothing changed."
         )
+    switching = isinstance(reference, BackendSwitchReference)
+    if switching:
+        matching = {"agent": reference.agent}
+        waiting_text = (
+            f"There's already a Confirm card waiting for you to switch {reference.agent}."
+        )
+    else:
+        matching = {"operation": reference.operation}
+        if reference.agent_name is not None:
+            matching["agent_name"] = reference.agent_name
+        waiting_text = "There's already a Confirm card waiting for you for this change."
+    # A pin card belongs to its channel: one waiting elsewhere is another request.
+    in_channel = (
+        origin.parent_channel_id
+        if not switching and reference.operation == "channel_pin_clear"
+        else None
+    )
     now = datetime.datetime.now(datetime.UTC)
     # Outside any turn, so not capped by one; never past a day, and the card says when.
     expires_at = now + datetime.timedelta(
@@ -2138,13 +2170,13 @@ async def _post_own_switch_card(
             session,
             tenant_id=auth.tenant_id,
             requester_platform_user_id=auth.platform_user_id,
-            agent_name=reference.agent,
+            matching=matching,
+            channel_id=in_channel,
             now=now,
         )
     if waiting:
         raise ToolError(
-            f"There's already a Confirm card waiting for you to switch {reference.agent}. "
-            "Press it, or let it expire, before asking again. Nothing changed."
+            f"{waiting_text} Press it, or let it expire, before asking again. Nothing changed."
         )
 
     async def current_admin(_clicker: str) -> bool:
@@ -2161,13 +2193,25 @@ async def _post_own_switch_card(
         place_word=space_noun(auth.platform),
         answering_agent_name=origin.responder_name,
         handoff_thread=(origin.platform, origin.parent_channel_id, origin.thread_id),
+        # A pin card clears only the chat it is posted in.
+        pin_channel=channel_ref(origin.tenant_id, origin.platform, origin.parent_channel_id),
     )
-    prompt = ConfirmationPrompt(
-        title="Change the model provider?",
-        requester_platform_user_id=auth.platform_user_id,
-        expires_at=expires_at,
-        admin=True,
-        backend_switch=reference,
+    prompt = (
+        ConfirmationPrompt(
+            title="Change the model provider?",
+            requester_platform_user_id=auth.platform_user_id,
+            expires_at=expires_at,
+            admin=True,
+            backend_switch=reference,
+        )
+        if switching
+        else ConfirmationPrompt(
+            title="Change this setting?",
+            requester_platform_user_id=auth.platform_user_id,
+            expires_at=expires_at,
+            admin=True,
+            configuration=reference,
+        )
     )
     try:
         prepared = await prepare(prompt)
@@ -2202,14 +2246,26 @@ async def _post_own_switch_card(
     )
     from daimon.adapters.mcp.tools.discord._switch_card import post_switch_card
 
-    message_id = await post_switch_card(
-        runtime, auth, channel_id=origin.thread_id, card=card, origin=turn_origin_place(origin)
-    )
-    async with runtime.session_factory.begin() as session:
-        await cards.mark_posted(session, card_id=row.id, message_id=message_id)
+    unposted = "Couldn't post the confirmation card; nothing changed."
+    try:
+        message_id = await post_switch_card(
+            runtime, auth, channel_id=origin.thread_id, card=card, origin=turn_origin_place(origin)
+        )
+        async with runtime.session_factory.begin() as session:
+            await cards.mark_posted(session, card_id=row.id, message_id=message_id)
+    except BaseException as exc:
+        # Never pressable (unposted, or its message unrecorded), so it must not
+        # hold the one waiting slot either; cancellation included.
+        with anyio.CancelScope(shield=True):
+            async with runtime.session_factory.begin() as session:
+                await cards.abandon(session, card_id=row.id, outcome=unposted)
+        if not isinstance(exc, Exception):
+            raise
+        log.warning("own_card.post_failed", card_id=str(row.id), error_type=type(exc).__name__)
+        raise ToolError(unposted) from exc
     return (
         "I posted a Confirm card in this conversation. Nothing changes until the requester "
-        "presses Confirm on it. Tell them so; do not call this tool again for this switch."
+        "presses Confirm on it. Tell them so; do not call this tool again for this change."
     )
 
 
