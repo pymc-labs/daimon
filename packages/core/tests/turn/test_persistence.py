@@ -1135,7 +1135,7 @@ async def test_repeated_cancellation_finishes_cleanup(
     store = MemoryStateStore()
     await store.put_binding(BINDING, expected_generation=0)
     persistence = context(store)
-    entered, cleaning, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered, cleaning, finish, released = (asyncio.Event() for _ in range(4))
     release = store.release_lease
 
     async def release_lease(lease: Lease) -> None:
@@ -1143,6 +1143,7 @@ async def test_repeated_cancellation_finishes_cleanup(
             cleaning.set()
             await finish.wait()
         await release(lease)
+        released.set()
 
     monkeypatch.setattr(store, "release_lease", release_lease)
 
@@ -1162,9 +1163,13 @@ async def test_repeated_cancellation_finishes_cleanup(
             task.cancel()
             await cleaning.wait()
             task.cancel()
-            finish.set()
+            done, _ = await asyncio.wait({task}, timeout=1)
+            assert task in done and task.cancelled()
             with pytest.raises(asyncio.CancelledError):
-                await task
+                task.result()
+            assert not released.is_set()
+            finish.set()
+            await released.wait()
         assert next(iter(store.data.leases.values())).active is None
     finally:
         finish.set()
@@ -1199,11 +1204,57 @@ async def test_hung_pump_cleanup_has_a_bounded_wait(monkeypatch: pytest.MonkeyPa
         task.cancel()
         done, _ = await asyncio.wait({task}, timeout=1)
         assert task in done
-        with pytest.raises(TimeoutError):
+        assert task.cancelled()
+        with pytest.raises(asyncio.CancelledError):
             task.result()
     finally:
         finish.set()
         task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        async with asyncio.timeout(1):
+            await released.wait()
+    assert next(iter(store.data.leases.values())).active is None
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_cleanup_timeout_preserves_pump_outcome(
+    fails: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._CLEANUP_TIMEOUT_S", 0.01)
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    cleaning, finish, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release = store.release_lease
+    error = RuntimeError("pump failed")
+
+    async def release_lease(lease: Lease) -> None:
+        cleaning.set()
+        await finish.wait()
+        await release(lease)
+        released.set()
+
+    monkeypatch.setattr(store, "release_lease", release_lease)
+
+    async def pump() -> str:
+        if fails:
+            raise error
+        return "completed"
+
+    task = asyncio.create_task(context(store).run(pump))
+    try:
+        async with asyncio.timeout(1):
+            await cleaning.wait()
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done
+        if fails:
+            with pytest.raises(RuntimeError) as caught:
+                task.result()
+            assert caught.value is error
+        else:
+            assert task.result() == "completed"
+        assert not released.is_set()
+    finally:
+        finish.set()
         await asyncio.gather(task, return_exceptions=True)
         async with asyncio.timeout(1):
             await released.wait()

@@ -4053,6 +4053,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     from daimon.core.stores.domain import Role
     from daimon.core.stores.thread_sessions import record_snapshot
     from daimon.core.stores.turn_origins import create_origin, get_active_origin
+    from daimon.core.turn import persistence as persistence_module
     from daimon.core.turn_origin import current_execution_origin_id, turn_origin
     from mux.testing.drivers.anthropic.ma_models import ma_session
 
@@ -4218,6 +4219,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
                 finish.set()
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+                # A second cancel releases the caller before persistence cleanup finishes.
+                await asyncio.gather(*tuple(persistence_module._PENDING_FINALIZERS))
         else:
             outcome = await invocation
             assert outcome.state.error is None

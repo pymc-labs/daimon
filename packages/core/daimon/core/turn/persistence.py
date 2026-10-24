@@ -15,7 +15,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
-from daimon.core.stores.gemini_runtime_state import complete
 from daimon.core.stores.mux_state import BeforeClaim, PostgresStateStore
 from daimon.core.turn.mutation_gate import recheck_retry
 from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
@@ -38,6 +37,7 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 _CLEANUP_TIMEOUT_S = 10.0
+_PENDING_FINALIZERS: set[asyncio.Future[None]] = set()
 
 # Kinds that never pass the root budget check, and so never count an input.
 _UNCOUNTED_KINDS = frozenset({"cancel", "archive", "recovery-interrupt"})
@@ -339,8 +339,13 @@ class TurnPersistence:
                     await self.store.release_lease(self._fence())
                 self._lease = None
 
-            # Bound the wait without cancelling grant revocation or lease release.
-            await complete(asyncio.wait_for(asyncio.shield(cleanup()), timeout=_CLEANUP_TIMEOUT_S))
+            pending = asyncio.ensure_future(cleanup())
+            _PENDING_FINALIZERS.add(pending)
+            pending.add_done_callback(_PENDING_FINALIZERS.discard)
+            try:
+                await asyncio.wait_for(asyncio.shield(pending), timeout=_CLEANUP_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("turn.cleanup_timeout", timeout_s=_CLEANUP_TIMEOUT_S)
 
     async def mutate[M: BaseModel](
         self,
