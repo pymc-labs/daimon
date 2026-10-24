@@ -54,6 +54,9 @@ BackendRefusalCause = Literal[
     "provider_not_allowed",
     "agent_backend",
     "provider_not_configured",
+    # A switch's stored consent no longer matches its source: ask for a fresh
+    # preview instead of claiming the provider is not set up (J6g).
+    "re_confirm",
     "no_credit_yet",
 ]
 MissingConfigPart = Literal["agent", "environment"]

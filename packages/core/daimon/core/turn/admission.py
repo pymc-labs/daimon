@@ -969,6 +969,13 @@ async def admit_impl(
                 if error.cause is None:
                     # The agent's own backend: its runtime can't serve this agent here.
                     raise _backend_refusal(revision, "agent", None) from error
+                if error.cause == "re_confirm" and error.provider is None:
+                    # The copy names the provider the switch went to (J6g).
+                    raise AdmissionDenied(
+                        reason="backend_unsupported",
+                        cause="re_confirm",
+                        provider=revision.backend,
+                    ) from error
             raise
         backend_counterpart = prepared.counterpart
         backend_agent_revision = agent_revision
