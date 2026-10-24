@@ -12,15 +12,14 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from anthropic.types.beta import BetaManagedAgentsSession
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _agent_chat_safety as safety
 from daimon.adapters.mcp.tools import agent_chat
@@ -47,19 +46,17 @@ from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_tool_rules, session_settle_state
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
 from daimon.testing import ma_agent, ma_environment, with_coordinator, with_hidden_capability
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import MARouter
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import (
-    MARouter,
     build_fake_anthropic,
     json_body,
+    ma_session,
     send_events_response,
 )
-from mux.testing.drivers.anthropic.ma_models import ma_session
-from pydantic import HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TENANT_ID = uuid.uuid4()
@@ -77,7 +74,7 @@ Call = tuple[str, str, dict[str, Any]]
 
 
 @pytest.fixture(autouse=True)
-def fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
+def _fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(safety, "_POLL_S", 0.01)
 
 
@@ -144,8 +141,7 @@ class FakeSession:
         toolset = next((t for t in self.tools if t.get("mcp_server_name") == server), None)
         if toolset is None:
             return True
-        configs: list[dict[str, Any]] = toolset.get("configs") or []
-        config = next((c for c in configs if c["name"] == name), None)
+        config = next((c for c in toolset.get("configs") or [] if c["name"] == name), None)
         chosen = config or toolset["default_config"]
         return chosen["permission_policy"]["type"] == "always_ask"
 
@@ -324,9 +320,7 @@ def _runtime(
 ) -> McpRuntime:
     settings = MagicMock()
     settings.tool_safety = policy
-    settings.mcp = McpSettings(
-        public_url=HttpUrl(public_url) if public_url is not None else None, jwt_secret=None
-    )
+    settings.mcp = McpSettings(public_url=public_url, jwt_secret=None)
     settings.github.fallback_pat = None
     return McpRuntime(
         session_factory=factory,
@@ -557,7 +551,7 @@ async def test_a_coordinator_session_is_refused_before_anything_is_sent(
     assert _no_workers()
 
 
-def _with_preview_fields(session: BetaManagedAgentsSession) -> BetaManagedAgentsSession:
+def _with_preview_fields(session: Any) -> Any:
     """`session` as Preview returns it (2026-10-20): fields the pinned SDK does not parse."""
     dumped = session.model_dump(mode="json")
     dumped["budget"] = None
@@ -878,12 +872,8 @@ async def test_continue_with_a_message_refuses_when_the_resumed_turn_runs_on(
     fake = FakeSession(frozen="always_ask")
     await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, _ENABLED)
-
     # The resumed turn never ends here.
-    def pending(self: FakeSession) -> set[str]:
-        return {"evt_still"}
-
-    monkeypatch.setattr(FakeSession, "_pending", pending)
+    monkeypatch.setattr(FakeSession, "_pending", lambda self: {"evt_still"})
     monkeypatch.setattr(agent_chat, "_RESUME_WAIT_S", 0.1)
     with pytest.raises(ToolError, match="not sent"):
         await _continue_turn_impl(runtime, _auth(), _SESSION, "next")
@@ -925,12 +915,10 @@ async def test_another_runtime_reads_a_pause_it_does_not_answer(
     await _record(factory, boundary)
     owner = _runtime(fake, factory, _ENABLED)
     other = _runtime(fake, factory, _ENABLED)
-
     # The owner's worker is stuck before answering: its decider never returns.
-    def wait_forever(*_a: Any, **_k: Any) -> Awaitable[bool]:
-        return asyncio.Event().wait()
-
-    with patch.object(safety, "_answer", AsyncMock(side_effect=wait_forever)):
+    with patch.object(
+        safety, "_answer", AsyncMock(side_effect=lambda *_a, **_k: asyncio.Event().wait())
+    ):
         worker = safety.watch_turn(
             owner, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
         )
@@ -1034,9 +1022,7 @@ async def test_channel_tool_rules_reach_agent_chat_turns(
 
 
 @pytest.mark.parametrize("channel", ["C1", "C1:1234.5678"])
-async def test_a_routine_privacy_stamp_keeps_its_channel_rules(
-    factory: async_sessionmaker[AsyncSession], channel: str
-) -> None:
+async def test_a_routine_privacy_stamp_keeps_its_channel_rules(factory, channel):
     from dataclasses import replace
 
     await _deny_in_channel(factory, "C1")
@@ -1112,10 +1098,7 @@ async def test_trusted_annotation_seam_feeds_the_unattended_verdict(
         looked_up.append(call.key)
         return hints
 
-    def annotations_for(*_: Any) -> Callable[[ToolCall], Awaitable[ToolAnnotations | None]]:
-        return lookup
-
-    monkeypatch.setattr(safety, "_annotations_for", annotations_for)
+    monkeypatch.setattr(safety, "_annotations_for", lambda *_: lookup)
     fake = FakeSession(tool=tool)
     runtime = _runtime(
         fake, factory, ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",))
@@ -1191,13 +1174,10 @@ async def test_session_annotations_over_fake_http(
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(transport=httpx.MockTransport(handle), **kwargs)
 
-    def allow_test_url(*_a: Any, **_k: Any) -> None:
-        pass
-
     async def catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
         with monkeypatch.context() as scoped:
             scoped.setattr(httpx, "AsyncClient", Client)
-            scoped.setattr(discovery, "assert_public_https_url", allow_test_url)
+            scoped.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
             return list(await discovery.read_mcp_catalogue(url, token))
 
     monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", catalogue)
@@ -1416,11 +1396,7 @@ async def test_a_channel_ask_beats_an_agent_wide_allow_for_routines(
     async with factory.begin() as db:
         await make_tenant(db, id=_TENANT_ID)
     admin = Subject(is_admin=True, platform_user_id="UA")
-    rules: tuple[tuple[str | None, agent_tool_rules.Rule, agent_tool_rules.Scope], ...] = (
-        (None, "allow", "chat_and_routines"),
-        ("C1", "ask", "chat"),
-    )
-    for channel, rule, scope in rules:
+    for channel, rule, scope in ((None, "allow", "chat_and_routines"), ("C1", "ask", "chat")):
         async with factory.begin() as db:
             await agent_tool_rules.set_rule(
                 db,

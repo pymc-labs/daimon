@@ -180,9 +180,6 @@ class HereApprovals:
             )
         except DaimonError as exc:
             return toast(str(exc))
-        if not (
-            self.runtime.settings.tool_safety.enabled
-            and self.runtime.settings.tool_safety.allow_gate_overrides
-        ):
+        if not self.runtime.settings.tool_safety.gate_overrides_active:
             return toast("Saved but ignored: approval overrides are not enabled.")
         return toast(f"Third-party write approvals: {value}.")

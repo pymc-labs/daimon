@@ -416,10 +416,7 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
             subject=subject,
         )
         message = f"Third-party write approvals: {value} ({scope})."
-        if not (
-            runtime.settings.tool_safety.enabled
-            and runtime.settings.tool_safety.allow_gate_overrides
-        ):
+        if not runtime.settings.tool_safety.gate_overrides_active:
             message += " Saved but ignored: approval overrides are not enabled."
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)
@@ -506,10 +503,7 @@ async def handle_here_approval_submission(runtime: SlackRuntime, payload: dict[s
             subject=subject,
         )
         message = f"Third-party write approvals: {value} (thread:{channel_id}:{root})."
-        if not (
-            runtime.settings.tool_safety.enabled
-            and runtime.settings.tool_safety.allow_gate_overrides
-        ):
+        if not runtime.settings.tool_safety.gate_overrides_active:
             message += " Saved but ignored: approval overrides are not enabled."
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)
