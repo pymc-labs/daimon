@@ -42,7 +42,7 @@ from daimon.adapters.teams.deployment_admins import demoting_owner_reads
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
 from daimon.adapters.teams.help import send_help
-from daimon.adapters.teams.here import show_here
+from daimon.adapters.teams.here import HereApprovals, show_here
 from daimon.adapters.teams.identity import GraphSource
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
@@ -422,6 +422,7 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
+    teams_app.on_card_action_execute("here_approvals", HereApprovals(runtime).on_action)
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
     teams_app.on_card_action_execute(provider_actions.VERB, turns.provider_actions.on_action)

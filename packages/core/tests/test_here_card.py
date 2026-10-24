@@ -9,7 +9,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import daimon.core.here_card as here_card_module
 import pytest
-from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, KeyEntry, McpServerEntry
 from daimon.core.here_card import (
     CredentialStatus,
@@ -586,14 +586,39 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
     assert "<@123>" not in unknown.text
 
 
+@pytest.mark.parametrize(
+    ("gate", "active", "is_dm", "expected"),
+    [
+        ("inherit", True, False, "Third-party write approvals: on (Daimon default)."),
+        ("off", True, False, "Third-party write approvals: off (server)."),
+        (
+            "off",
+            False,
+            False,
+            "Stored write approvals: off (server); approval overrides are not enabled.",
+        ),
+        (
+            "off",
+            True,
+            True,
+            "Direct-message write approvals are unchanged; scope overrides do not apply.",
+        ),
+    ],
+)
 async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
     monkeypatch: pytest.MonkeyPatch,
+    gate: Approvals,
+    active: bool,
+    is_dm: bool,
+    expected: str,
 ) -> None:
     """Teams has no `<@id>` mention: the setter is named from their stored name."""
     entra_id = str(uuid.UUID(int=7))
     channel = "19:ops@thread.tacv2"
     monkeypatch.setattr(
-        here_card_module, "load_access_policy", AsyncMock(return_value=TenantAccessPolicy())
+        here_card_module,
+        "load_access_policy",
+        AsyncMock(return_value=TenantAccessPolicy(approvals=gate)),
     )
     monkeypatch.setattr(here_card_module, "load_rule_viewer", AsyncMock(return_value=None))
     responder = RosterAgent(
@@ -645,9 +670,13 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
             default=DeploymentDefault(agent_name="other"),
             github=GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False),
             public_mcp_url=None,
-            is_admin=False,
+            is_admin=True,
+            gate_overrides_active=active,
+            is_dm=is_dm,
             caller_account_id=None,
         )
+        assert card.approval_gate_note == expected
+        assert card.approval_gate_admin is (not is_dm)
         # The compact card text omits provenance; the structured facts keep it.
         return card.set_by_label or ""
 
@@ -659,3 +688,22 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
     teams_lookup.assert_awaited_with(ANY, account_id=SETTER)
     assert unnamed == "unknown", "someone never named to us reads unknown"
     assert entra_id not in named + unnamed, "the Entra object id never reaches the card"
+
+
+@pytest.mark.parametrize("has_agent", [False, True])
+def test_outsider_warning_and_approval_note_are_both_visible(has_agent: bool) -> None:
+    card = HereCard(
+        agent_name="ResearchBot" if has_agent else None,
+        tier="channel" if has_agent else None,
+        channel_rule=ChannelRule(),
+        effective_readers="any",
+        effective_writers="any",
+        who_may_answer="",
+        reads_kept_inside=False,
+        outsiders_can_view=True,
+        approval_gate_note="Third-party write approvals: on (server).",
+        text="",
+    )
+    text = render_here_card_text(card)
+    assert "outside your organisation" in text
+    assert "Third-party write approvals: on (server)." in text

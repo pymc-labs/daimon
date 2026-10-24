@@ -395,10 +395,11 @@ def prompt_for_tool_call(
     requester_platform_user_id: str,
     now: datetime,
     timeout: timedelta = CONFIRMATION_TIMEOUT,
+    trusted_servers: frozenset[str] = frozenset({DAIMON_SERVER_NAME}),
 ) -> ConfirmationPrompt:
     """The card for one gated write, with short product-facing details."""
-    server = call.server_name or "a tool"
-    publishing = call.tool_name in PUBLISH_TOOLS and server == DAIMON_SERVER_NAME
+    own_server = call.server_name in trusted_servers
+    publishing = call.tool_name in PUBLISH_TOOLS and own_server
     data = call.input
     name = str(data.get("name") or "")
     slug = str(data.get("slug") or "")
@@ -409,10 +410,7 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
-    if (
-        call.tool_name in {"request_fleet_config", "request_provider_allowlist"}
-        and server == DAIMON_SERVER_NAME
-    ):
+    if call.tool_name in {"request_fleet_config", "request_provider_allowlist"}:
         if call.tool_name == "request_fleet_config":
             reference = ConfigurationReference.model_validate(
                 {
@@ -441,7 +439,7 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
-    if call.tool_name == "request_channel_pin_clear" and server == DAIMON_SERVER_NAME:
+    if call.tool_name == "request_channel_pin_clear":
         reference = ConfigurationReference.model_validate(
             {
                 "operation": "channel_pin_clear",
@@ -456,7 +454,7 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
-    if call.tool_name == "request_agent_backend_switch" and server == DAIMON_SERVER_NAME:
+    if call.tool_name == "request_agent_backend_switch":
         reference = BackendSwitchReference.model_validate(
             {
                 "agent": data.get("agent_name"),
@@ -514,7 +512,7 @@ def prompt_for_tool_call(
             f"Shared with: {_short(recipients)}",
             f"Spending cap: ${cap}" if cap is not None else "Spending cap: Not set",
         )
-    elif call.tool_name == "microsoft_send" and server == DAIMON_SERVER_NAME:
+    elif call.tool_name == "microsoft_send" and own_server:
         invite = data.get("action") == "create_event"
         # Each field is one line: a newline in one must not fake a line of the card.
         subject = _one_line(data.get("subject") or "")
@@ -552,7 +550,7 @@ def prompt_for_tool_call(
                 f"Message: {preview or '(empty)'}",
             )
         )
-    elif call.tool_name == "lead_intake_resolve" and server == DAIMON_SERVER_NAME:
+    elif call.tool_name == "lead_intake_resolve" and own_server:
         resolution = data.get("resolution")
         fields = cast("dict[str, object]", resolution) if isinstance(resolution, dict) else {}
         action = "Resolve lead"
@@ -583,12 +581,12 @@ def prompt_for_tool_call(
             requester_platform_user_id=requester_platform_user_id,
             expires_at=now + timeout,
         )
-    elif call.tool_name == "microsoft_write" and server == DAIMON_SERVER_NAME:
+    elif call.tool_name == "microsoft_write" and own_server:
         action, consequence, detail_lines = _microsoft_write_card(data)
         title = f"{action}?"
         denied_action = "Microsoft 365 not changed"
 
-    elif call.tool_name == "start_long_job" and server == DAIMON_SERVER_NAME:
+    elif call.tool_name == "start_long_job" and own_server:
         action = "Start long job"
         title = "Run this command in an isolated worker?"
         denied_action = "Long job not started"
@@ -602,7 +600,7 @@ def prompt_for_tool_call(
             f"Dollar cap: {data.get('max_usd') or 'configured default'}",
             f"Exact command:\n{data.get('command', '')}",
         )
-    elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
+    elif call.tool_name == "add_skill" and own_server:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:
             source = str(data.get("path") or data.get("attachment_url") or "")

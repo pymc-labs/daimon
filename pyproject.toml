@@ -178,6 +178,8 @@ source_modules = [
     "daimon.core.answering_map",
     "daimon.core.artifacts",
     "daimon.core.anthropic_guard",
+    "daimon.core.approval_admin",
+    "daimon.core.approval_gate",
     "daimon.core.authz",
     "daimon.core.billing",
     "daimon.core.billing_panel",

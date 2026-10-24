@@ -140,7 +140,12 @@ from daimon.adapters.slack.github_connect import (
     handle_github_update_click,
 )
 from daimon.adapters.slack.help import handle_help_command
-from daimon.adapters.slack.here import handle_here_command, handle_make_confidential
+from daimon.adapters.slack.here import (
+    handle_here_approval_submission,
+    handle_here_approvals,
+    handle_here_command,
+    handle_make_confidential,
+)
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
@@ -1185,6 +1190,12 @@ class SlackApp:
                         )
 
                     self._spawn(_run_feedback_text())
+            elif cb_id == "here_approvals_thread":
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id)
+                )
+                if not is_external_interactive(payload):
+                    self._spawn(handle_here_approval_submission(self.runtime, payload))
             elif cb_id == SUPPORT_CALLBACK_ID:
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _sup = evaluate_support_submission(payload)
@@ -1468,6 +1479,8 @@ class SlackApp:
             or action_id == "routines_create"
         ):
             self._spawn(handle_routine_action(self.runtime, payload))
+        elif action_id == "here_approvals":
+            self._spawn(handle_here_approvals(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:

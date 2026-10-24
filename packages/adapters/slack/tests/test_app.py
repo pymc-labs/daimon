@@ -7500,3 +7500,58 @@ async def test_queue_notice_delayed_by_reaction_is_fenced_to_held_turn(transitio
         )
     client.chat_postMessage.assert_not_awaited()
     client.reactions_add.assert_awaited_once()
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_approval_thread_modal_acks_before_dispatch_and_rejects_external(external):
+    app = _make_app()
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, payload):
+        socket.call_log.append("approval-thread")
+
+    with (
+        patch("daimon.adapters.slack.app.handle_here_approval_submission", new=handle),
+        patch("daimon.adapters.slack.app.is_external_interactive", return_value=external),
+    ):
+        await app.on_request(
+            socket,
+            SocketModeRequest(
+                type="interactive",
+                envelope_id="approval-thread-envelope",
+                payload={
+                    "type": "view_submission",
+                    "team": {"id": "T_TEST"},
+                    "user": {"id": "U_TEST"},
+                    "view": {"callback_id": "here_approvals_thread"},
+                },
+            ),
+        )
+        await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log == (
+        ["send_socket_mode_response"]
+        if external
+        else ["send_socket_mode_response", "approval-thread"]
+    )
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_approval_select_uses_verified_host_block_action_dispatch(external):
+    app = _make_app()
+    socket = _FakeSocketClient()
+    payload = _make_block_actions_payload(action_id="here_approvals")
+    payload["user"]["team_id"] = "T_OTHER" if external else "T_TEST"
+    handled = AsyncMock()
+    refused = AsyncMock()
+    with (
+        patch("daimon.adapters.slack.app.handle_here_approvals", new=handled),
+        patch.object(app, "_refuse_external_click", new=refused),
+    ):
+        await app.on_request(
+            socket,
+            SocketModeRequest(type="interactive", envelope_id="gate-select", payload=payload),
+        )
+        await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log[0] == "send_socket_mode_response"
+    assert handled.await_count == (0 if external else 1)
+    assert refused.await_count == (1 if external else 0)

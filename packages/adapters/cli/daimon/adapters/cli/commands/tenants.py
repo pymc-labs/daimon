@@ -894,9 +894,16 @@ async def tenants_access_policy_set(
         await lock_access_policy(session, tenant_id=tenant_id)
         if clear:
             try:
-                dropped = sorted(
-                    (await load_access_policy(session, tenant_id=tenant_id)).agent_rules
-                )
+                current = await load_access_policy(session, tenant_id=tenant_id)
+                if current.approvals != "inherit" or any(
+                    rule.approvals != "inherit" for rule in current.channel_rules.values()
+                ):
+                    raise typer.BadParameter(
+                        "clear approval overrides from the native /here admin control "
+                        "first; each change requires a native admin and an audit event. "
+                        "Nothing was changed."
+                    )
+                dropped = sorted(current.agent_rules)
             except AccessPolicyUnreadable:
                 # --clear is the way out of an unreadable row, but the row may
                 # hold agent rules nobody can list: ask all the same.

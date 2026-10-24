@@ -23,6 +23,8 @@ ChannelWriters = Literal["any", "own", "none"]
 """Who may start turns and post in a channel: anyone, its own agents only, or
 nobody, admins and daimon's notices included."""
 
+Approvals = Literal["inherit", "off", "on"]
+
 
 class ChannelRule(BaseModel):
     """Who may read and write one channel, Discord thread, Slack thread
@@ -32,6 +34,8 @@ class ChannelRule(BaseModel):
 
     readers: ChannelReaders = "any"
     writers: ChannelWriters = "any"
+    approvals: Approvals = Field(default="inherit", exclude_if=lambda value: value == "inherit")
+    approvals_set_by: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _own_on_both(self) -> ChannelRule:
@@ -125,6 +129,8 @@ class TenantAccessPolicy(BaseModel):
     # Discord organisation membership for visibility warnings, independent of invoker access.
     internal_role_ids: tuple[str, ...] = ()
     invoker_admin_bypass: bool = True
+    approvals: Approvals = Field(default="inherit", exclude_if=lambda value: value == "inherit")
+    approvals_set_by: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # Channel, Discord thread or Slack ``channel:ts`` id -> its rule; a thread
     # also follows its channel's. Open rules are not kept.
     channel_rules: dict[str, ChannelRule] = Field(default_factory=dict)

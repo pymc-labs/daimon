@@ -237,7 +237,9 @@ def unattended_posture(
     posture = PolicyApproval(
         decide=unattended_decider(
             policy,
-            trusted_servers=trusted_servers_for(public_url),
+            trusted_servers=trusted_servers_for(
+                public_url, {s.name: s.url for s in session.agent.mcp_servers}
+            ),
             confirmed_tools=protected_tools(policy),
             rules_for=agent_rule_lookup(
                 session_factory,
@@ -388,7 +390,7 @@ async def dm_session_authority(
     )
 
     async def gate() -> None:
-        await decide_before_send(deps, admission)()
+        await decide_before_send(deps, admission, attended=False)()
         current = await read()
         if (
             current.id != actual.id
