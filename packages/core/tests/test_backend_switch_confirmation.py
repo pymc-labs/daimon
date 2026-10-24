@@ -351,6 +351,12 @@ async def test_shared_admin_predicate_fails_closed_on_checker_error():
     check = AsyncMock(side_effect=RuntimeError("admin lookup unavailable"))
     assert await check_confirmation_admin(prompt, "requester", check) is not None
     assert await check_confirmation_admin(prompt, "requester", None) is not None
+    assert await check_confirmation_admin(prompt, "requester", check, "approved") is not None
+    # A Deny changes nothing and needs no evidence: the check (which records a
+    # re-previewed card's Confirm, J5) never sees it.
+    check.reset_mock()
+    assert await check_confirmation_admin(prompt, "requester", check, "denied") is None
+    check.assert_not_awaited()
 
 
 @pytest.mark.parametrize("enabled", [False, True])

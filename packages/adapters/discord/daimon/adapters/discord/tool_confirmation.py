@@ -269,7 +269,7 @@ class _ConfirmationView(discord.ui.LayoutView):
         The admin re-check (with the card's own digest) first, then requester,
         expiry and single use. None means the answer was taken.
         """
-        refusal = await check_confirmation_admin(self._prompt, clicker, self._check_admin)
+        refusal = await check_confirmation_admin(self._prompt, clicker, self._check_admin, answer)
         if refusal is not None:
             return refusal
         return settle_local_confirmation(self._prompt, self._answer, clicker, answer)
