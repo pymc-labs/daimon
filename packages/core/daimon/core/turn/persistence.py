@@ -240,9 +240,10 @@ class TurnPersistence:
         loop = asyncio.get_running_loop()
         give_up = loop.time() + wait.timeout_s if wait is not None else 0.0
         delay = wait.poll_initial_s if wait is not None else 0.0
+        queued = False
         while True:
             if wait is not None:
-                if wait.cancel is not None and wait.cancel.is_set():
+                if queued and wait.cancel is not None and wait.cancel.is_set():
                     raise LeaseWaitCancelled(self.operation_key)
                 if loop.time() >= give_up:
                     raise TimeoutError(f"{self._slot.describe()} stayed leased by another turn")
@@ -260,6 +261,7 @@ class TurnPersistence:
                     raise TimeoutError(f"{self._slot.describe()} exceeded its lease wait")
                 return acquired
             except LeaseBusy:
+                queued = True
                 if wait is None:
                     raise
             if wait.cancel is not None and wait.cancel.is_set():
@@ -291,6 +293,14 @@ class TurnPersistence:
             async with context:
                 return await pump()
 
+        # An already-cancelled invocation may take a free lease to reconcile
+        # genuine provider usage. It still sends nothing. Once it queues, Stop
+        # always ends the wait; a newly cancelled acquisition never executes.
+        cancelled_on_entry = (
+            self._lease_wait is not None
+            and self._lease_wait.cancel is not None
+            and self._lease_wait.cancel.is_set()
+        )
         await self._check_binding()
         self._lease = await self._acquire_lease()
         work: asyncio.Task[T] | None = None
@@ -299,7 +309,8 @@ class TurnPersistence:
             # A binding CAS while acquisition waited must not route a stale turn.
             await self._check_binding(queued=self._lease_wait is not None)
             if (
-                self._lease_wait is not None
+                not cancelled_on_entry
+                and self._lease_wait is not None
                 and self._lease_wait.cancel is not None
                 and self._lease_wait.cancel.is_set()
             ):
