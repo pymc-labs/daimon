@@ -40,6 +40,23 @@ async def agent_name_lock(
         yield
 
 
+@asynccontextmanager
+async def member_copies_lock(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> AsyncIterator[None]:
+    """Serialize one person's own copies in a tenant, until the block ends.
+
+    The cap check (how many they already own) and the create are separate calls;
+    held across both, two copies at once can never both fit under the cap.
+    """
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"member_copies:{tenant_id}:{account_id}"},
+        )
+        yield
+
+
 async def record_agent_creator(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,

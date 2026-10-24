@@ -59,7 +59,7 @@ from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
+from daimon.core.agent_ownership import agent_name_lock, member_copies_lock, record_agent_creator
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -74,6 +74,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_SETUP_HIDDEN,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
@@ -349,16 +350,22 @@ def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
         return (
             f"agent '{agent.name}' is managed by defaults; chat tools cannot modify it. "
-            "An admin can make an editable copy with fork_agent; a member can create_agent "
-            "a new one instead."
+            "Anyone talking to it can make their own editable copy with fork_agent (an "
+            "admin can copy it from anywhere), or create_agent a new one."
         )
     if agent.metadata.get(MA_METADATA_KEY_ACCOUNT) is None:
         return (
             f"agent '{agent.name}' is a system agent; chat tools cannot modify it. "
-            "An admin can make an editable copy with fork_agent; a member can create_agent "
-            "a new one instead."
+            "Anyone talking to it can make their own editable copy with fork_agent (an "
+            "admin can copy it from anywhere), or create_agent a new one."
         )
     return None
+
+
+def _setup_hidden(agent: BetaManagedAgentsAgent, auth: AuthIdentity) -> bool:
+    """A member's own copy of an agent they talked to: its inherited setup stays an
+    admin's to read, as on the source, though they own it."""
+    return not auth.is_admin and agent.metadata.get(MA_METADATA_KEY_SETUP_HIDDEN) == "true"
 
 
 async def _reject_guild_name_collision(
@@ -426,7 +433,10 @@ async def _list_agents_impl(
     ]
     if auth.is_admin:
         return infos
-    return [info if info.owned_by_you else info.for_member() for info in infos]
+    hidden = {row.id for row in rows if _setup_hidden(row, auth)}
+    return [
+        info if info.owned_by_you and info.id not in hidden else info.for_member() for info in infos
+    ]
 
 
 async def _get_agent_impl(
@@ -453,7 +463,7 @@ async def _get_agent_impl(
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
     owned = await caller_owns_agent(runtime, auth, agent.id)
-    sees_setup = auth.is_admin or owned
+    sees_setup = auth.is_admin or (owned and not _setup_hidden(agent, auth))
     if sees_setup and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
@@ -930,6 +940,9 @@ async def _update_agent_impl(
             ) from exc
         raise
     result = await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
+    if _setup_hidden(updated, auth):
+        # The owner's edit answers with capabilities only: never the inherited setup.
+        result = result.for_member()
     applies_lines: list[str] = []
     if model is not None:
         applies_lines.append(
@@ -1056,7 +1069,27 @@ async def _attach_mcp_server_impl(
     except anthropic.ConflictError as exc:
         # Residual conflict after the one retry — surface as a clean ToolError.
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
-    return await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
+    info = await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
+    return info.for_member() if _setup_hidden(updated, auth) else info
+
+
+async def _require_member_copy_room(runtime: McpRuntime, auth: AuthIdentity) -> None:
+    """A member may own only so many copies they made by talking to an agent."""
+    limit = runtime.settings.mcp.member_copy_limit
+    owned = await caller_owned_ids(runtime, auth)
+    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    mine = [
+        agent
+        for agent in agents
+        if owned_in(owned, auth, agent.id)
+        and agent.metadata.get(MA_METADATA_KEY_SETUP_HIDDEN) == "true"
+    ]
+    if len(mine) >= limit:
+        raise ToolError(
+            f"You already have {len(mine)} copies of your own (the most is {limit}). "
+            "Archive one you no longer use, or ask an admin to make this copy. "
+            "Nothing was created."
+        )
 
 
 async def _fork_agent_impl(
@@ -1074,9 +1107,12 @@ async def _fork_agent_impl(
         MA_METADATA_KEY_FORKED_IN,
     )
 
-    # Forking is an admin's call: a fork routes nowhere and has no channel
-    # pin of its own, so it is free to run anywhere the source can't.
-    _require_admin(auth)
+    # Forking another agent is an admin's call: a fork routes nowhere and has no
+    # channel pin of its own, so it is free to run anywhere the source can't. Anyone
+    # may copy the agent answering their own chat turn (it is theirs to own; TARGET-V2
+    # J10), so only a person's own turn credential gets that far.
+    if not auth.is_admin and (auth.chat_agent_id is None or not may_own(auth)):
+        _require_admin(auth)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     public_url = runtime.settings.mcp.public_url
     async with contextlib.AsyncExitStack() as stack:
@@ -1098,6 +1134,24 @@ async def _fork_agent_impl(
         source = await resolve_setup_agent(
             runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
         )
+        # From the turn's credential, never a model-supplied id.
+        answering = (
+            auth.chat_agent_id is not None
+            and auth.agent_id is None
+            and auth.hold is None
+            and derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=source.id)
+            == auth.chat_agent_id
+        )
+        if not auth.is_admin and not answering:
+            _require_admin(auth)
+        if not auth.is_admin:
+            # Held through the create: two copies at once never both fit the cap.
+            await stack.enter_async_context(
+                member_copies_lock(
+                    runtime.session_factory, tenant_id=auth.tenant_id, account_id=auth.account_id
+                )
+            )
+            await _require_member_copy_room(runtime, auth)
         try:
             copy = await copy_agent(
                 runtime.client,
@@ -1118,10 +1172,16 @@ async def _fork_agent_impl(
                 }
                 if origin is not None
                 else None,
+                answering=answering,
+                hold=auth.hold,
+                # A member's copy keeps the source's setup an admin's to read.
+                hide_setup=not auth.is_admin,
             )
         except DaimonError as exc:
             raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
     info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
+    if _setup_hidden(copy.agent, auth):
+        info = info.for_member()
     if copy.dropped_skills:
         info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
     if copy.copied_skills:
@@ -2033,7 +2093,11 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
-        Admin-only. Only for a saved, named copy someone asked to keep. Running
+        Anyone may copy you (the agent answering them), and owns that copy; copying
+        any other agent is admin-only. Only for a saved, named copy someone asked
+        to keep. The copy keeps its source's tool rules (copied once, at the fork:
+        later changes to the source's rules don't follow), and starts on the server's
+        default fleet (the source's own fleet settings don't carry over). Running
         copies of yourself on several models at once is not this: that is a fleet
         of task workers (fleet_spawn), which needs no admin.
         Copies its prompt, model, skills and the MCP servers that need
