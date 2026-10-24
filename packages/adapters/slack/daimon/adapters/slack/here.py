@@ -260,10 +260,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                     app_configured=runtime.settings.github_app.app_id is not None
                     and runtime.settings.github_app.private_key is not None,
                 ),
-                gate_overrides_active=(
-                    runtime.settings.tool_safety.enabled
-                    and runtime.settings.tool_safety.allow_gate_overrides
-                ),
+                gate_overrides_active=runtime.settings.tool_safety.gate_overrides_active,
                 public_mcp_url=str(runtime.settings.mcp.public_url)
                 if runtime.settings.mcp.public_url is not None
                 else None,
@@ -419,10 +416,7 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
             subject=subject,
         )
         message = f"Third-party write approvals: {value} ({scope})."
-        if not (
-            runtime.settings.tool_safety.enabled
-            and runtime.settings.tool_safety.allow_gate_overrides
-        ):
+        if not runtime.settings.tool_safety.gate_overrides_active:
             message += " Saved but ignored: approval overrides are not enabled."
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)
@@ -509,10 +503,7 @@ async def handle_here_approval_submission(runtime: SlackRuntime, payload: dict[s
             subject=subject,
         )
         message = f"Third-party write approvals: {value} (thread:{channel_id}:{root})."
-        if not (
-            runtime.settings.tool_safety.enabled
-            and runtime.settings.tool_safety.allow_gate_overrides
-        ):
+        if not runtime.settings.tool_safety.gate_overrides_active:
             message += " Saved but ignored: approval overrides are not enabled."
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)

@@ -37,8 +37,6 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
 )
-from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.stores import session_settle_state
 from daimon.core.turn.approvals import (
     AnnotationLookup,
@@ -52,7 +50,11 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import LegacyTurnIO
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.unattended import gate_session_snapshot, unattended_posture
+from daimon.core.turn.unattended import (
+    gate_session_snapshot,
+    session_annotations,
+    unattended_posture,
+)
 from fastmcp.exceptions import ToolError
 
 log = structlog.get_logger(__name__)
@@ -195,19 +197,12 @@ def _annotations_for(
     runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
 ) -> AnnotationLookup | None:
     """Read only trusted catalogues from this session, using its agent's credential."""
-    policy = runtime.settings.tool_safety
-    if not policy.enabled or not policy.trusted_annotations:
-        return None
-    return mcp_annotation_lookup(
-        server_urls={
-            s.name: s.url for s in session.agent.mcp_servers if s.name in policy.trusted_annotations
-        },
-        token_for=agent_mcp_token_for(
-            runtime.session_factory,
-            fernet=runtime.fernet,
-            tenant_id=auth.tenant_id,
-            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=session.agent.id),
-        ),
+    return session_annotations(
+        runtime.settings.tool_safety,
+        session,
+        session_factory=runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        fernet=runtime.fernet,
     )
 
 

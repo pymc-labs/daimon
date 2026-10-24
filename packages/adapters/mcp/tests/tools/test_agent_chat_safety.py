@@ -1195,24 +1195,39 @@ async def test_session_annotations_over_fake_http(
     assert seen.count("tools/list") == int(trusted)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("trusted", [False, True])
 def test_annotation_credentials_use_the_sessions_agent(
-    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+    enabled: bool, trusted: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from daimon.core.turn import unattended
+
     fake = FakeSession()
+    factory = async_sessionmaker[AsyncSession]()
     runtime = _runtime(
-        fake, factory, ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",))
+        fake,
+        factory,
+        ToolSafetyPolicy(enabled=enabled, trusted_annotations=("linear",) if trusted else ()),
     )
     token_builder = MagicMock()
-    monkeypatch.setattr(safety, "agent_mcp_token_for", token_builder)
+    monkeypatch.setattr(unattended, "agent_mcp_token_for", token_builder)
     lookup_builder = MagicMock()
-    monkeypatch.setattr(safety, "mcp_annotation_lookup", lookup_builder)
+    monkeypatch.setattr(unattended, "mcp_annotation_lookup", lookup_builder)
     # An agent key can belong to another agent than the session being continued.
     auth = replace(_auth(), agent_id=uuid.uuid4())
-    safety._annotations_for(runtime, auth, fake.model)  # pyright: ignore[reportPrivateUsage]
+    result = safety._annotations_for(runtime, auth, fake.model)  # pyright: ignore[reportPrivateUsage]
+    if not enabled or not trusted:
+        assert result is None
+        token_builder.assert_not_called()
+        lookup_builder.assert_not_called()
+        return
+    assert result is lookup_builder.return_value
     token_builder.assert_called_once_with(
         factory, fernet=runtime.fernet, tenant_id=_TENANT_ID, agent_id=_AGENT_UUID
     )
-    assert lookup_builder.call_args.kwargs["server_urls"] == {"linear": _LINEAR_URL}
+    lookup_builder.assert_called_once_with(
+        server_urls={"linear": _LINEAR_URL}, token_for=token_builder.return_value
+    )
 
 
 async def test_a_confirmation_is_gated_before_it_resumes_the_turn(
