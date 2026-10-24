@@ -70,14 +70,14 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             or len(title) > 200
         ):
             raise ToolError(
-                "An attended owner turn, command (1–8000 characters) and title (1–200 "
+                "The owner must be here to approve a command (1–8000 characters) and title (1–200 "
                 "characters) are required"
             )
         gap = await _session_gate.session_card_gap(
             runtime, auth, origin, tool_name="start_long_job"
         )
         if gap is not None:
-            raise ToolError("Approval of this exact command is required in the originating turn")
+            raise ToolError("Approval of this exact command is required in this conversation")
         async with runtime.session_factory.begin() as db:
             live = await get_live_thread_session(
                 db,
@@ -98,7 +98,7 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 ceilings=runtime.settings.long_jobs,
             )
         if live is None:
-            raise ToolError("Parent session is unavailable")
+            raise ToolError("The original conversation is unavailable")
         parent = await retrieve_session(runtime.client, live.ma_session_id, scope=mcp_scope(auth))
         # Bind idempotency to provider evidence, never a caller-invented key.
         events = await LegacyTurnIO(runtime.client, parent.id, scope=mcp_scope(auth)).replay()

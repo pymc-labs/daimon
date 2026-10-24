@@ -1073,6 +1073,8 @@ async def test_long_job_act_read_invariant(
                 now=now,
                 expires_at=now + dt.timedelta(minutes=10),
                 chat_session_id="test-session",
+                sender_foreign=False,
+                shared_channel=False,
             )
         origin_id = str(origin.id)
     monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))

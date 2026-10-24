@@ -254,7 +254,7 @@ class LongJobExecutor:
         except WorkerVanished as exc:
             outcome = "lost"
             manifest = LongJobManifest(
-                exit_code=None, summary=str(exc)[:4000] or "Worker session vanished"
+                exit_code=None, summary=str(exc)[:4000] or "Worker is no longer available"
             )
         finally:
             if drive is not None:
@@ -295,7 +295,7 @@ class LongJobExecutor:
                     )
                     manifest = LongJobManifest(
                         exit_code=None,
-                        summary="Interrupt was not acknowledged; the worker session was archived.",
+                        summary="Interrupt was not acknowledged; the worker was archived.",
                     )
                 else:
                     async with self.sm.begin() as db:
@@ -309,7 +309,7 @@ class LongJobExecutor:
                 except WorkerVanished:
                     outcome = "lost"
                     manifest = LongJobManifest(
-                        exit_code=None, summary="Worker session vanished during stop"
+                        exit_code=None, summary="Worker is no longer available during stop"
                     )
                 else:
                     async with self.sm.begin() as db:

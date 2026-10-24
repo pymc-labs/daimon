@@ -598,8 +598,8 @@ def prompt_for_tool_call(
         )
         detail_lines = (
             f"Title: {data.get('title', '')}",
-            f"Deadline (minutes): {data.get('deadline_minutes') or 'tenant default'}",
-            f"Dollar cap: {data.get('max_usd') or 'tenant default'}",
+            f"Deadline (minutes): {data.get('deadline_minutes') or 'configured default'}",
+            f"Dollar cap: {data.get('max_usd') or 'configured default'}",
             f"Exact command:\n{data.get('command', '')}",
         )
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
