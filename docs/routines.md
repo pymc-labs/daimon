@@ -39,7 +39,8 @@ clearing delivery, changing the budget, or selecting DM. Legacy routines with
 unknown provenance keep ordinary channel/thread edits, clearing and normal firing
 on every platform, but cannot select DM. Recreate the routine from its channel
 or thread to get DM delivery. DM routines run through the normal live-DM path,
-with the owner’s ordinary memory, credentials and tools. Execution is unattended;
+with the owner’s ordinary credentials and tools, and can read and write the
+owner’s personal memory under the normal live-DM memory policy. Execution is unattended;
 permitted tools retain ordinary DM side-effect risk, and nobody watches intermediate actions.
 
 The host queues the final reply through the outbox and sends chunks of at
@@ -589,8 +590,10 @@ Explicit owner-DM routines are normal live-DM turns: scheduled messages from the
 owner into their own DM. Each fire re-resolves membership, the invoker role gate
 and admin bypass switch, tenant DM controls, recipient policy, agent eligibility
 and immutable creation provenance. It uses the ordinary admission, binding and
-runner, including normal owner credentials, personal/shared memory and memory
-write policy. A memory outage degrades as it does for a live DM.
+runner, including normal owner credentials and personal/shared memory. Explicit
+DM routines can read and write the owner’s personal memory under the normal
+live-DM memory policy, including `dm_memory_read_only` when enabled. A memory
+outage degrades as it does for a live DM.
 
 Headless routine sessions, including legacy destination-free and owner-only runs,
 mount the agent's shared memory read-only and never mount personal memory. They
@@ -632,8 +635,8 @@ Late writes compare the captured producer, destination and revision; every chunk
 and file rechecks them.
 An old result cannot acquire a new agent's authority or move to a public target.
 
-Only explicit owner-DM routines mount personal memory, through the normal
-live-DM path. Every headless routine uses shared memory read-only and never
+Only explicit owner-DM routines mount personal memory, with read and write
+access under the normal live-DM memory policy. Every headless routine uses shared memory read-only and never
 mounts personal memory, including legacy rows with neither destination nor
 channel and routines switched to **No automatic delivery**. Clearing DM delivery
 erases the old private result; the next fire runs headless without personal
