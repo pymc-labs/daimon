@@ -246,6 +246,8 @@ from daimon.core.turn.slots import (
 )
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
+    QUEUE_NOTICE,
+    HeldThreads,
     ThreadQueue,
     claim_dispatch,
     dispatch_and_drain,
@@ -776,7 +778,7 @@ class DaimonBot(commands.Bot):
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
         # turn so the user doesn't lose messages they fired while the bot was busy.
-        self._processing: set[int] = set()
+        self._processing: HeldThreads[int] = HeldThreads()
         self._processing_tasks: dict[int, asyncio.Task[object]] = {}
         # The running turn of each thread, for a typed "stop" (`_typed_stop`).
         self._typed_stops = TypedStops()
@@ -3592,6 +3594,8 @@ class DaimonBot(commands.Bot):
         """
         self._queued_reactions.add(id(message))
         self._thread_queue.enqueue(thread_id, message)
+        generation = self._processing.generation(thread_id)
+        notify = self._processing.should_notify(thread_id)
         try:
             if self._thread_lost(message):
                 return  # no reaction in a gone or closed thread; the release finishes the row
@@ -3607,6 +3611,19 @@ class DaimonBot(commands.Bot):
             # The drain can finish while add_reaction is still in flight.
             if id(message) not in self._queued_reactions and not self._thread_lost(message):
                 await self._remove_mention_reaction(message, "⌛")
+        if (
+            notify
+            and not self._thread_lost(message)
+            and self._processing.is_current(thread_id, generation)
+        ):
+            try:
+                await message.channel.send(QUEUE_NOTICE)
+            except Exception as exc:
+                log.warning(
+                    "mention_queue.notice_failed",
+                    thread_id=str(thread_id),
+                    err_type=type(exc).__name__,
+                )
 
     def _thread_lost(self, message: discord.Message) -> bool:
         """Whether `message` sits in a thread that is gone or closed.
@@ -3705,7 +3722,7 @@ class DaimonBot(commands.Bot):
 
     @property
     def _thread_queue(self) -> ThreadQueue[int, discord.Message]:
-        return ThreadQueue(self._processing, self._pending)
+        return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
     async def _drain_pending_mentions(
         self, thread_id: int, guild_id: str, tenant_id: uuid.UUID

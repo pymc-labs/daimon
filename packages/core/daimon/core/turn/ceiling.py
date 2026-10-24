@@ -34,11 +34,11 @@ __all__ = [
 # liveness deadline (time-since-last-event) instead of a flat wall-clock one.
 # That upgrade is now obsolete: the driver's eventless-cycle reconnect loop is
 # status-checked (it asks MA whether the session is still `running` before
-# reconnecting, rather than trusting silence), so the only thing left for this
-# ceiling to bound is a session MA will legitimately keep reporting as
-# `running` forever -- legal server behavior, since no server-side wall-clock
-# kill exists. That is a backstop value, not a liveness signal, so the flat
-# deadline is still the right shape.
+# reconnecting, rather than trusting silence). Idempotent reads also have
+# their own short budgets, but repeated unknown probes, reconnects or a session
+# MA keeps reporting as `running` can last forever: no server-side wall-clock
+# kill exists. The ceiling caps the whole turn, independently of those call
+# budgets, so a flat deadline is still the right shape.
 TURN_CEILING_S: float = 45.0 * 60.0
 
 #: The running turn's deadline, for anything inside it that must not promise a

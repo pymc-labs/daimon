@@ -375,6 +375,16 @@ generic session records retain their validation. Turn seal stamping uses this
 read and the existing metadata-only update port, with no extra provider request.
 Prepared legacy replay and interruption pass the caller's admitted scope to the
 private transport while preserving SDK traffic and recovery behavior.
+
+The Anthropic legacy turn transport bounds idempotent reads (status, replay and
+idle history) to 60 seconds including retries and pagination. Its read client
+uses a 30-second request timeout and at most two retries. Turn mutations (input,
+confirmations, interrupt and archive) retain the original client timeout and
+always disable automatic SDK retries, including attended turns. An unknown
+liveness probe keeps the turn held and probes again until a definitive result,
+cancellation or the overall turn ceiling. Live streams retain their separate
+read timeout.
+
 The Anthropic environment driver exposes a scoped create-and-discard edge for legacy environment forks that ignored the SDK reply. It validates the request configuration and tenant authorization without decoding unused response fields; generic Environment records retain their existing validation.
 
 MCP agent chat and session inspection use tenant/account scopes derived from
@@ -529,13 +539,14 @@ consumes them. Shared turns retain their persisted accountless slot and the
 writer's operation scope. Send claims survive restart; uncertain delivery never
 permits automatic resend. The Anthropic stop observer can forward its normalized
 wait events to this same journal without changing provider requests. Legacy
-turns and unbound direct port callers retain their previous behavior. These host
+turns and unbound direct port callers do not gain durable host claims. These host
 proofs do not promote the separate C01–C18 adapter's PENDING entries.
 
 Claimed Anthropic mutations suppress SDK retries only during their delivery
 call, so losing an acknowledgement leaves an unknown outcome for reconciliation
-instead of a second native POST. Read operations and legacy requests retain the
-injected client's retry budget; the shared client is never modified.
+instead of a second native POST. Turn sends, confirmations, interrupts and
+archives disable SDK retries even without a durable claim. Idempotent reads
+have separate budgets; the shared client is never modified.
 
 Host codecs carry native `UsageObservation` values separately from display
 events and expose an async `replay_usage()` walk for interrupted, failed and

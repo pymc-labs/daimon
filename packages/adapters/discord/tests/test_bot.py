@@ -48,7 +48,9 @@ def _make_runtime(
     discord_settings.thread_open_notice_after_s = 3.0
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
-    anthropic = AsyncMock()
+    anthropic = AsyncMock(max_retries=8)
+    anthropic.with_options = MagicMock(return_value=anthropic)
+    anthropic.with_middleware = MagicMock(return_value=anthropic)
     # Dead-session recovery's transcript rescue (`_replay_previous_session`)
     # walks this as an async iterator, not an awaitable -- an unconfigured
     # AsyncMock attribute returns a coroutine instead and blows up with

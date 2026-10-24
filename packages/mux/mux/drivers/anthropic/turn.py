@@ -130,7 +130,7 @@ class AnthropicEvents:
     offers no turn precondition or resumable SSE cursor; these requests fail
     before I/O rather than silently weakening those guarantees. A lost POST
     acknowledgement reports outcome_unknown and is never retried by this port
-    (the injected SDK retry policy remains the host's responsibility).
+    or by its SDK client; turn mutations always disable automatic retries.
     """
 
     def __init__(
@@ -167,7 +167,9 @@ class AnthropicEvents:
         inputs = translate_inputs(events)
         try:
             result = await provider_call(
-                mutation_client(self._client).beta.sessions.events.send(session.id, events=inputs)
+                mutation_client(self._client, single_attempt=True).beta.sessions.events.send(
+                    session.id, events=inputs
+                )
             )
         except ProviderError as error:
             cause = error.__cause__
@@ -261,7 +263,7 @@ class AnthropicEvents:
         requested_at = datetime.now(UTC)
         try:
             await provider_call(
-                mutation_client(self._client).beta.sessions.events.send(
+                mutation_client(self._client, single_attempt=True).beta.sessions.events.send(
                     session.id, events=[{"type": "user.interrupt"}]
                 )
             )
