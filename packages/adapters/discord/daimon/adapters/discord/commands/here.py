@@ -58,6 +58,8 @@ class ApprovalGateView(discord.ui.View):
         tenant_id: uuid.UUID,
         channel_id: str,
         thread_id: str | None = None,
+        *,
+        include_confidential: bool = False,
     ) -> None:
         super().__init__(timeout=300)
         self.runtime = runtime
@@ -86,6 +88,11 @@ class ApprovalGateView(discord.ui.View):
         )
         select.callback = self.change
         self.add_item(select)
+        if include_confidential:
+            confidential = MakeConfidentialView(runtime, tenant_id, channel_id)
+            for item in tuple(confidential.children):
+                confidential.remove_item(item)
+                self.add_item(item)
 
     async def change(self, interaction: BotInteraction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -247,19 +254,18 @@ class HereCog(commands.Cog):
             )
             card = card.model_copy(update={"text": render_here_card_text(card)})
             view = (
-                MakeConfidentialView(runtime, tenant_id, str(channel.id))
-                if visibility.outsiders_can_view
-                and card.effective_readers != "own"
-                and is_guild_admin(interaction)
+                ApprovalGateView(
+                    runtime,
+                    tenant_id,
+                    str(channel.id),
+                    thread_id,
+                    include_confidential=bool(
+                        visibility.outsiders_can_view and card.effective_readers != "own"
+                    ),
+                )
+                if is_guild_admin(interaction)
                 else None
             )
-            if is_guild_admin(interaction):
-                approval_view = ApprovalGateView(runtime, tenant_id, str(channel.id), thread_id)
-                if view is not None:
-                    for item in tuple(view.children):
-                        view.remove_item(item)
-                        approval_view.add_item(item)
-                view = approval_view
             await interaction.edit_original_response(
                 embed=build_here_embed(card),
                 view=view,

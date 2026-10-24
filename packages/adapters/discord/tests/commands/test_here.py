@@ -210,3 +210,28 @@ async def test_native_admin_can_set_every_approval_scope(
     assert stored == value
     assert len(events) == 1 and events[0].platform_user_id == "native-admin"
     fresh.assert_awaited_once()
+
+
+async def test_approval_controls_preserve_confidential_action_and_its_admin_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    import discord
+    from daimon.adapters.discord import confidential
+    from daimon.adapters.discord.commands.here import ApprovalGateView
+
+    refuse = AsyncMock(return_value=True)
+    monkeypatch.setattr(confidential, "refuse_if_not_admin", refuse)
+    runtime = MagicMock()
+    view = ApprovalGateView(runtime, uuid.uuid4(), "123", "456", include_confidential=True)
+    assert len(view.children) == 2
+    assert isinstance(view.children[0], discord.ui.Select)
+    button = view.children[1]
+    assert isinstance(button, discord.ui.Button)
+    assert button.label == "Make confidential"
+    interaction = MagicMock()
+    await button.callback(interaction)
+    refuse.assert_awaited_once_with(interaction)
+    runtime.sessionmaker.assert_not_called()

@@ -191,8 +191,14 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
     if state in {"no_view", "no_replies", "no_agent"}:
         # Nothing answers here, so reading and publishing scope would mislead.
         return HereCardPresentation(
-            state=state, title=title, colour=colour, subline=subline,
-            extras=(*visibility_lines, *((card.approval_gate_note,) if card.approval_gate_note else ())),
+            state=state,
+            title=title,
+            colour=colour,
+            subline=subline,
+            extras=(
+                *visibility_lines,
+                *((card.approval_gate_note,) if card.approval_gate_note else ()),
+            ),
         )
     reading = {
         "any": "Any conversation",

@@ -688,3 +688,22 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
     teams_lookup.assert_awaited_with(ANY, account_id=SETTER)
     assert unnamed == "unknown", "someone never named to us reads unknown"
     assert entra_id not in named + unnamed, "the Entra object id never reaches the card"
+
+
+@pytest.mark.parametrize("has_agent", [False, True])
+def test_outsider_warning_and_approval_note_are_both_visible(has_agent: bool) -> None:
+    card = HereCard(
+        agent_name="ResearchBot" if has_agent else None,
+        tier="channel" if has_agent else None,
+        channel_rule=ChannelRule(),
+        effective_readers="any",
+        effective_writers="any",
+        who_may_answer="",
+        reads_kept_inside=False,
+        outsiders_can_view=True,
+        approval_gate_note="Third-party write approvals: on (server).",
+        text="",
+    )
+    text = render_here_card_text(card)
+    assert "outside your organisation" in text
+    assert "Third-party write approvals: on (server)." in text
