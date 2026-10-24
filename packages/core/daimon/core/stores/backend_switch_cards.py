@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from daimon.core._models import BackendSwitchCard
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import ScalarSelect, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 SwitchCardStatus = Literal["pending", "claimed", "applied", "refused", "cancelled"]
@@ -205,6 +205,16 @@ async def record_refresh(
     """A switch card re-previewed when it was built (J5): the stale preview it was asked
     with, and the one it showed. Never pressable (no message) and never a waiting card
     (no top-level agent); the approved call spends it once (`consume_refresh`)."""
+    # This account's refreshes that expired unspent go first: nothing else sweeps them.
+    await session.execute(
+        delete(BackendSwitchCard).where(
+            BackendSwitchCard.tenant_id == tenant_id,
+            BackendSwitchCard.account_id == account_id,
+            BackendSwitchCard.reference.has_key("refresh"),
+            BackendSwitchCard.status.in_(("pending", "claimed")),
+            BackendSwitchCard.expires_at <= func.now(),
+        )
+    )
     fresh_reference = fresh.model_dump(mode="json")
     record = BackendSwitchCard(
         tenant_id=tenant_id,
@@ -229,20 +239,18 @@ async def record_refresh(
     await session.flush()
 
 
-async def consume_refresh(
-    session: AsyncSession,
-    *,
+def _refresh_row(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     agent_name: str,
     stale_digest: str,
     fresh_digest: str,
     fresh_revision: int,
+    status: str,
     now: datetime,
-) -> bool:
-    """Spend one card refresh: the approved call's stale preview, re-previewed to exactly
-    the agent's current one. False when none matches (the agent changed again)."""
-    target = (
+) -> ScalarSelect[uuid.UUID]:
+    """One live refresh row for this account, agent and stale -> fresh preview."""
+    return (
         select(BackendSwitchCard.id)
         .where(
             BackendSwitchCard.tenant_id == tenant_id,
@@ -257,16 +265,74 @@ async def consume_refresh(
                     }
                 }
             ),
-            BackendSwitchCard.status == "pending",
+            BackendSwitchCard.status == status,
             BackendSwitchCard.expires_at > now,
         )
         .limit(1)
         .with_for_update(skip_locked=True)
         .scalar_subquery()
     )
-    spent = await session.scalar(
+
+
+async def approve_refresh(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    agent_name: str,
+    stale_digest: str,
+    fresh_digest: str,
+    fresh_revision: int,
+    now: datetime,
+) -> bool:
+    """The person pressed Confirm on a re-previewed card: its refresh may now be spent
+    (pending -> claimed). A denied or expired card's refresh never is."""
+    target = _refresh_row(
+        tenant_id,
+        account_id,
+        agent_name,
+        stale_digest,
+        fresh_digest,
+        fresh_revision,
+        "pending",
+        now,
+    )
+    approved = await session.scalar(
         update(BackendSwitchCard)
         .where(BackendSwitchCard.id == target, BackendSwitchCard.status == "pending")
+        .values(status="claimed")
+        .returning(BackendSwitchCard.id)
+    )
+    return approved is not None
+
+
+async def consume_refresh(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    agent_name: str,
+    stale_digest: str,
+    fresh_digest: str,
+    fresh_revision: int,
+    now: datetime,
+) -> bool:
+    """Spend one approved card refresh: the approved call's stale preview, re-previewed to
+    exactly the agent's current one. False when none matches (the agent changed again,
+    or that card was denied or never confirmed)."""
+    target = _refresh_row(
+        tenant_id,
+        account_id,
+        agent_name,
+        stale_digest,
+        fresh_digest,
+        fresh_revision,
+        "claimed",
+        now,
+    )
+    spent = await session.scalar(
+        update(BackendSwitchCard)
+        .where(BackendSwitchCard.id == target, BackendSwitchCard.status == "claimed")
         .values(status="applied", outcome="Switched by a card re-previewed when it was built.")
         .returning(BackendSwitchCard.id)
     )

@@ -220,8 +220,22 @@ async def test_provider_card_is_bound_to_tenant_policy_and_current_admin(owned_p
     admin.return_value = False
     assert await check(prompt, "requester")
     admin.return_value = True
+    # A refusal other than a stale preview keeps its own reason: previewing again
+    # won't help, so it is never the retryable stale-preview text (J5).
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.confirmation import STALE_SETTING_TEXT
+    from daimon.core.fleet_configuration import configuration_refusal
+
+    real = service.tenant_policy
+    service.tenant_policy = AsyncMock(side_effect=AgentBackendRefused("feature_disabled"))
+    refused = await check(prompt, "requester")
+    assert refused != STALE_SETTING_TEXT and "Preview these exact" not in (refused or "")
+    with pytest.raises(ValueError, match="emergency stop") as plain:
+        await prepare(prompt)
+    assert str(plain.value) == configuration_refusal("feature_disabled")
+    service.tenant_policy = real
     await service.set_tenant_allowlist(agent.tenant_id, providers, policy.revision, actor)
-    assert await check(prompt, "requester")
+    assert await check(prompt, "requester") == STALE_SETTING_TEXT
     assert not trace.replies and not trace.violations
 
 
