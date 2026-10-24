@@ -2127,107 +2127,6 @@ class WatchesSettings(BaseModel):
     )
 
 
-class RecruitmentBackendSettings(BaseModel):
-    base_url: str = Field(
-        default="https://synthetic.invalid",
-        description=("Recruitment API base URL for this tenant; trusted services only."),
-    )
-    api_key: SecretStr = Field(
-        default=SecretStr(""),
-        description=(
-            "Service-only recruitment Bearer key; never mounted in agent tools or provider "
-            "sessions."
-        ),
-    )
-
-
-class RecruitmentTenantSettings(BaseModel):
-    channel_ids: tuple[str, ...] = Field(
-        min_length=1,
-        description=(
-            "Required recruitment parent channel IDs; isolated from all general agent "
-            "readers, even while processing is disabled. Restart services to change."
-        ),
-    )
-    recruiter_user_ids: tuple[str, ...] = ()
-    recruiter_role_ids: tuple[str, ...] = ()
-    enabled: bool = False
-    raw_retention_days: int = Field(default=7, ge=1, le=365)
-    retention_days: int = Field(default=30, ge=1, le=3650)
-
-    @model_validator(mode="after")
-    def require_recruiters(self) -> RecruitmentTenantSettings:
-        if not self.recruiter_user_ids and not self.recruiter_role_ids:
-            raise ValueError("At least one recruiter user or role is required")
-        return self
-
-
-class RecruitmentSettings(BaseModel):
-    tenants: dict[str, RecruitmentTenantSettings] = Field(
-        default_factory=dict,
-        description=(
-            "Guild ID to recruitment settings (required nonempty channel_ids and "
-            "recruiter_user_ids or recruiter_role_ids). Immutable for the process lifetime; "
-            "restart Discord, MCP and scheduler together when changing. Privacy applies "
-            "even when recruitment processing is disabled. Set enabled=true in each tenant "
-            "to opt into processing."
-        ),
-    )
-
-    def is_recruitment_channel(
-        self, guild_id: str, channel_id: str, parent_id: str | None = ""
-    ) -> bool:
-        """Pure privacy boundary; None means an unresolved thread parent."""
-        tenant = self.tenants.get(guild_id)
-        return bool(
-            tenant
-            and (
-                channel_id in tenant.channel_ids
-                or parent_id is None
-                or parent_id in tenant.channel_ids
-            )
-        )
-
-    enabled: bool = Field(
-        default=False,
-        description=(
-            "Enable staffing reconciliation in existing Discord/scheduler processes. Each "
-            "tenant must also be enabled by operator configuration."
-        ),
-    )
-    backends: dict[uuid.UUID, RecruitmentBackendSettings] = Field(
-        default_factory=dict[uuid.UUID, RecruitmentBackendSettings],
-        description=(
-            "Tenant UUID to service-only recruitment base_url/api_key map. Supply only to "
-            "Discord and scheduler, never public sidecar or MCP."
-        ),
-    )
-    synthetic: bool = Field(
-        default=False,
-        description=(
-            "Use an in-process synthetic recruitment backend instead of any network calls. "
-            "For synthetic QA only; disabled by default. Real backend parity requires "
-            "separate validation."
-        ),
-    )
-    synthetic_failure_status: int = Field(
-        default=0,
-        ge=0,
-        le=599,
-        description=(
-            "Synthetic QA backend response failure status (for example 503); zero succeeds. "
-            "Used only when recruitment.synthetic is enabled."
-        ),
-    )
-    model: str = Field(
-        default="claude-haiku-4-5",
-        description=(
-            "Model for stateless structured recruitment extraction without tools, memory or "
-            "conversational provider sessions."
-        ),
-    )
-
-
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -2327,7 +2226,6 @@ class Settings(BaseSettings):
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
     watches: WatchesSettings = Field(default_factory=WatchesSettings)
-    recruitment: RecruitmentSettings = Field(default_factory=RecruitmentSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(
         default_factory=PrivateChannelMessagesSettings
     )
@@ -2473,7 +2371,6 @@ def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
 
 class _WatchesSettingsSource(BaseSettings):
     watches: WatchesSettings = Field(default_factory=WatchesSettings)
-    recruitment: RecruitmentSettings = Field(default_factory=RecruitmentSettings)
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_", env_nested_delimiter="__", extra="ignore", hide_input_in_errors=True
     )

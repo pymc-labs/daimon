@@ -12,7 +12,6 @@ from daimon.adapters.discord.routines_panel.write import (
     pause_routine_via_panel,
     resume_routine_via_panel,
 )
-from daimon.core.config import RecruitmentSettings
 from daimon.core.cron import next_slot_at_or_after
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +41,6 @@ async def test_load_guild_routines_sorts_alphabetical_case_insensitive(
     entries, over_cap_count, _ = await load_guild_routines(
         db_session,
         client,
-        recruitment=RecruitmentSettings(),
         tenant_id=tenant_id,
     )
     labels = [e.label for e in entries]
@@ -64,7 +62,6 @@ async def test_load_guild_routines_caps_at_25_with_over_cap_count(
     entries, over_cap_count, _ = await load_guild_routines(
         db_session,
         client,
-        recruitment=RecruitmentSettings(),
         tenant_id=tenant_id,
     )
     assert len(entries) == 25, "load must cap entries at the Discord 25-option ceiling"
@@ -79,7 +76,6 @@ async def test_load_guild_routines_empty_returns_empty_tuple(
     entries, over_cap_count, agent_name_map = await load_guild_routines(
         db_session,
         client,
-        recruitment=RecruitmentSettings(),
         tenant_id=tenant_id,
     )
     assert entries == [], "empty DB must yield empty entries list"
@@ -112,7 +108,6 @@ async def test_load_guild_routines_glyph_per_row(
     entries, _, _ = await load_guild_routines(
         db_session,
         client,
-        recruitment=RecruitmentSettings(),
         tenant_id=tenant_id,
     )
     by_label = {e.label: e for e in entries}
@@ -132,7 +127,6 @@ async def test_load_guild_routines_agent_name_fallback_for_missing_id(
     entries, _, _ = await load_guild_routines(
         db_session,
         client,
-        recruitment=RecruitmentSettings(),
         tenant_id=tenant_id,
     )
     assert len(entries) == 1
@@ -152,7 +146,6 @@ async def test_load_guild_routines_label_fallback_for_blank_trigger(
     entries, _, _ = await load_guild_routines(
         db_session,
         client,
-        recruitment=RecruitmentSettings(),
         tenant_id=tenant_id,
     )
     assert len(entries) == 1
@@ -224,7 +217,6 @@ async def test_panel_rows_redact_legacy_diagnostics_for_non_owners(
             client,
             tenant_id=tenant_id,
             viewer_user_id=viewer,
-            recruitment=RecruitmentSettings(),
         )
         result = entries[0].routine
         if viewer == "owner":

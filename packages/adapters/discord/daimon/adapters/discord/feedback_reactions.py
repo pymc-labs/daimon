@@ -44,7 +44,6 @@ from daimon.adapters.discord.feedback_modal import support_channel_for
 from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.support_escalation import SupportEscalateButton, discord_channel
 from daimon.core.agent_post_identity import is_our_discord_webhook
-from daimon.core.config import RecruitmentSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import (
     Vote,
@@ -118,8 +117,7 @@ class FeedbackReactionCog(commands.Cog):
     that catches broadly.
     """
 
-    def __init__(self, bot: DaimonBot, *, recruitment: RecruitmentSettings | None = None) -> None:
-        self._recruitment = recruitment or RecruitmentSettings()
+    def __init__(self, bot: DaimonBot) -> None:
         self._bot = bot
         # message id -> "the bot wrote it", populated only by a fetch that
         # actually resolved an author. Per-process and deliberately not
@@ -138,19 +136,6 @@ class FeedbackReactionCog(commands.Cog):
             log.exception("feedback_reactions.handler_failed", err_type=type(err).__name__)
 
     async def _record_vote_from_reaction(self, payload: discord.RawReactionActionEvent) -> None:
-        if payload.guild_id is not None:
-            channel = self._bot.get_channel(payload.channel_id)
-            parent = (
-                str(channel.parent_id)
-                if isinstance(channel, discord.Thread) and channel.parent_id
-                else ""
-                if isinstance(channel, discord.abc.GuildChannel)
-                else None
-            )
-            if self._recruitment.is_recruitment_channel(
-                str(payload.guild_id), str(payload.channel_id), parent
-            ):
-                return
         if self._bot.user is None:
             return  # not connected yet
         bot_user_id = self._bot.user.id

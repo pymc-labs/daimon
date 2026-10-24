@@ -15,7 +15,6 @@ from daimon.core.headless_runner import run_turn
 from daimon.core.routine_delivery import agent_posted_to
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
@@ -105,7 +104,6 @@ async def _final_state(
     )
     states: list[TurnState] = []
     await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=build_fake_anthropic(router.dispatch),
         agent_id="agent_x",
         environment_id="env_x",

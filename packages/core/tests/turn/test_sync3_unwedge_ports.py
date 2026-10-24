@@ -5,7 +5,6 @@ import asyncio
 import httpx
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import ResourceRef, Scope
@@ -74,7 +73,6 @@ async def test_sdk_composed_mux_recovery_matches_main_legacy_requests_and_effect
         lifecycle = RecordingLifecycle()
         async with transport.client() as client:
             state = await run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id="session",
                 user_message="retry me",
@@ -119,7 +117,6 @@ async def test_injected_backend_refusal_never_uses_ancillary_sdk_for_recovery() 
             account_id=_SCOPE.account_id,
         )
         state = await run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=client,
             session_id="session",
             user_message="retry me",

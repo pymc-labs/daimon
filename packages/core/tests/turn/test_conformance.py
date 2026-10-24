@@ -21,7 +21,6 @@ from daimon.core.turn.io import TurnEvent
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import PreparedTurn
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import isolated_test_schema, require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
@@ -155,7 +154,6 @@ async def run_host(monkeypatch, event, persistence=None, *, io_factory=OfflineIO
     transport = ScriptedTransport()
     async with build_async_anthropic(transport=httpx.MockTransport(transport.dispatch)) as client:
         state = await driver.run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=client,
             session_id=event.session_id,
             user_message="offline",

@@ -50,7 +50,6 @@ typo is silent — check the spelling here.
 - [Turn Queue](#turn-queue)
 - [Fleet](#fleet)
 - [Watches](#watches)
-- [Recruitment](#recruitment)
 - [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
@@ -1521,55 +1520,6 @@ Enable OS-signed page-event and reviewed READ-tool polling producers and dispatc
 disabled until the execution-bound unattended origin grants, non-gateable cleanup and
 watch release are reviewed. The database global gate must also be explicitly enabled by
 an operator.
-
-## Recruitment
-
-Read from `daimon.core.config.RecruitmentSettings`. Prefix `DAIMON_RECRUITMENT__`.
-
-### `DAIMON_RECRUITMENT__TENANTS`
-
-`dict[str, RecruitmentTenantSettings]` · optional · default `{}`
-
-Guild ID to recruitment settings (required nonempty channel_ids and recruiter_user_ids
-or recruiter_role_ids). Immutable for the process lifetime; restart Discord, MCP and
-scheduler together when changing. Privacy applies even when recruitment processing is
-disabled. Set enabled=true in each tenant to opt into processing.
-
-### `DAIMON_RECRUITMENT__ENABLED`
-
-`bool` · optional · default `False`
-
-Enable staffing reconciliation in existing Discord/scheduler processes. Each tenant must
-also be enabled by operator configuration.
-
-### `DAIMON_RECRUITMENT__BACKENDS`
-
-`dict[UUID, RecruitmentBackendSettings]` · optional · default `{}`
-
-Tenant UUID to service-only recruitment base_url/api_key map. Supply only to Discord and
-scheduler, never public sidecar or MCP.
-
-### `DAIMON_RECRUITMENT__SYNTHETIC`
-
-`bool` · optional · default `False`
-
-Use an in-process synthetic recruitment backend instead of any network calls. For
-synthetic QA only; disabled by default. Real backend parity requires separate
-validation.
-
-### `DAIMON_RECRUITMENT__SYNTHETIC_FAILURE_STATUS`
-
-`int` · optional · default `0`
-
-Synthetic QA backend response failure status (for example 503); zero succeeds. Used only
-when recruitment.synthetic is enabled.
-
-### `DAIMON_RECRUITMENT__MODEL`
-
-`str` · optional · default `claude-haiku-4-5`
-
-Model for stateless structured recruitment extraction without tools, memory or
-conversational provider sessions.
 
 ## Private Channel Messages
 

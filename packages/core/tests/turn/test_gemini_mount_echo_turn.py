@@ -14,7 +14,6 @@ import pytest
 from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.turn_fakes import RecordingLifecycle
 from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
@@ -148,7 +147,6 @@ async def test_completed_mounted_turn_delivers_its_answer_without_the_token(
         lifecycle = RecordingLifecycle()
         async with ScriptedTransport().client() as anthropic:
             state = await run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=anthropic,
                 session_id=session.ref.id,
                 user_message="q",

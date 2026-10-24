@@ -101,7 +101,7 @@ async def run_backfill_agent_names(
     tests don't need to round-trip through `asyncio.run` + `load_settings`.
     """
     async with rt.sessionmaker() as session:
-        rows = await list_routines_missing_agent_name(session, recruitment=rt.settings.recruitment)
+        rows = await list_routines_missing_agent_name(session)
 
     from_metadata = 0
     fallback = 0
@@ -323,12 +323,7 @@ async def run_sandbox_tools(
         tenant = await get_tenant(session, tenant_id)
         if tenant is None or tenant.archived_at is not None:
             raise UserFacingError("Select an active tenant.")
-        rows = {
-            rid: await get_routine(
-                session, rid, tenant_id=tenant_id, recruitment=rt.settings.recruitment
-            )
-            for rid in ids
-        }
+        rows = {rid: await get_routine(session, rid, tenant_id=tenant_id) for rid in ids}
         missing = [str(rid) for rid, row in rows.items() if row is None]
         if missing:
             raise UserFacingError(

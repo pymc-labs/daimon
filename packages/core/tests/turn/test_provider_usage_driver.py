@@ -19,7 +19,6 @@ from anthropic.types.beta.sessions import (
 from daimon.core.turn import driver
 from daimon.core.turn.io import LegacyTurnIO, TurnEvent, TurnStream
 from daimon.core.turn.persistence import TurnPersistence
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.usage_billing import ObservationBilled
 from daimon.testing.turn_fakes import BlockForever, FakeAnthropic, RecordingLifecycle, YieldEvent
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
@@ -144,7 +143,6 @@ async def test_revisions_survive_duplicate_display_ids_and_postrun_replay(
         return True
 
     final = await driver.run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=cast(AsyncAnthropic, fake),
         session_id="sess_1",
         user_message="hi",
@@ -176,7 +174,6 @@ async def test_pending_same_revision_is_retried_after_run(monkeypatch: pytest.Mo
         return len(recorded) > 1
 
     final = await driver.run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=cast(AsyncAnthropic, fake),
         session_id="sess_1",
         user_message="hi",
@@ -250,7 +247,6 @@ async def test_persisted_provider_pump_keeps_lease_through_usage_reconciliation(
 
     with persistence.activate():
         run = driver.run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=cast(AsyncAnthropic, fake),
             session_id="sess_1",
             user_message="hi",
@@ -295,7 +291,6 @@ async def test_failed_or_cancelled_pump_fetches_native_usage(
 
     task = asyncio.create_task(
         driver.run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=cast(AsyncAnthropic, fake),
             session_id="sess_1",
             user_message="hi",
@@ -329,7 +324,6 @@ async def test_billed_codec_without_reconciliation_refuses_before_send(
 
     with pytest.raises(ValueError, match="before sending"):
         await driver.run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=cast(AsyncAnthropic, fake),
             session_id="sess_1",
             user_message="hi",
@@ -360,7 +354,6 @@ async def test_usage_only_native_frame_is_folded_without_an_sdk_meter(
         return True
 
     final = await driver.run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=cast(AsyncAnthropic, fake),
         session_id="sess_1",
         user_message="hi",

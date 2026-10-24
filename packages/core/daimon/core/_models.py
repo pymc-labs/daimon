@@ -4471,66 +4471,6 @@ class LeadMailboxMessageRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class RecruitmentThreadRecord(Base):
-    __tablename__ = "recruitment_threads"
-    seen_watermark: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    covered_watermark: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    thread_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    parent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    card_id: Mapped[str | None] = mapped_column(Text)
-    claim_token: Mapped[str | None] = mapped_column(Text)
-    phase: Mapped[str] = mapped_column(Text, nullable=False)
-    revision: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_state: Mapped[bytes | None] = mapped_column(LargeBinary)
-    raw_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class RecruitmentMessageRecord(Base):
-    __tablename__ = "recruitment_messages"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["tenant_id", "thread_id"],
-            ["recruitment_threads.tenant_id", "recruitment_threads.thread_id"],
-            ondelete="CASCADE",
-        ),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    thread_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    message_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    raw_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    source_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    needs_enrichment: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    processed_revision: Mapped[str | None] = mapped_column(Text)
-    revision: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_source: Mapped[bytes | None] = mapped_column(LargeBinary)
-
-
-class RecruitmentOutboxRecord(Base):
-    __tablename__ = "recruitment_outbox"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["tenant_id", "thread_id"],
-            ["recruitment_threads.tenant_id", "recruitment_threads.thread_id"],
-            ondelete="CASCADE",
-        ),
-        UniqueConstraint("tenant_id", "stable_key", name="uq_recruitment_key"),
-        UniqueConstraint("tenant_id", "thread_id", "revision", name="uq_recruitment_revision"),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    revision: Mapped[str] = mapped_column(Text, nullable=False)
-    stable_key: Mapped[str] = mapped_column(Text, nullable=False)
-    state: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_request: Mapped[bytes | None] = mapped_column(LargeBinary)
-
-
 class SelfHostedAgentRecord(Base):
     """Tenant-owned resource; spec contains model, system, tools, skills and metadata."""
 

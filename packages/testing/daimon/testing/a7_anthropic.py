@@ -38,7 +38,6 @@ from daimon.core.turn import driver
 from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO, TurnIO
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
@@ -273,7 +272,6 @@ class StateReplay:
                 persistence.activate() if path == "mux" else nullcontext(),
             ):
                 state = await driver.run_turn(
-                    privacy=TurnPrivacy("test"),
                     anthropic=client,
                     session_id=session_id,
                     session_ref=ResourceRef(

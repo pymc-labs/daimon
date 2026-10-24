@@ -29,13 +29,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import (
-    AnthropicSettings,
-    DatabaseSettings,
-    McpSettings,
-    RecruitmentSettings,
-    Settings,
-)
+from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_panel_mcp_token
@@ -100,8 +94,7 @@ def _runtime(
         session_factory=sessionmaker,
         client=client if client is not None else MagicMock(),  # type: ignore[arg-type]
         settings=MagicMock(  # type: ignore[arg-type]
-            mcp=McpSettings(require_routine_destination=require_destination),
-            recruitment=RecruitmentSettings(),
+            mcp=McpSettings(require_routine_destination=require_destination)
         ),
         deployment_default=DeploymentDefault(),
     )

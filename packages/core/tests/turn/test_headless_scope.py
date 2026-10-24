@@ -8,7 +8,6 @@ import pytest
 from daimon.core import headless_runner
 from daimon.core.mux_backend import resource_scope
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
@@ -88,7 +87,6 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
     async with transport.client() as client:
         assert (
             await headless_runner.run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 agent_id=agent.id,
                 environment_id=environment.id,
@@ -140,7 +138,6 @@ async def test_mux_headless_missing_identity_fails_before_provider_io(
     async with transport.client() as client:
         with pytest.raises(ScopeViolation, match="authorized tenant/account"):
             await headless_runner.run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 agent_id="agent-headless",
                 environment_id="env-headless",

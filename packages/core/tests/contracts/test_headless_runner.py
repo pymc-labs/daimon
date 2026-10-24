@@ -27,7 +27,6 @@ from anthropic.types.beta import BetaCloudConfigParams, BetaEnvironment, BetaMan
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.privacy import TurnPrivacy
 from pydantic import HttpUrl, SecretStr
 
 from .conftest import LocalDaimonMCP
@@ -74,7 +73,6 @@ async def test_run_turn_attaches_daimon_mcp_vault(
     account_id = uuid.uuid4()
 
     await run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=anthropic_client,
         agent_id=live_agent.id,
         environment_id=live_environment.id,

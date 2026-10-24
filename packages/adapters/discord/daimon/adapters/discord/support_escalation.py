@@ -47,7 +47,6 @@ from typing import Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.recruitment_guard import protected_for_client
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.config import SupportSettings
@@ -155,10 +154,6 @@ async def post_to_support_channel(
         channel = bot.get_channel(int(channel_id))
         if channel is None:
             channel = await bot.fetch_channel(int(channel_id))
-        if protected_for_client(
-            bot, channel, str(getattr(getattr(channel, "guild", None), "id", ""))
-        ):
-            return False
         if not isinstance(channel, discord.abc.Messageable):
             _log.warning("support.channel_not_messageable", channel_id=channel_id)
             return False

@@ -36,7 +36,6 @@ from daimon.adapters.mcp.tools.discord._models import (
     ThreadRow,  # pyright: ignore[reportPrivateUsage]
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.discord._recruitment import protected, require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
@@ -184,7 +183,6 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
                 raise _bot_read_error(channel_id) from exc
             raise
         channel = _require_guild_channel(raw_channel, guild_id)
-        require_general_channel(runtime, guild_id, channel)
 
         if isinstance(channel, discord.Thread):
             raise ToolError("this is a thread — use read_thread")
@@ -237,8 +235,6 @@ async def _list_channels_impl(  # pyright: ignore[reportUnusedFunction]
         channels = await guild.fetch_channels()
         result: list[ChannelRow] = []
         for ch in channels:
-            if protected(runtime, guild_id, ch):
-                continue
             if not read_policy.lists(str(ch.id)):
                 continue
             if member.guild_permissions.administrator or ch.permissions_for(member).view_channel:
@@ -283,7 +279,6 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
                 raise _bot_read_error(channel_id) from exc
             raise
         channel = _require_guild_channel(raw_channel, guild_id)
-        require_general_channel(runtime, guild_id, channel)
 
         if isinstance(channel, discord.Thread):
             await _check_thread_view(c, channel, member, _require_discord_identity(auth))
@@ -396,7 +391,6 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 raise _bot_read_error(thread_id) from exc
             raise
         channel = _require_guild_channel(raw_channel, guild_id)
-        require_general_channel(runtime, guild_id, channel)
 
         if not isinstance(channel, discord.Thread):
             raise ToolError("not a thread — use read_channel for channels")
@@ -454,7 +448,6 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
         guild, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
         raw_parent = await _resolve_channel(c, channel_id)
         parent = _require_guild_channel(raw_parent, guild_id)
-        require_general_channel(runtime, guild_id, parent)
 
         if isinstance(parent, discord.Thread):
             raise ToolError("not a channel — list_threads takes a parent channel id")
@@ -469,7 +462,7 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
         active_threads = await guild.active_threads()
         result: list[ThreadRow] = []
         for t in active_threads:
-            if protected(runtime, guild_id, t) or t.parent_id != int(channel_id):
+            if t.parent_id != int(channel_id):
                 continue
             # Private threads: check membership/manage_threads
             if t.type is discord.ChannelType.private_thread:
@@ -483,8 +476,6 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
 
         # Archived public threads (private=False is default)
         async for t in parent.archived_threads(limit=50):
-            if protected(runtime, guild_id, t):
-                continue
             if read_policy.allows(str(t.id), str(parent.id)):
                 result.append(_to_thread_row(t))
 

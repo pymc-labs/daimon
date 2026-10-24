@@ -28,7 +28,6 @@ from daimon.core.posted_controls.confirmation import ConfirmationCardState, buil
 from daimon.core.turn import driver
 from daimon.core.turn.io import TurnEvent, TurnStream
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.run import _DeferredFailureLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_log import status_log_override
@@ -359,7 +358,6 @@ async def test_actual_driver_to_teams_surface_finalizes_without_synthetic_meter(
     posts = Posts()
     lifecycle = posts.lifecycle()
     final = await driver.run_turn(
-        privacy=TurnPrivacy("test"),
         anthropic=cast(AsyncAnthropic, FakeAnthropic()),
         session_id="session",
         user_message="hello",

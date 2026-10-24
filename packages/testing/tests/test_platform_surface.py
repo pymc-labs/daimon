@@ -13,10 +13,8 @@ import httpx
 import pytest
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
-from daimon.core.config import RecruitmentSettings
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.platform_surface import PlatformSurfaceCapture
 from daimon.testing.slack_surface import SlackSurfaceHarness
@@ -459,7 +457,6 @@ async def test_actual_host_driver_pumps_scripted_provider_into_real_platform_pos
         async def invoke(lc: Lifecycle) -> TurnState:
             await lc.post_initial()
             return await run_turn(
-                privacy=TurnPrivacy(platform, RecruitmentSettings()),
                 anthropic=provider,
                 session_id="sess:1",
                 user_message="qa input",

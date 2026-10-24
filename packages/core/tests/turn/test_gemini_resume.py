@@ -16,7 +16,6 @@ from daimon.core.turn import gemini as gemini_turn
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import RecordingLifecycle
@@ -186,7 +185,6 @@ async def turn(harness: Harness, *, deadline_s: float = 30) -> tuple[TurnState, 
     lifecycle = RecordingLifecycle()
     async with ScriptedTransport().client() as client:
         state = await run_turn(
-            privacy=TurnPrivacy("test"),
             anthropic=client,
             session_id=harness.session.id,
             user_message="question",

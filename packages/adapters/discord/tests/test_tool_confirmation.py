@@ -18,7 +18,6 @@ from daimon.adapters.discord.tool_confirmation import (
     discord_confirmation_hook,
 )
 from daimon.core.authz import Subject
-from daimon.core.config import RecruitmentSettings
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -33,7 +32,6 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
-from daimon.core.turn.privacy import TurnPrivacy
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -581,7 +579,6 @@ async def _run_turn_with_stalled_card_retire(
     started = asyncio.get_running_loop().time()
     final = await asyncio.wait_for(
         run_turn_on_leg(
-            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=fa,  # type: ignore[arg-type]
             session_id="sess_1",
             user_message="file a bug",

@@ -106,7 +106,6 @@ from daimon.core.turn.prepare import (
     bind_session_impl,
     clone_overrides,
 )
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.run import (
     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
     _turn_port_kwargs,  # pyright: ignore[reportPrivateUsage]
@@ -189,7 +188,6 @@ async def run_turn(
     agent_id: str,
     environment_id: str,
     trigger_message: str,
-    privacy: TurnPrivacy,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
     account_id: uuid.UUID | None = None,
@@ -214,7 +212,6 @@ async def run_turn(
     hold: TurnHold | None = None,
     turn_path: TurnPath | None = None,
 ) -> str:
-    privacy.check()
     observation = current_outcome.get()
     owns_observation = observation is None
     if observation is None and session_factory is not None:
@@ -225,7 +222,6 @@ async def run_turn(
             agent_id=agent_id,
             environment_id=environment_id,
             trigger_message=trigger_message,
-            privacy=privacy,
             origin=origin,
             mcp_settings=mcp_settings,
             account_id=account_id,
@@ -260,7 +256,6 @@ async def run_turn(
                 agent_id=agent_id,
                 environment_id=environment_id,
                 trigger_message=trigger_message,
-                privacy=privacy,
                 origin=origin,
                 mcp_settings=mcp_settings,
                 account_id=account_id,
@@ -324,7 +319,6 @@ async def run_turn_impl(
     agent_id: str,
     environment_id: str,
     trigger_message: str,
-    privacy: TurnPrivacy,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
     account_id: uuid.UUID | None = None,
@@ -441,7 +435,6 @@ async def run_turn_impl(
     the driver, so nothing below re-reads settings for the turn. ``None`` falls
     back to one settings read here.
     """
-    privacy.check()
     turn_scope: Scope | None = None
     selected_path = turn_path if turn_path is not None else load_turn_settings().path
     if selected_path == "mux":
@@ -662,7 +655,6 @@ async def run_turn_impl(
             ),
         ):
             state: TurnState = await drive_turn(
-                privacy=privacy,
                 anthropic=anthropic,
                 path=selected_path,
                 scope=turn_scope,

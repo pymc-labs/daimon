@@ -490,7 +490,6 @@ def discord_confirmation_hook(
         ):
             raise PermissionError("missing lead reader")
         return await require_lead_readable(
-            recruitment=runtime.settings.recruitment,
             sessionmaker=runtime.sessionmaker,
             fernet=fernet,
             resolver=resolver,

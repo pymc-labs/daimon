@@ -63,7 +63,6 @@ class RoutinesCog(commands.Cog):
                     runtime.anthropic,
                     tenant_id=tenant_id,
                     viewer_user_id=str(interaction.user.id),
-                    recruitment=runtime.settings.recruitment,
                 )
             state = RoutinesPanelState.initial(
                 rows=entries,

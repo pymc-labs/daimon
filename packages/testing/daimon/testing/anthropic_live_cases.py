@@ -16,7 +16,6 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.anthropic_live import MODEL, LiveContext, LiveRefused
@@ -143,7 +142,6 @@ async def a7_pair(context: LiveContext) -> Mapping[str, object]:
             started = time.perf_counter()
             with persistence.activate() if path == "mux" else nullcontext():
                 state = await run_turn(
-                    privacy=TurnPrivacy("test"),
                     anthropic=context.client,
                     session_id=ref.id,
                     session_ref=ref,

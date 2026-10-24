@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
@@ -163,8 +163,6 @@ async def _discord_budget_channel(
     """
     if not channel_id.isdigit():
         raise typer.BadParameter(f"{channel_id!r} is not a Discord channel id")
-    if rt.settings.recruitment.is_recruitment_channel(guild_id, channel_id, ""):
-        raise DaimonError("Source unavailable.")
     if rt.settings.discord is None:
         if missing_ok:
             return channel_id
@@ -178,17 +176,6 @@ async def _discord_budget_channel(
         if missing_ok:
             return channel_id
         raise DaimonError(f"Discord channel {channel_id} is not visible to daimon")
-    parent = channel.get("parent_id")
-    if rt.settings.recruitment.is_recruitment_channel(
-        guild_id,
-        channel_id,
-        ""
-        if channel.get("type") in {0, 2, 4, 5, 13, 15, 16}
-        else str(parent)
-        if parent and channel.get("type") in {10, 11, 12}
-        else None,
-    ):
-        raise DaimonError("Source unavailable.")
     if str(channel.get("guild_id")) != guild_id:
         raise DaimonError(f"channel {channel_id} is not in server {guild_id}")
     if channel.get("type") in _DISCORD_THREAD_TYPES:
@@ -464,18 +451,6 @@ async def channels_list(
             now=datetime.now(UTC),
             with_access=True,
         )
-    if platform == "discord" and workspace_id in rt.settings.recruitment.tenants:
-        visible = list(summary.channels)
-        visible.clear()
-        for entry in summary.channels:
-            try:
-                await _discord_budget_channel(
-                    rt, guild_id=workspace_id, channel_id=entry.channel_id, transport=None
-                )
-            except DaimonError:
-                continue
-            visible.append(entry)
-        summary = replace(summary, channels=visible)
     if as_json:
         console.print(json.dumps(asdict(summary)), soft_wrap=True, highlight=False, markup=False)
         return
@@ -785,17 +760,6 @@ async def _channel_label(
         return None
     if found is None or str(found.get("guild_id")) != workspace_id:
         return None
-    parent = found.get("parent_id")
-    if rt.settings.recruitment.is_recruitment_channel(
-        workspace_id,
-        channel_id,
-        ""
-        if found.get("type") in {0, 2, 4, 5, 13, 15, 16}
-        else str(parent)
-        if parent and found.get("type") in {10, 11, 12}
-        else None,
-    ):
-        return None
     name = found.get("name")
     return name if isinstance(name, str) else None
 
@@ -931,10 +895,6 @@ async def channels_rule_set(
     if thread and (category or writers or copy_from or release_agents or wanted_readers == "own"):
         raise typer.BadParameter("--thread takes only --readers inside or any")
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    if platform == "discord" and rt.settings.recruitment.is_recruitment_channel(
-        workspace_id, channel_id.strip(), ""
-    ):
-        raise DaimonError("Source unavailable.")
     kind = "category" if category else "thread" if thread else "channel"
     where = f"{platform}:{workspace_id} {kind}"
     # The CLI is the deployment operator.
@@ -962,10 +922,6 @@ async def channels_rule_set(
         )
     except (RuleRefused, InvalidChannelId) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    if platform == "discord" and workspace_id in rt.settings.recruitment.tenants:
-        await _discord_budget_channel(
-            rt, guild_id=workspace_id, channel_id=channel, transport=discord_transport
-        )
     label = (
         await _channel_label(
             rt,

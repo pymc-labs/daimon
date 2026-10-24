@@ -25,7 +25,6 @@ from daimon.adapters.mcp.tools.discord._client import (
     rest_client,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import AttachmentRow, MessageRow, SearchResult
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
@@ -138,11 +137,6 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
     # 1. Auth gates
     user_id = _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
-    if any(
-        runtime.settings.recruitment.is_recruitment_channel(guild_id, id)
-        for id in channel_ids or []
-    ):
-        raise ToolError("Source unavailable.")
     token = _require_bot_token(runtime)
 
     # Require at least one filter
@@ -178,7 +172,6 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                         raise _bot_read_error(ch_id) from exc
                     raise
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
-                require_general_channel(runtime, guild_id, guild_ch)
                 if isinstance(guild_ch, discord.Thread):
                     await _check_thread_view(c, guild_ch, member, user_id)
                     read_policy.require(ch_id, str(guild_ch.parent_id))
@@ -344,30 +337,6 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # 10. Map visible hits → MessageRow
         rows: list[MessageRow] = []
         for hit in visible_hits:
-            if guild_id in runtime.settings.recruitment.tenants:
-                parent = (
-                    ""
-                    if hit.channel_id in view_by_channel_id
-                    else parent_by_channel_id.get(hit.channel_id)
-                )
-                if parent is None:
-                    try:
-                        live = _require_guild_channel(
-                            await _resolve_channel(c, hit.channel_id), guild_id
-                        )
-                        parent = (
-                            str(live.parent_id)
-                            if isinstance(live, discord.Thread) and live.parent_id
-                            else None
-                            if isinstance(live, discord.Thread)
-                            else ""
-                        )
-                    except (ToolError, discord.HTTPException):
-                        continue
-                if runtime.settings.recruitment.is_recruitment_channel(
-                    guild_id, hit.channel_id, parent
-                ):
-                    continue
             rows.append(
                 MessageRow(
                     id=hit.id,
@@ -397,11 +366,7 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # existence/volume of messages in channels the caller cannot view.
         # Once anything is sealed, a scoped count could include hits in a sealed
         # thread under a scoped parent, so it reports only what is shown too.
-        exact_count = (
-            bool(channel_ids)
-            and not read_policy.withholds_hits
-            and guild_id not in runtime.settings.recruitment.tenants
-        )
+        exact_count = bool(channel_ids) and not read_policy.withholds_hits
         effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
         if read_policy.withholds_hits:
@@ -436,7 +401,6 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                         raise _bot_read_error(ch_id) from exc
                     raise
                 guild_ch = _require_guild_channel(raw_ch, guild_id)
-                require_general_channel(runtime, guild_id, guild_ch)
                 if missing := await _bot_lacks_read_permission(guild, guild_ch):
                     raise _bot_read_error(guild_ch, missing_history=missing == "history")
         return SearchResult(

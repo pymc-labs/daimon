@@ -447,7 +447,6 @@ class ConfirmClicker:
         self._bot = bot
         self._control_file = control_file
         self._qa_bot_ids = frozenset(settings.discord.qa_bot_user_ids)
-        self._recruitment = settings.recruitment
         self._lock = asyncio.Lock()
 
     async def handle(self, request: ClickRequest, *, peer_uid: int | None) -> dict[str, Any]:
@@ -504,11 +503,6 @@ class ConfirmClicker:
                 raise _Refused("channel not found") from None
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             raise _Refused("only server channels and threads are supported")
-
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(self._recruitment, channel, str(channel.guild.id)):
-            raise _Refused("this channel is reserved")
 
         from daimon.adapters.discord.tool_confirmation import confirmation_requester
 

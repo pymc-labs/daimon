@@ -30,7 +30,6 @@ from daimon.adapters.mcp.tools.discord._models import ThreadRow
 from daimon.adapters.mcp.tools.discord._read import (
     _to_thread_row,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_create_thread_permission,  # pyright: ignore[reportPrivateUsage]
     _check_rename_thread_permission,  # pyright: ignore[reportPrivateUsage]
@@ -75,7 +74,6 @@ async def _create_thread_impl(  # pyright: ignore[reportUnusedFunction]
         _, member = await _resolve_member(c, guild_id, _require_discord_identity(auth))
         raw_channel = await _resolve_channel(c, channel_id)
         channel = _require_guild_channel(raw_channel, guild_id)
-        require_general_channel(runtime, guild_id, channel)
 
         if isinstance(channel, discord.Thread):
             raise ToolError("not a channel — create_thread takes a parent channel id")
@@ -153,7 +151,6 @@ async def _rename_thread_impl(  # pyright: ignore[reportUnusedFunction]
         _, member = await _resolve_member(c, guild_id, user_id)
         raw_channel = await _resolve_channel(c, thread_id)
         channel = _require_guild_channel(raw_channel, guild_id)
-        require_general_channel(runtime, guild_id, channel)
         if not isinstance(channel, discord.Thread):
             raise ToolError("not a thread — rename_thread takes a thread id")
 

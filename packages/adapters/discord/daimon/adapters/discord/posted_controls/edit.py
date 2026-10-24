@@ -23,10 +23,6 @@ import aiohttp
 import structlog
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.posted_controls.view import build_card_view
-from daimon.adapters.discord.recruitment_guard import (
-    protected_for_client,
-    recruitment_settings_for_client,
-)
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.credential_submit import credential_card_edit, note_credential_save_failure
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -68,18 +64,6 @@ async def edit_posted_card(
             note_credential_save_failure(row, outcome)
         if row.origin_thread_id is None or row.posted_message_id is None:
             return
-        recruitment = recruitment_settings_for_client(client)
-        if recruitment is not None and recruitment.tenants:
-            try:
-                source = client.get_channel(
-                    int(row.origin_thread_id)
-                ) or await client.fetch_channel(int(row.origin_thread_id))
-            except discord.HTTPException:
-                return
-            if protected_for_client(
-                client, source, str(getattr(getattr(source, "guild", None), "id", ""))
-            ):
-                return
         view = build_card_view(
             card_for_request(
                 row,
@@ -147,10 +131,6 @@ async def edit_expired_posted_card(client: discord.Client, *, row: CredentialReq
         return False
     try:
         channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
-        if protected_for_client(
-            client, channel, str(getattr(getattr(channel, "guild", None), "id", ""))
-        ):
-            return False
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return False
         if (

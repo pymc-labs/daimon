@@ -158,7 +158,6 @@ from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
@@ -442,35 +441,6 @@ async def _build_fire(
                 await _refuse(s, row, "Daimon was removed from here.")
                 return
             platform = tenant.platform
-            privacy = TurnPrivacy(
-                platform,
-                settings.recruitment,
-                row.tenant_id,
-                row.source_thread_id or row.source_channel_id or row.channel_id or "",
-                row.source_channel_id or row.channel_id,
-            )
-            try:
-                privacy.check()
-            except AdmissionDenied:
-                await _refuse(s, row, "Source unavailable.")
-                return
-            # Stored destination metadata is resolved below by normal policy;
-            # configured parents can be refused before using stored trigger text.
-            if (
-                platform == "discord"
-                and row.destination_kind in {"channel", "thread"}
-                and settings.recruitment.is_recruitment_channel(
-                    tenant.external_id,
-                    row.destination_id or "",
-                    ""
-                    if row.destination_kind == "channel"
-                    else row.channel_id
-                    if row.channel_id != row.destination_id
-                    else None,
-                )
-            ):
-                await _refuse(s, row, "Source unavailable.")
-                return
             if row.destination_kind == "dm" and (
                 platform != "discord"
                 or not await dm_enabled(s, tenant_id=row.tenant_id)
@@ -796,7 +766,6 @@ async def _build_fire(
         held_fire: dict[str, Any] = {} if fire_hold is None else {"hold": fire_hold}
 
         result = await run_turn(
-            privacy=privacy,
             anthropic=client,
             agent_id=resolved_agent_id,
             environment_id=resolved_env_id,
@@ -1669,7 +1638,6 @@ async def run(
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)
-            await _sweep_recruitment(sm, settings, push_resync_fernet, client)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
@@ -1707,7 +1675,6 @@ async def run(
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)
-            await _sweep_recruitment(sm, settings, push_resync_fernet, client)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
@@ -1809,21 +1776,6 @@ async def _drain_github_installation_reconciliations(
 def run_sync() -> None:
     """Console-script entrypoint. ``daimon-scheduler`` resolves here."""
     sys.exit(asyncio.run(run()))
-
-
-async def _sweep_recruitment(
-    sm: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    fernet: MultiFernet | None,
-    client: AsyncAnthropic,
-) -> None:
-    from daimon.core.recruitment_runtime import reconcile_recruitment
-
-    try:
-        await reconcile_recruitment(sm, settings, fernet, client)
-    except Exception:
-        # Never include candidate content or upstream response bodies in logs.
-        log.error("scheduler.recruitment_reconciliation_failed")
 
 
 if __name__ == "__main__":

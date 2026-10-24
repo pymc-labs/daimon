@@ -23,7 +23,7 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.views import CancelView
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings, RecruitmentSettings, ThreadNamingSettings
+from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -84,7 +84,6 @@ def _make_runtime(
     """
     _ = tenant_id  # runtime no longer carries tenant_id; bot.py threads it
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")
@@ -1502,9 +1501,8 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 13, "setup_hook should add exactly 13 Cogs"
+        assert len(add_cog_calls) == 12, "setup_hook should add exactly 12 Cogs"
         assert sum(type(cog).__name__ == "LeadsCog" for cog in add_cog_calls) == 1
-        assert sum(type(cog).__name__ == "RecruitmentCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "ModelCog" for cog in add_cog_calls) == 1
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_github_cog.assert_called_once_with(bot)
@@ -1516,9 +1514,7 @@ class TestSetupHook:
         mock_privacy_cog.assert_called_once_with(bot)
         mock_memory_cog.assert_called_once_with(bot)
         mock_github_cog.assert_called_once_with(bot)
-        mock_feedback_reaction_cog.assert_called_once_with(
-            bot, recruitment=runtime.settings.recruitment
-        )
+        mock_feedback_reaction_cog.assert_called_once_with(bot)
 
 
 class TestInvokerAccessPolicy:
@@ -2639,7 +2635,6 @@ class TestResolverSelfHeal:
         anthropic = build_fake_anthropic(router.dispatch)
         # Override runtime with the real fake_anthropic for this test.
         settings = MagicMock()
-        settings.recruitment = RecruitmentSettings()
         settings.mcp = McpSettings()
         settings.defaults_root = tmp_path
         settings.billing.markup = Decimal("1.0")
@@ -2768,7 +2763,6 @@ class TestResolverSelfHeal:
 
         anthropic = build_fake_anthropic(router.dispatch)
         settings = MagicMock()
-        settings.recruitment = RecruitmentSettings()
         # Plain string on the MagicMock: bot.py applies str(), identity on str — assertion stays literal.
         settings.mcp.public_url = "https://example.test/mcp"
         settings.defaults_root = tmp_path

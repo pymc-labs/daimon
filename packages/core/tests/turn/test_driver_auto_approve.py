@@ -15,9 +15,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 from anthropic import AsyncAnthropic
-from daimon.core.config import RecruitmentSettings
 from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TextBlock
 from daimon.testing.turn_fakes import (
     FakeAnthropic,
@@ -66,7 +64,6 @@ async def test_auto_approve_confirms_blocked_ids_and_continues_on_same_stream() 
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -117,7 +114,6 @@ async def test_auto_approve_dedups_overlapping_ids_across_consecutive_idles() ->
     ]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -172,7 +168,6 @@ async def test_auto_approve_ends_turn_when_all_requested_ids_already_confirmed()
     ]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -218,7 +213,6 @@ async def test_auto_approve_dedups_across_a_reconnect() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -256,7 +250,6 @@ async def test_default_posture_still_ends_requires_action_turn_as_failure_and_se
     ]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -289,7 +282,6 @@ async def test_explicit_require_approval_behaves_identically_to_default() -> Non
     ]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -330,7 +322,6 @@ async def test_auto_approve_confirms_a_requires_action_discovered_via_a_clean_cl
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -372,7 +363,6 @@ async def test_auto_approve_confirms_a_requires_action_discovered_via_a_read_tim
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -412,7 +402,6 @@ async def test_auto_approve_reconnects_when_queued_confirmation_is_taken_later()
     lifecycle = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -449,7 +438,6 @@ async def test_auto_approve_does_not_re_confirm_on_the_idle_branch_ids_already_c
     fa.beta.sessions.retrieve_statuses = ["idle", "idle", "idle"]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -486,7 +474,6 @@ async def test_auto_approve_replay_echo_after_stale_pause_is_not_a_reask() -> No
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -519,7 +506,6 @@ async def test_auto_approve_replay_echo_followed_by_reask_stops() -> None:
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -554,7 +540,6 @@ async def test_auto_approve_never_sends_confirmations_into_a_terminated_session(
     fa.beta.sessions.retrieve_statuses = ["terminated"]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -595,7 +580,6 @@ async def test_require_approval_still_finalizes_a_requires_action_found_on_the_i
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -642,7 +626,6 @@ async def test_auto_approve_eventless_reconnect_keeps_pre_approval_content_when_
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -694,7 +677,6 @@ async def test_auto_approve_mid_turn_reconnect_keeps_pre_approval_content_across
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -738,7 +720,6 @@ async def test_auto_approve_reconnect_still_drops_a_prior_turns_content_at_its_e
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -782,7 +763,6 @@ async def test_require_approval_treats_a_prior_turns_requires_action_idle_as_a_b
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_reused",
         user_message="second question",
@@ -825,7 +805,6 @@ async def test_require_approval_treats_a_prior_turns_requires_action_idle_as_a_b
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_reused",
         user_message="second question",
@@ -886,7 +865,6 @@ async def test_queued_confirmations_in_a_replay_are_not_taken_until_ma_acts() ->
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn_on_leg(
-        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="publish",

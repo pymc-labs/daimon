@@ -2745,62 +2745,6 @@ grant; the shared personal-credential vault never receives routine provenance.
 Every unattended confirmation path protects lead resolution, even with general
 tool safety disabled.
 
-## Recruitment threads
-
-Opt-in staffing runs in the existing Discord worker, core and scheduler. Core
-owns stateless recruitment extraction, encrypted evidence, recruiter-reviewed
-outbox intents and idempotent backend delivery. The existing scheduler scans
-old/new history and purges expired content; Discord repairs in-thread review
-cards after restart. No new process, gateway, queue or database is required.
-Backend credentials are trusted-service settings, never agent tools or sidecar
-credentials. See [Recruitment threads](recruitment.md) for operation and synthetic QA.
-
-Recruitment privacy is a pure service-settings boundary: configured guilds name
-nonempty recruitment parent channels and recruiters. General Discord ingress,
-queued and automatic turns, classifiers, DM transfer and MCP readers refuse
-these channels and all their threads before reading content or naming a source
-in an error. Thread titles and database enrollment do not participate. Empty
-settings require no privacy I/O; immutable thread parents avoid enrollment and
-rename races. The three tenant-scoped tables hold threads, source evidence and
-outbox intents; configuration comes only from restart-bound settings.
-
-Gateway human creates/edits/deletes increment a durable seen watermark before
-enrichment. Review cards bind revision and covered watermark; confirmation
-atomically checks the current counter while inserting its outbox intent. Own
-controls never become candidate evidence, and unknown-author bot events are
-resolved without changing an otherwise identical review.
-
-
-Every provider driver call requires a `TurnPrivacy` declaration; prepared,
-headless routine and workspace-checkpoint paths carry the same recruitment
-settings and source placement. The scheduler refuses saved routines before
-using trigger content, and delivery refuses reserved destinations without any
-fallback. Independent lead HTTP routes and native panels share this boundary.
-Unresolved SDK channel forms fail closed, including uncached partial channels.
-General interactions are gated before SDK command/view/modal dispatch; wizard
-reconstruction additionally refuses before querying its row. Metadata listings
-and channel labels omit reserved places. An AST-based reader registry ratchets
-recognized runtime Discord primitives, turn callers, persistent controls and
-stored routine readers against named boundaries and committed regressions.
-It is a review ratchet, not exhaustive discovery: assignment aliases, reflection,
-constructed URL variables and lower-level SDK HTTP methods can escape it.
-Guard-string/test-name checks do not prove ordering, control flow or reachability;
-manual inventory review and behavioral tests remain necessary.
-
-`TurnPrivacy` is a trusted-caller declaration contract, not an independently
-authenticated source credential. Prepared paths derive origin from admission
-and prefer its grant's tenant; direct/headless callers must supply the actual
-platform, settings, tenant and placement from service context, never tool input.
-The driver cannot recognize false declarations. Stored routine content uses a
-shared current-settings read policy before MCP/CLI/control projection, including
-mutation returns. Reserved sources/destinations and unknown legacy provenance
-are hidden even from owners/admins. The interaction parser exempts only this
-application's named `/recruitment` command and its component namespace; the cog
-retains its live recruiter/thread checks.
-
-Bulk deletion locks every affected recruitment thread in stable order and
-records all source tombstones in one transaction. Its event watermark cannot be
-covered between deleted message IDs, including parent-channel starter events.
 ### Self-hosted harness turns
 
 The `selfhosted.loop` turn-runtime entry point composes injected tenant-scoped

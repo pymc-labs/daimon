@@ -37,7 +37,6 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     McpSettings,
-    RecruitmentSettings,
     Settings,
 )
 from daimon.core.confirmation import prompt_for_tool_call
@@ -257,7 +256,6 @@ class World:
 
     def runtime(self) -> MagicMock:
         runtime = MagicMock()
-        runtime.settings.recruitment = RecruitmentSettings()
         runtime.sessionmaker = self.sessions
         runtime.turn_deps.fernet = build_multifernet((FERNET_KEY,))
         resolver = MagicMock()

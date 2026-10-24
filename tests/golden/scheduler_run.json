@@ -55,20 +55,6 @@
             "thread_id": null
           },
           "platform": "discord",
-          "privacy": {
-            "channel_id": "C_ENV",
-            "parent_id": "C_ENV",
-            "platform": "discord",
-            "recruitment": {
-              "backends": {},
-              "enabled": false,
-              "model": "claude-haiku-4-5",
-              "synthetic": false,
-              "synthetic_failure_status": 0,
-              "tenants": {}
-            },
-            "tenant_id": "8b369f43-5689-50e4-9636-670ae2d2e0ea"
-          },
           "sandbox": null,
           "session_factory": {
             "fixture_type": "async_sessionmaker"

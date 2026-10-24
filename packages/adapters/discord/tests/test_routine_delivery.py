@@ -13,7 +13,6 @@ from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
-from daimon.core.config import DirectMessagePolicy, RecruitmentSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef
@@ -142,7 +141,6 @@ def _poster(
 
     return make_discord_routine_poster(
         sm,
-        recruitment=RecruitmentSettings(),
         fetch_channel=fetch,
         membership_resolver=CachedMembershipResolver(membership),
         open_dm=(dms or _Dms()).open,
@@ -680,7 +678,6 @@ async def test_role_loss_during_destination_lookup_refuses_delayed_delivery(
 
     poster = make_discord_routine_poster(
         db_session_factory,
-        recruitment=RecruitmentSettings(),
         fetch_channel=fetch,
         open_dm=dms.open,
         dm_policy=lambda _: DirectMessagePolicy(),
@@ -774,7 +771,6 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
 
     poster = make_discord_routine_poster(
         db_session_factory,
-        recruitment=RecruitmentSettings(),
         fetch_channel=fetch,
         open_dm=dms.open,
         dm_policy=lambda _: DirectMessagePolicy(
@@ -851,7 +847,6 @@ async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
 
     poster = make_discord_routine_poster(
         db_session_factory,
-        recruitment=RecruitmentSettings(),
         fetch_channel=AsyncMock(side_effect=AssertionError("no public fallback")),
         open_dm=open_dm,
         dm_policy=lambda _: DirectMessagePolicy(),
@@ -913,7 +908,6 @@ async def test_dm_delivery_rechecks_all_live_agent_names(db_session_factory, age
 
     poster = make_discord_routine_poster(
         db_session_factory,
-        recruitment=RecruitmentSettings(),
         fetch_channel=AsyncMock(side_effect=AssertionError("not a channel")),
         open_dm=dms.open,
         dm_policy=lambda _: DirectMessagePolicy(),
@@ -987,7 +981,6 @@ async def test_generated_files_share_the_at_most_once_outbox(
 
     poster = make_discord_routine_poster(
         db_session_factory,
-        recruitment=RecruitmentSettings(),
         fetch_channel=AsyncMock(return_value=channel),
         open_dm=AsyncMock(return_value=dm),
         dm_policy=lambda _: DirectMessagePolicy(mode="members"),
@@ -1071,7 +1064,6 @@ async def test_destination_change_between_text_and_file_cancels_payload(
 
     poster = make_discord_routine_poster(
         db_session_factory,
-        recruitment=RecruitmentSettings(),
         fetch_channel=AsyncMock(return_value=channel),
         open_dm=AsyncMock(side_effect=AssertionError("no fallback after changing destination")),
         dm_policy=lambda _: DirectMessagePolicy(mode="members"),
@@ -1166,7 +1158,6 @@ async def test_fallback_files_recheck_privacy_after_download(
     monkeypatch.setattr("daimon.core.routine_files.download_output_file", download)
     poster = make_discord_routine_poster(
         db_session_factory,
-        recruitment=RecruitmentSettings(),
         fetch_channel=fetch,
         open_dm=AsyncMock(return_value=dm),
         dm_policy=lambda _: policy,
@@ -1184,38 +1175,6 @@ async def test_fallback_files_recheck_privacy_after_download(
     async with db_session_factory() as session:
         after = await get_routine(session, row.id, tenant_id=row.tenant_id)
     assert after.delivery_status == "skipped"
-
-
-@pytest.mark.parametrize("source", [True, False])
-async def test_reserved_routine_source_or_destination_never_falls_back(
-    db_session, db_session_factory, source
-):
-    from daimon.core.config import RecruitmentSettings
-
-    row = await _routine(
-        db_session,
-        destination_id="20",
-        destination_kind="thread",
-        channel_id="2" if source else "3",
-    )
-    target = MagicMock(spec=discord.Thread)
-    target.id, target.parent_id = 20, 2
-    fetch = AsyncMock(return_value=target)
-    dm = AsyncMock(side_effect=AssertionError("private fallback"))
-    post = make_discord_routine_poster(
-        db_session_factory,
-        recruitment=RecruitmentSettings(
-            tenants={str(_GUILD): {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}}
-        ),
-        fetch_channel=fetch,
-        open_dm=dm,
-        dm_policy=lambda _: DirectMessagePolicy(mode="all"),
-    )
-    outcome = await post(row)
-    assert outcome.status == "skipped"
-    assert outcome.note == "Source unavailable."
-    dm.assert_not_awaited()
-    target.send.assert_not_called()
 
 
 @pytest.mark.parametrize("marked", ["destination", "parent-found-at-delivery"])

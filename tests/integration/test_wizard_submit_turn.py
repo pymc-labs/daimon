@@ -36,7 +36,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.views import CancelView
 from daimon.adapters.discord.wizard_submit import WizardSubmitButton
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings, RecruitmentSettings, TurnQueueSettings
+from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -136,7 +136,6 @@ def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession], router: MARouter
 ) -> DiscordRuntime:
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")
     settings.billing.signup_credit = Decimal("0")

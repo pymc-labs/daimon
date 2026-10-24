@@ -23,7 +23,6 @@ from daimon.adapters.discord.posted_controls.fleet import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
-from daimon.core.config import RecruitmentSettings
 from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_digest
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -2650,7 +2649,7 @@ def _run_end_bot(channel, *, may_post=True):
     return SimpleNamespace(
         runtime=SimpleNamespace(
             sessionmaker=MagicMock(),
-            settings=SimpleNamespace(recruitment=RecruitmentSettings()),
+            settings=SimpleNamespace(),
         ),
         _channel_by_id=AsyncMock(return_value=channel)
         if not isinstance(channel, Exception)
@@ -2719,44 +2718,3 @@ def test_a_setup_error_reads_as_ours_with_a_log_reference():
         f"failed: a setup error on our side; give an admin the reference (ref {str(failed.id)[:8]})"
     )
     assert "couldn't be set up on that model" not in status
-
-
-async def test_reserved_fleet_notice_and_live_card_never_read_messages(monkeypatch):
-    from daimon.adapters.discord.bot import DaimonBot
-    from daimon.adapters.discord.posted_controls import fleet as fleet_card
-
-    thread = _ended_thread()
-    thread.guild.id = 60
-    recruitment = RecruitmentSettings(
-        tenants={"60": {"channel_ids": [str(thread.parent_id)], "recruiter_user_ids": ["7"]}}
-    )
-    bot = _run_end_bot(thread)
-    bot.runtime.settings.recruitment = recruitment
-    shown = AsyncMock()
-    monkeypatch.setattr(fleet_card, "show_fleet_ended", shown)
-    assert await DaimonBot._post_fleet_run_end(bot, _notice(())) == "give_up"
-    assert await DaimonBot._live_fleet_card(bot, thread, author_id=7, is_admin=True) is None
-    shown.assert_not_awaited()
-    thread.fetch_message.assert_not_awaited()
-    thread.send.assert_not_awaited()
-    bot._may_post_in.assert_not_awaited()
-
-
-async def test_reserved_fleet_parent_refuses_before_resolving_or_reading_history():
-    from types import SimpleNamespace
-
-    thread = _ended_thread()
-    thread.guild.id = 60
-    thread.history = MagicMock(side_effect=AssertionError("reserved history must not be read"))
-    recruitment = RecruitmentSettings(
-        tenants={"60": {"channel_ids": [str(thread.parent_id)], "recruiter_user_ids": ["7"]}}
-    )
-    sessions = MagicMock()
-    factory = DiscordFleetCardFactory.from_runtime(
-        MagicMock(), SimpleNamespace(recruitment=recruitment, sessionmaker=sessions)
-    )
-    with pytest.raises(FleetRefused, match="prerequisites_unavailable"):
-        await factory._resolve(thread, 7, UUID(int=1), UUID(int=2), None)
-    sessions.assert_not_called()
-    thread.history.assert_not_called()
-    thread.fetch_message.assert_not_awaited()

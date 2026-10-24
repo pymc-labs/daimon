@@ -94,7 +94,6 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.runtimes import ensure_channel_runtime, scope_channel_runtimes
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_billing import ObservationRecorder
@@ -1769,12 +1768,6 @@ async def bind_session_impl(
         # Chat callers get the checkpoint-and-bundle transfer by default; a
         # caller that must never spend a checkpoint turn passes its own hook.
         effective_transfer = transfer or WorkspaceTransferRunner(
-            privacy=TurnPrivacy.from_admission(
-                deps.recruitment,
-                admission,
-                platform=platform,
-                tenant_id=tenant_id,
-            ),
             anthropic=deps.anthropic,
             sessionmaker=deps.sessionmaker,
             tenant_id=tenant_id,

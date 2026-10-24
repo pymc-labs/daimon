@@ -3545,44 +3545,6 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
         assert after.sandbox_tools_set_by == "agent_changed"
 
 
-async def test_saved_recruitment_routine_stops_after_settings_restart(
-    db_session, db_session_factory, monkeypatch
-):
-    from daimon.core.config import RecruitmentSettings
-
-    tenant = await make_tenant(db_session, platform="discord", workspace_id="101")
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant.id,
-        created_by_user_id="7",
-        agent_id="a",
-        agent_name="a",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="synthetic candidate",
-        channel_id="2",
-    )
-    await db_session.commit()
-    settings = _make_test_settings(monkeypatch)
-    settings.recruitment = RecruitmentSettings(
-        tenants={"101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}}
-    )
-    async with AsyncAnthropic(api_key="fake") as client:
-        fire = await _build_fire(
-            client=client,
-            sm=db_session_factory,
-            settings=settings,
-            deployment_default=DeploymentDefault(),
-            resolver_cache=new_resolver_cache(),
-        )
-        with unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as driver:
-            await fire(row)
-        driver.assert_not_called()
-    async with db_session_factory() as session:
-        saved = await get_routine(session, row.id, tenant_id=tenant.id)
-    assert saved.last_error == "Source unavailable."
-
-
 @pytest.mark.parametrize("at_destination", [False, True], ids=["origin", "destination"])
 async def test_selfhosted_routine_refuses_before_any_anthropic_access(
     db_session: AsyncSession,

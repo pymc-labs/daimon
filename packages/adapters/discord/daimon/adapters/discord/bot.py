@@ -31,7 +31,6 @@ from daimon.adapters.discord.context import (
     build_delta_xml,
 )
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
-from daimon.adapters.discord.control_dispatch import dispatch_general_interaction
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
@@ -758,14 +757,7 @@ class DaimonBot(commands.Bot):
         def parse_allowed_interaction(data: dict[str, Any]) -> None:
             guild_id = data.get("guild_id")
             if self._allows_guild(int(guild_id) if guild_id is not None else None):
-                dispatch_general_interaction(
-                    self.runtime.settings.recruitment,
-                    self._connection,
-                    data,
-                    parse_interaction,
-                    lambda work: self._spawn(work),
-                    application_id=self.application_id,
-                )
+                parse_interaction(data)
 
         self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction
 
@@ -1009,11 +1001,8 @@ class DaimonBot(commands.Bot):
         from the stored card post, before any Discord call. The card's own control
         path still proves authority for the rest.
         """
-        from daimon.adapters.discord.recruitment_guard import protected
         from daimon.core.stores import fleet as fleet_store
 
-        if protected(self.runtime.settings.recruitment, thread, str(thread.guild.id)):
-            return None
         if self.runtime.fleet_card_factory is None or not self.runtime.settings.fleet.enabled:
             return None
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
@@ -1327,7 +1316,6 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     post=make_discord_routine_poster(
                         self.runtime.sessionmaker,
-                        recruitment=self.runtime.settings.recruitment,
                         fetch_channel=self._channel_by_id,
                         open_dm=self.open_member_dm,
                         dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
@@ -1373,7 +1361,6 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
-        from daimon.adapters.discord.recruitment import RecruitmentCog
 
         await self.add_cog(HelpCog(self))
         await self.add_cog(HereCog(self))
@@ -1382,12 +1369,11 @@ class DaimonBot(commands.Bot):
         await self.add_cog(GitHubCog(self))
         await self.add_cog(RoutinesCog(self))
         await self.add_cog(LeadsCog(self))
-        await self.add_cog(RecruitmentCog(self, self.runtime))
         await self.add_cog(BillingCog(self))
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))
         await self.add_cog(ModelCog(self))
-        await self.add_cog(FeedbackReactionCog(self, recruitment=self.runtime.settings.recruitment))
+        await self.add_cog(FeedbackReactionCog(self))
 
         # One-time CLASS registration (not per-button) for the chat-initiated
         # credential-request button. Imported here, not at module level, since
@@ -1818,14 +1804,6 @@ class DaimonBot(commands.Bot):
                         channel = self.get_channel(
                             int(locked.thread_id)
                         ) or await self.fetch_channel(int(locked.thread_id))
-                        from daimon.adapters.discord.recruitment_guard import protected
-
-                        if isinstance(
-                            channel, (discord.abc.GuildChannel, discord.Thread)
-                        ) and protected(
-                            self.runtime.settings.recruitment, channel, str(channel.guild.id)
-                        ):
-                            return
                         if isinstance(channel, discord.abc.Messageable):
                             message = await channel.fetch_message(
                                 int(locked.active_turn_message_id)
@@ -2029,11 +2007,6 @@ class DaimonBot(commands.Bot):
             try:
                 await self._retire_orphaned_turns(retry=True)
                 await self._recover_stopped_worker_cards()
-                from daimon.adapters.discord.recruitment import RecruitmentCog
-
-                recruitment = self.get_cog("RecruitmentCog")
-                if isinstance(recruitment, RecruitmentCog):
-                    await recruitment.recover()
                 if asyncio.get_running_loop().time() >= next_aged_sweep:
                     await self._sweep_aged_turn_cards()
                     await self._prune_message_admissions()
@@ -2152,10 +2125,6 @@ class DaimonBot(commands.Bot):
                     await self._record_failed_card_recovery(
                         intent, thread=None, candidate_message_ids=candidate_message_ids
                     )
-                    return
-                from daimon.adapters.discord.recruitment_guard import protected
-
-                if protected(self.runtime.settings.recruitment, channel, str(channel.guild.id)):
                     return
                 thread = channel
                 await reconcile_turn_card_intent(
@@ -2559,10 +2528,6 @@ class DaimonBot(commands.Bot):
                             or channel.guild.id != guild.id
                         ):
                             continue
-                        from daimon.adapters.discord.recruitment_guard import protected
-
-                        if protected(self.runtime.settings.recruitment, channel, str(guild.id)):
-                            continue
                         after = max(
                             discord.utils.time_snowflake(cutoff), int(watermark) if watermark else 0
                         )
@@ -2658,7 +2623,6 @@ class DaimonBot(commands.Bot):
         """The bot's one participant, built on first use and reused after that."""
         if self._participant is None:
             self._participant = ThreadParticipant(
-                recruitment=self.runtime.settings.recruitment,
                 settings=self.runtime.settings.thread_participation,
                 sessionmaker=self.runtime.sessionmaker,
                 anthropic=self.runtime.anthropic,
@@ -2684,14 +2648,6 @@ class DaimonBot(commands.Bot):
         `on` costs exactly one indexed read and returns -- no liveness read,
         no classifier, no timer, no turn.
         """
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(
-            self.runtime.settings.recruitment,
-            message.channel,
-            str(message.guild.id) if message.guild else "",
-        ):
-            return
         if self.draining or self.user is None:
             return
         if message.guild is None or not isinstance(message.channel, discord.Thread):
@@ -2773,10 +2729,6 @@ class DaimonBot(commands.Bot):
         responder: ThreadParticipant,
     ) -> None:
         """The thread went quiet: judge the whole batch once, then run at most one turn."""
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(self.runtime.settings.recruitment, thread, guild_id):
-            return
         thread_id = thread.id
         batch = self._participation_pending.pop(thread_id, None)
         if batch is None or not batch.messages:
@@ -3147,12 +3099,6 @@ class DaimonBot(commands.Bot):
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
         if not self._allows_guild(message.guild.id if message.guild else None):
-            return
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if message.guild is not None and protected(
-            self.runtime.settings.recruitment, message.channel, str(message.guild.id)
-        ):
             return
         if startup_replay:
             # Its admission may run later (queued); it must stay as quiet as here.
@@ -3848,10 +3794,6 @@ class DaimonBot(commands.Bot):
         ``unprompted`` marks a turn nobody @mentioned (organic thread
         participation) so the context tells the agent it chose to speak.
         """
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(self.runtime.settings.recruitment, message.channel, guild_id):
-            return
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
         surface = _TurnFailureSurface()
@@ -3997,10 +3939,6 @@ class DaimonBot(commands.Bot):
         anything outside a turn goes through
         `dispatch_continuations_in_thread`, which takes the guard first.
         """
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(self.runtime.settings.recruitment, thread, guild_id):
-            return
         if self.draining:
             return
         await dispatch_pending_continuations(
@@ -4032,10 +3970,6 @@ class DaimonBot(commands.Bot):
     async def dispatch_continuations_in_thread(
         self, *, tenant_id: uuid.UUID, thread: discord.Thread, guild_id: str
     ) -> None:
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(self.runtime.settings.recruitment, thread, guild_id):
-            return
         await self._wait_for_orphan_recovery()
         if not claim_dispatch(
             self._processing,
@@ -4065,7 +3999,6 @@ class DaimonBot(commands.Bot):
     async def _post_fleet_run_end(self, notice: EndNotice) -> EndOutcome:
         """Settle an ended run's card and post its line in the run's own thread."""
         from daimon.adapters.discord.posted_controls.fleet import record_card, show_fleet_ended
-        from daimon.adapters.discord.recruitment_guard import protected
         from daimon.core.fleet_orchestration import FleetRefused
 
         run = notice.run
@@ -4073,7 +4006,6 @@ class DaimonBot(commands.Bot):
             channel = await self._channel_by_id(int(run.thread_id))
             if (
                 not isinstance(channel, discord.Thread)
-                or protected(self.runtime.settings.recruitment, channel, str(channel.guild.id))
                 or derive_tenant_uuid(platform="discord", workspace_id=str(channel.guild.id))
                 != run.tenant_id
                 or not await self._may_post_in(tenant_id=run.tenant_id, channel=channel)
@@ -4322,10 +4254,7 @@ class DaimonBot(commands.Bot):
         rendering its own error -- there is no lifecycle message to attach
         one to before `bind_session` has even run.
         """
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(self.runtime.settings.recruitment, thread, guild_id):
-            raise PermissionError("Recruitment sources cannot enter provider context")
+        _ = guild_id  # kept for parity with _handle_mention's error-context signature
         # Read the predecessor BEFORE bind_session decides the replacement --
         # once it runs, the old row is superseded and this is the only chance
         # to read what it was running.
@@ -4901,10 +4830,6 @@ class DaimonBot(commands.Bot):
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         if not self._allows_guild(payload.guild_id):
             return
-        if self.runtime.settings.recruitment.is_recruitment_channel(
-            str(payload.guild_id), str(payload.thread_id), str(payload.parent_id)
-        ):
-            return
         metadata = payload.data["thread_metadata"]
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
         async with self.runtime.sessionmaker() as session:
@@ -4921,10 +4846,6 @@ class DaimonBot(commands.Bot):
 
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
         if not self._allows_guild(payload.guild_id):
-            return
-        if self.runtime.settings.recruitment.is_recruitment_channel(
-            str(payload.guild_id), str(payload.thread_id), str(payload.parent_id)
-        ):
             return
         had_running_turn = payload.thread_id in self._processing
         # Every time, so a deployment can show whether this event beats the first 10003.

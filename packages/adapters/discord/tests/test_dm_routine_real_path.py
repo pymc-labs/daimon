@@ -31,7 +31,7 @@ from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.scheduler.main import _build_fire, _CapsAdapter
 from daimon.core import direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import DirectMessagePolicy, RecruitmentSettings, Settings
+from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     admit_cold_dm,
     reply_to_dm_result,
@@ -433,7 +433,6 @@ class Harness:
         """One Discord delivery poll through the real owner-DM poster."""
         poster = make_discord_routine_poster(
             self.factory,
-            recruitment=RecruitmentSettings(),
             fetch_channel=fetch_channel,
             open_dm=open_dm,
             dm_policy=lambda _: DirectMessagePolicy(),

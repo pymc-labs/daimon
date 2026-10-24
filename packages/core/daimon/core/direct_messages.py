@@ -361,10 +361,6 @@ async def start_dm(
     `require_unsealed_source` before reading history. The DM bills
     `source_channel_id`; each move resets the scope and replays no prior history.
     """
-    if platform == "discord" and deps.recruitment.is_recruitment_channel(
-        workspace_id, source_thread_id or source_channel_id, source_channel_id
-    ):
-        raise ValueError("This source cannot be moved to a private conversation.")
     require_unsealed_source(admission)
     await require_dm_enabled(deps, tenant_id=tenant_id)
     scope_id = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"

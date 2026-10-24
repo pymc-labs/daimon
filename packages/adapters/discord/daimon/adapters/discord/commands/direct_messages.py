@@ -464,13 +464,6 @@ class DirectMessageCog(commands.Cog):
             )
             return
         runtime = self.bot.runtime
-        from daimon.adapters.discord.recruitment_guard import protected
-
-        if protected(runtime.settings.recruitment, channel, str(guild.id)):
-            await interaction.followup.send(
-                "This source cannot be moved to a private conversation.", ephemeral=True
-            )
-            return
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
         try:
             member = await guild.fetch_member(interaction.user.id)

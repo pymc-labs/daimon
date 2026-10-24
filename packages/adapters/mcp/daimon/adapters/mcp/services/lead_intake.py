@@ -9,7 +9,6 @@ from typing import Any, Literal, cast, overload
 from urllib.parse import quote
 
 import httpx
-from daimon.core.config import RecruitmentSettings
 from daimon.core.lead_intake import (
     IntakeConfig,
     LeadDealCandidate,
@@ -20,8 +19,6 @@ from daimon.core.lead_intake import (
 )
 from daimon.core.lead_intake_service import EffectRequest, ReviewRequired, VerifiedSource
 from daimon.core.lead_source import decode_email, has_registration_request
-
-_NO_RECRUITMENT = RecruitmentSettings()
 
 
 class HttpIntakePorts:
@@ -39,10 +36,8 @@ class HttpIntakePorts:
         hubspot_token: str,
         discord_token: str,
         gmail_refresh_credentials: dict[str, str] | None = None,
-        recruitment: RecruitmentSettings = _NO_RECRUITMENT,
     ) -> None:
         self.client = client
-        self.recruitment = recruitment
         self.refresh_credentials = gmail_refresh_credentials
         self.gmail_refreshed = False
         self.tokens = {
@@ -88,29 +83,6 @@ class HttpIntakePorts:
         params: dict[str, str] | None = None,
         missing: bool = False,
     ) -> dict[str, Any] | None:
-        # All Discord content/effect routes, including reconciliation and recovery,
-        # share this boundary. Metadata resolution itself never reads messages.
-        parts = path.strip("/").split("/")
-        if (
-            provider == "discord"
-            and self.recruitment.tenants
-            and parts[0] == "channels"
-            and len(parts) > 2
-        ):
-            channel = await self.request("discord", "GET", f"channels/{parts[1]}")
-            guild_id = str(channel.get("guild_id", ""))
-            parent = channel.get("parent_id")
-            parent_id = (
-                ""
-                if channel.get("type") in {0, 2, 4, 5, 13, 15, 16}
-                else str(parent)
-                if parent and channel.get("type") in {10, 11, 12}
-                else None
-            )
-            if not guild_id or self.recruitment.is_recruitment_channel(
-                guild_id, parts[1], parent_id
-            ):
-                raise PermissionError("Source unavailable.")
         if provider == "gmail" and self.refresh_credentials and not self.gmail_refreshed:
             response = await self.client.post(
                 "https://oauth2.googleapis.com/token",

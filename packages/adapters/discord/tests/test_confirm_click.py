@@ -691,20 +691,3 @@ def test_cli_without_a_server_says_it_is_not_listening(
 
 def _no_peer(_writer: object) -> int | None:
     return None
-
-
-async def test_reserved_channel_refuses_before_card_content(monkeypatch, control):
-    from daimon.core.config import RecruitmentSettings
-
-    world = _World(monkeypatch)
-    answer = world.post_card()
-    recruitment = RecruitmentSettings(
-        tenants={str(GUILD): {"channel_ids": [str(CHANNEL)], "recruiter_user_ids": [str(QA)]}}
-    )
-    result = await world.clicker(
-        control, _settings().model_copy(update={"recruitment": recruitment})
-    ).handle(_request(), peer_uid=1000)
-    assert result["outcome"] == "denied"
-    assert world.http.calls == 0
-    assert not answer.done()
-    world.fetch_channel.assert_not_awaited()

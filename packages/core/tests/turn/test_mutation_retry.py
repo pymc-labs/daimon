@@ -35,7 +35,6 @@ from daimon.core.turn.io import (
 )
 from daimon.core.turn.persistence import MutationRetry, TurnPersistence, UncertainSend
 from daimon.core.turn.posture import BillingExempt
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
@@ -193,7 +192,6 @@ async def test_rate_limit_then_success_completes_the_turn_with_one_accepted_send
     async with transport.client(max_retries=MA_MAX_RETRIES) as client:
         with persistence.activate():
             state = await run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id="session",
                 user_message="question",

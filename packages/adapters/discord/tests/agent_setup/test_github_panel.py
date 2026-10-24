@@ -19,7 +19,6 @@ from daimon.adapters.discord.agent_setup.github_repos import GitHubReposView
 from daimon.adapters.discord.agent_setup.github_waiting import GitHubWaitingView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.commands.github import GitHubCog
-from daimon.core.config import RecruitmentSettings
 from daimon.core.github_panel import GrantsPanel, RepoChoice
 from daimon.core.roster import RosterAgent
 from daimon.core.stores.github_access import AuthorizedRepo
@@ -386,9 +385,7 @@ async def test_discord_new_repo_card_releases_failed_delivery(
     session.__aexit__ = AsyncMock(return_value=None)
     runtime = SimpleNamespace(
         sessionmaker=SimpleNamespace(begin=lambda: session),
-        settings=SimpleNamespace(
-            recruitment=RecruitmentSettings(), crypto=SimpleNamespace(keys=())
-        ),
+        settings=SimpleNamespace(crypto=SimpleNamespace(keys=())),
     )
     interaction = MagicMock()
     interaction.user.id = 7

@@ -21,7 +21,6 @@ from daimon.adapters.mcp.tools.discord._client import (
 from daimon.adapters.mcp.tools.discord._read import (
     _list_channels_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.adapters.mcp.tools.slack._read import (
     _slack_list_channels_impl,  # pyright: ignore[reportPrivateUsage]
@@ -75,7 +74,6 @@ async def _require_thread_in_channel(
         try:
             async with rest_client(_require_bot_token(runtime)) as client:
                 thread = await client.fetch_channel(int(thread_id))
-            require_general_channel(runtime, auth.external_id or "", thread)
         except (discord.HTTPException, ValueError) as exc:
             raise ToolError("thread does not belong to this channel") from exc
         if not isinstance(thread, discord.Thread) or str(thread.parent_id) != channel_id:

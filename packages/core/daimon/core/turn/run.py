@@ -102,7 +102,6 @@ from daimon.core.turn.prepare import (
     insert_mapping,
     stamp_session_seal,
 )
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.progress_plans import progress_plans_prefix
 from daimon.core.turn.provider_actions import (
     ProviderActionApproval,
@@ -893,14 +892,6 @@ async def run_prepared_turn(
     message and confirmation batch. Runtimes without a session read refuse
     unattended confirmations with a plain reason, including with safety off.
     """
-    privacy = TurnPrivacy.from_admission(
-        deps.recruitment,
-        prepared.admission,
-        platform=platform,
-        tenant_id=tenant_id,
-        fallback_channel_id=thread_id,
-    )
-    privacy.check()
     observation = (
         prepared.admission.observation
         or current_outcome.get()
@@ -1051,14 +1042,6 @@ async def run_prepared_turn_impl(
     signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
     breach can never loop into a second wall-clock-priced attempt.
     """
-    privacy = TurnPrivacy.from_admission(
-        deps.recruitment,
-        prepared.admission,
-        platform=platform,
-        tenant_id=tenant_id,
-        fallback_channel_id=thread_id,
-    )
-    privacy.check()
     if origin in _CHAT_RENDERED_ORIGINS:
         lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
 
@@ -1565,7 +1548,6 @@ async def run_prepared_turn_impl(
                 with output_authorization(delivery):
                     try:
                         state = await run_turn(
-                            privacy=privacy,
                             **_turn_port_kwargs(
                                 deps,
                                 prepared.admission,
@@ -1746,7 +1728,6 @@ async def run_prepared_turn_impl(
                     confirmation=tool_confirmation,
                 ) as recovery_confirmation:
                     recovered_state = await run_turn(
-                        privacy=privacy,
                         **_turn_port_kwargs(
                             deps,
                             recovery.admission or prepared.admission,

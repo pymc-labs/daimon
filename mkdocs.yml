@@ -21,7 +21,6 @@ nav:
   - Permissions: permissions.md
   - Isolation: isolation.md
   - Routines: routines.md
-  - Recruitment threads: recruitment.md
   - Billing: billing.md
   - Defaults: defaults.md
   - GitHub push resync: github-push-resync.md

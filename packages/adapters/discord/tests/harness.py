@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import discord
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import RecruitmentSettings, TurnQueueSettings
+from daimon.core.config import TurnQueueSettings
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_queue import TurnQueue
@@ -38,8 +38,6 @@ def make_bot(runtime: DiscordRuntime) -> DaimonBot:
         )
     if not isinstance(runtime.turn_deps, TurnDeps):
         runtime = replace(runtime, turn_deps=deps_for(runtime.anthropic, runtime.sessionmaker))
-    if not isinstance(runtime.settings.recruitment, RecruitmentSettings):
-        runtime.settings.recruitment = RecruitmentSettings()
     bot = DaimonBot(runtime=runtime, intents=intents)
 
     async def membership(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]

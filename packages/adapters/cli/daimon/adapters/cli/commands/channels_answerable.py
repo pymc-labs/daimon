@@ -312,27 +312,11 @@ async def channels_answerable(
         guild_id=guild_id,
         transport=discord_transport,
     )
-    guild_channels = [
-        channel
-        for channel in guild_channels
-        if not rt.settings.recruitment.is_recruitment_channel(
-            guild_id,
-            str(channel.get("id", "")),
-            ""
-            if channel.get("type") in {0, 2, 4, 5, 13, 15, 16}
-            else str(channel["parent_id"])
-            if channel.get("parent_id") and channel.get("type") in {10, 11, 12}
-            else None,
-        )
-    ]
     # No tenant row yet means no policy and no bindings: everything is open.
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
     async with rt.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
         bindings = await list_answering_bindings(session, tenant_id=tenant_id, platform="discord")
-    visible_ids = {str(channel["id"]) for channel in guild_channels}
-    if guild_id in rt.settings.recruitment.tenants:
-        bindings = [binding for binding in bindings if binding.parent_channel_id in visible_ids]
     found = compute_answerable(
         policy, guild_id=guild_id, guild_channels=guild_channels, bindings=bindings
     )
