@@ -22,6 +22,8 @@ from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.cron import InvalidScheduleError
 from daimon.core.errors import AgentNameCollision, TurnError, UserFacingError
 from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.session_fence_retry import FenceUnavailable
+from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
@@ -83,6 +85,9 @@ _USAGE_LIMIT = (
     "Ask the team running it to check the limit.",
 )
 _AI_BUSY = ("Daimon's AI service is busy.", "Try again in a minute.")
+# Daimon's own short-lived contention (an admin's settings write held the policy
+# fence past the wait): nothing is wrong, and the same message works in a moment.
+_DAIMON_BUSY = ("Daimon is busy right now.", "Try again in a moment.")
 _AI_UNREACHABLE = ("Daimon couldn't reach its AI service.", "Try again in a minute.")
 _AI_REFUSED = ("Daimon's AI service couldn't accept the request.", "Ask an admin to check it.")
 _NO_PERMISSION = (
@@ -142,6 +147,8 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     """What happened and what to do, by cause. Never the exception's text."""
     if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
         return _cause_lines(exc.cause)
+    if isinstance(exc, (PolicyBusyError, FenceUnavailable)):
+        return _DAIMON_BUSY
     if spend_limit_error(exc) is not None:
         return _USAGE_LIMIT
     if isinstance(exc, anthropic.APIStatusError):
