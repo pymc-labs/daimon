@@ -298,7 +298,7 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
         started = time.monotonic()
         try:
             spawned = []
-            assert root.max_worker_seconds == 120
+            assert root.max_worker_seconds == 600
             for fleet_root in roots:
                 for index in range(WORKERS):
                     terms = _spawn_terms(

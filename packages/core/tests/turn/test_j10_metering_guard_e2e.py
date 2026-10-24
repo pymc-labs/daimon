@@ -32,6 +32,7 @@ from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
 from daimon.core.stores import fleet
 from sqlalchemy.exc import DBAPIError
 
+from .conversation_worker_support import conversation_root as conversation_root
 from .test_fleet_native_dispatch import _policy, _spawn_terms
 from .test_fleet_native_dispatch import worker_root as worker_root
 from .test_frozen_root import root_turn as root_turn

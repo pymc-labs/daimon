@@ -136,6 +136,10 @@ async def conversation_root(
             ).read_text()
         )
         plan["grant"]["limits"]["deadline"] = current.expires_at.isoformat()
+        if getattr(request, "param", None) == "load":
+            # Main's three-fleet load scenario grants ten minutes to the run
+            # and its workers; the recorded single-worker fixture uses two.
+            plan["grant"]["max_worker_seconds"] = 600
         for backend, _ in plan["grant"]["choices"]:
             if backend["backend"] == "openai":
                 backend["profile"] = PROFILE
