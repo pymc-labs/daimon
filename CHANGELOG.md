@@ -365,8 +365,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callers cannot create duplicate seeded resources or archive an ID another
   caller has already resolved.
 
-- Synchronize the Preview lane with main and atomically repair legacy Preview migration stamps while preserving existing data.
-
 ### Fixed
 
 - Concurrent routines for the same owner reuse their platform identity when enrollment is still committing, instead of failing with a duplicate-principal error.
@@ -1051,7 +1049,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
 
 - Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
-- Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
+- Preserve the deployed Microsoft accounts migration ID and explain deployment serialization.
 
 - Add default-off OS-signed page-event watches with atomic evidence and durable wakes,
   restricted database identities, replay/retention limits and an optional preview
