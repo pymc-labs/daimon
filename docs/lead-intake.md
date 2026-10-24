@@ -22,7 +22,14 @@ Configuration contains the executing `agent_id` (the tenant-derived agent UUID),
 `guild_id`, restricted sales `channel_id`, `source_connection_id`, actual
 `gmail_mailbox`, `crm_connection_id`, HubSpot `portal_id`, recipient allowlist,
 optional `routine_id`, notifier and resolver **user** IDs, pipeline, stage and
-optional deal-field mappings. `reconciliation_start` is a timezone-aware cutover
+optional `deal_fields` mappings and `attribution_property`. For the PyMC Labs
+portal, set `deal_fields` to `{"dealtype": "newbusiness", "channel": "Cold in-mail"}`
+and `attribution_property` to `how_they_heard_about_pymc_labs`. Other deployments
+use their own property names and values. Attribution submissions need
+`attribution_value` and a verbatim `attribution_evidence` quote supporting it.
+Daimon checks the property's visible HubSpot options before creating the deal;
+a missing property, hidden option or invalid value requires review.
+`reconciliation_start` is a timezone-aware cutover
 checkpoint; choose the current time to start without historical import. Names,
 addresses, portal IDs and CRM field mappings are deployment-specific.
 `gmail_mailbox` is required: unclassified discoveries and scan coverage are kept

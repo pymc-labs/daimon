@@ -383,7 +383,13 @@ class HttpIntakePorts:
                 if str(r["properties"].get("name", "")).casefold() == p["name"].casefold()
             ]
             if len(matches) > 1 or (not matches and names):
-                raise ReviewRequired("company_ambiguous")
+                raise ReviewRequired(
+                    "company_ambiguous. Candidate companies: "
+                    + ", ".join(
+                        f"{r['properties'].get('name') or ''} ({r['id']})"
+                        for r in (matches or names)
+                    )
+                )
             return str(matches[0]["id"]) if matches else None
         if step == "deal":
             objects = await self._objects(kind, "dealname,description,hs_is_closed")
@@ -410,14 +416,20 @@ class HttpIntakePorts:
             if p["separate"] != "True" and any(
                 not c.company_ids and not c.contact_ids for c in candidates
             ):
-                raise ReviewRequired("orphan_opportunity_review")
+                raise ReviewRequired(
+                    "orphan_opportunity_review. Candidate deals: "
+                    + ", ".join(f"{c.name} ({c.id})" for c in candidates)
+                )
             match = select_matching_opportunity(
                 candidates,
                 p["description"],
                 LeadProgress(separate_opportunity_confirmed=p["separate"] == "True"),
             )
             if match.requires_review:
-                raise ReviewRequired("opportunity_ambiguous")
+                raise ReviewRequired(
+                    "opportunity_ambiguous. Candidate deals: "
+                    + ", ".join(f"{c.name} ({c.id})" for c in candidates)
+                )
             return match.deal_id
         return None
 
@@ -497,6 +509,33 @@ class HttpIntakePorts:
                 "daimon_intake_identity": effect.key,
                 "discord_lead_thread": p["thread_url"],
             }
+        if step == "deal" and (value := p.get("attribution_value")):
+            evidence = p.get("attribution_evidence")
+            if (
+                not evidence
+                or evidence not in p["original_text"]
+                or value.casefold() not in evidence.casefold()
+            ):
+                raise ReviewRequired(
+                    "Attribution requires an explicit source quote supporting the value"
+                )
+            if not config.attribution_property:
+                raise ReviewRequired("attribution_property_required")
+            definition = await self.request(
+                "hubspot",
+                "GET",
+                f"crm/v3/properties/deals/{quote(config.attribution_property, safe='')}",
+                missing=True,
+            )
+            if not definition or value not in {
+                option["value"]
+                for option in definition.get("options", [])
+                if not option.get("hidden")
+            }:
+                raise ReviewRequired(
+                    "Attribution is not a valid HubSpot option; review the explicit evidence"
+                )
+            properties[config.attribution_property] = value
         response = await self.request(
             "hubspot", "POST", f"crm/v3/objects/{kind}", {"properties": properties}
         )

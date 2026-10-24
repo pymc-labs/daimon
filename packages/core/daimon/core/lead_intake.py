@@ -281,6 +281,7 @@ class IntakeConfig(BaseModel):
     pipeline: str = "default"
     stage: str = "appointmentscheduled"
     deal_fields: dict[str, str] = Field(default_factory=dict)
+    attribution_property: str = ""
     retention_days: int = Field(default=90, ge=1, le=90)
     raw_retention_days: float = Field(default=7, gt=0, le=7)
     reconciliation_start: AwareDatetime
@@ -307,6 +308,8 @@ class LeadDraft(BaseModel):
     company_domain: str | None = None
     enquirer_evidence: str | None = None
     company_evidence: str | None = None
+    attribution_value: str | None = None
+    attribution_evidence: str | None = None
 
 
 class LeadEffectState(BaseModel):

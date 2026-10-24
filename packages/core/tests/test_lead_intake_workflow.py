@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sized
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -12,7 +13,14 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.lead_intake import IntakeConfig, IntakeResolution, LeadDraft, LeadSource
+from daimon.core.lead_intake import (
+    IntakeConfig,
+    IntakeResolution,
+    LeadClassification,
+    LeadDraft,
+    LeadSource,
+    LeadSourceKind,
+)
 from daimon.core.lead_intake_access import (
     LeadReadDenied,
     LeadReader,
@@ -51,7 +59,7 @@ class FakePorts:
         self.writes: list[str] = []
         self.fail_step: str | None = None
         self.fail_before = False
-        self.recipients = ("intake@example.test",)
+        self.recipients: tuple[str, ...] = ("intake@example.test",)
         self.scan_fail = False
 
     async def source(
@@ -98,8 +106,10 @@ async def readable(target: LeadReadTarget) -> None:
 
 def draft(classification: str = "project", message: str = "immutable-1") -> LeadDraft:
     return LeadDraft(
-        source=LeadSource(kind="gmail", mailbox="owner@example.test", message_id=message),
-        classification=classification,
+        source=LeadSource(
+            kind=LeadSourceKind.GMAIL, mailbox="owner@example.test", message_id=message
+        ),
+        classification=LeadClassification(classification),
         opportunity_description="Forecast project",
         thread_title="Synthetic",
         thread_content="Research summary\nDRAFT reply: Thank you for your enquiry.",
@@ -141,6 +151,7 @@ async def test_fake_model_classification_replay(
     store, service, ports = await setup(lead_sessions, "active")
     ports.source_text = row["text"]
     discovered = await service.scan()
+    assert isinstance(discovered["discovered"], list)
     assert "archived-a" in discovered["discovered"]
     fetched = await service.read_source("archived-a")
     assert fetched.text == row["text"] and fetched.raw is None
@@ -477,7 +488,9 @@ async def test_manual_source_replay_is_independent_of_gmail_connection(
 ) -> None:
     store, service, ports = await setup(lead_sessions)
     prepared = draft().model_copy(
-        update={"source": LeadSource(kind="manual", channel_id="500", message_id="600")}
+        update={
+            "source": LeadSource(kind=LeadSourceKind.MANUAL, channel_id="500", message_id="600")
+        }
     )
     first = await service.submit(prepared, "7")
     config, credentials = await store.configuration()
@@ -567,6 +580,7 @@ async def test_unclassified_discovery_expires_from_health_and_resume(
 ) -> None:
     store, service, _ = await setup(lead_sessions)
     scanned = await service.scan()
+    assert isinstance(scanned["discovered"], Sized)
     assert len(scanned["discovered"]) == 2
     assert (await store.health())["unclassified_count"] == 2
     async with lead_sessions() as session, session.begin():
@@ -769,11 +783,14 @@ async def test_renaming_the_connection_strands_no_discovery(
     ports = ManyMessages("Genuine project enquiry")
     service = IntakeService(store, ports, noop, authorize_read=readable)
     first = await service.scan()
+    assert isinstance(first["discovered"], Sized)
     assert first["has_more_discovered"] is True and len(first["discovered"]) == 100
     accepted = await service.submit(
         draft().model_copy(
             update={
-                "source": LeadSource(kind="gmail", mailbox="owner@example.test", message_id="m-000")
+                "source": LeadSource(
+                    kind=LeadSourceKind.GMAIL, mailbox="owner@example.test", message_id="m-000"
+                )
             }
         ),
         "7",
@@ -797,3 +814,31 @@ async def test_renaming_the_connection_strands_no_discovery(
         "7",
     )
     assert replay.id == accepted.id
+
+
+async def test_manually_selected_company_without_name_uses_lead_deal_name(
+    lead_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, service, ports = await setup(lead_sessions, "active")
+    effects: list[EffectRequest] = []
+    original = ports.write
+
+    async def capture(config: IntakeConfig, effect: EffectRequest) -> str:
+        effects.append(effect)
+        return await original(config, effect)
+
+    monkeypatch.setattr(ports, "write", capture)
+    result = await service.submit(draft().model_copy(update={"company_name": None}), "7")
+    assert result.status == "review"
+    result = await service.resolve(
+        result.id,
+        IntakeResolution(
+            company_id="201",
+            contact_id="202",
+            evidence="Verified company 201 and contact 202 by hand.",
+        ),
+        "7",
+    )
+    assert result.status == "completed", result.error_code
+    deal = next(effect for effect in effects if effect.step == "deal")
+    assert deal.payload["name"] == "Lead: Forecast project"

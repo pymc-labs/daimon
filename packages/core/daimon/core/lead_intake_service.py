@@ -351,10 +351,14 @@ class IntakeService:
                             record,
                             "deal",
                             {
+                                "attribution_value": e.attribution_value or "",
+                                "attribution_evidence": e.attribution_evidence or "",
+                                "original_text": e.original_text if e.attribution_value else "",
                                 "description": submission.opportunity_description,
-                                "name": f"{e.company_name}: {submission.opportunity_description}"[
-                                    :200
-                                ],
+                                "name": (
+                                    f"{e.company_name or 'Lead'}: "
+                                    f"{submission.opportunity_description}"
+                                )[:200],
                                 "company": p.company_id,
                                 "contact": p.contact_id,
                                 "domain": e.company_domain or "",
