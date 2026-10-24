@@ -21,10 +21,11 @@ from daimon.core.stores import long_jobs as store
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import ma_agent, ma_environment
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 

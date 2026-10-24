@@ -649,6 +649,39 @@
         'type': 'object',
       }),
     }),
+    'cancel_long_job': dict({
+      'description': '''
+        Request interrupt and archive as owner or current human tenant admin.
+        <blank line>
+        Cancellation requires management authority only: source privacy never blocks
+        stopping a job. Reply and audit contain no command, summary or other content.
+        The scheduler makes cancellation terminal after interrupt and archive.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'job_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'job_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'cancel_timer': dict({
       'description': 'Cancel a pending timer by id (from `create_timer` or `list_timers`). A cancelled timer never fires.',
       'parameters': dict({
@@ -5374,6 +5407,38 @@
         'type': 'object',
       }),
     }),
+    'get_long_job': dict({
+      'description': '''
+        Read an owner/admin job; return source-restricted metadata when content is private.
+        <blank line>
+        Supply origin_context_id from a turn inside a restricted source channel.
+        Admin authority permits management, never a bypass of source privacy.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'job_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'job_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'get_message': dict({
       'description': '''
         Fetch a single message by channel and message id.
@@ -6515,6 +6580,31 @@
         'required': list([
           'handle',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'list_long_jobs': dict({
+      'description': '''
+        List your latest 100 jobs; current human tenant admins may list all tenant jobs.
+        <blank line>
+        Source-restricted jobs contain only id, state, owner and scheduling metadata.
+        Supply origin_context_id when reading inside a restricted source.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -9836,6 +9926,59 @@
           }),
         }),
         'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'start_long_job': dict({
+      'description': '''
+        Run an exact human-approved shell command in a fresh isolated Managed Agents worker.
+        <blank line>
+        Requires an attended owner turn and approval card. The parent thread goes idle;
+        completion wakes it to read and report. Worker waits are bounded to 280 seconds.
+        Tenant/agent admin policy must enable jobs. Omitted limits use effective policy;
+        a deadline or dollar cap above its maximum is refused. No connectors, skills,
+        shared memory or credentials are mounted. Jobs are billed to the owner.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'command': dict({
+            'type': 'string',
+          }),
+          'deadline_minutes': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'max_usd': dict({
+            'anyOf': list([
+              dict({
+                'type': 'number',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'title': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'command',
+          'title',
           'origin_context_id',
         ]),
         'type': 'object',

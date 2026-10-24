@@ -588,7 +588,6 @@ def prompt_for_tool_call(
         title = f"{action}?"
         denied_action = "Microsoft 365 not changed"
 
-
     elif call.tool_name == "start_long_job" and server == DAIMON_SERVER_NAME:
         action = "Start long job"
         title = "Run this command in an isolated worker?"

@@ -4753,7 +4753,7 @@ async def test_job_completion_wake_only_reads_job_and_restores_parent_tools(
     platform,
 ):
     from daimon.core.stores.task_continuations import record_continuation
-    from daimon.testing.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)

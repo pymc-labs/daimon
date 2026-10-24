@@ -494,8 +494,14 @@ async def test_worker_creation_transport_is_empty_and_owner_billed(db_engine, db
     import httpx
     from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
     from daimon.core.long_jobs_ma import ManagedLongJobPort
-    from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
-    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma import (
+        MARouter,
+        build_fake_anthropic,
+        json_body,
+        list_response,
+    )
+    from mux.testing.drivers.anthropic.ma_models import ma_session
     from pydantic import SecretStr
 
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -681,10 +687,14 @@ async def test_real_driver_resume_replays_without_another_user_message():
     from daimon.core.mux_backend import resource_scope
     from daimon.core.turn.driver import run_turn
     from daimon.core.turn.posture import BillingExempt
-    from daimon.core.turn.privacy import TurnPrivacy
-    from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
-    from daimon.testing.ma_models import ma_session
     from daimon.testing.turn_fakes import RecordingLifecycle
+    from mux.testing.drivers.anthropic.ma import (
+        MARouter,
+        build_fake_anthropic,
+        list_response,
+        sse_response,
+    )
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     now = datetime.now(UTC).isoformat()
     events = [
@@ -727,7 +737,6 @@ async def test_real_driver_resume_replays_without_another_user_message():
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
             billing=BillingExempt(reason="cli-operator-run"),
-            privacy=TurnPrivacy("scheduler"),
         )
         assert state.error is None and state.stop_reason.type == "end_turn"
     finally:

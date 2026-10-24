@@ -5,8 +5,8 @@ downgrade: unsupported
 
 from alembic import op
 
-revision = "0123_long_jobs"
-down_revision = "0122_recruitment"
+revision = "0147_long_jobs"
+down_revision = "0146_remove_recruitment"
 branch_labels = None
 depends_on = None
 

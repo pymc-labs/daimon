@@ -75,7 +75,7 @@ WATCH_POLLING = "0143_watch_polling"
 SANDBOX_HEAD = "0144_routine_sandbox_tools"
 RECRUITMENT_HEAD = "0145_recruitment"
 REMOVAL_HEAD = "0146_remove_recruitment"
-HEAD = "0123_long_jobs"
+HEAD = "0147_long_jobs"
 CHAIN = [
     MAIN,
     *MAIN_SUCCESSORS,
@@ -215,10 +215,18 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
 
     compared_tables = (
         TABLES
-        if expected in (LEAD_HEAD, WATCH_HEAD, WATCH_POLLING, SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, HEAD)
+        if expected
+        in (
+            LEAD_HEAD,
+            WATCH_HEAD,
+            WATCH_POLLING,
+            SANDBOX_HEAD,
+            RECRUITMENT_HEAD,
+            REMOVAL_HEAD,
+            HEAD,
+        )
         else {name for name in TABLES if not name.startswith("lead_")}
     )
-    if expected not in (RECRUITMENT_HEAD, HEAD):
     if expected != HEAD:
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected not in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, HEAD):
@@ -241,7 +249,12 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if reflected and kind == "column" and name == "is_external":
             return getattr(getattr(obj, "table", None), "name", None) != "turn_origins"
-        if kind == "column" and expected not in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, HEAD):
+        if kind == "column" and expected not in (
+            SANDBOX_HEAD,
+            RECRUITMENT_HEAD,
+            REMOVAL_HEAD,
+            HEAD,
+        ):
             return name not in SANDBOX_COLUMNS
         return kind != "table" or name in compared_tables
 
@@ -1226,8 +1239,8 @@ async def test_remove_recruitment_roundtrip(
                 for table in RECRUITMENT_TABLES:
                     assert sync.scalar(text(f"SELECT count(*) FROM {table}")) == 1
                 sync.commit()
-            command.upgrade(config, "head")
-            _assert_head(sync)
+            command.upgrade(config, REMOVAL_HEAD)
+            _assert_head(sync, REMOVAL_HEAD)
             _assert_recruitment_removed(sync)
             command.downgrade(config, "0145_recruitment")
             assert (
@@ -1253,7 +1266,7 @@ async def test_remove_recruitment_roundtrip(
                     {"table": table},
                 )
             sync.commit()
-            command.upgrade(config, "head")
+            command.upgrade(config, REMOVAL_HEAD)
             _assert_recruitment_removed(sync)
 
         await connection.run_sync(exercise)

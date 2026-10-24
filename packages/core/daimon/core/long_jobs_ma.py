@@ -36,7 +36,6 @@ from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.io import LegacyTurnIO
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.posture import Billed, UsageRecorder
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.unattended import session_gate, unattended_posture
 from daimon.core.usage_sweep import session_billing, settle_session
@@ -263,13 +262,6 @@ class ManagedLongJobPort:
             ):
                 raise WorkerVanished("Approved environment changed before launch")
         record = await self.recorder(job)
-        privacy = TurnPrivacy(
-            job.platform,
-            self.settings.recruitment,
-            job.tenant_id,
-            job.thread_id,
-            job.parent_channel_id,
-        )
         with unattended_sends(
             session_gate(
                 self.client,
@@ -293,7 +285,6 @@ class ManagedLongJobPort:
                 cancel=asyncio.Event(),
                 render_interval_s=20,
                 billing=Billed(record=record),
-                privacy=privacy,
                 deadline=turn_deadline(
                     now=job.created_at,
                     ceiling_s=job.deadline_minutes * 60,
