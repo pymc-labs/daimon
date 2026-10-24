@@ -151,6 +151,40 @@ async def test_root_request_derivation_reaches_real_fresh_or_clone_worker(worker
     assert all(call.method == "GET" for call in transport.requests)
 
 
+async def test_derivation_waits_out_a_concurrent_policy_writer(worker_root):
+    # J10 6930b189: a policy write (a copy, a rule, tidy) held the tenant's fence
+    # while a worker prepared; its one try-lock failed it as a setup error.
+    request, root, _, resolved, _, _, _, _, _ = worker_root
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def writer() -> None:
+        async with access_policy.policy_write_transaction(
+            request.deps.sessionmaker, tenant_id=request.tenant_id
+        ):
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(writer())
+    await held.wait()
+    derivation = asyncio.create_task(request.for_worker(root, resolved))
+    await asyncio.sleep(0.3)
+    assert not derivation.done()
+    release.set()
+    await holder
+    derived = await derivation
+    assert derived.worker is resolved and derived.admission.backend_revision is not None
+
+
+async def test_derivation_names_a_policy_writer_that_outlasts_its_budget(worker_root, monkeypatch):
+    request, root, _, resolved, _, _, _, _, _ = worker_root
+    monkeypatch.setattr(access_policy, "POLICY_WRITE_TIMEOUT_S", 0.3)
+    async with access_policy.policy_write_transaction(
+        request.deps.sessionmaker, tenant_id=request.tenant_id
+    ):
+        with pytest.raises(access_policy.PolicyBusyError):
+            await request.for_worker(root, resolved)
+
+
 @pytest.mark.parametrize(
     "fault", ("subject", "place", "scope", "pin", "expired", "stale", "disabled", "slow")
 )
