@@ -2715,3 +2715,29 @@ def test_a_setup_error_reads_as_ours_with_a_log_reference():
         f"failed: a setup error on our side; give an admin the reference (ref {str(failed.id)[:8]})"
     )
     assert "couldn't be set up on that model" not in status
+
+
+async def test_an_ended_runs_card_retries_a_cost_it_couldnt_read_yet():
+    """The first read timed out: the card says "not available yet" now, but tries
+    again on its next update instead of keeping that while the reply has a figure."""
+    card, owner, _loader, send, edit = setup()
+    owner.read_run.return_value = (replace(run(), status="completed"), (worker(),))
+    owner.run_cost = AsyncMock(side_effect=[None, Decimal("0.42"), Decimal("9.99")])
+
+    def footers():
+        return [
+            item.content
+            for mock in (send, edit)
+            for c in mock.await_args_list
+            if c.kwargs.get("view") is not None
+            for item in c.kwargs["view"].walk_children()
+            if isinstance(item, discord.ui.TextDisplay) and "Budget cap" in item.content
+        ]
+
+    assert await card.refresh()
+    assert "Cost not available yet" in footers()[-1]
+    assert await card.refresh()
+    assert "Cost $0.42" in footers()[-1]
+    assert await card.refresh()
+    assert "Cost $0.42" in footers()[-1], "a known cost is read once"
+    assert owner.run_cost.await_count == 2
