@@ -1056,12 +1056,16 @@ async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers
     assert "shared threads stay on Anthropic" in prepared.consequence
 
 
+@pytest.mark.parametrize("kind", ["handoff", "owner"])
 @pytest.mark.parametrize("handed_to", ["Researcher", "someone-else", None])
-async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_preview, handed_to):
+async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(
+    owned_preview, handed_to, kind
+):
     """J2: the turn's agent hands the thread to the copy, then switches the copy.
 
     The approved switch moves the copy's conversation here and drops its history,
-    so the card must say so even though the turn's own agent is someone else.
+    so the card must say so even though the turn's own agent is someone else. A
+    member's hand-off to their own copy (kind "owner", #1425) counts the same.
     """
     from unittest.mock import AsyncMock
 
@@ -1081,6 +1085,7 @@ async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_
                 responder_name=handed_to,
                 created_by_account_id=actor.account_id,
                 now=datetime.now(UTC),
+                kind=kind,
             )
     prepare, _ = backend_switch_callbacks(
         service,
