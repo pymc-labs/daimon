@@ -208,6 +208,21 @@ DRAIN_GRACE_S = 60.0
 CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
+# Daimon's own short-lived contention (an admin's settings write held the policy fence
+# past the wait): nothing is wrong, and the same message works in a moment.
+_DAIMON_BUSY = "Daimon is busy right now. Try again in a moment."
+
+
+def failure_notice(exc: BaseException) -> str:
+    """The card's closing words for a turn that failed unexpectedly."""
+    from daimon.core.errors import TurnError
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.stores.access_policy import PolicyBusyError
+
+    cause = exc.cause if isinstance(exc, TurnError) else exc
+    return _DAIMON_BUSY if isinstance(cause, (PolicyBusyError, FenceUnavailable)) else _FAILED
+
+
 _SHED = "Too many chats at once right now. Try again in a moment."
 _CANCEL_NOT_AUTHOR = "Only the person who asked, or a Daimon admin, can stop this reply."
 _CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
@@ -1585,7 +1600,7 @@ class TeamsApp:
                     "teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc
                 )
                 capture_exception_with_scope(exc)
-                await holder[-1].close_with_notice(_FAILED)
+                await holder[-1].close_with_notice(failure_notice(exc))
                 await holder[-1].release_controls()  # An answer that landed keeps its own.
                 if reraise:
                     raise

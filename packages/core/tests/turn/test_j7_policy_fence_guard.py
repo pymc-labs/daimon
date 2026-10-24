@@ -106,3 +106,16 @@ def test_policy_contention_reads_as_busy_never_the_generic_error(adapter, error)
         text = render(raised, request_id="01M5NVJBNMQ7SFBEF4R58V6AW4")
         assert "Something went wrong" not in text, text
         assert "busy" in text and "Try again" in text, text
+
+
+@pytest.mark.parametrize("error", [PolicyBusyError(), FenceUnavailable(0.0)])
+def test_teams_closes_a_busy_turn_with_the_busy_words(error):
+    from daimon.adapters.teams.app import failure_notice
+    from daimon.core.errors import TurnError
+
+    for raised in (error, TurnError(kind="upstream", message="x", cause=error)):
+        text = failure_notice(raised)
+        assert "something went wrong" not in text.lower(), text
+        assert "busy" in text and "Try again" in text, text
+    # Anything else keeps Teams' existing failure words.
+    assert failure_notice(RuntimeError("x")).startswith("Sorry, something went wrong")
