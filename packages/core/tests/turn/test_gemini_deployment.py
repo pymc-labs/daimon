@@ -991,8 +991,8 @@ async def test_only_explicit_tools_compile_and_scope_is_pinned(
     assert all(runtime.usage_store.prices[model] is price for model, price in expected.items())
     with pytest.raises(TypeError):
         runtime.usage_store.prices[FLASH_PRIMARY] = expected[FLASH_PRIMARY]
-    # Inline reuse has no sandbox or container: its usage settles at $0 infrastructure.
-    assert runtime.usage_store.infrastructure_usd == Decimal(0)
+        # Inline reuse has no sandbox or container: its usage settles at $0 infrastructure.
+        assert runtime.usage_store.infrastructure_usd == Decimal(0)
     assert not (tmp_path / "records.sqlite").exists()
     config = selected.admission.backend_revision
     assert config is not None
