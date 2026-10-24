@@ -1504,14 +1504,25 @@ class AgentBackendService:
     ) -> BackendResolution:
         if not self.enabled:
             return BackendResolution("default", resolve_default(None))
-        async with self._sessions.begin() as session:
-            revision, _shared, source = await resolve_turn_backend(
-                session,
-                channel,
-                agent,
-                enabled=self.enabled,
-                retained_revision=retained_revision,
-            )
+        from daimon.core.session_fence_retry import retry_fences
+
+        # resolve_turn_backend's shared policy fence is one try-lock: a concurrent
+        # policy writer is waited out (each miss rolls back and re-reads), never a failure.
+        async def attempt() -> tuple[
+            ConfigRevision | None, bool, Literal["channel", "agent", "default"]
+        ]:
+            async with self._sessions.begin() as session:
+                return await resolve_turn_backend(
+                    session,
+                    channel,
+                    agent,
+                    enabled=self.enabled,
+                    retained_revision=retained_revision,
+                )
+
+        revision, _shared, source = await retry_fences(
+            attempt, busy_error=policy_store.PolicyBusyError
+        )
         return BackendResolution(source, resolve_agent_backend(revision, None), revision)
 
 

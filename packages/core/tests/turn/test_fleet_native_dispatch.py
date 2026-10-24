@@ -185,6 +185,40 @@ async def test_derivation_names_a_policy_writer_that_outlasts_its_budget(worker_
             await request.for_worker(root, resolved)
 
 
+async def test_a_workers_resolve_stage_waits_out_a_concurrent_policy_writer(worker_root):
+    # J3 8970b4ef (smoke 1250d1c8): run_worker's own resolve stage took the tenant's
+    # shared policy fence with one try-lock while a copy/switch held it, and the worker
+    # failed ("it took too long to start"). It now waits the writer out.
+    request, root, row, resolved, prices, calls, _, _, _ = worker_root
+    derived = await request.for_worker(root, resolved)
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def writer() -> None:
+        async with access_policy.policy_write_transaction(
+            request.deps.sessionmaker, tenant_id=request.tenant_id
+        ):
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(writer())
+    await held.wait()
+    running = asyncio.create_task(
+        run_worker(
+            derived,
+            parent=root,
+            worker=row,
+            trigger_message="Complete the task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    )
+    await asyncio.sleep(0.5)
+    release.set()
+    await holder
+    result = await running
+    assert result.status == "succeeded" and result.result is not None
+
+
 @pytest.mark.parametrize(
     "fault", ("subject", "place", "scope", "pin", "expired", "stale", "disabled", "slow")
 )
