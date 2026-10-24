@@ -10,10 +10,12 @@ cheap models only (Gemini Flash; the Claude copy is the control).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -29,6 +31,31 @@ from packages.adapters.mcp.tests.tools.test_j2_gemini_root_e2e import db_preflig
 from packages.adapters.mcp.tests.tools.test_j2_gemini_root_e2e import fresh_chat as fresh_chat
 
 HAIKU = "claude-haiku-4-5"
+#: The cheap native models a copy switches to.
+NATIVE = {"gemini": "gemini-3.8-flash", "openai": "gpt-6-luna"}
+
+
+class HostedTemplates:
+    """OpenAI's hosted environment templates in front of a GPT root's wire: the
+    tenant's environment is created on its first GPT turn, then listed."""
+
+    def __init__(self, wire):
+        self.wire = wire
+        self.templates: list[dict] = []
+
+    def handle(self, call: httpx.Request) -> httpx.Response:
+        if call.url.path.removeprefix("/v1") == "/agents/environments/templates":
+            if call.method == "POST":
+                body = json.loads(call.content)
+                self.templates.append(
+                    {"id": f"envtmpl_{len(self.templates) + 1}", "created_at": 0, **body}
+                )
+                return httpx.Response(200, json=self.templates[-1])
+            return httpx.Response(200, json={"data": self.templates, "has_more": False})
+        for template in self.templates:
+            if call.url.path.endswith("/agents/environments/templates/" + template["id"]):
+                return httpx.Response(200, json=template)
+        return self.wire.handle(call)
 
 
 async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit: bool = False):
@@ -83,8 +110,8 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
             agent_id=copy.id,
             keep_provider=True,
         )
-    if backend == "gemini":
-        target, model = "gemini", "gemini-3.8-flash"
+    if backend in NATIVE:
+        target, model = backend, NATIVE[backend]
         preview = await _request_agent_backend_switch_impl(
             chat.runtime,
             chat.auth,
@@ -269,6 +296,22 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
         )
     native: dict = {}
     posts: list = []
+    openai_root = None
+    if backend == "openai":
+        from unittest.mock import AsyncMock
+
+        from daimon.core.provider_keys import DEFAULT_KEY_ENV
+        from daimon.core.turn import openai_deployment
+
+        from packages.core.tests.turn.test_openai_full_source import FullWire
+
+        monkeypatch.setenv(DEFAULT_KEY_ENV["openai"], "offline")
+        # Off GCP there is no metadata server: name the deployment as staging would.
+        monkeypatch.setattr(
+            openai_deployment, "_deployment_id", AsyncMock(return_value="pymc-offline")
+        )
+        openai_root = HostedTemplates(FullWire(str(chat.auth.tenant_id)))
+    root_wire = pytest.MonkeyPatch()
 
     def gemini(call: httpx.Request) -> httpx.Response:
         if call.url.path.startswith("/v1beta/agents"):
@@ -280,9 +323,24 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
             return httpx.Response(200, json=interaction(f"turn-{len(posts)}"))
         return httpx.Response(200, json=interaction(call.url.path.rsplit("/", 1)[-1]))
 
+    sdk_clients = contextlib.AsyncExitStack()
     if backend == "gemini":
-        # Patches httpx.AsyncClient, which the Claude control's MA client must keep.
-        clients_for(monkeypatch, gemini)
+        # Patches httpx's clients globally, which the Claude control's MA client and a
+        # worker's own provider clients must keep: only for this root turn.
+        clients_for(root_wire, gemini)
+    if backend == "openai":
+        import mux.drivers.openai as openai_sdk
+        from mux.drivers.openai.transport import SDKTransport
+        from mux.testing.isolated_sdk import build_async_openai
+
+        sdk = await sdk_clients.enter_async_context(
+            build_async_openai(
+                transport=httpx.MockTransport(openai_root.handle),
+                api_key="offline",
+                base_url="https://openai.invalid/v1",
+            )
+        )
+        root_wire.setattr(openai_sdk, "configured_transport", lambda **kwargs: SDKTransport(sdk))
     sm = chat.runtime.session_factory
     deps = replace(
         deps_for_pinned_mux(chat.runtime.client, sm),
@@ -370,6 +428,8 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
         )
     finally:
         current_origin_id.reset(token)
+        root_wire.undo()
+        await sdk_clients.aclose()
     async with sm() as db:
         keys = list(
             await db.scalars(
@@ -392,24 +452,151 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
             origin_id=origin.id,
             now=datetime.now(UTC),
         )
-    return keys, root_refusal(origin.id), prepared, frozen
+    return keys, root_refusal(origin.id), prepared, frozen, deps, origin
 
 
 @pytest.mark.parametrize("grant", ["default", "explicit"])
-@pytest.mark.parametrize("backend", ["gemini", None])
+@pytest.mark.parametrize("backend", ["gemini", "openai", None])
 async def test_a_native_agent_coordinates_a_fleet(fresh_chat, monkeypatch, backend, grant):
     """The Claude (Haiku) copy is the control: it froze before the fix too."""
-    keys, refusal, prepared, frozen = await _coordinator_turn(
+    keys, refusal, prepared, frozen, *_ = await _coordinator_turn(
         fresh_chat, monkeypatch, backend, explicit=grant == "explicit"
     )
-    if backend == "gemini":
-        assert prepared.session_ref.provider == "gemini"
+    if backend is not None:
+        assert prepared.session_ref.provider == backend
         assert prepared.admission.backend_counterpart is not None
     assert refusal is None, refusal
     assert keys, "no fleet root was retained"
     # The root's own model is the one it runs on, so a worker that names no model runs
     # there too (not on the copy's original Claude model).
-    if backend == "gemini":
-        assert (frozen.spec.model.provider, frozen.spec.model.id) == ("gemini", "gemini-3.8-flash")
+    if backend is not None:
+        assert (frozen.spec.model.provider, frozen.spec.model.id) == (backend, NATIVE[backend])
     else:
         assert (frozen.spec.model.provider, frozen.spec.model.id) == ("anthropic", HAIKU)
+
+
+async def _fleet_from_root(chat, monkeypatch, deps, origin, root):
+    """The native root dispatches one worker that names no model, through the same
+    fleet tool service its turn calls, and collects it. Returns (rows, collected)."""
+    import mux.drivers.gemini as gemini_sdk
+    from daimon.adapters.mcp.tools.fleet import HostFleetToolService
+    from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
+    from daimon.core.provider_keys import DEFAULT_KEY_ENV
+    from daimon.core.stores.fleet import WorkerPool
+    from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
+    from mux.testing.isolated_sdk import build_gemini_client
+
+    from packages.adapters.mcp.tests.tools.test_j4_named_agents_e2e import _settled_within
+    from packages.adapters.mcp.tests.tools.test_j10_fork_e2e import (
+        GeminiCatalog,
+        GeminiTransport,
+    )
+
+    for provider in ("openai", "gemini"):
+        monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
+    gemini_wire = GeminiTransport()
+    gemini_wire.counted = []
+    monkeypatch.setattr(gemini_sdk, "configured_transport", lambda **kwargs: gemini_wire)
+    catalog = GeminiCatalog()
+    gemini_client = build_gemini_client(
+        transport=httpx.MockTransport(catalog.handle),
+        api_key="offline",
+        base_url="https://gemini.invalid",
+    )
+    monkeypatch.setattr(
+        gemini_sdk,
+        "configured_catalog_transport",
+        lambda **kwargs: SDKAgentCatalogTransport(gemini_client),
+    )
+    import mux.drivers.openai as openai_sdk
+    from mux.drivers.openai.transport import SDKTransport
+    from mux.testing.isolated_sdk import build_async_openai
+
+    from packages.adapters.mcp.tests.tools.test_j10_fork_e2e import AstraWire
+
+    astra = AstraWire()
+    astra.session_id = f"native-openai-worker-{uuid.uuid4().hex[:8]}"
+    astra.session_bodies = []
+    clients = contextlib.AsyncExitStack()
+    sdk = await clients.enter_async_context(
+        build_async_openai(
+            transport=httpx.MockTransport(astra.handle),
+            api_key="offline",
+            base_url="https://openai.invalid/v1",
+        )
+    )
+    monkeypatch.setattr(openai_sdk, "configured_transport", lambda **kwargs: SDKTransport(sdk))
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        markup=Decimal(1),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
+    )
+    bridge = HostFleetToolService(FleetOrchestrator(ports), runtime=chat.runtime, deps=deps)
+    from daimon.core.stores.domain import Role
+
+    # The root's tool calls carry the turn's own identity: the subject it admitted.
+    caller = replace(
+        chat.auth,
+        chat_agent_id=root.agent_id,
+        is_admin=root.subject.is_admin,
+        role=Role.ADMIN if root.subject.is_admin else Role.USER,
+    )
+    try:
+        reply = dict(
+            await bridge.spawn(
+                caller,
+                run_id=None,
+                origin_context_id=origin.id,
+                operation_key="W1",
+                role="analyst",
+                backend=None,
+                agent=None,
+                clone=None,
+                clone_revision=None,
+                overrides=None,
+                session=None,
+                budget_usd=None,
+                deadline=None,
+                max_turns=None,
+                result_contract=None,
+                reviewer_of=None,
+                task="Compare X from your point of view.",
+            )
+        )
+        assert reply["status"] == "pending", reply
+        rows = await _settled_within(ports, root, 1, 30)
+        collected = dict(
+            await bridge.collect(caller, run_id=root.fleet.run_id, origin_context_id=origin.id)
+        )
+    finally:
+        await ports.close()
+        gemini_client.close()
+        await gemini_client.aio.aclose()
+        await clients.aclose()
+    return rows, collected, gemini_wire, astra
+
+
+@pytest.mark.parametrize("backend", ["gemini", "openai"])
+async def test_a_native_root_dispatches_a_worker_and_collects_its_result(
+    fresh_chat, monkeypatch, backend
+):
+    """Worker dispatch and the delivered result from a GPT/Gemini root (#1494 follow-up):
+    a worker that names no model runs on the root's own model and is collected."""
+    keys, refusal, _, frozen, deps, origin = await _coordinator_turn(
+        fresh_chat, monkeypatch, backend
+    )
+    assert refusal is None and keys
+    rows, collected, gemini_wire, astra = await _fleet_from_root(
+        fresh_chat, monkeypatch, deps, origin, frozen
+    )
+    ((row,),) = (rows,)
+    assert (row.backend, row.model, row.status) == (backend, NATIVE[backend], "succeeded")
+    assert collected["status"] == "ready" and len(collected["results"]) == 1
+    # It ran on that provider's own wire, as itself: the task is its instructions.
+    if backend == "gemini":
+        (sent,) = gemini_wire.requests
+        assert "Compare X from your point of view." in str(sent["system_instruction"])
+    else:
+        (body,) = astra.session_bodies
+        assert body["agent"]["model"] == NATIVE["openai"]
