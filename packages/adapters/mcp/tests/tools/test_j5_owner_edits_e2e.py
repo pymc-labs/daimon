@@ -18,9 +18,11 @@ import httpx
 import pytest
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.tools.agents import (
+    _builtin_enabled,  # pyright: ignore[reportPrivateUsage]
     _create_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _request_agent_backend_switch_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_agent_builtin_tool_impl,  # pyright: ignore[reportPrivateUsage]
     _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.defaults.metadata import tenant_scoped_display_title
@@ -191,3 +193,111 @@ async def test_j5_the_owner_previews_a_switch_to_gpt(owner):
         origin_context_id=str(owner.origin.id),
     )
     assert preview.status == "preview" and preview.target_backend == "openai"
+
+
+@MEMBER
+async def test_j5_the_create_result_says_you_own_it(owner):
+    """SMOKE 0eee1b8e: the create result didn't say whether the creator owns the agent."""
+    info = await _created(owner)
+    assert info.owned_by_you is True and info.owner == "you"
+
+
+@MEMBER
+async def test_j5_the_owner_switches_to_gpt_and_the_read_back_says_so(owner):
+    """SMOKE 0eee1b8e: after the switch the read-back still showed the Claude model."""
+    from mux.profiles import backend_selection
+
+    info = await _created(owner)
+    switch = {
+        "agent_name": info.name,
+        "target_backend": "openai",
+        "origin_context_id": str(owner.origin.id),
+    }
+    preview = await _request_agent_backend_switch_impl(owner.runtime, owner.auth, **switch)
+    await _request_agent_backend_switch_impl(
+        owner.runtime,
+        owner.auth,
+        **switch,
+        expected_revision=preview.expected_revision,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    seen = await _read(owner, info)
+    assert seen.provider == "openai"
+    assert seen.model == backend_selection("openai").model
+    assert seen.native_model == "claude-sonnet-4-6"
+
+
+async def _builtin(chat, info, tool, enabled, *, auth=None):
+    return await _set_agent_builtin_tool_impl(
+        chat.runtime,
+        auth or chat.auth,
+        NAME,
+        tool=tool,
+        enabled=enabled,
+        expected_ma_agent_id=info.id,
+        origin_context_id=str(chat.origin.id),
+    )
+
+
+def _web_search_on(chat, info) -> bool | None:
+    return _builtin_enabled(chat.ma.agents[info.id]["tools"], "web_search")
+
+
+@MEMBER
+async def test_j5_the_owner_turns_web_search_on_and_off_and_it_sticks(owner):
+    """SMOKE 0eee1b8e: there was no tool to turn a built-in tool off."""
+    info = await _created(owner)
+    assert _web_search_on(owner, info) is True, "a new agent's toolset has it on"
+    off = await _builtin(owner, info, "web_search", False)
+    assert _web_search_on(owner, info) is False and "now off" in (off.applies or "")
+    on = await _builtin(owner, info, "web_search", True)
+    assert _web_search_on(owner, info) is True and "now on" in (on.applies or "")
+    again = await _builtin(owner, info, "web_search", True)
+    assert "already on" in (again.applies or "")
+
+
+@MEMBER
+async def test_j5_only_builtin_slash_name_in_denied_forbids_a_built_in(owner):
+    """`builtin/web_search` in the operator's denied list forbids it; a bare name doesn't."""
+    from dataclasses import replace
+
+    from fastmcp.exceptions import ToolError
+
+    info = await _created(owner)
+
+    def denying(*names: str):
+        settings = owner.runtime.settings
+        policy = settings.tool_safety.model_copy(update={"denied": names})
+        return replace(
+            owner,
+            runtime=replace(
+                owner.runtime, settings=settings.model_copy(update={"tool_safety": policy})
+            ),
+        )
+
+    await _builtin(owner, info, "web_search", False)
+    await _builtin(denying("web_search"), info, "web_search", True)
+    assert _web_search_on(owner, info) is True, "a bare name may be an MCP tool's"
+    await _builtin(owner, info, "web_search", False)
+    with pytest.raises(ToolError, match="turned web_search off for every agent"):
+        await _builtin(denying("builtin/web_search"), info, "web_search", True)
+    assert _web_search_on(owner, info) is False
+
+
+@MEMBER
+async def test_j5_another_member_cannot_change_the_owners_agent(owner):
+    from dataclasses import replace
+
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_account
+    from fastmcp.exceptions import ToolError
+
+    info = await _created(owner)
+    async with owner.runtime.session_factory.begin() as session:
+        tenant = await get_tenant(session, owner.auth.tenant_id)
+        other = await make_account(session, tenant=tenant)
+    stranger = replace(owner.auth, account_id=other.id, platform_user_id="999000999")
+    with pytest.raises(ToolError):
+        await _builtin(owner, info, "web_search", False, auth=stranger)
+    assert _web_search_on(owner, info) is True

@@ -139,6 +139,7 @@ CASES = [
     SearchCase("switch research-bot to Opus", "update_agent", frozenset([])),
     SearchCase("change research-bot's prompt", "update_agent", frozenset([])),
     SearchCase("what can research-bot access", "get_agent", frozenset(["list_agent_keys"])),
+    SearchCase("turn off research-bot's web search", "set_agent_builtin_tool", frozenset([])),
     SearchCase("delete churn-explorer", "archive_agent", frozenset([])),
     SearchCase("have research-bot take over this task", "hand_off_task", frozenset([])),
     SearchCase("let churn-explorer finish this", "hand_off_task", frozenset([])),

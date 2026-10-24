@@ -162,6 +162,11 @@ class AgentInfo(BaseModel):
     copy's name. The copy has them even when ``skills`` does not list them yet; do
     not add them again."""
     owned_by_you: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The provider it answers on: its own provider setting, else Anthropic. When
+    # that setting moved it off Anthropic, ``model`` is that provider's model and
+    # ``native_model`` the Managed Agents one it keeps for switching back.
+    provider: Provider | None = Field(default=None, exclude_if=lambda value: value is None)
+    native_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     """Set by ``get_agent`` and ``list_agents``: whether the caller owns this agent
     (created it, or an admin named them), so may change it without an admin."""
     owner: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -208,6 +213,40 @@ class AgentInfo(BaseModel):
         return self.model_copy(
             update={"created_at": None, "mcp_servers": None, "sync_warnings": None}
         )
+
+
+async def _with_providers(
+    runtime: McpRuntime, auth: AuthIdentity, infos: list[AgentInfo]
+) -> list[AgentInfo]:
+    """Each agent's own provider setting, as the next conversation with it uses it."""
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+    from mux.profiles import backend_selection
+
+    if not infos:
+        return infos
+    async with runtime.session_factory() as session:
+        settings = [
+            await agent_backends.current(
+                session,
+                auth.tenant_id,
+                derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=info.id),
+            )
+            for info in infos
+        ]
+    placed: list[AgentInfo] = []
+    for info, setting in zip(infos, settings, strict=True):
+        backend = setting.backend if setting is not None else None
+        if backend is None or backend == DEFAULT_BACKEND:
+            placed.append(info.model_copy(update={"provider": DEFAULT_BACKEND}))
+            continue
+        model = (setting.model if setting is not None else None) or backend_selection(backend).model
+        placed.append(
+            info.model_copy(
+                update={"provider": backend, "model": model, "native_model": info.model}
+            )
+        )
+    return placed
 
 
 async def _build_agent_info(
@@ -432,6 +471,7 @@ async def _list_agents_impl(
         )
         for a in rows
     ]
+    infos = await _with_providers(runtime, auth, infos)
     if auth.is_admin:
         return infos
     hidden = {row.id for row in rows if _setup_hidden(row, auth)}
@@ -470,7 +510,129 @@ async def _get_agent_impl(
     if not sees_setup:
         info = info.for_member()
     owner = (await owner_labels(runtime, auth, [agent.id])).get(agent.id)
+    (info,) = await _with_providers(runtime, auth, [info])
     return info.model_copy(update={"owned_by_you": owned, "owner": owner})
+
+
+#: The built-in tools an agent's toolset can turn on or off (Managed Agents' names).
+BuiltinToolName = Literal[
+    "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
+]
+_TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
+
+
+def _builtin_enabled(tools: list[Tool], tool: str) -> bool | None:
+    """Whether `tool` is on in the agent's toolset; None when it has no toolset."""
+    for entry in tools:
+        if str(entry.get("type", "")).startswith("agent_toolset"):
+            raw = cast(dict[str, Any], entry)
+            default = cast(dict[str, Any], raw.get("default_config") or {}).get("enabled")
+            for config in raw.get("configs") or ():
+                if config.get("name") == tool:
+                    enabled = config.get("enabled")
+                    return bool(enabled) if enabled is not None else default is not False
+            return default is not False
+    return None
+
+
+def _with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
+    """`tools` with `tool` turned on or off; any permission policy it had is kept."""
+    if _builtin_enabled(tools, tool) is None:
+        tools = merge_default_agent_toolset(tools)
+    updated: list[Tool] = []
+    for entry in tools:
+        if not str(entry.get("type", "")).startswith("agent_toolset"):
+            updated.append(entry)
+            continue
+        raw = dict(cast(dict[str, Any], entry))
+        configs = [dict(config) for config in raw.get("configs") or ()]
+        for config in configs:
+            if config.get("name") == tool:
+                config["enabled"] = enabled
+                break
+        else:
+            configs.append({"name": tool, "enabled": enabled})
+        raw["configs"] = configs
+        updated.append(cast(Tool, raw))
+    return updated
+
+
+async def _set_agent_builtin_tool_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    name: str,
+    *,
+    tool: BuiltinToolName,
+    enabled: bool,
+    expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
+) -> AgentInfo:
+    """Turn one built-in tool on or off, with update_agent's authorization."""
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    agent = await resolve_setup_agent(
+        runtime,
+        auth,
+        name=name,
+        expected_ma_agent_id=expected_ma_agent_id,
+        location_channel_id=origin_channel_id(origin),
+    )
+    _reject_system_agent(agent)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await reachability.require_admin_for_reachable_agent(
+        runtime, auth, agent_name=name, agent=agent
+    )
+    current = [_ma_tool_to_param(t) for t in agent.tools]
+    was = _builtin_enabled(current, tool)
+    if enabled:
+        if auth.anthropic_disabled:
+            raise ToolError(
+                "This server runs its own model, so built-in tools can't be turned on here. "
+                "Nothing changed."
+            )
+        if f"builtin/{tool}" in runtime.settings.tool_safety.denied:
+            raise ToolError(
+                f"Whoever runs Daimon has turned {tool} off for every agent here. Nothing changed."
+            )
+    if (was or False) == enabled:
+        state = "on" if enabled else "off"
+        reason = "" if was is not None else f" ({name} has no built-in tools)"
+        info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
+        return info.model_copy(
+            update={"applies": f"{tool} is already {state} for {name}{reason}. Nothing changed."}
+        )
+
+    async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
+        tools = _with_builtin([_ma_tool_to_param(t) for t in fresh.tools], tool, enabled)
+        return await update_agent(
+            runtime.client,
+            fresh.id,
+            version=fresh.version,
+            payload={"tools": tools},
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
+
+    try:
+        updated = await update_agent_with_version_retry(
+            runtime.client,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
+    except anthropic.ConflictError as exc:
+        raise ToolError("the agent was modified concurrently — please retry the operation") from exc
+    info = await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
+    if _setup_hidden(updated, auth):
+        info = info.for_member()
+    (info,) = await _with_providers(runtime, auth, [info])
+    applies = f"{tool} is now {'on' if enabled else 'off'} for {name}, from its next message."
+    if info.provider is not None and info.provider != DEFAULT_BACKEND:
+        from daimon.core.turn.notices import provider_name
+
+        applies += (
+            f" It answers on {provider_name(info.provider)} now, which runs without built-in "
+            "tools; this applies when it's back on Claude."
+        )
+    return info.model_copy(update={"applies": applies})
 
 
 def _reject_unknown_model(model: ModelSelection) -> None:
@@ -857,6 +1019,11 @@ async def _create_agent_impl(
     if backend is not None:
         # The model it runs on, never the Claude record it is saved with.
         info = info.model_copy(update={"model": backend[1], "applies": started})
+    # Say whether the creator was recorded as its owner, read back as get_agent
+    # reads it: recording fails closed, so a miss reads as not owned.
+    owned = await caller_owns_agent(runtime, auth, ma_agent.id)
+    owner = (await owner_labels(runtime, auth, [ma_agent.id])).get(ma_agent.id)
+    info = info.model_copy(update={"owned_by_you": owned, "owner": owner})
     return await _with_answering_note(runtime, auth, info)
 
 
@@ -2221,6 +2388,33 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             tools=tools,
             mcp_servers=mcp_servers,
             skills=skills,
+            expected_ma_agent_id=expected_ma_agent_id,
+            origin_context_id=origin_context_id,
+        )
+
+    @mcp.tool
+    async def set_agent_builtin_tool(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        name: str,
+        tool: BuiltinToolName,
+        enabled: bool,
+        expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
+    ) -> AgentInfo:
+        """Turn one of an agent's built-in tools on or off, e.g. "turn off its web search".
+
+        ``tool`` is the built-in's name (web_search, web_fetch, bash, read, write,
+        edit, glob, grep). Needs the agent's owner or an admin, like update_agent.
+        Whoever runs Daimon can forbid one for every agent by listing
+        ``builtin/<name>`` in the tool-safety ``denied`` setting; that is refused.
+        Returns ``applies``: post it as part of the reply. Pass this turn's
+        ``origin_context_id`` so its channel counts."""
+        return await _set_agent_builtin_tool_impl(
+            runtime,
+            await _auth(ctx),
+            name,
+            tool=tool,
+            enabled=enabled,
             expected_ma_agent_id=expected_ma_agent_id,
             origin_context_id=origin_context_id,
         )
