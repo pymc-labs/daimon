@@ -416,8 +416,8 @@ def test_a_busy_preparation_reads_as_try_again_through_the_kept_chain() -> None:
     from daimon.core.turn.errors import AdmissionDenied
     from mux.errors import ProviderError
 
+    # The cause alone, with nothing under it: the mapping decides, not a timeout.
     busy = AdmissionDenied(reason="backend_unsupported", cause="preparation_busy")
-    busy.__cause__ = TimeoutError()
     assert worker_failure_code(busy, "preparation_refused") == "preparation_deadline_exceeded"
     quota = ProviderError.__new__(ProviderError)
     quota.category, quota.native_code = "rate_limited", "quota_zero"

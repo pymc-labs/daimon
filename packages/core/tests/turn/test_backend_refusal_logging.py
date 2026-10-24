@@ -244,3 +244,37 @@ def test_a_database_failure_is_named_by_class_and_sqlstate_and_busy_only_when_tr
     assert cause == {"type": "unlisted", "class": "sqlalchemy.exc.DBAPIError", "sqlstate": sqlstate}
     assert transient_failure(error) is busy
     assert private not in json.dumps(cause)
+
+
+class _Status(Exception):
+    """An SDK status error, as its `status_code` shows it."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("PRIVATE body")
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize(
+    ("cause", "busy"),
+    [
+        (_Status(503), True),
+        (_Status(429), True),
+        (TimeoutError(), True),
+        (ConnectionResetError(), True),
+        (_Status(401), False),  # a bad key: retrying never fixes it
+        (_Status(403), False),
+        (_Status(404), False),  # a missing resource
+        (None, False),
+    ],
+)
+def test_an_upstream_failure_is_busy_only_when_a_retry_can_clear_it(cause, busy):
+    """#1558 review: a provider 401/403/404 must give the reference, not "busy, try
+    again" forever; a 5xx, 429, timeout or lost connection is busy."""
+    from daimon.core.channel_backend import transient_failure
+    from daimon.core.errors import TurnError
+
+    as_attribute = TurnError(kind="upstream", message="upstream", cause=cause)
+    assert transient_failure(as_attribute) is busy
+    raised = TurnError(kind="upstream", message="upstream")
+    raised.__cause__ = cause
+    assert transient_failure(raised) is busy

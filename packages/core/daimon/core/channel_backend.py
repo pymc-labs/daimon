@@ -665,6 +665,33 @@ def _sqlstate(error: BaseException) -> str | None:
     return None
 
 
+def _upstream_transient(error: BaseException) -> bool:
+    """Whether a provider failure is one a retry can clear: a timeout or a lost
+    connection, a 5xx or a 429, or a normalized provider error marked retryable.
+    A 401/403/404 (a bad key, a missing resource) is not: retrying never fixes it,
+    so its turn gives the reference instead of "busy, try again" forever."""
+    import httpx
+    from mux.errors import ProviderError
+
+    pending: list[object] = [getattr(error, "cause", None), error.__cause__, error.__context__]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError, httpx.TransportError)):
+            return True
+        if isinstance(current, ProviderError) and current.retryable:
+            return True
+        status = getattr(current, "status_code", None)
+        if isinstance(status, int) and (status >= 500 or status == 429):
+            return True
+        if isinstance(current, BaseException):
+            pending.extend((current.__cause__, current.__context__))
+    return False
+
+
 def transient_failure(error: BaseException | None) -> bool:
     """Whether a failure, or any exception in its chain, is one a retry can clear:
     a timeout, a database pool timeout, a lost connection or server restart, a
@@ -696,7 +723,10 @@ def transient_failure(error: BaseException | None) -> bool:
             ),
         ):
             return True
-        if isinstance(error, TurnError) and error.kind in ("connection_lost", "upstream"):
+        if isinstance(error, TurnError) and (
+            error.kind == "connection_lost"
+            or (error.kind == "upstream" and _upstream_transient(error))
+        ):
             return True
         if isinstance(error, DBAPIError):
             sqlstate = _sqlstate(error)
