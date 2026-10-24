@@ -40,7 +40,7 @@ from daimon.core.neutral_resources import (
     WorkerSpecRefused,
     resolve_worker_spec,
 )
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, SKILL_READ_TOOLS
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, SKILL_READ_PROXY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
@@ -96,8 +96,8 @@ _WILDCARD = "*"
 #: losses (OpenAI's web_search is unpriced and uncounted; Gemini's grounding is off).
 _WEB_TOOLS = frozenset({"web_search", "web_fetch"})
 SKILL_READ_INSTRUCTION = (
-    "Your skills don't load by themselves here: call skill_list to see them, and "
-    "skill_read the one that fits before you start a task it covers."
+    "Your skills don't load by themselves here: use call_tool to call skill_list "
+    "and see them, then skill_read the one that fits before you start a task it covers."
 )
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
@@ -1994,11 +1994,14 @@ async def _capture_source_capabilities(
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
                 # Its custom skills come along as Daimon MCP's skill_list/skill_read
-                # when both are in its executable catalogue (J6 b); otherwise they
-                # are a whole loss its consent must name.
-                skills_by_tools = any(
-                    s.source in (None, "custom") for s in spec.skills or ()
-                ) and all(permissions.get(name) == "auto" for name in SKILL_READ_TOOLS)
+                # (J6 b), which a GPT/Gemini turn reaches through the call_tool
+                # proxy its catalogue carries; without that proxy they are a whole
+                # loss its consent must name. The catalogue itself is unchanged, so
+                # a template captured before keeps matching it.
+                skills_by_tools = (
+                    any(s.source in (None, "custom") for s in spec.skills or ())
+                    and permissions.get(SKILL_READ_PROXY) == "auto"
+                )
                 if (
                     any(s.source in (None, "custom") for s in spec.skills or ())
                     and not skills_by_tools

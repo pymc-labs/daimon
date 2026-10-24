@@ -1645,7 +1645,9 @@ class McpToken(Base):
             "surface IS NULL OR (surface = 'provider_turn' AND kind = 'agent')",
             name="ck_mcp_tokens_surface",
         ),
-        CheckConstraint("skill_bytes_read >= 0", name="ck_mcp_tokens_skill_bytes_read"),
+        CheckConstraint(
+            "skill_bytes_read >= 0 AND skill_calls >= 0", name="ck_mcp_tokens_skill_reads"
+        ),
     )
 
     jti: Mapped[uuid.UUID] = mapped_column(
@@ -1677,10 +1679,12 @@ class McpToken(Base):
     issued_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, server_default=text("0")
     )
-    # Skill bytes a provider turn has read through `skill_read`, against its budget.
+    # A provider turn's skill calls and the bytes `skill_read` returned, against
+    # its budget (`daimon.adapters.mcp.tools.skill_reads`).
     skill_bytes_read: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
     )
+    skill_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     # The channel the token was minted in, whose calls then run inside it; both
     # NULL for a token bound to no channel.
     platform: Mapped[str | None] = mapped_column(Text, nullable=True)

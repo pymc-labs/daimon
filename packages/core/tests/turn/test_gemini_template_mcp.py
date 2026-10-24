@@ -209,7 +209,9 @@ def _connection(selected):
 async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert {"memory", "skills"} <= set(quote.declared_drops)
+    assert "memory" in quote.declared_drops
+    # J6b: its skills come along through call_tool -> skill_list/skill_read.
+    assert "skills" not in quote.declared_drops
     # J6b: its execution tools map to code_execution; web search and fetch
     # (grounding, off) are each a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops

@@ -80,8 +80,9 @@ async def chat(fresh_chat, monkeypatch):
                 "describe_agent",
                 "hand_off_task",
                 "request_agent_backend_switch",
-                "skill_list",
-                "skill_read",
+                # Everything else, skill_list/skill_read included, through the proxy.
+                "search_tools",
+                "call_tool",
             }
         )
 

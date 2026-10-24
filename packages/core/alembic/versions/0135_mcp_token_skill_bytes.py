@@ -1,9 +1,10 @@
-"""mcp_token_skill_bytes: count the skill bytes one provider turn has read.
+"""mcp_token_skill_bytes: count one provider turn's skill calls and bytes.
 
-A GPT or Gemini turn reads its agent's skills through Daimon MCP (`skill_read`).
-Its per-turn credential counts the bytes returned, so a loop of reads can't
-spend the turn's tokens past a fixed budget. An atomic UPDATE checks and adds
-in one statement, on every instance.
+A GPT or Gemini turn reads its agent's skills through Daimon MCP (`skill_list`,
+`skill_read`). Its turn-lived credential counts the calls and the bytes
+returned, so a loop can't spend the turn's tokens or the shared provider quota
+past a fixed budget. An atomic UPDATE checks and adds in one statement, on every
+instance.
 
 downgrade: safe
 """
@@ -24,11 +25,16 @@ def upgrade() -> None:
         "mcp_tokens",
         sa.Column("skill_bytes_read", sa.BigInteger(), nullable=False, server_default="0"),
     )
+    op.add_column(
+        "mcp_tokens",
+        sa.Column("skill_calls", sa.Integer(), nullable=False, server_default="0"),
+    )
     op.create_check_constraint(
-        "ck_mcp_tokens_skill_bytes_read", "mcp_tokens", "skill_bytes_read >= 0"
+        "ck_mcp_tokens_skill_reads", "mcp_tokens", "skill_bytes_read >= 0 AND skill_calls >= 0"
     )
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_mcp_tokens_skill_bytes_read", "mcp_tokens", type_="check")
+    op.drop_constraint("ck_mcp_tokens_skill_reads", "mcp_tokens", type_="check")
+    op.drop_column("mcp_tokens", "skill_calls")
     op.drop_column("mcp_tokens", "skill_bytes_read")

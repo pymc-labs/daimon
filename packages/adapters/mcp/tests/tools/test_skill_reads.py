@@ -2,13 +2,15 @@
 
 The agent comes from the turn's credential, never from the model's arguments; a
 skill is readable only when it is attached to that agent and titled for this
-tenant. Each read is cut at 64 KB, and one turn's reads stop at 512 KB.
+tenant. Each read is cut at 64 KB, one turn's reads stop at 512 KB and 40 calls,
+both checked before any download, and a version is downloaded once while cached.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -16,7 +18,9 @@ import pytest
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import skill_reads
 from daimon.adapters.mcp.tools.skill_reads import (
+    SKILL_CALLS_PER_TURN,
     SKILL_READ_MAX_BYTES,
     SKILL_READ_TURN_BYTES,
     _skill_list_impl,  # pyright: ignore[reportPrivateUsage]
@@ -96,6 +100,8 @@ async def world(db_session: AsyncSession, db_session_factory: async_sessionmaker
         _row("sk_foreign", tenant_scoped_display_title(tenant_id=other_tenant, name="secrets")),
     ]
 
+    downloads: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
         if method == "GET" and path == "/v1/agents":
@@ -110,6 +116,7 @@ async def world(db_session: AsyncSession, db_session_factory: async_sessionmaker
                 and path.startswith(f"/v1/skills/{skill_id}/")
                 and path.endswith("/content")
             ):
+                downloads.append(skill_id)
                 return httpx.Response(200, content=data)
         raise NotHandled
 
@@ -119,18 +126,28 @@ async def world(db_session: AsyncSession, db_session_factory: async_sessionmaker
         MagicMock(),
         DeploymentDefault(),
     )
-    jti = uuid.uuid4()
-    async with db_session_factory() as session, session.begin():
-        await mcp_tokens.create_mcp_token_row(
-            session,
-            jti=jti,
-            account_id=account.id,
-            tenant_id=tenant.id,
-            agent_id=str(derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_mine")),
-            label="provider-turn",
-            created_at=datetime.now(UTC),
-            surface="provider_turn",
-        )
+    skill_reads._FILES.clear()  # pyright: ignore[reportPrivateUsage]
+    agent_id = str(derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_mine"))
+
+    async def credential(*, lives: timedelta | None) -> uuid.UUID:
+        """A provider-turn credential: a turn's own (15 min) or an operator's file."""
+        jti = uuid.uuid4()
+        now = datetime.now(UTC)
+        async with db_session_factory() as session, session.begin():
+            await mcp_tokens.create_mcp_token_row(
+                session,
+                jti=jti,
+                account_id=account.id,
+                tenant_id=tenant.id,
+                agent_id=agent_id,
+                label="provider-turn",
+                created_at=now,
+                expires_at=None if lives is None else now + lives,
+                surface="provider_turn",
+            )
+        return jti
+
+    jti = await credential(lives=timedelta(minutes=15))
 
     def turn(**changes: object) -> AuthIdentity:
         values: dict[str, object] = {
@@ -144,30 +161,35 @@ async def world(db_session: AsyncSession, db_session_factory: async_sessionmaker
         values.update(changes)
         return AuthIdentity(**values)  # type: ignore[arg-type]
 
-    return runtime, turn, db_session_factory, jti
+    return SimpleNamespace(
+        runtime=runtime,
+        turn=turn,
+        sessions=db_session_factory,
+        jti=jti,
+        credential=credential,
+        downloads=downloads,
+    )
 
 
 async def test_a_turn_lists_and_reads_only_its_own_agents_skills(world):
-    runtime, turn, *_ = world
-    listed = await _skill_list_impl(runtime, turn())
-    assert [(entry.name, entry.description) for entry in listed] == [
-        ("research", "Research a topic.")
-    ]
-    read = await _skill_read_impl(runtime, turn(), "research")
+    listed = await _skill_list_impl(world.runtime, world.turn())
+    assert [entry.name for entry in listed] == ["research"]
+    assert world.downloads == [], "skill_list reads names only, never a skill's files"
+    read = await _skill_read_impl(world.runtime, world.turn(), "research")
     assert read.path == "SKILL.md" and "Do it." in read.content and not read.truncated
     assert read.files == ["SKILL.md", "notes.txt"]
 
 
 async def test_another_agents_skill_is_refused(world):
-    runtime, turn, *_ = world
     with pytest.raises(ToolError, match="isn't one of this agent's skills"):
-        await _skill_read_impl(runtime, turn(), "billing")
+        await _skill_read_impl(world.runtime, world.turn(), "billing")
+    assert world.downloads == []
 
 
 async def test_another_tenants_skill_is_refused_even_when_attached(world):
-    runtime, turn, *_ = world
     with pytest.raises(ToolError, match="isn't one of this agent's skills"):
-        await _skill_read_impl(runtime, turn(), "secrets")
+        await _skill_read_impl(world.runtime, world.turn(), "secrets")
+    assert world.downloads == []
 
 
 @pytest.mark.parametrize(
@@ -180,40 +202,69 @@ async def test_another_tenants_skill_is_refused_even_when_attached(world):
     ],
 )
 async def test_only_a_provider_turns_own_credential_reads(world, changes):
-    runtime, turn, *_ = world
     with pytest.raises(ToolError, match="Nothing was read"):
-        await _skill_list_impl(runtime, turn(**changes))
+        await _skill_list_impl(world.runtime, world.turn(**changes))
     with pytest.raises(ToolError, match="Nothing was read"):
-        await _skill_read_impl(runtime, turn(**changes), "research")
+        await _skill_read_impl(world.runtime, world.turn(**changes), "research")
 
 
-async def test_a_read_is_cut_and_a_turn_stops_at_its_budget(world):
-    runtime, turn, sessions, jti = world
-    read = await _skill_read_impl(runtime, turn(), "research", "notes.txt")
+@pytest.mark.parametrize("lives", [None, timedelta(days=30)])
+async def test_an_operators_long_lived_credential_never_reads(world, lives):
+    """Its budget would be a lifetime's, not a turn's: only a turn-lived one reads."""
+    jti = await world.credential(lives=lives)
+    with pytest.raises(ToolError, match="Nothing more was read"):
+        await _skill_read_impl(world.runtime, world.turn(token_jti=jti), "research")
+    assert world.downloads == []
+
+
+async def test_a_read_is_cut_and_a_turn_stops_at_its_budget_before_downloading(world):
+    read = await _skill_read_impl(world.runtime, world.turn(), "research", "notes.txt")
     assert read.truncated and len(read.content.encode()) == SKILL_READ_MAX_BYTES
     reads = SKILL_READ_TURN_BYTES // SKILL_READ_MAX_BYTES
     for _ in range(reads - 1):
-        await _skill_read_impl(runtime, turn(), "research", "notes.txt")
-    with pytest.raises(ToolError, match="512 KB"):
-        await _skill_read_impl(runtime, turn(), "research", "notes.txt")
-    async with sessions() as session:
-        row = await mcp_tokens.get_mcp_token(session, jti=jti)
-    assert row is not None
-    # Every byte returned was counted, and the refused read added none.
-    from sqlalchemy import text
+        await _skill_read_impl(world.runtime, world.turn(), "research", "notes.txt")
+    # The version was downloaded once: every later read came from the cache.
+    assert world.downloads == ["sk_mine"]
+    world.downloads.clear()
+    skill_reads._FILES.clear()  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(ToolError, match="Nothing more was read"):
+        await _skill_read_impl(world.runtime, world.turn(), "research", "notes.txt")
+    assert world.downloads == [], "a spent turn is refused before any download"
+    calls, read_bytes = await _counted(world)
+    assert read_bytes == reads * SKILL_READ_MAX_BYTES and calls == reads
 
-    async with sessions() as session:
-        counted = (
-            await session.execute(
-                text("SELECT skill_bytes_read FROM mcp_tokens WHERE jti = :jti"), {"jti": jti}
-            )
-        ).scalar_one()
-    assert counted == reads * SKILL_READ_MAX_BYTES
+
+async def test_a_turn_stops_at_its_call_cap(world):
+    for _ in range(SKILL_CALLS_PER_TURN):
+        await _skill_list_impl(world.runtime, world.turn())
+    with pytest.raises(ToolError, match="Nothing more was read"):
+        await _skill_list_impl(world.runtime, world.turn())
+    assert (await _counted(world))[0] == SKILL_CALLS_PER_TURN
 
 
 async def test_another_tenants_credential_never_draws_on_this_budget(world):
-    runtime, turn, sessions, jti = world
-    async with sessions() as session, session.begin():
-        assert not await mcp_tokens.charge_skill_bytes(
-            session, jti=jti, tenant_id=uuid.uuid4(), size=1, budget=SKILL_READ_TURN_BYTES
+    async with world.sessions() as session, session.begin():
+        assert (
+            await mcp_tokens.begin_skill_call(
+                session,
+                jti=world.jti,
+                tenant_id=uuid.uuid4(),
+                now=datetime.now(UTC),
+                max_calls=SKILL_CALLS_PER_TURN,
+                budget=SKILL_READ_TURN_BYTES,
+            )
+            is None
         )
+
+
+async def _counted(world) -> tuple[int, int]:
+    from sqlalchemy import text
+
+    async with world.sessions() as session:
+        row = (
+            await session.execute(
+                text("SELECT skill_calls, skill_bytes_read FROM mcp_tokens WHERE jti = :jti"),
+                {"jti": world.jti},
+            )
+        ).one()
+    return int(row[0]), int(row[1])

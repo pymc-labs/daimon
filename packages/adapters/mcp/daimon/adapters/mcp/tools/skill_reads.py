@@ -1,23 +1,43 @@
 """A GPT or Gemini turn's own skills, read through Daimon MCP (J6 b).
 
 Off Anthropic, an agent's custom skills don't load by themselves: the turn
-lists them (`skill_list`) and reads one (`skill_read`) when it needs it. Only
-the turn's own credential reads, and only the skills attached to the agent it
-runs as: the agent comes from the credential (`chat_agent_id`), never from the
-model's arguments, and a skill is this tenant's only when its title carries
-the tenant's prefix. Reads are read-only, cut at `SKILL_READ_MAX_BYTES`, and a
-turn's total is capped at `SKILL_READ_TURN_BYTES` on its credential's row, so
-a loop of reads can't run up its tokens.
+lists them (`skill_list`) and reads one (`skill_read`) when it needs it, through
+the `call_tool` proxy its MCP catalogue already carries.
+
+Who may read what:
+- Only the turn's own credential, and only one that lives for that turn (an
+  agent template mints one per turn and revokes it at the end): the budget kept
+  on its row is that turn's. An operator row's long-lived credential never
+  reads; its skills are deployed natively.
+- The agent comes from the credential (`chat_agent_id`), never from the model's
+  arguments; a skill resolves only when it is attached to that agent and its
+  title carries this tenant's prefix.
+- The agent's live pins are read, not a captured revision: a skill attached or
+  removed while a conversation runs shows on its next call, as the skill list
+  of an Anthropic agent does in its next conversation. The person attaching it
+  already holds the right to change the agent.
+
+What it costs, all bounded per turn on the credential's row:
+- each call (list or read) is counted before any download, at most
+  `SKILL_CALLS_PER_TURN`;
+- a read returns at most `SKILL_READ_MAX_BYTES`, and a turn's reads at most
+  `SKILL_READ_TURN_BYTES` together;
+- `skill_list` reads names only, never a skill's files;
+- a version's files are cached per tenant (`_FILES`): a version never changes,
+  so a loop of reads downloads it once.
+A retried turn mints a new credential and so starts a new budget, bounded by
+the turn's own retries.
 """
 
 from __future__ import annotations
 
-import asyncio
+import time
+import uuid
+from datetime import UTC, datetime
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.defaults.ma_index import (
     download_skill_version,
     find_agent_by_derived_uuid,
@@ -36,16 +56,25 @@ from pydantic import BaseModel
 SKILL_READ_MAX_BYTES = 64 * 1024
 #: The most all of one turn's `skill_read` calls return together.
 SKILL_READ_TURN_BYTES = 512 * 1024
+#: The most skill calls (list and read) one turn makes.
+SKILL_CALLS_PER_TURN = 40
+#: How long a downloaded version's files stay cached, and how many are kept.
+_CACHE_SECONDS = 600
+_CACHE_ENTRIES = 64
+_FILES: dict[tuple[uuid.UUID, str, str], tuple[float, dict[str, bytes]]] = {}
 
 _NOT_HERE = (
     "Only an agent's own reply on GPT or Gemini reads its skills this way; on "
     "Anthropic they load by themselves. Nothing was read."
 )
+_SPENT = (
+    "This reply has read as much of its skills as it may. Work from what it has "
+    "read. Nothing more was read."
+)
 
 
 class SkillEntry(BaseModel):
     name: str
-    description: str
 
 
 class SkillFile(BaseModel):
@@ -56,7 +85,7 @@ class SkillFile(BaseModel):
     files: list[str]
 
 
-def _require_turn(auth: AuthIdentity) -> None:
+def _require_turn(auth: AuthIdentity) -> uuid.UUID:
     """A provider turn's own credential: no agent key, no held or confirmation turn."""
     if (
         auth.chat_agent_id is None
@@ -66,11 +95,28 @@ def _require_turn(auth: AuthIdentity) -> None:
         or auth.hold is not None
     ):
         raise ToolError(_NOT_HERE)
+    return auth.token_jti
+
+
+async def _begin_call(runtime: McpRuntime, auth: AuthIdentity) -> int:
+    """Count this call on the turn's credential, before any download: bytes left."""
+    jti = _require_turn(auth)
+    async with runtime.session_factory() as session, session.begin():
+        left = await mcp_tokens.begin_skill_call(
+            session,
+            jti=jti,
+            tenant_id=auth.tenant_id,
+            now=datetime.now(UTC),
+            max_calls=SKILL_CALLS_PER_TURN,
+            budget=SKILL_READ_TURN_BYTES,
+        )
+    if left is None:
+        raise ToolError(_SPENT)
+    return left
 
 
 async def _turn_skills(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, tuple[str, str]]:
     """This turn's agent's own custom skills: name -> (skill id, concrete version)."""
-    _require_turn(auth)
     assert auth.chat_agent_id is not None
     agent = await find_agent_by_derived_uuid(
         runtime.client, tenant_id=auth.tenant_id, agent_id=auth.chat_agent_id
@@ -96,42 +142,38 @@ async def _turn_skills(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, tup
 
 
 async def _files(runtime: McpRuntime, auth: AuthIdentity, pin: tuple[str, str]) -> dict[str, bytes]:
+    """A version's files, downloaded once per tenant while cached."""
     skill_id, version = pin
+    key = (auth.tenant_id, skill_id, version)
+    cached = _FILES.get(key)
+    now = time.monotonic()
+    if cached is not None and cached[0] > now:
+        return cached[1]
     data = await download_skill_version(
         runtime.client,
         skill_id=skill_id,
         version=version,
         scope=resource_scope(tenant_id=str(auth.tenant_id)),
     )
-    return retained_archive_files(data)
-
-
-def _description(skill_md: bytes) -> str:
-    try:
-        spec, _ = parse_skill_markdown(skill_md.decode("utf-8"), source="SKILL.md")
-    except (UnicodeDecodeError, DaimonError):
-        return ""
-    return spec.description.strip()
+    files = retained_archive_files(data)
+    for stale in [k for k, (until, _) in _FILES.items() if until <= now]:
+        del _FILES[stale]
+    while len(_FILES) >= _CACHE_ENTRIES:
+        del _FILES[next(iter(_FILES))]
+    _FILES[key] = (now + _CACHE_SECONDS, files)
+    return files
 
 
 async def _skill_list_impl(runtime: McpRuntime, auth: AuthIdentity) -> list[SkillEntry]:
-    skills = await _turn_skills(runtime, auth)
-
-    async def entry(name: str, pin: tuple[str, str]) -> SkillEntry:
-        try:
-            files = await _files(runtime, auth, pin)
-        except DaimonError:
-            return SkillEntry(name=name, description="")
-        return SkillEntry(name=name, description=_description(files["SKILL.md"]))
-
-    return list(await asyncio.gather(*(entry(n, p) for n, p in sorted(skills.items()))))
+    await _begin_call(runtime, auth)
+    return [SkillEntry(name=name) for name in sorted(await _turn_skills(runtime, auth))]
 
 
 async def _skill_read_impl(
     runtime: McpRuntime, auth: AuthIdentity, name: str, path: str = "SKILL.md"
 ) -> SkillFile:
-    skills = await _turn_skills(runtime, auth)
-    pin = skills.get(name)
+    left = await _begin_call(runtime, auth)
+    pin = (await _turn_skills(runtime, auth)).get(name)
     if pin is None:
         raise ToolError(
             f"{name!r} isn't one of this agent's skills. Call skill_list for the ones it has."
@@ -143,33 +185,30 @@ async def _skill_read_impl(
     body = files.get(path)
     if body is None:
         raise ToolError(f"{name!r} has no file {path!r}. Its files: {', '.join(sorted(files))}.")
-    returned = body[:SKILL_READ_MAX_BYTES]
+    returned = body[: min(SKILL_READ_MAX_BYTES, left)]
     try:
         text = returned.decode("utf-8")
     except UnicodeDecodeError:
-        # A cut through a multi-byte character: drop the partial character.
-        text = returned.decode("utf-8", errors="ignore")
         if len(returned) == len(body):
             raise ToolError(f"{path!r} in {name!r} isn't text. Nothing was read.") from None
-    assert auth.token_jti is not None
+        # A cut through a multi-byte character: drop the partial character.
+        text = returned.decode("utf-8", errors="ignore")
     async with runtime.session_factory() as session, session.begin():
         charged = await mcp_tokens.charge_skill_bytes(
             session,
-            jti=auth.token_jti,
+            jti=_require_turn(auth),
             tenant_id=auth.tenant_id,
+            now=datetime.now(UTC),
             size=len(text.encode("utf-8")),
             budget=SKILL_READ_TURN_BYTES,
         )
     if not charged:
-        raise ToolError(
-            "This reply has read as much of its skills as it may (512 KB). Work from what "
-            "it has read. Nothing more was read."
-        )
+        raise ToolError(_SPENT)
     return SkillFile(
         name=name,
         path=path,
         content=text,
-        truncated=len(body) > SKILL_READ_MAX_BYTES,
+        truncated=len(text.encode("utf-8")) < len(body),
         files=sorted(files),
     )
 
@@ -177,8 +216,8 @@ async def _skill_read_impl(
 def register_skill_read_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def skill_list(ctx: Context) -> list[SkillEntry]:  # pyright: ignore[reportUnusedFunction]
-        """List your own skills, each with when to use it. On GPT or Gemini, call
-        this first; then skill_read the one that fits before you start."""
+        """List your own skills by name. On GPT or Gemini, call this first; then
+        skill_read the one that fits before you start."""
         return await _skill_list_impl(runtime, await _auth(ctx))
 
     @mcp.tool

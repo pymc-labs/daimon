@@ -6055,8 +6055,8 @@
     }),
     'skill_list': dict({
       'description': '''
-        List your own skills, each with when to use it. On GPT or Gemini, call
-        this first; then skill_read the one that fits before you start.
+        List your own skills by name. On GPT or Gemini, call this first; then
+        skill_read the one that fits before you start.
       ''',
       'parameters': dict({
         'additionalProperties': False,

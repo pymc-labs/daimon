@@ -31,12 +31,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Annotated, Any
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.tool_safety import (
-    APPROVAL_TOOLS,
-    NATIVE_FLEET_TOOLS,
-    SKILL_READ_TOOLS,
-    proxy_refusal,
-)
+from daimon.core.tool_safety import APPROVAL_TOOLS, NATIVE_FLEET_TOOLS, proxy_refusal
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import get_context
@@ -119,12 +114,10 @@ class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
             return tools
         collapsed = await super().transform_tools(tools)
         if isinstance(auth, AuthIdentity) and auth.no_confirmation_surface:
-            # A GPT/Gemini turn: its provider allowlists only what this list names. Its
-            # fleet tools and its skills (J6 b) are listed by name.
+            # A GPT/Gemini turn: its provider allowlists only what this list names.
             listed = {tool.name for tool in collapsed}
-            pinned = {*NATIVE_FLEET_TOOLS, *SKILL_READ_TOOLS}
             return [
                 *collapsed,
-                *(t for t in tools if t.name in pinned and t.name not in listed),
+                *(t for t in tools if t.name in NATIVE_FLEET_TOOLS and t.name not in listed),
             ]
         return collapsed
