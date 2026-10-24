@@ -845,9 +845,9 @@ def register_fleet_tools(
         are starting, e.g. ["opus 5.5", "astra", "argon"], the same list on
         every call), plus origin_context_id from your turn controls.
         fleet_agents lists the allowed models by name. A family name alone
-        ("haiku") means its newest model (Claude Haiku 5.5): never ask which
-        version, just name the model you started. A name that matches none, or
-        several families, is refused with the allowed list.
+        ("haiku") means its newest model (fleet_agents' family_names says
+        which): never ask which version, just name the model you started. A name
+        that matches none, or several families, is refused with the allowed list.
         If the person names a model that isn't on that list (e.g. "Gemini
         Pro" when only Flash and Argon are allowed), don't start a worker:
         tell them it isn't available here, offer the closest allowed model,
@@ -1019,8 +1019,8 @@ def register_fleet_tools(
         person asked for that isn't listed here isn't available: say so and
         ask which listed model to use, rather than picking one for them.
         "family_names": a family name alone ("haiku", "sonnet", "luna",
-        "flash") means the newest model of that family, e.g. haiku ->
-        claude-haiku-5-5. Pass it as said and name the exact model in your
+        "flash") means the newest model of that family; this map says which
+        model each one is here. Pass it as said and name the exact model in your
         reply; never ask which version. Ask only when the name matches no
         listed model, or models of different families.
         """
