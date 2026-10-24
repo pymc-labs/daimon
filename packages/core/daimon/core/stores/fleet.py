@@ -822,7 +822,19 @@ async def set_run_status(
         {
             "finished_at": func.now(),
             "end_notice": case((spawned, "owed"), else_=None),
-            "end_notice_due_at": case((spawned, func.now() + END_NOTICE_GRACE), else_=None),
+            # The grace is for the turn that ended the run to render its own card. Past
+            # the run's deadline no turn of it is left to (they share that deadline), so
+            # the card is due at once instead of a minute after the deadline.
+            "end_notice_due_at": case(
+                (
+                    spawned,
+                    func.least(
+                        func.now() + END_NOTICE_GRACE,
+                        func.greatest(FleetRunRow.deadline_at, func.now()),
+                    ),
+                ),
+                else_=None,
+            ),
         }
         if status not in RUN_TRANSITIONS
         else {}
