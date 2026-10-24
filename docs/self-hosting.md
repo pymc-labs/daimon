@@ -1666,10 +1666,11 @@ uncertain or partially sent claim to pending, because delivery is at most once.
 
 ### Signed page-event watch sidecar
 
-Only Discord thread/channel polling is delivered end to end. Page-event watches
-are not yet delivered: no page host calls `sign_page_event`, and per-watch keys
-are not connected to sidecar verification. Notion, Linear, HubSpot, URL and
-webhook watches cannot fire through this infrastructure.
+Only Discord `read_thread` and `read_channel` polling works end to end.
+Notion, Linear, HubSpot and URL watches are polls of unreviewed tools: creation
+is refused, and imports remain paused as `source_unmapped`. Webhook/callback
+watches map to `page_event`, which is not yet delivered: no host calls
+`sign_page_event`, and sidecar verification is not connected to per-watch keys.
 
 The optional `preview-sidecar` Compose profile runs the commit-pinned application
 and digest-pinned TLS proxy after migrations. Set `DAIMON_SIDECAR_PUBLIC_HOST`
@@ -1697,8 +1698,8 @@ startup. The service receives an explicitly allowlisted environment.
 
 `DAIMON_SIDECAR__SIGNING_KEYS` is a secret JSON map of key IDs to random OS-host
 HMAC keys (32–256 bytes, at most 16 keys). The sidecar reads this configured map;
-it does not obtain keys from watch enrollment. Registrations store hashes, not recoverable keys. Initial enrollment
-binds an existing Discord thread, page and key, but no host produces events.
+registrations store hashes, not recoverable keys. Initial enrollment binds an
+existing Discord thread, page and key.
 There is no public signing route or outside sender mode. Offline file imports are
 described below.
 
@@ -1790,9 +1791,8 @@ pending firing. Daily caps (24/watch, 100/owner), evidence quotas and seven-day
 retention are shared across callbacks and polls. No additional turn path exists.
 
 Fresh page signing keys are sent only to the owner's private DM, once; the MCP
-result contains a key ID but no key. This does not connect a page producer or
-configure the sidecar's secret key map. Rotation revokes
-the old key and cancels its queued wakes. A failed private delivery pauses the watch;
+result contains a key ID but no key. Rotation revokes the old key and cancels
+its queued wakes. A failed private delivery pauses the watch;
 rotate again to retry with fresh material. List/show never reveal the secret.
 
 #### Offline internal-watch import
@@ -1867,8 +1867,8 @@ daimon watches confirm WATCH_UUID TENANT_UUID OWNER_ACCOUNT_UUID AGENT_ID PARENT
 Confirmation refuses a mismatched binding, unmapped source/projection, expired
 watch or missing page key. It activates a mapped definition; both producer gates
 still independently control execution. Ordinary owner `resume_watch` cannot bypass
-operator confirmation. Confirmation does not supply the missing page-event
-producer or sidecar key integration; page-event imports still cannot fire.
+operator confirmation. The [page-event limitation](#signed-page-event-watch-sidecar)
+still applies after confirmation.
 
 
 Native [lead intake](lead-intake.md) uses the existing `DAIMON_CRYPTO__KEYS`

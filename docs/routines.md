@@ -48,9 +48,10 @@ most 2,000 characters with mentions disabled. The notification includes the
 routine label and run identity. It neither selects a cold-DM tenant nor adds
 the notification to an active conversation's model history. Blocked DMs,
 revoked access, interrupted claims and uncertain or partial sends are visible
-in `delivery_status` / `delivery_note` and the Discord routines panel. There
-is no public fallback and no automatic resend; a later scheduled run may try
-again. The first failure in a failing streak uses the same private checks.
+via MCP `get_routine` / `list_routines` in `delivery_status` / `delivery_note`.
+Admins can also see failures for their own routines in the Discord `/routines`
+panel. There is no public fallback and no automatic resend; a later scheduled
+run may try again. The first failure in a failing streak uses the same private checks.
 Destination changes cancel queued results; a destination changed during a
 run prevents that run's result from being queued to the new destination.
 
@@ -469,7 +470,7 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 | --- | --- | --- | --- |
 | create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
 | list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
-| pause / resume | `update_routine`: admin or creator | `Manage Server` to open the panel | admin or creator |
+| pause / resume | `update_routine`: admin or creator | `Manage Server` to open; admin or creator re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 
 Ownership is `created_by_user_id`, and the check fails closed on both nulls:

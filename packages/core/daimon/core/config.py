@@ -2119,7 +2119,7 @@ class WatchesSettings(BaseModel):
         default=False,
         description=(
             "Enable reviewed Discord READ-tool polling and watch dispatch. "
-            "Page-event watches have no connected producer or per-watch sidecar key integration. "
+            "Page-event watches are not yet delivered. "
             "Keep disabled "
             "until the execution-bound unattended origin grants, non-gateable cleanup "
             "and watch release are reviewed. "

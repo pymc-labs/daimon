@@ -398,10 +398,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expressions are refused. Polls start with a saved baseline and compare
         change, added array elements, or updated object keys every 60–86400 seconds.
         Lifetime is 1–30 days. Producers remain disabled until both operator gates
-        are enabled. Page-event registration exists, but page-event watches are not
-        yet delivered: no host produces signed events and sidecar verification is
-        not connected to per-watch keys. Page signing keys are sent privately to
-        the owner once and never returned here.
+        are enabled; page-event watches are not yet delivered. Page signing keys
+        are sent privately to the owner once and never returned here.
         """
         return await create_watch_impl(
             runtime,

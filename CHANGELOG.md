@@ -17,12 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Correct watch delivery documentation to cover working Discord polling and the
-  undelivered page-event path; clarify that Discord `/routines` requires Manage
-  Server, ineligible cold DMs receive one-time `/dm-me` guidance, routine fallback
-  delivery sends the full final reply, and destination-free routines can opt in
-  to sandbox tools.
-
 - Preserve unattended sandbox restrictions across native providers: refuse workers and wakes that require automatic sandbox/custom tools or other ungated capabilities before a provider message; retain conversation-only workers, attended native execution and guarded selfhosted tools.
 
 
@@ -1060,11 +1054,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add default-off watch infrastructure with atomic evidence and durable wakes,
   restricted database identities, replay/retention limits and an optional preview
-  sidecar. Only polled Discord thread/channel watches work end to end. Page-event
-  watches (including Notion, Linear, HubSpot, URL and webhook sources) are not yet
-  delivered: no host signs events and sidecar verification is not connected to
-  per-watch keys. Account erasure removes owned watches, evidence and queued wakes. Woken
-  turns require an execution-bound unattended session grant, explicitly allowlisted
+  sidecar. Only polled Discord `read_thread`/`read_channel` watches work end to end.
+  Notion, Linear, HubSpot and URL polls use unreviewed tools: creation is refused
+  and imports remain paused as `source_unmapped`. Webhook/callback watches map to
+  `page_event`, which is not yet delivered. Account erasure removes owned watches,
+  evidence and queued wakes. Woken turns require an execution-bound unattended session grant, explicitly allowlisted
   snapshot fields and named read tools; skills, multiagent coordinators and unknown
   capabilities refuse before provider mutation. Original tools restore after each
   turn, including cancellation. Fresh access and spend checks gate every send and

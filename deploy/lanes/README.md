@@ -134,10 +134,8 @@ single-migrator invariant, including when starting or retrying Cloud Run jobs.
 
 ### Signed page-event watch sidecar
 
-Only polled Discord thread/channel watches work end to end. Page-event watches
-are not yet delivered: no host signs events, and per-watch keys are not connected
-to sidecar verification. Notion, Linear, HubSpot, URL and webhook watches cannot
-fire through this infrastructure.
+Only polled Discord `read_thread` and `read_channel` watches work end to end.
+See [supported sources and page-event limitations](../../docs/self-hosting.md#signed-page-event-watch-sidecar).
 
 The optional `preview-sidecar` Compose profile runs `daimon-sidecar`, the private
 OS poll executor and a TLS proxy, using the lane's immutable commit image and successful migration dependency.
@@ -156,10 +154,8 @@ Provision a distinct login granted only `daimon_sidecar`, with no ownership,
 schema CREATE, policy or credential-table rights. Set its local DSN in
 `DAIMON_SIDECAR__DATABASE_URL`; require TLS across hosts. Startup audits the actual
 login's inherited/PUBLIC privileges and installed ingress functions. The callback
-endpoint reads
-`DAIMON_SIDECAR__SIGNING_KEYS` from secret management; watch enrollment does not
-configure this map, and no OS page host produces events. The Compose environment
-is explicitly allowlisted.
+endpoint reads `DAIMON_SIDECAR__SIGNING_KEYS` from secret management. The Compose
+environment is explicitly allowlisted.
 
 See [self-hosting](../../docs/self-hosting.md#signed-page-event-watch-sidecar) for
 signing, callback headers, limits, role checks and stop/retention behavior, and
@@ -265,7 +261,7 @@ a backend with working `tool_confirmation` and the owner's verified card approva
 
    Expected: the watch lists the owner-bound agent and exact reporting thread.
    Keep the returned poll watch UUID. The first poll saves a baseline and produces
-   no wake. Page-event delivery is unavailable and is not part of this exercise.
+   no wake. This exercise covers polling.
 
 2. **Poll a change.** After at least one successful baseline poll, the human owner
    types exactly `row-12 poll change 1` into the source channel in Discord. Ask

@@ -2580,9 +2580,9 @@ completed cache entries. Unknown evidence cannot satisfy a role gate.
 
 ## Owner-DM routine delivery
 
-Discord `/routines` includes an owner-only delivery choice and delivery failure
-reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
-the authenticated owner; the operator CLI has `routines create --destination dm`
+The Discord `/routines` panel requires Manage Server and offers the delivery
+choice and delivery failure reasons for the admin's own routines. MCP accepts
+`destination_kind="dm"` with the recipient derived from the authenticated owner; the operator CLI has `routines create --destination dm`
 and a verifying dry-run. Slack and Teams explicitly reject DM writes.
 Retained previews, errors and delivery diagnostics for DM and legacy
 destination-free routines are owner-only on every reading surface, including
@@ -2626,9 +2626,7 @@ which may contain signed upload URLs.
 ### Signed page-event watch entry point
 
 Only polled Discord `read_thread` and `read_channel` watches work end to end.
-Page-event watches are not yet delivered: no host calls `sign_page_event`, and
-the sidecar has no integration for the per-watch signing key. Notion, Linear,
-HubSpot, URL and webhook watches therefore cannot fire through this path.
+See [supported sources and page-event limitations](self-hosting.md#signed-page-event-watch-sidecar).
 The callback infrastructure verifies HMAC, binding, freshness and replay before
 acknowledging a transaction that stores evidence and enqueues a `watch_fired` wake.
 It has no direct table access or turn runner; core's durable queue handles dispatch. Discord, Slack and Teams share
@@ -2700,10 +2698,8 @@ back off exponentially to one day; revoked access pauses the watch and cancels w
 MCP enrollment requires an attended turn origin and binds its tenant, owner, agent,
 thread, parent and session. Owner/admin management cancels queued wakes on pause,
 rotation and deletion. Fresh signing keys go only to the owner's private DM, once;
-MCP results and stored rows contain no plaintext key. Key delivery alone does not
-connect a page producer or configure sidecar verification. The offline CLI
-importer accepts no signing keys,
-imports everything paused, and requires explicit exact-binding confirmation before
+MCP results and stored rows contain no plaintext key. The offline CLI importer
+accepts no signing keys, imports everything paused, and requires explicit exact-binding confirmation before
 activation. An unmapped source cannot be confirmed or resumed. The existing Discord
 notice poller sends its owner a private migration notice without running a model or
 resuming the watch. Notebook and report hosts do not provide a page document query
