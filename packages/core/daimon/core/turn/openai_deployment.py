@@ -359,7 +359,11 @@ OPENAI_TEMPLATE_MCP_LABEL = "openai-agent-turn"
 
 
 def template_mcp_matches(request: ProviderPreparationRequest, target: AgentSpec) -> bool:
-    """The target's MCP is exactly the captured Daimon MCP representation, nothing more."""
+    """The target's MCP is exactly the captured Daimon MCP representation, nothing more.
+
+    Its other tools are exactly the represented execution tools (the hosted
+    environment's bash), never a custom tool.
+    """
     from daimon.core.turn.runtime_manifest import represented_source
 
     source = request.source
@@ -368,7 +372,8 @@ def template_mcp_matches(request: ProviderPreparationRequest, target: AgentSpec)
         represented is not None
         and target.mcp_servers == represented.target.mcp_servers
         and not target.skills
-        and not any(tool.kind != "mcp_toolset" for tool in target.tools or ())
+        and tuple(target.tools or ()) == tuple(represented.target.tools or ())
+        and all(tool.kind == "builtin" for tool in target.tools or ())
     )
 
 

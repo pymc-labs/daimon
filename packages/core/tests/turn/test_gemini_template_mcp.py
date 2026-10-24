@@ -208,8 +208,12 @@ def _connection(selected):
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(template):
     _, quote, *_ = template
-    assert "mcp" not in quote.declared_drops and "tools" in quote.declared_drops
+    assert "mcp" not in quote.declared_drops
     assert {"memory", "skills"} <= set(quote.declared_drops)
+    # J6b: its execution tools map to code_execution; web search and fetch
+    # (grounding, off) are each a named loss, never all of its tools.
+    assert "tools" not in quote.declared_drops
+    assert {"builtin_tool:web_fetch", "builtin_tool:web_search"} <= set(quote.declared_drops)
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

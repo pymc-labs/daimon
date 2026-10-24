@@ -40,10 +40,10 @@ J6B = "J6 (b) skills/built-in tools off Anthropic: scope waits on ROOT/Carlos (J
 LEGS = [
     pytest.param("openai", "mcp"),  # #1441: GPT roots keep Daimon MCP
     pytest.param("openai", "skill", marks=_gap(J6B)),
-    pytest.param("openai", "builtin", marks=_gap(J6B)),
+    pytest.param("openai", "builtin"),  # J6b PR1: bash in its hosted environment
     pytest.param("gemini", "mcp"),
     pytest.param("gemini", "skill", marks=_gap(J6B)),
-    pytest.param("gemini", "builtin", marks=_gap(J6B)),
+    pytest.param("gemini", "builtin"),  # J6b PR1: code_execution
 ]
 
 
@@ -134,3 +134,7 @@ async def test_j6_a_copy_on_another_backend_keeps_it(chat, backend, capability):
         origin_context_id=str(chat.origin.id),
     )
     assert LOSS[capability] not in preview.declared_drops, preview.declared_drops
+    if capability == "builtin":
+        # Its shell/code execution is kept; web search is a named loss (unpriced on
+        # OpenAI, grounding off on Gemini), said plainly on the card.
+        assert "builtin_tool:web_search" in preview.declared_drops, preview.declared_drops
