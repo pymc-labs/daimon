@@ -515,17 +515,21 @@ _TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
 
 
 def _builtin_enabled(tools: list[Tool], tool: str) -> bool | None:
-    """Whether `tool` is on in the agent's toolset; None when it has no toolset."""
+    """Whether any of the agent's toolsets turns `tool` on; None when it has none."""
+    found: bool | None = None
     for entry in tools:
-        if str(entry.get("type", "")).startswith("agent_toolset"):
-            raw = cast(dict[str, Any], entry)
-            default = cast(dict[str, Any], raw.get("default_config") or {}).get("enabled")
-            for config in raw.get("configs") or ():
-                if config.get("name") == tool:
-                    enabled = config.get("enabled")
-                    return bool(enabled) if enabled is not None else default is not False
-            return default is not False
-    return None
+        if not str(entry.get("type", "")).startswith("agent_toolset"):
+            continue
+        raw = cast(dict[str, Any], entry)
+        default = cast(dict[str, Any], raw.get("default_config") or {}).get("enabled")
+        on = default is not False
+        for config in raw.get("configs") or ():
+            if config.get("name") == tool:
+                enabled = config.get("enabled")
+                on = bool(enabled) if enabled is not None else default is not False
+                break
+        found = on or bool(found)
+    return found
 
 
 def _with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
@@ -972,6 +976,8 @@ async def _create_agent_impl(
         spec = spec.model_copy(
             update={"tools": _forbidden_builtins_off(runtime, list(spec.tools or []))}
         )
+        # The toolset the create sends (the base one added if missing) turns none on.
+        refuse_forbidden_builtins(runtime, [], merge_default_agent_toolset(spec.tools))
     owner = may_own(auth)
     async with contextlib.AsyncExitStack() as stack:
         if owner:
@@ -1267,9 +1273,6 @@ async def _update_agent_impl(
                 )
         if tools is not None:
             patch["tools"] = _union_tools(tools, fresh)
-            refuse_forbidden_builtins(
-                runtime, [_ma_tool_to_param(t) for t in fresh.tools], patch["tools"]
-            )
         # Attaching skills to an agent that lacks agent_toolset_20260401 produces a
         # skills-unusable hole — MA rejects session creation ("skills require the read tool").
         # If this update includes skills, ensure the effective tools list carries the base toolset.
@@ -1282,6 +1285,11 @@ async def _update_agent_impl(
             )
             if not has_base_toolset:
                 patch["tools"] = merge_default_agent_toolset(effective_tools)
+        if "tools" in patch:
+            # On the final tools: a skill's base toolset can turn built-ins on too.
+            refuse_forbidden_builtins(
+                runtime, [_ma_tool_to_param(t) for t in fresh.tools], patch["tools"]
+            )
         return await update_agent(
             runtime.client,
             fresh.id,

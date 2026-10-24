@@ -439,3 +439,40 @@ async def test_j5_a_self_hosted_server_cannot_turn_a_built_in_on(owner):
             owner, info, "web_search", True, auth=replace(owner.auth, anthropic_disabled=True)
         )
     assert _web_search_on(owner, info) is False
+
+
+@MEMBER
+async def test_j5_a_skill_cannot_bring_in_a_forbidden_built_in(owner):
+    """Attaching a skill to an agent with no toolset adds the base one: checked too."""
+    from fastmcp.exceptions import ToolError
+
+    info = await _created(owner)
+    owner.ma.agents[info.id]["tools"] = [
+        tool
+        for tool in owner.ma.agents[info.id]["tools"]
+        if not tool["type"].startswith("agent_toolset")
+    ]
+    with pytest.raises(ToolError, match="turned bash off for every agent"):
+        await _update_agent_impl(
+            _denying(owner, "builtin/bash").runtime,
+            owner.auth,
+            NAME,
+            model=None,
+            description=None,
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skills=["notes"],
+            expected_ma_agent_id=info.id,
+            origin_context_id=str(owner.origin.id),
+        )
+    assert _builtin_enabled(owner.ma.agents[info.id]["tools"], "bash") is None
+
+
+def test_j5_a_built_in_on_in_any_toolset_is_on():
+    off = {"type": "agent_toolset_20260401", "default_config": {"enabled": False}, "configs": []}
+    on = {"type": "agent_toolset_20250522", "configs": [{"name": "bash", "enabled": True}]}
+    assert _builtin_enabled([off], "bash") is False
+    assert _builtin_enabled([off, on], "bash") is True
+    assert _builtin_enabled([on, off], "bash") is True
+    assert _builtin_enabled([{"type": "mcp_toolset", "mcp_server_name": "x"}], "bash") is None
