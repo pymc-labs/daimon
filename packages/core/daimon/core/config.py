@@ -2118,7 +2118,8 @@ class WatchesSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable OS-signed page-event and reviewed READ-tool polling producers and dispatch. "
+            "Enable reviewed Discord READ-tool polling and watch dispatch. "
+            "Page-event watches are not yet delivered. "
             "Keep disabled "
             "until the execution-bound unattended origin grants, non-gateable cleanup "
             "and watch release are reviewed. "

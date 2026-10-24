@@ -2444,8 +2444,9 @@ route-bound server selector, including pagination for more than 25 servers. It r
 the original message for five minutes and rechecks eligibility on selection. Later
 messages on that route are silently ignored while selection is pending. After expiry,
 the next message discovers again. Unknown membership asks for a retry rather than
-presenting an incomplete choice. No eligible tenant means no reply and a structured
-reason log. Discovery and server switching share a per-user bucket of three attempts,
+presenting an incomplete choice. No eligible tenant means no model turn and a structured
+reason log; Daimon sends a one-time `/dm-me` guidance reply per person per process.
+Discovery and server switching share a per-user bucket of three attempts,
 refilling one every 20 seconds; exhaustion is silent. Ordinary active replies do not
 consume this bucket. Pending controls and rate buckets are process-local; a restart
 invalidates selectors, so the person sends a new message.
@@ -2579,9 +2580,9 @@ completed cache entries. Unknown evidence cannot satisfy a role gate.
 
 ## Owner-DM routine delivery
 
-Discord `/routines` includes an owner-only delivery choice and delivery failure
-reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
-the authenticated owner; the operator CLI has `routines create --destination dm`
+The Discord `/routines` panel requires Manage Server and offers the delivery
+choice and delivery failure reasons for the admin's own routines. MCP accepts
+`destination_kind="dm"` with the recipient derived from the authenticated owner; the operator CLI has `routines create --destination dm`
 and a verifying dry-run. Slack and Teams explicitly reject DM writes.
 Retained previews, errors and delivery diagnostics for DM and legacy
 destination-free routines are owner-only on every reading surface, including
@@ -2624,10 +2625,11 @@ which may contain signed upload URLs.
 
 ### Signed page-event watch entry point
 
-OS page hosts sign events after their own ACL/CSRF checks. The sidecar verifies
-HMAC, binding, freshness and replay before acknowledging a transaction that stores
-evidence and enqueues a `watch_fired` wake. It has no direct table access or turn
-runner; core's durable queue handles dispatch. Discord, Slack and Teams share
+Only polled Discord `read_thread` and `read_channel` watches work end to end.
+See [supported sources and page-event limitations](self-hosting.md#signed-page-event-watch-sidecar).
+The callback infrastructure verifies HMAC, binding, freshness and replay before
+acknowledging a transaction that stores evidence and enqueues a `watch_fired` wake.
+It has no direct table access or turn runner; core's durable queue handles dispatch. Discord, Slack and Teams share
 compatible readers; CLI and scheduler do not dispatch continuations. Old readers
 ignore the new reason before batching, preserving unrelated work on rollback.
 
@@ -2696,9 +2698,8 @@ back off exponentially to one day; revoked access pauses the watch and cancels w
 MCP enrollment requires an attended turn origin and binds its tenant, owner, agent,
 thread, parent and session. Owner/admin management cancels queued wakes on pause,
 rotation and deletion. Fresh signing keys go only to the owner's private DM, once;
-MCP results and stored rows contain no plaintext key. Operators install the delivered
-key on the OS host and sidecar. The offline CLI importer accepts no signing keys,
-imports everything paused, and requires explicit exact-binding confirmation before
+MCP results and stored rows contain no plaintext key. The offline CLI importer
+accepts no signing keys, imports everything paused, and requires explicit exact-binding confirmation before
 activation. An unmapped source cannot be confirmed or resumed. The existing Discord
 notice poller sends its owner a private migration notice without running a model or
 resuming the watch. Notebook and report hosts do not provide a page document query

@@ -134,6 +134,9 @@ single-migrator invariant, including when starting or retrying Cloud Run jobs.
 
 ### Signed page-event watch sidecar
 
+Only polled Discord `read_thread` and `read_channel` watches work end to end.
+See [supported sources and page-event limitations](../../docs/self-hosting.md#signed-page-event-watch-sidecar).
+
 The optional `preview-sidecar` Compose profile runs `daimon-sidecar`, the private
 OS poll executor and a TLS proxy, using the lane's immutable commit image and successful migration dependency.
 Only the proxy publishes TLS; database, `/healthz` and other paths stay private.
@@ -150,9 +153,9 @@ also cancels queued wakes; stop controls remain available with producers off.
 Provision a distinct login granted only `daimon_sidecar`, with no ownership,
 schema CREATE, policy or credential-table rights. Set its local DSN in
 `DAIMON_SIDECAR__DATABASE_URL`; require TLS across hosts. Startup audits the actual
-login's inherited/PUBLIC privileges and installed ingress functions. Supply
-`DAIMON_SIDECAR__SIGNING_KEYS` through secret management to the sidecar and authorized
-OS page hosts, never browsers. The Compose environment is explicitly allowlisted.
+login's inherited/PUBLIC privileges and installed ingress functions. The callback
+endpoint reads `DAIMON_SIDECAR__SIGNING_KEYS` from secret management. The Compose
+environment is explicitly allowlisted.
 
 See [self-hosting](../../docs/self-hosting.md#signed-page-event-watch-sidecar) for
 signing, callback headers, limits, role checks and stop/retention behavior, and
@@ -171,7 +174,7 @@ See [self-hosting](../../docs/self-hosting.md#polling-and-owner-management) for 
 reviewed read registry, owner tools and card approval, signing-key delivery,
 source authorization, projection limits, scheduling, leases, caps and backoff.
 That section also gives the standalone private-listener command and secret setup.
-The exact preview enable commands and five-step exercise are below.
+The exact preview enable commands and four-step polling exercise are below.
 
 #### Offline internal-watch import
 
@@ -182,7 +185,7 @@ internal signing keys. `artifact_db_query` stays paused as `source_unmapped`; it
 owner receives the existing private notice without resuming the watch. No page
 store or internal connection is introduced.
 
-#### Row 12: five-step preview parity procedure
+#### Row 12: four-step preview polling procedure
 
 Run only in an isolated preview lane after release review, with both the setting
 and durable global gate explicitly enabled. Use a disposable Discord thread whose
@@ -239,11 +242,9 @@ published port. The code setting and durable global gate are ON. The new secret
 is shared by executor and sidecar from this lane's `.env` only. Enrollment needs
 a backend with working `tool_confirmation` and the owner's verified card approval.
 
-1. **Create watches.** Ask the agent during the owner's attended turn to call:
+1. **Create a poll watch.** Ask the agent during the owner's attended turn to call:
 
    ```text
-   create_watch(origin_context_id=ORIGIN, source="page_event", page_id=PAGE_UUID,
-                instructions="Report the received parity evidence.", lifetime_days=1)
    create_watch(origin_context_id=ORIGIN, source="poll", tool="read_channel",
                 arguments={"channel_id":SOURCE_CHANNEL_ID,"limit":1},
                 projection=".rows[0].content", rule="change", interval=60,
@@ -258,45 +259,11 @@ a backend with working `tool_confirmation` and the owner's verified card approva
    agent must have `read_channel` enabled without approval in its own canonical OS
    toolset, as well as the existing read-and-report allowlist eligibility.
 
-   Expected: both watches list the same owner-bound agent and exact thread. The
-   page signing key appears once in the owner's private DM, never the MCP output.
-   Install the delivered `key_id` and key privately on the OS page host and in
-   `DAIMON_SIDECAR__SIGNING_KEYS`, then reload sidecar. Keep the returned callback
-   and poll watch UUIDs. The first poll saves a baseline and produces no wake.
+   Expected: the watch lists the owner-bound agent and exact reporting thread.
+   Keep the returned poll watch UUID. The first poll saves a baseline and produces
+   no wake. This exercise covers polling.
 
-2. **Fire a signed page callback.** In a private OS-host operator shell, put the
-   delivered key in `WATCH_KEY` without shell tracing/history and set
-   `WATCH_ID`, `PAGE_ID`, `KEY_ID`, `CALLBACK_ORIGIN=https://preview-callback-host`.
-   Export all five variables (`WATCH_ID` is the callback watch UUID, `PAGE_ID`
-   is the same `PAGE_UUID` used above). Load `WATCH_KEY` using `read -rs WATCH_KEY;
-   export WATCH_KEY` in bash so it does not enter shell history.
-   This sends exactly one server-signed event; a browser never receives the key:
-
-   ```sh
-   uv run python - <<'PY'
-   import os, urllib.request, uuid
-   from datetime import UTC, datetime
-   from daimon.core.continuity.page_events import sign_page_event
-   event = sign_page_event(key=os.environ["WATCH_KEY"],
-       watch_id=uuid.UUID(os.environ["WATCH_ID"]),
-       page_id=uuid.UUID(os.environ["PAGE_ID"]), key_id=os.environ["KEY_ID"],
-       body=b'{"parity":"signed-page-event"}', now=datetime.now(UTC))
-   request = urllib.request.Request(
-       os.environ["CALLBACK_ORIGIN"] + "/callbacks/watches/" + str(event.watch_id),
-       data=event.body, headers=event.headers(), method="POST")
-   with urllib.request.urlopen(request, timeout=15) as response:
-       print(response.status, response.read().decode())
-   PY
-   ```
-
-   The request signs the exact bytes and sets no explicit Content-Type header
-   (urllib may add its default); sidecar accepts the raw UTF-8 body. Each execution mints a fresh event UUID.
-
-   Expected: HTTP 202 with `accepted=true` and a durable `wake_id`; the bound thread
-   receives a read-and-report answer containing `signed-page-event`. It appears
-   nowhere else. Reusing the same signed event UUID yields 409 and no second wake.
-
-3. **Poll a change.** After at least one successful baseline poll, the human owner
+2. **Poll a change.** After at least one successful baseline poll, the human owner
    types exactly `row-12 poll change 1` into the source channel in Discord. Ask
    the agent in the attended reporting thread to call `show_watch(watch_id=POLL_WATCH_UUID)`.
 
@@ -312,7 +279,7 @@ a backend with working `tool_confirmation` and the owner's verified card approva
    WHERE f.watch_id = '<POLL_WATCH_UUID>' ORDER BY f.created_at DESC;
    ```
 
-4. **Confirm unattended refusal of a write.** The human owner types exactly
+3. **Confirm unattended refusal of a write.** The human owner types exactly
    `row-12: call linear/create_issue to create an issue now` in the source channel.
 
    Expected: the next poll wake reports the change and refuses the requested write;
@@ -322,7 +289,7 @@ a backend with working `tool_confirmation` and the owner's verified card approva
    prose. The deterministic regression is
    `test_watch_read_report_refuses_writes_shell_and_builtins_even_with_write_grants`.
 
-5. **Revoke actual source access and cancel queued wakes.** In the preview host's
+4. **Revoke actual source access and cancel queued wakes.** In the preview host's
    private bash shell, set `PREVIEW_COMPOSE` to the absolute deployed
    `compose.lane.yml` path (beside the lane's `.env`). Use the existing project name
    shown by `docker compose ls` as `PREVIEW_PROJECT`, not a new Compose project.
@@ -405,7 +372,6 @@ a backend with working `tool_confirmation` and the owner's verified card approva
    wake is `cancelled` with `watch_revoked`. Restoring permission and restarting
    Discord produces no report and does not resume the watch. In a fresh attended
    owner turn ask the agent for `show_watch(watch_id=POLL_WATCH_UUID)` to verify.
-   Ask it to pause the page watch with `pause_watch(watch_id=CALLBACK_WATCH_UUID)`.
    Restore both producer gates to OFF after the exercise unless separately approved
    to keep them on. This cancels queued work through the core stop port, updates
    only this lane's existing `.env`, and recreates its policy consumers:

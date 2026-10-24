@@ -48,7 +48,7 @@ shared or personal memory is mounted there, `/memory` shows the channel's, and
 Self-hosted turns do not run the automatic Managed Agents file sweep. Deliver
 files through Daimon's MCP message tools using staged file handles.
 
-Page-watch reports require live authorization at each post, edit and file-upload
+Watch reports require live authorization at each post, edit and file-upload
 step. A refused check stops subsequent delivery, including terminal cleanup.
 Watch turns do not schedule detached session-output sweeps after their execution
 grant ends.

@@ -573,7 +573,9 @@ inside an isolated channel cannot run in a cold DM, including for server admins.
 The live admin bypass for the invoker allowlist still applies.
 
 No eligible tenant, revoked membership or role access, disabled DMs and denied
-recipient access produce no reply and no model turn, with a structured reason log.
+recipient access produce no model turn, with a structured reason log. A cold DM
+with no eligible tenant gets a one-time `/dm-me` guidance reply per person per
+process; revoked access to an existing conversation suppresses its reply.
 Revocation during a running turn suppresses its private result. The active server
 is retained; sending another DM never falls through into a different tenant.
 An unknown membership lookup during discovery can ask for a retry without naming

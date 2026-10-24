@@ -39,7 +39,8 @@ clearing delivery, changing the budget, or selecting DM. Legacy routines with
 unknown provenance keep ordinary channel/thread edits, clearing and normal firing
 on every platform, but cannot select DM. Recreate the routine from its channel
 or thread to get DM delivery. DM routines run through the normal live-DM path,
-with the owner’s ordinary memory, credentials and tools. Execution is unattended;
+with the owner’s ordinary credentials and tools, and can read and write the
+owner’s personal memory under the normal live-DM memory policy. Execution is unattended;
 permitted tools retain ordinary DM side-effect risk, and nobody watches intermediate actions.
 
 The host queues the final reply through the outbox and sends chunks of at
@@ -47,9 +48,10 @@ most 2,000 characters with mentions disabled. The notification includes the
 routine label and run identity. It neither selects a cold-DM tenant nor adds
 the notification to an active conversation's model history. Blocked DMs,
 revoked access, interrupted claims and uncertain or partial sends are visible
-in `delivery_status` / `delivery_note` and the Discord routines panel. There
-is no public fallback and no automatic resend; a later scheduled run may try
-again. The first failure in a failing streak uses the same private checks.
+via MCP `get_routine` / `list_routines` in `delivery_status` / `delivery_note`.
+Admins can also see failures for their own routines in the Discord `/routines`
+panel. There is no public fallback and no automatic resend; a later scheduled
+run may try again. The first failure in a failing streak uses the same private checks.
 Destination changes cancel queued results; a destination changed during a
 run prevents that run's result from being queued to the new destination.
 
@@ -66,9 +68,11 @@ agent, and prints the resolved recipient and budget source. An optional
 `--source-channel` must resolve to a supported channel or thread in the selected
 tenant's Discord guild. Threads retain their parent for budgeting and their own
 ID for source restriction checks. Dry-run performs the same source verification
-and sealing checks as a save. There is no independent recipient option. Use MCP or the owner-only delivery choice in `/routines`
-for interactive edits; list/get include the resolved owner ID and delivery
-status. `clear_destination=true` retains its existing meaning.
+and sealing checks as a save. There is no independent recipient option. Use MCP
+for owner edits. The Discord `/routines` panel requires Manage Server; its
+delivery choice is available only when that admin owns the routine. MCP list/get
+include the resolved owner ID and delivery status. `clear_destination=true`
+retains its existing meaning.
 
 A one-off "remind me in two hours" or "check back tomorrow at nine" is not a
 routine. Use a timer (`create_timer`, see [mcp-tools.md](mcp-tools.md#timers))
@@ -186,8 +190,8 @@ The platform surfaces differ, and the difference is deliberate:
   (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). Its form
   and schedule words read the same as Slack's. The shared rules (glyph, label,
   ordering, admin-or-creator) live in `daimon.core.routines`.
-- **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
-  view its last output. Creating one on Discord means asking the agent in
+- **Discord** `/routines` requires **Manage Server** and is read-mostly: pick a
+  routine, pause or resume it, view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
   (`packages/adapters/discord/daimon/adapters/discord/routines_panel/`).
 - The CLI has no routine CRUD. `daimon routines backfill-agent-names` is an
@@ -466,7 +470,7 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 | --- | --- | --- | --- |
 | create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
 | list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
-| pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
+| pause / resume | `update_routine`: admin or creator | `Manage Server` to open; admin or creator re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 
 Ownership is `created_by_user_id`, and the check fails closed on both nulls:
@@ -587,8 +591,10 @@ Explicit owner-DM routines are normal live-DM turns: scheduled messages from the
 owner into their own DM. Each fire re-resolves membership, the invoker role gate
 and admin bypass switch, tenant DM controls, recipient policy, agent eligibility
 and immutable creation provenance. It uses the ordinary admission, binding and
-runner, including normal owner credentials, personal/shared memory and memory
-write policy. A memory outage degrades as it does for a live DM.
+runner, including normal owner credentials and personal/shared memory. Explicit
+DM routines can read and write the owner’s personal memory under the normal
+live-DM memory policy, including `dm_memory_read_only` when enabled. A memory
+outage degrades as it does for a live DM.
 
 Headless routine sessions, including legacy destination-free and owner-only runs,
 mount the agent's shared memory read-only and never mount personal memory. They
@@ -630,8 +636,8 @@ Late writes compare the captured producer, destination and revision; every chunk
 and file rechecks them.
 An old result cannot acquire a new agent's authority or move to a public target.
 
-Only explicit owner-DM routines mount personal memory, through the normal
-live-DM path. Every headless routine uses shared memory read-only and never
+Only explicit owner-DM routines mount personal memory, with read and write
+access under the normal live-DM memory policy. Every headless routine uses shared memory read-only and never
 mounts personal memory, including legacy rows with neither destination nor
 channel and routines switched to **No automatic delivery**. Clearing DM delivery
 erases the old private result; the next fire runs headless without personal
@@ -726,9 +732,9 @@ invoker-policy bypass; destination and agent restrictions remain separate.
 ### Sandbox tools
 
 Built-in sandbox tools are off for every routine run by default. They can be
-turned on for one channel or thread routine at a time, for that routine's own
-scheduled runs only. DM routines cannot be opted in: they run as the owner's
-private DM turn. Owning a routine is not enough to opt it in.
+turned on for one channel, thread or destination-free routine at a time, for
+that routine's own scheduled runs only. DM routines cannot be opted in: they run
+as the owner's private DM turn. Owning a routine is not enough to opt it in.
 
 An opt-in covers exactly the agent and environment the routine runs with when
 it is made. **Built-ins are enabled for a run only when the run's agent
