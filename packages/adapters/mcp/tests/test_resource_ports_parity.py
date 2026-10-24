@@ -579,6 +579,8 @@ async def test_public_continue_turn_keeps_ownership_recheck_send_and_clock(
     host_guards: list[Scope],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A Claude agent (the provider guard's own read is tested in test_j4_create_*).
+    monkeypatch.setattr(agent_chat, "_refuse_another_provider", AsyncMock(return_value=None))
     clock = dt.datetime(2026, 10, 9, 12, tzinfo=dt.UTC)
     replies: list[tuple[str, str, int, dict[str, Any]]] = [
         ("GET", "/v1/sessions/session", 200, BODY),

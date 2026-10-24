@@ -98,7 +98,11 @@ from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_ISOLATED,
+    MA_METADATA_KEY_NAME,
+)
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
@@ -505,12 +509,17 @@ async def _describe_agent_impl(
 
 
 async def _refuse_another_provider(
-    runtime: McpRuntime, auth: AuthIdentity, ma_agent: BetaManagedAgentsAgent
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    ma_agent_id: str,
+    name: str,
+    nothing: str = "Nothing was started.",
 ) -> None:
     """Agent keys and the hub open Managed Agents sessions, so an agent whose backend
     is another provider is refused plainly here, never answered (and billed) on the
-    Claude record its definition is saved with."""
-    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    Claude record its definition is saved with. A session opened before a switch
+    doesn't continue on Claude either."""
     from daimon.core.stores import agent_backends
     from daimon.core.turn.notices import provider_name
     from mux.contracts.config import DEFAULT_BACKEND
@@ -519,14 +528,13 @@ async def _refuse_another_provider(
         revision = await agent_backends.current(
             session,
             auth.tenant_id,
-            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent.id),
+            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id),
         )
     backend = revision.backend if revision is not None else None
     if backend is not None and backend != DEFAULT_BACKEND:
-        name = ma_agent.metadata.get(MA_METADATA_KEY_NAME) or ma_agent.name
         raise ToolError(
             f"{name} runs on {provider_name(backend)}; agent keys and the hub can only "
-            "talk to agents on Claude for now. Ask it in chat instead. Nothing was started."
+            f"talk to agents on Claude for now. Ask it in chat instead. {nothing}"
         )
 
 
@@ -593,7 +601,12 @@ async def _start_turn_impl(
     """
     require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
-    await _refuse_another_provider(runtime, auth, ma_agent)
+    await _refuse_another_provider(
+        runtime,
+        auth,
+        ma_agent_id=ma_agent.id,
+        name=ma_agent.metadata.get(MA_METADATA_KEY_NAME) or ma_agent.name,
+    )
     billing_exempt: ExemptReason | None = (
         "mcp-internal-caller" if auth.platform_user_id is None else None
     )
@@ -752,6 +765,14 @@ async def _continue_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
+    # Switched since this session opened: it would go on answering on Claude.
+    await _refuse_another_provider(
+        runtime,
+        auth,
+        ma_agent_id=session.agent.id,
+        name=session.agent.name,
+        nothing="Nothing was sent.",
+    )
     if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
         raise ToolError(_SEALED_SINCE_START_MSG)
     if auth.platform_user_id is not None and await is_over_channel_budget(
