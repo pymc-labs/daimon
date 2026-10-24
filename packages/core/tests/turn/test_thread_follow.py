@@ -78,6 +78,7 @@ def world(monkeypatch):
             "responder_ma_agent_id": None,
             "ever_shared": False,
             "eligible": True,
+            "enabled_backends": ("anthropic", "openai", "gemini"),
             "now": NOW,
         }
         values.update(changes)

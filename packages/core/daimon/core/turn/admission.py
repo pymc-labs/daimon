@@ -25,6 +25,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -82,7 +83,7 @@ from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
-from daimon.core.stores import agent_backends, mux_state
+from daimon.core.stores import agent_backends, mux_state, thread_provider_releases
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
@@ -207,6 +208,7 @@ async def _thread_follow(
     responder_ma_agent_id: str | None,
     ever_shared: bool,
     eligible: bool,
+    enabled_backends: tuple[Provider, ...],
     now: datetime,
 ) -> ThreadFollow | None:
     """Whether this conversation must follow its agent's switch (M03).
@@ -274,6 +276,19 @@ async def _thread_follow(
             return None
         if retained is None or retained.model in (None, model):
             return None
+    # Only toward a provider that can run here: an unavailable preference never
+    # strands a conversation that still works where it is.
+    from mux.profiles import backend_selection
+
+    selection = backend_selection(provider)
+    if model is not None:
+        selection = selection.model_copy(update={"model": model})
+    try:
+        check_backend(
+            ConfigRevision.create(channel, 0, selection), enabled_backends=enabled_backends
+        )
+    except BackendUnsupported:
+        return None
     if ever_shared and await store.get_binding(Slot(thread=thread)) is not None:
         return ThreadFollow("stays", provider, model)
     # As a confirmed switch from chat does: request the release; admission selects
@@ -579,7 +594,69 @@ async def admit_impl(
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
 ) -> Admission:
-    """Run the full pre-turn gate sequence; raise instead of returning bool."""
+    """Run the full pre-turn gate sequence; raise instead of returning bool.
+
+    M03: a message may move its conversation to the agent's switched provider
+    (`_thread_follow`). When that move is refused there (e.g. the provider can't
+    serve this agent yet), the move is withdrawn and the message is admitted where
+    the conversation already works, so an unavailable preference never strands it.
+    """
+    gates = partial(
+        _admit_gates,
+        deps,
+        tenant_id=tenant_id,
+        platform=platform,
+        external_user_id=external_user_id,
+        channel_id=channel_id,
+        now=now,
+        thread_id=thread_id,
+        role=role,
+        is_dm=is_dm,
+        dm_source_channel_id=dm_source_channel_id,
+        category_id=category_id,
+        category_unresolved=category_unresolved,
+        requester_org=requester_org,
+        requester_home_id=requester_home_id,
+        channel_shared=channel_shared,
+    )
+    followed: list[Slot] = []
+    try:
+        return await gates(followed=followed)
+    except AdmissionDenied as denied:
+        if denied.reason != "backend_unsupported" or not followed:
+            raise
+    async with deps.sessionmaker.begin() as release_session:
+        for slot in followed:
+            await thread_provider_releases.take_request(release_session, slot)
+    return await gates(followed=[], follow_switch=False)
+
+
+async def _admit_gates(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_user_id: str,
+    channel_id: str,
+    now: datetime,
+    thread_id: str | None = None,
+    role: Role | None = None,
+    is_dm: bool = False,
+    dm_source_channel_id: str | None = None,
+    category_id: str | None = None,
+    category_unresolved: bool = False,
+    requester_org: RequesterOrg,
+    requester_home_id: str | None = None,
+    channel_shared: bool | None = None,
+    followed: list[Slot] | None = None,
+    follow_switch: bool = True,
+) -> Admission:
+    """The pre-turn gates (`admit_impl`).
+
+    `follow_switch` lets this message move its conversation to the agent's switched
+    provider (M03); each slot moved is added to `followed`, so a refused move can be
+    withdrawn.
+    """
     started = last_stage = perf_counter()
     stage_ms: dict[str, float] = {}
 
@@ -707,8 +784,10 @@ async def admit_impl(
             own_slot=own_slot,
             responder_ma_agent_id=config.responder_ma_agent_id,
             ever_shared=backend_ever_shared,
+            enabled_backends=tuple(policy.enabled_backends),
             eligible=(
-                selection_enabled
+                follow_switch
+                and selection_enabled
                 and not is_dm
                 and config.thread_binding_kind != "setup"
                 and not configured_channel
@@ -716,7 +795,10 @@ async def admit_impl(
             ),
             now=now,
         )
-        released = released or (backend_follow is not None and backend_follow.kind == "moved")
+        if backend_follow is not None and backend_follow.kind == "moved":
+            released = True
+            if followed is not None:
+                followed.append(own_slot)
         if (
             selection_enabled
             and channel is not None
