@@ -992,6 +992,8 @@ def backend_switch_callbacks(
         return turn_agent
 
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
+        from daimon.core.handoff_context import redact_handoff_summary
+
         if prompt.configuration is not None:
             action, details = await verified_configuration(
                 prompt, prompt.requester_platform_user_id
@@ -1026,7 +1028,11 @@ def backend_switch_callbacks(
             *(
                 (
                     f"Carries a summary of this conversation to {agent.name}: "
-                    + _clipped(prompt.backend_switch.handoff_summary, _SUMMARY_SHOWN),
+                    # Redacted as the copy will get it: the card is posted in the channel.
+                    + _clipped(
+                        redact_handoff_summary(prompt.backend_switch.handoff_summary),
+                        _SUMMARY_SHOWN,
+                    ),
                 )
                 if prompt.backend_switch is not None
                 and prompt.backend_switch.handoff_summary is not None

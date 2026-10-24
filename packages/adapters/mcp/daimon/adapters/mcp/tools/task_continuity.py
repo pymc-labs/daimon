@@ -51,6 +51,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     forked_in,
 )
+from daimon.core.handoff_context import redact_handoff_summary
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
 from daimon.core.security_audit import record_authz_denial
@@ -75,7 +76,6 @@ from daimon.core.thread_handoff import (
     recorded_thread_sessions,
     render_handoff_refused,
 )
-from daimon.core.turn_origin import redact_turn_origin_text
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
@@ -477,28 +477,12 @@ MAX_HANDOFF_SUMMARY = 2000
 _MIN_HANDOFF_SUMMARY = 20
 
 
-# Credential-shaped strings a summary must never carry: provider keys, bearer
-# values, GitHub/Slack tokens, AWS key ids, JWTs, a labelled hex secret, and long
-# opaque runs mixing letters and digits. Paths, file names, identifiers and git
-# SHAs stay (no "/" or "." in a run; bare hex is redacted only after a key label).
-_SECRET_SHAPES = re.compile(
-    r"(?i)\bbearer\s+[\w.~+/=-]{8,}"
-    r"|\b(?:sk|pk|rk)-[\w-]{16,}"
-    r"|\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_\w{16,}"
-    r"|\bxox[abpr]-[\w-]{10,}"
-    r"|\bAKIA[0-9A-Z]{16}\b"
-    r"|\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}"
-    r"|\b(?:api[_-]?key|token|secret|password|passwd)\s*[:=]\s*\S{8,}"
-    r"|\b(?=[A-Za-z0-9+_-]*\d)(?=[A-Za-z0-9+_-]*[A-Za-z])[A-Za-z0-9+_-]{48,}={0,2}"
-)
-
-
 def _clean_summary(summary: str | None) -> str | None:
     """The summary as stored: no turn-origin ids or credential-shaped strings, trimmed,
     blank-line runs collapsed, capped. Too short to carry anything is refused."""
     if summary is None:
         return None
-    text = _SECRET_SHAPES.sub("[redacted]", redact_turn_origin_text(summary))
+    text = redact_handoff_summary(summary)
     text = re.sub(r"\n{3,}", "\n\n", text.strip())[:MAX_HANDOFF_SUMMARY]
     if len(text) < _MIN_HANDOFF_SUMMARY:
         raise ToolError(

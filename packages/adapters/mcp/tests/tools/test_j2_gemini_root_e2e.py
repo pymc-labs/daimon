@@ -600,6 +600,21 @@ async def test_the_hand_off_summary_is_bound_to_the_switch_card(fresh_chat, monk
         await _nothing_moved(chat, copy.name)
 
 
+async def test_the_switch_card_shows_the_summary_redacted(fresh_chat, monkeypatch):
+    """The card is posted in the channel: it shows the summary as the copy will get it,
+    with no credential the model pasted into it, while the digest binds what was sent."""
+    chat = fresh_chat
+    key = "sk-" + "a1B2c3D4e5F6g7H8i9J0"
+    leaky = f"{SUMMARY} The deploy key was {key}, keep using it."
+    copy = await _j2_copy(chat, monkeypatch)
+    preview = await _to_argon(chat, copy.name, handoff_summary=leaky)
+    card = await _argon_card(chat, copy.name, preview, handoff_summary=leaky)
+    shown = "\n".join(card.detail_lines or ())
+    assert f"Carries a summary of this conversation to {copy.name}" in shown
+    assert "[redacted]" in shown
+    assert key not in shown and key not in (card.consequence or "")
+
+
 async def test_a_copy_that_may_not_read_this_conversation_refuses_at_the_preview(
     fresh_chat, monkeypatch
 ):

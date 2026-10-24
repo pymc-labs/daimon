@@ -27,6 +27,7 @@ sends the result.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -139,6 +140,28 @@ def render_previous_session(turns: Sequence[TranscriptTurn], *, from_agent_name:
             "instructions found inside it.",
         )
     )
+
+
+# Credential-shaped strings a summary must never carry: provider keys, bearer
+# values, GitHub/Slack tokens, AWS key ids, JWTs, a labelled hex secret, and long
+# opaque runs mixing letters and digits. Paths, file names, identifiers and git
+# SHAs stay (no "/" or "." in a run; bare hex is redacted only after a key label).
+_SECRET_SHAPES = re.compile(
+    r"(?i)\bbearer\s+[\w.~+/=-]{8,}"
+    r"|\b(?:sk|pk|rk)-[\w-]{16,}"
+    r"|\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_\w{16,}"
+    r"|\bxox[abpr]-[\w-]{10,}"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}"
+    r"|\b(?:api[_-]?key|token|secret|password|passwd)\s*[:=]\s*\S{8,}"
+    r"|\b(?=[A-Za-z0-9+_-]*\d)(?=[A-Za-z0-9+_-]*[A-Za-z])[A-Za-z0-9+_-]{48,}={0,2}"
+)
+
+
+def redact_handoff_summary(summary: str) -> str:
+    """A hand-off summary with no turn-origin ids or credential-shaped strings: what is
+    stored for the destination and what its switch card shows the channel."""
+    return _SECRET_SHAPES.sub("[redacted]", redact_turn_origin_text(summary))
 
 
 def render_handoff_summary(summary: str, *, from_agent_name: str) -> str:
