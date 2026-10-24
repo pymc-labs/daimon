@@ -239,14 +239,17 @@ async def test_i2_each_enrollment_requires_actual_server_side_card_proof(
 
 
 @pytest.mark.fresh_schema
-async def test_i2_initial_page_key_uses_create_card_without_unapproved_rotation(
-    attended_owner, monkeypatch
-):
+async def test_create_page_event_watch_is_refused(attended_owner, monkeypatch):
     runtime, _, auth, origin = attended_owner
     proof = AsyncMock(return_value=None)
     monkeypatch.setattr(_session_gate, "session_card_gap", proof)
-    with patch("daimon.adapters.mcp.tools.watches.private_key_delivery", AsyncMock()) as deliver:
-        created = await create_watch_impl(
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.watches.watches.register_page_watch", AsyncMock()
+        ) as register,
+        pytest.raises(ToolError, match="until a page-event producer exists"),
+    ):
+        await create_watch_impl(
             runtime,
             auth,
             origin_context_id=origin,
@@ -254,9 +257,7 @@ async def test_i2_initial_page_key_uses_create_card_without_unapproved_rotation(
             page_id=str(uuid.uuid4()),
             instructions="report",
         )
-    assert created.source == "page_event" and created.key_id is not None
-    assert [call.kwargs["tool_name"] for call in proof.await_args_list] == ["create_watch"]
-    deliver.assert_awaited_once()
+    register.assert_not_awaited()
 
 
 @pytest.mark.fresh_schema

@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On the mux turn path, a turn that reaches a thread whose lease another running turn holds now waits for that turn instead of failing with `LeaseBusy`. The wait ends at the turn's own ceiling, honors Stop, and a holder that dies frees the thread when its lease expires. A turn whose session the holder replaced adopts the replacement.
 
+- Map supported internal Discord watches to owner-authorized Daimon poll watches; keep unsupported imports paused with a reason. Mapped channel watches use live result differences instead of `since` and see live channel messages only, excluding archived history and messages inside child threads. Refuse page-event watch creation until a page-event producer exists.
+
 - Reject crossed known Azure model/deployment aliases regardless of letter case.
 
 - Derive Azure model versions from Sol/Luna selection, expose azd model selection, verify Luna-only live probes against response models, and allow manual judge model overrides.
@@ -1067,6 +1069,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add default-off watch infrastructure with atomic evidence and durable wakes,
   restricted database identities, replay/retention limits and an optional preview
   sidecar. Only polled Discord `read_thread`/`read_channel` watches work end to end.
+  Supported internal Discord polls map to these tools during import and remain
+  paused until owner/destination confirmation.
   Notion, Linear, HubSpot and URL polls use unreviewed tools: creation is refused
   and imports remain paused as `source_unmapped`. Webhook/callback watches map to
   `page_event`, which is not yet delivered. Account erasure removes owned watches,
