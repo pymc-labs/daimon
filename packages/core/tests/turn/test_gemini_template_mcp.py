@@ -283,17 +283,18 @@ async def test_the_credential_refuses_another_scope_reference_or_destination(tem
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_catalogue_that_changed_since_consent_revokes_and_refuses(template, monkeypatch):
+async def test_a_listing_missing_a_consented_tool_revokes_and_refuses(template, monkeypatch):
     from daimon.core.mcp_oauth import discovery
 
     request, *_ = template
     selected, runtime = await _prepared(request)
     connection = _connection(selected)
+    listed = discovery.list_mcp_tools
 
-    async def widened(_url, _token):
-        return frozenset({"search_tools", "call_tool", "admin_only_tool"})
+    async def without_call_tool(url, token):
+        return frozenset(await listed(url, token)) - {"call_tool"}
 
-    monkeypatch.setattr(discovery, "list_mcp_tools", widened)
+    monkeypatch.setattr(discovery, "list_mcp_tools", without_call_tool)
     transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
     async with request.deps.sessionmaker() as db:
         before = {r.jti for r in await _tokens(db, request)}
@@ -302,6 +303,29 @@ async def test_a_catalogue_that_changed_since_consent_revokes_and_refuses(templa
     async with request.deps.sessionmaker() as db:
         minted = [r for r in await _tokens(db, request) if r.jti not in before]
     assert minted and all(r.revoked_at is not None for r in minted), "refused credential revoked"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_listing_with_more_tools_still_mints_and_allows_only_the_consented(
+    template, monkeypatch
+):
+    """A tool added to the server (or a rollout's other revision) widens the listing:
+    the turn's credential still works, and the provider still runs only the
+    consented allowlist; the server gates the rest whatever the listing says."""
+    from daimon.core.mcp_oauth import discovery
+
+    request, *_ = template
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    listed = discovery.list_mcp_tools
+
+    async def widened(url, token):
+        return frozenset(await listed(url, token)) | {"admin_only_tool"}
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", widened)
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    assert await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    assert "admin_only_tool" not in connection.tool_policy["allowed_tools"]
 
 
 async def _tokens(db, request):
@@ -801,5 +825,101 @@ async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_
     consent_recorded_before_template_tools()
     # The switch tool stays dropped as consented; add_skill is newly offered.
     monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: frozenset({"add_skill"}))
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
+        await _prepared(request)
+
+
+#: The fleet tools #1515 pinned into a provider turn's listing and #1536 took out.
+ONCE_PINNED = frozenset({"fleet_spawn", "fleet_collect", "fleet_status", "fleet_agents"})
+
+
+@pytest.fixture
+def listing(monkeypatch):
+    """The provider-turn listing, changed by a test between consent and the turn:
+    `add` names tools listed on top of the server's own, `remove` hides some."""
+    from daimon.core.mcp_oauth import discovery
+
+    listed = discovery.list_mcp_tools
+    state: dict[str, frozenset[str]] = {"add": frozenset(), "remove": frozenset()}
+
+    async def changed(url, token):
+        return (frozenset(await listed(url, token)) | state["add"]) - state["remove"]
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", changed)
+    return state
+
+
+@pytest.fixture
+def pinned_at_consent(listing):
+    listing["add"] = ONCE_PINNED
+    return listing
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_captured_with_the_fleet_pin_prepares_after_its_revert(
+    pinned_at_consent, template
+):
+    """PRE fleet-gemini (smoke cbfc6032): re-confirmed while #1515 pinned the fleet
+    tools into the listing, then #1536 took them out. Nothing it can reach changed:
+    the fleet tools are still reachable through call_tool."""
+    request, *_ = template
+    pinned_at_consent["add"] = frozenset()
+    selected, _ = await _prepared(request)
+    allowed = _connection(selected).tool_policy["allowed_tools"]
+    assert "call_tool" in allowed and not ONCE_PINNED & set(allowed)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_captured_before_the_fleet_pin_prepares_with_it(listing, template):
+    """The other way (smoke a1d991fb): a consent from before the pin, a listing with it."""
+    request, *_ = template
+    listing["add"] = ONCE_PINNED
+    selected, _ = await _prepared(request)
+    assert "call_tool" in _connection(selected).tool_policy["allowed_tools"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_listing_that_lost_a_consented_tool_needs_a_new_confirmation(listing, template):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, *_ = template
+    listing["remove"] = frozenset({"call_tool"})
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
+        await _prepared(request)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_gated_tool_added_after_consent_stays_gated(listing, template):
+    """A confirmation-gated tool new on the server: the copy keeps working, the tool
+    is not allowed, and it is named a loss like every gated tool."""
+    request, *_ = template
+    listing["add"] = frozenset({"add_skill"})
+    selected, _ = await _prepared(request)
+    assert "add_skill" not in _connection(selected).tool_policy["allowed_tools"]
+    assert "mcp_tool:daimon-mcp:add_skill" in selected.target_spec.declared_drops
+
+
+@pytest.fixture
+def add_skill_listed_and_gated(listing, monkeypatch):
+    """The consent sees add_skill listed and gated (a named loss)."""
+    from daimon.core import tool_safety
+
+    listing["add"] = frozenset({"add_skill"})
+    real = tool_safety.self_carded_tools
+    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: real() - frozenset({"add_skill"}))
+    return real
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_tool_the_consent_named_a_loss_never_becomes_allowed_unasked(
+    add_skill_listed_and_gated, template, monkeypatch
+):
+    from daimon.core import tool_safety
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, quote, *_ = template
+    assert "mcp_tool:daimon-mcp:add_skill" in quote.declared_drops
+    real = add_skill_listed_and_gated
+    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: real() | {"add_skill"})
     with pytest.raises((AgentBackendRefused, AdmissionDenied)):
         await _prepared(request)
