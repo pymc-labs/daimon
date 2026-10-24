@@ -12,7 +12,7 @@ import datetime
 import uuid
 from collections.abc import Mapping
 from functools import partial
-from typing import Annotated, Any, Final, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast, get_args
 
 import anthropic
 import anyio
@@ -163,10 +163,10 @@ class AgentInfo(BaseModel):
     not add them again."""
     owned_by_you: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     # The provider it answers on: its own provider setting, else Anthropic. When
-    # that setting moved it off Anthropic, ``model`` is that provider's model and
-    # ``native_model`` the Managed Agents one it keeps for switching back.
+    # that setting moved it off Anthropic, ``active_model`` is that provider's model;
+    # ``model`` stays its own (Claude) model, the one update_agent changes.
     provider: Provider | None = Field(default=None, exclude_if=lambda value: value is None)
-    native_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    active_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     """Set by ``get_agent`` and ``list_agents``: whether the caller owns this agent
     (created it, or an admin named them), so may change it without an admin."""
     owner: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -225,27 +225,20 @@ async def _with_providers(
 
     if not infos:
         return infos
+    ids = {
+        info.id: derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=info.id) for info in infos
+    }
     async with runtime.session_factory() as session:
-        settings = [
-            await agent_backends.current(
-                session,
-                auth.tenant_id,
-                derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=info.id),
-            )
-            for info in infos
-        ]
+        settings = await agent_backends.current_many(session, auth.tenant_id, set(ids.values()))
     placed: list[AgentInfo] = []
-    for info, setting in zip(infos, settings, strict=True):
+    for info in infos:
+        setting = settings.get(ids[info.id])
         backend = setting.backend if setting is not None else None
-        if backend is None or backend == DEFAULT_BACKEND:
+        if setting is None or backend is None or backend == DEFAULT_BACKEND:
             placed.append(info.model_copy(update={"provider": DEFAULT_BACKEND}))
             continue
-        model = (setting.model if setting is not None else None) or backend_selection(backend).model
-        placed.append(
-            info.model_copy(
-                update={"provider": backend, "model": model, "native_model": info.model}
-            )
-        )
+        active = setting.model or backend_selection(backend).model
+        placed.append(info.model_copy(update={"provider": backend, "active_model": active}))
     return placed
 
 
@@ -536,9 +529,20 @@ def _builtin_enabled(tools: list[Tool], tool: str) -> bool | None:
 
 
 def _with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
-    """`tools` with `tool` turned on or off; any permission policy it had is kept."""
+    """`tools` with `tool` turned on or off; any permission policy it had is kept.
+
+    An agent with no toolset gains one holding only `tool`, never the defaults.
+    """
     if _builtin_enabled(tools, tool) is None:
-        tools = merge_default_agent_toolset(tools)
+        only: Tool = cast(
+            Tool,
+            {
+                "type": _TOOLSET_TYPE,
+                "default_config": {"enabled": False},
+                "configs": [{"name": tool, "enabled": enabled}],
+            },
+        )
+        return [*tools, only]
     updated: list[Tool] = []
     for entry in tools:
         if not str(entry.get("type", "")).startswith("agent_toolset"):
@@ -555,6 +559,56 @@ def _with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
         raw["configs"] = configs
         updated.append(cast(Tool, raw))
     return updated
+
+
+_BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
+
+
+def _denied_builtins(runtime: McpRuntime) -> frozenset[str]:
+    """Built-ins whoever runs Daimon forbids: ``builtin/<name>`` in tool-safety ``denied``.
+
+    Only that explicit form: a bare name there keeps meaning an MCP tool.
+    """
+    denied = runtime.settings.tool_safety.denied
+    return frozenset(name for name in _BUILTIN_NAMES if f"builtin/{name}" in denied)
+
+
+def refuse_forbidden_builtins(runtime: McpRuntime, before: list[Tool], after: list[Tool]) -> None:
+    """Refuse a change that turns on a built-in whoever runs Daimon forbids.
+
+    The one check create_agent, update_agent and set_agent_builtin_tool share.
+    """
+    turned_on = sorted(
+        name
+        for name in _denied_builtins(runtime)
+        if _builtin_enabled(after, name) and not _builtin_enabled(before, name)
+    )
+    if turned_on:
+        raise ToolError(
+            f"Whoever runs Daimon has turned {', '.join(turned_on)} off for every agent "
+            "here. Nothing changed."
+        )
+
+
+def _explicitly_on(tools: list[Tool], tool: str) -> bool:
+    """Whether a toolset in `tools` names `tool` and turns it on (not just by default)."""
+    for entry in tools:
+        if str(entry.get("type", "")).startswith("agent_toolset"):
+            for config in cast(dict[str, Any], entry).get("configs") or ():
+                if config.get("name") == tool and config.get("enabled") is True:
+                    return True
+    return False
+
+
+def _forbidden_builtins_off(runtime: McpRuntime, tools: list[Tool]) -> list[Tool]:
+    """A new agent's default toolset with every forbidden built-in written as off."""
+    denied = _denied_builtins(runtime)
+    if not denied:
+        return tools
+    tools = merge_default_agent_toolset(tools)
+    for name in sorted(denied):
+        tools = _with_builtin(tools, name, False)
+    return tools
 
 
 async def _set_agent_builtin_tool_impl(
@@ -589,10 +643,7 @@ async def _set_agent_builtin_tool_impl(
                 "This server runs its own model, so built-in tools can't be turned on here. "
                 "Nothing changed."
             )
-        if f"builtin/{tool}" in runtime.settings.tool_safety.denied:
-            raise ToolError(
-                f"Whoever runs Daimon has turned {tool} off for every agent here. Nothing changed."
-            )
+        refuse_forbidden_builtins(runtime, current, _with_builtin(current, tool, True))
     if (was or False) == enabled:
         state = "on" if enabled else "off"
         reason = "" if was is not None else f" ({name} has no built-in tools)"
@@ -908,6 +959,19 @@ async def _create_agent_impl(
         runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
     )
     started: str | None = None
+    if _denied_builtins(runtime):
+        # Asked for by name: refused. Only on by default: written as off.
+        asked = [
+            name for name in _denied_builtins(runtime) if _explicitly_on(spec.tools or [], name)
+        ]
+        if asked:
+            raise ToolError(
+                f"Whoever runs Daimon has turned {', '.join(sorted(asked))} off for every "
+                "agent here. Nothing changed."
+            )
+        spec = spec.model_copy(
+            update={"tools": _forbidden_builtins_off(runtime, list(spec.tools or []))}
+        )
     owner = may_own(auth)
     async with contextlib.AsyncExitStack() as stack:
         if owner:
@@ -1203,6 +1267,9 @@ async def _update_agent_impl(
                 )
         if tools is not None:
             patch["tools"] = _union_tools(tools, fresh)
+            refuse_forbidden_builtins(
+                runtime, [_ma_tool_to_param(t) for t in fresh.tools], patch["tools"]
+            )
         # Attaching skills to an agent that lacks agent_toolset_20260401 produces a
         # skills-unusable hole — MA rejects session creation ("skills require the read tool").
         # If this update includes skills, ensure the effective tools list carries the base toolset.
@@ -2406,7 +2473,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``tool`` is the built-in's name (web_search, web_fetch, bash, read, write,
         edit, glob, grep). Needs the agent's owner or an admin, like update_agent.
         Whoever runs Daimon can forbid one for every agent by listing
-        ``builtin/<name>`` in the tool-safety ``denied`` setting; that is refused.
+        ``builtin/<name>`` in the tool-safety ``denied`` setting; turning it on is
+        then refused here, in update_agent and in create_agent.
         Returns ``applies``: post it as part of the reply. Pass this turn's
         ``origin_context_id`` so its channel counts."""
         return await _set_agent_builtin_tool_impl(

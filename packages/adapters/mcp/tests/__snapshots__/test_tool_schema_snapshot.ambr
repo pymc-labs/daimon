@@ -5377,7 +5377,8 @@
         ``tool`` is the built-in's name (web_search, web_fetch, bash, read, write,
         edit, glob, grep). Needs the agent's owner or an admin, like update_agent.
         Whoever runs Daimon can forbid one for every agent by listing
-        ``builtin/<name>`` in the tool-safety ``denied`` setting; that is refused.
+        ``builtin/<name>`` in the tool-safety ``denied`` setting; turning it on is
+        then refused here, in update_agent and in create_agent.
         Returns ``applies``: post it as part of the reply. Pass this turn's
         ``origin_context_id`` so its channel counts.
       ''',
