@@ -340,7 +340,7 @@ def register_hub_tools(
 
         Runs as you, in that Daimon's workspace: it reads only what you can see
         and spends that workspace's credit. Pass ``handle`` from a previous
-        result to continue the same conversation. Discord replies require live membership
+        result to continue the same conversation. Replies require current membership
         and invoker-policy access at delivery. On timeout the error carries
         the handle; resume with it rather than asking again.
         Only handles opened through agent chat can be continued here; platform
@@ -421,7 +421,7 @@ def register_hub_tools(
     ) -> Page[SessionEventOut]:
         """A session's transcript. The Daimon's reply is in ``agent.message`` events.
 
-        Discord callers must still pass a live membership and invoker-policy check.
+        Callers must still pass current membership and invoker-policy checks.
         """
         _, _, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):

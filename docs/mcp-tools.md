@@ -383,7 +383,7 @@ Routines tools: create / list / get / update / delete, and an admin's sandbox op
 | `get_routine` | all callers | Get a routine by id. |
 | `list_routines` | all callers | List your routines (admins may see other owners' available routines). |
 | `set_routine_sandbox_tools` | admin only | Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off for one routine's own scheduled runs. |
-| `update_routine` | all callers | PATCH-update a routine, including owner-only Discord DM delivery. |
+| `update_routine` | all callers | PATCH-update a routine, including owner-only DM delivery where supported. |
 
 ## `self_edit`
 
@@ -512,13 +512,13 @@ Owner-bound watch management.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_watch` | all callers | Watch an OS page event or a reviewed OS read tool from this conversation. |
-| `delete_watch` | all callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
-| `list_watches` | all callers | List your watches in this workspace, including paused imports and expiry; no signing secrets. |
-| `pause_watch` | all callers | Pause your watch and cancel its queued wakes. |
-| `resume_watch` | all callers | Resume your paused watch from an attended owner turn after fresh access checks. |
-| `rotate_watch_key` | all callers | Rotate an OS page signing key, revoke the old key and cancel queued wakes. |
-| `show_watch` | all callers | Show your watch's immutable destination, source, status and expiry. |
+| `create_watch` | Discord callers | Watch an OS page event or a reviewed OS read tool from this conversation. |
+| `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
+| `list_watches` | Discord callers | List your watches in this workspace, including paused imports and expiry; no signing secrets. |
+| `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
+| `resume_watch` | Discord callers | Resume your paused watch from an attended owner turn after fresh access checks. |
+| `rotate_watch_key` | Discord callers | Rotate an OS page signing key, revoke the old key and cancel queued wakes. |
+| `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
 
 ## `wizard`
 

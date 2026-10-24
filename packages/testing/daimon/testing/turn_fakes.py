@@ -346,6 +346,10 @@ class FakeAnthropic:
         self.options.append(options)
         return self
 
+    def with_middleware(self, *middleware: object) -> FakeAnthropic:
+        """No HTTP is sent by this fake, so redirect middleware has no work."""
+        return self
+
 
 async def run_turn_on_leg(**kwargs: Any) -> TurnState:  # noqa: ANN401 - forwards run_turn's keywords
     """`run_turn` with the selected leg's path and authorized scope, for direct driver tests."""

@@ -629,9 +629,7 @@ async def _run_admitted_dm_turn(
         raise DirectMessageAccessRevoked(
             "execution_incomplete", message="The run did not complete."
         )
-    answer = (
-        extract_final_response(outcome.state.content) or "The turn completed without a text reply."
-    )
+    answer = extract_final_response(outcome.state.content) or "The reply finished without text."
     return answer, outcome.ma_session_id
 
 

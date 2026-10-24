@@ -392,6 +392,7 @@ async def test_run_smoke_check_runs_the_turn_as_the_provisioned_smoke_account(
     workspace = _Workspace()
 
     result = await run_smoke_check(
+        tool_safety=OPEN_TOOL_SAFETY,
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,

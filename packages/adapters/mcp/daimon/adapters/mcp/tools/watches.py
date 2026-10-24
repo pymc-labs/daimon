@@ -85,7 +85,7 @@ async def private_key_delivery(
     async with rest_client(_require_bot_token(runtime)) as client:
         # Guild membership is fetched live for the owner.
         if auth.external_id is None:
-            raise ToolError("Missing workspace")
+            raise ToolError("Missing team")
         guild = await client.fetch_guild(int(auth.external_id))
         member = await guild.fetch_member(int(watch.owner_external_id))
         if member.bot:
@@ -118,10 +118,10 @@ async def require_attended_owner(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None, *, tool_name: str
 ) -> TurnOriginRow:
     if origin_context_id is None:
-        raise ToolError("An attended owner turn origin is required")
+        raise ToolError("An active reply from the owner is required")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     if not origin.attended or auth.platform != "discord" or auth.platform_user_id is None:
-        raise ToolError("An attended owner Discord turn is required")
+        raise ToolError("An attended owner conversation is required")
     try:
         slot = Slot(
             thread=ThreadRef(
@@ -145,7 +145,7 @@ async def require_attended_owner(
                     binding.thread != candidate.thread
                     or binding.legacy_account_id != candidate.account_id
                 ):
-                    raise ToolError("Backend binding differs from owner scope")
+                    raise ToolError("The model provider differs from the owner's selection")
                 retained, _, _ = await channel_backend.resolve_turn_backend(
                     db,
                     slot.thread.channel,
@@ -161,12 +161,12 @@ async def require_attended_owner(
                         or retained.channel != slot.thread.channel
                         or retained.local != binding.config_revision
                     ):
-                        raise ToolError("Backend binding revision differs from admission")
+                        raise ToolError("The model provider's settings changed; try again")
                     resolved = retained
                 if (resolved.backend, resolved.profile) != (binding.provider, binding.profile):
-                    raise ToolError("Backend binding revision differs from admission")
+                    raise ToolError("The model provider's settings changed; try again")
                 if get_profile(resolved.profile).support_for("tool_confirmation") not in SUPPORTED:
-                    raise ToolError("Backend cannot prove owner card approval")
+                    raise ToolError("The model provider cannot verify the owner's approval")
         gap = await _session_gate.session_card_gap(runtime, auth, origin, tool_name=tool_name)
     except Exception:
         # Unsupported backends and unreadable proofs cannot authorize enrollment.
@@ -371,7 +371,7 @@ async def manage_watch_impl(
 
 
 def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool
+    @mcp.tool(tags={"discord"})
     async def create_watch(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str,
@@ -416,7 +416,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             lifetime_days=lifetime_days,
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord"})
     async def list_watches(ctx: Context) -> list[WatchSummary]:  # pyright: ignore[reportUnusedFunction]
         """List your watches in this workspace, including paused imports and expiry; no signing
         secrets.
@@ -430,21 +430,21 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 )
             ]
 
-    @mcp.tool
+    @mcp.tool(tags={"discord"})
     async def show_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Show your watch's immutable destination, source, status and expiry. Admins may inspect
         within their workspace.
         """
         return await manage_watch_impl(runtime, await _auth(ctx), watch_id=watch_id, action="show")
 
-    @mcp.tool
+    @mcp.tool(tags={"discord"})
     async def pause_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Pause your watch and cancel its queued wakes. Workspace admins may pause another
         owner's watch.
         """
         return await manage_watch_impl(runtime, await _auth(ctx), watch_id=watch_id, action="pause")
 
-    @mcp.tool
+    @mcp.tool(tags={"discord"})
     async def resume_watch(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Resume your paused watch from an attended owner turn after fresh access checks.
         Only the owner may resume; an admin cannot override the owner pause.
@@ -460,7 +460,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord"})
     async def rotate_watch_key(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Rotate an OS page signing key, revoke the old key and cancel queued wakes. The fresh
         key goes to its owner by private DM once. Requires an attended owner turn;
@@ -471,7 +471,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), watch_id=watch_id, origin_context_id=origin_context_id
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord"})
     async def delete_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Delete your watch and its retained evidence after cancelling queued wakes; admins may
         delete within their workspace.

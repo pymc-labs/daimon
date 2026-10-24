@@ -1035,7 +1035,7 @@ async def test_account_purge_removes_selfhosted_receipts_and_keeps_shared_resour
     ).db.selfhosted_operations == 0
 
 
-async def test_collect_purge_preview_linked_principals_example_uses_platform_capitalization(
+async def test_collect_purge_preview_linked_principals_example_omits_platform_names(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1053,6 +1053,6 @@ async def test_collect_purge_preview_linked_principals_example_uses_platform_cap
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
 
     assert preview.linked_principals.example is not None
-    assert preview.linked_principals.example.startswith("Discord:"), (
-        "platform name must be capitalized in display"
+    assert preview.linked_principals.example == "42", (
+        "linked account examples must not name another chat platform"
     )

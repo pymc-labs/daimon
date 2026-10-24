@@ -187,7 +187,7 @@ def make_discord_routine_poster(
     def refusal(row: RoutineRow, reason: str) -> DeliveryOutcome:
         private_reasons = {
             "invoker_not_allowed": "The owner is no longer a verified, allowed server member.",
-            "access_policy_unreadable": "The server access policy could not be read.",
+            "access_policy_unreadable": "The server access settings could not be read.",
             "routine_dms_disabled": "Routine DMs are disabled for this server.",
             "restricted_source": "A restricted source cannot deliver by DM.",
             "agent_not_allowed": "The agent is not allowed to run privately.",

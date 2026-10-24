@@ -84,6 +84,8 @@ async def test_registered_handoff_cannot_borrow_human_attendance(
                 expires_at=now + timedelta(hours=1),
                 attended=attended,
                 chat_session_id=grant,
+                sender_foreign=False,
+                shared_channel=False,
             )
 
         human = await origin("human-thread", human_grant, True)

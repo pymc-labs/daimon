@@ -10,6 +10,7 @@ from daimon.adapters.mcp.tools.fleet_config import (
 )
 from daimon.core.fleet_configuration import FleetConfigInput
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from fastmcp.exceptions import ToolError
 
 from .test_backend_switch import active_chat as active_chat
@@ -310,6 +311,7 @@ async def test_pre_config_recorded_session_cannot_gate_the_new_tools(active_chat
         vault_id=None,
         public_url=str(runtime.settings.mcp.public_url),
         confirmed_tools=frozenset({"request_agent_backend_switch"}),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     async with runtime.session_factory.begin() as session:
         await record_snapshot(

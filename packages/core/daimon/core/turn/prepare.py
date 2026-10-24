@@ -225,6 +225,7 @@ class PreparedTurn:
     _preparation: ProviderPreparationRequest | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
+    _native_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1508,6 +1509,17 @@ async def bind_session_impl(
             if worker is not None:
                 remaining_s(effective_deadline, now=now(), refuse_expired=True)
             result = await prepare(selected)
+            # Carry the reviewed native target separately from fleet capture.
+            # Unattended execution must inspect actual provider tools, not the
+            # source's Anthropic representation or a retained origin grant.
+            native_spec = (
+                selected.worker.spec
+                if selected.worker is not None
+                else selected.verified_counterpart.agent.spec
+                if selected.verified_counterpart is not None
+                else selected.target_spec
+            )
+            result = replace(result, _native_spec=native_spec)
             ref = result.session_ref
             backend = result.backend
             if ref is None or (

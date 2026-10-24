@@ -33,7 +33,7 @@ async def require_turn_origin(
     """Require an explicit live origin authorized by the caller session's signed grant."""
     if auth.platform not in CHAT_PLATFORMS or not origin_context_id or auth.chat_session_id is None:
         raise ToolError(
-            "Use the origin_context_id from this active platform turn with its session grant."
+            "Use the origin_context_id and signed conversation grant from this active reply."
         )
     try:
         origin_id = uuid.UUID(origin_context_id)
@@ -51,7 +51,9 @@ async def require_turn_origin(
             now=datetime.now(UTC),
         )
     if origin is None or origin.chat_session_id != auth.chat_session_id:
-        raise ToolError("This turn origin is unavailable or expired; retry in that conversation.")
+        raise ToolError(
+            "This reply's origin is unavailable or expired; retry in that conversation."
+        )
     # A chat turn's credential names its agent as chat_agent_id, as
     # `get_verified_origin` reads it: it may claim only its own responder's origin.
     executing_agent = auth.agent_id or auth.chat_agent_id

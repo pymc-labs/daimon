@@ -3769,6 +3769,8 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         role=Role.USER,
         attended=False,
         chat_session_id="timer-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         await _hand_off_task_impl(
             handoff_runtime,
@@ -3848,6 +3850,8 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         )
 
         class NativePersistence:
+            lease_acquired = True
+
             def activate(self) -> contextlib.AbstractContextManager[None]:
                 return contextlib.nullcontext()
 
@@ -3864,7 +3868,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
                 ToolCall(tool_use_id="native-call", server_name="linear", tool_name="get_issue")
             )
             assert not decision.allow and decision.deny_message is not None
-            assert "cannot refresh the session's tool safety gate" in decision.deny_message
+            assert "cannot refresh the conversation's tool safety gate" in decision.deny_message
             order.append("native denied")
             return TurnState()
 
@@ -4090,6 +4094,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         attended=True,
         chat_session_id=grant,
+        sender_foreign=False,
+        shared_channel=False,
     )
     await db_session.commit()
     router = _router(session_bodies=[], dead_session_ids=set())
@@ -4125,6 +4131,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         responder_name="daimon",
         role=Role.USER,
         attended=origin_attended,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
 
         async def read_origin():

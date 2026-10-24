@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email import policy
@@ -22,6 +23,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_runtime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import admitted_session_scope, bind_session_impl
@@ -32,6 +34,7 @@ from daimon.core.turn.runtime_manifest import (
     source_preservation_pin,
 )
 from daimon.core.turn.runtimes import build_channel_runtime
+from daimon.core.turn.unattended import ALLOW_REVIEWED_NATIVE_UNATTENDED_TOOLS
 from daimon.testing import f2_mcp_binding
 from daimon.testing.db import sibling_nullpool_engine
 from daimon.testing.f2_mcp_binding import AgentMCPAuthority, AgentMCPBinding
@@ -803,6 +806,23 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             external_id="caller",
         )
     target = ma_agent(id="handoff-target", name="daimon", tenant_id=request.tenant_id)
+    # This test exercises signed-origin authorization, so the destination
+    # shares the source provider. Cross-provider handoffs retain their own fence.
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+
+    async with sessions.begin() as db:
+        await agent_backends.put_revision(
+            db,
+            tenant_id=request.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=target.id),
+            local=1,
+            backend="openai",
+            digest="d" * 64,
+            previous_local=None,
+            agent_name=target.name,
+            preview_digest="p" * 64,
+        )
     router.add(
         "GET",
         r"/v1/agents",
@@ -842,6 +862,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             responder_name="test-agent",
             role=Role.USER,
             attended=True,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             # Simulate an inherited parent execution during child construction.
             # Construction must install a fresh slot grant, never this origin's.
@@ -864,6 +886,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                         expires_at=datetime.now(UTC) + timedelta(hours=1),
                         attended=True,
                         chat_session_id=previous_grant,
+                        sender_foreign=False,
+                        shared_channel=False,
                     )
             with execution_origin(parent.id if parent is not None else None):
                 prepared = await bind_session_impl(
@@ -939,24 +963,44 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             async def no_recovery():
                 pytest.fail("native session must not recover into another backend")
 
-            outcome = await run_prepared_turn(
-                request.deps,
-                prepared,
-                tenant_id=request.tenant_id,
-                platform=request.platform,
-                thread_id=thread_id,
-                external_user_id="caller",
-                user_message="do requested work",
-                lifecycle=RecordingLifecycle(),
-                cancel=asyncio.Event(),
-                reseed_user_message=no_recovery,
-                recovery_lifecycle=lambda _: RecordingLifecycle(),
-                before_send=before_send,
-                attended=kind == "human",
-                origin="worker" if worker else "chat",
-                operation_key=f"origin-lifecycle:{index}",
-            )
-            assert outcome.state.error is None, (index, kind, outcome.state.error)
+            # Main's signed-grant assertions above still run at before_send.
+            # Preview's default refuses this source's automatic sandbox tools
+            # before a provider message, including timer and child execution.
+            refused = kind != "human" and not ALLOW_REVIEWED_NATIVE_UNATTENDED_TOOLS
+            sent_before = [
+                call
+                for call in wire.requests
+                if call.method == "POST" and call.url.path.endswith("/events")
+            ]
+            with (
+                pytest.raises(AdmissionDenied, match="backend_unsupported")
+                if refused
+                else nullcontext()
+            ):
+                outcome = await run_prepared_turn(
+                    request.deps,
+                    prepared,
+                    tenant_id=request.tenant_id,
+                    platform=request.platform,
+                    thread_id=thread_id,
+                    external_user_id="caller",
+                    user_message="do requested work",
+                    lifecycle=RecordingLifecycle(),
+                    cancel=asyncio.Event(),
+                    reseed_user_message=no_recovery,
+                    recovery_lifecycle=lambda _: RecordingLifecycle(),
+                    before_send=before_send,
+                    attended=kind == "human",
+                    origin="worker" if worker else "chat",
+                    operation_key=f"origin-lifecycle:{index}",
+                )
+                assert outcome.state.error is None, (index, kind, outcome.state.error)
+            if refused:
+                assert [
+                    call
+                    for call in wire.requests
+                    if call.method == "POST" and call.url.path.endswith("/events")
+                ] == sent_before
             assert (await live_origin()).chat_session_id is None
             assert "isError" in str(await handoff()), (
                 "an ended execution cannot reuse its installed bearer"

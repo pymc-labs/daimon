@@ -89,7 +89,7 @@ def build_service(
                     )
             return Extraction(
                 candidate=Candidate(name="Synthetic candidate"),
-                summary="Synthetic QA review; no real backend effects.",
+                summary="Synthetic QA review; no live effects.",
                 changes=changes,
             )
         import asyncio

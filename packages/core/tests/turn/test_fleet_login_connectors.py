@@ -11,6 +11,7 @@ from daimon.core.neutral_resources import (
     resolve_worker_spec,
     task_worker_spec,
 )
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.runtime_manifest import login_mcp_servers, worker_source_ceiling
 from mux.contracts.resources import MCPConnection, ResourceBinding, ToolSpec
 
@@ -218,6 +219,7 @@ async def test_the_real_projectors_stored_logins_and_secrets_never_reach_a_worke
             mcp_settings=McpSettings(
                 public_url=HttpUrl("https://mcp.example.test/mcp"), jwt_secret=SecretStr("test")
             ),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     logins = {
         binding.credential_ref

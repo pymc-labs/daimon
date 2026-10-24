@@ -220,7 +220,7 @@ async def apply_thread_model(
 
 FLEET_ROOT_NOTE: Final = (
     " This conversation's agent runs worker fleets, and a fleet always runs the model "
-    "the agent's owner approved, so the choice doesn't apply to its turns here."
+    "the agent's owner approved, so the choice doesn't apply to its replies here."
 )
 
 

@@ -248,7 +248,9 @@ PUBLISH_TOOLS: Final[frozenset[str]] = frozenset(
 )
 
 #: Daimon's tools a session can hold on `always_ask` by their own name.
-APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS})
+APPROVAL_TOOLS: Final[frozenset[str]] = frozenset(
+    {*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS, "set_routine_sandbox_tools"}
+)
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
@@ -489,7 +491,7 @@ def get_mcp_server_name_rejection(server_name: str) -> str | None:
     """
     if SERVER_SEPARATOR in server_name:
         return (
-            f"MCP server names cannot contain '{SERVER_SEPARATOR}' ('{server_name}'): it "
+            f"Connection names cannot contain '{SERVER_SEPARATOR}' ('{server_name}'): it "
             "separates a server from a tool in tool keys. Pick a different server name."
         )
     return None

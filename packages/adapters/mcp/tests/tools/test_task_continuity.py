@@ -1613,6 +1613,7 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
         is_admin=True,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="provider-handoff-grant",
     )
     async with turn_origin(
         committing_sessionmaker,
@@ -1626,6 +1627,7 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
         role=Role.ADMIN,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="provider-handoff-grant",
     ) as origin:
         if pinned == "unpinned":
             result = await _hand_off_task_impl(

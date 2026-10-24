@@ -750,6 +750,8 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         responder_name="analyst",
         role=Role.USER,
         attended=False,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         if ending in ("normal", "dead_session") or ending.startswith("spend_"):
             outcome = await call
@@ -967,6 +969,8 @@ async def test_watch_send_requires_current_unattended_session_grant(
         responder_name="analyst",
         role=Role.USER,
         attended=grant_case == "attended",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         async with db_session_factory.begin() as db:
             await bind_origin_session(

@@ -282,7 +282,7 @@ async def test_without_a_daimon_endpoint_the_reserved_name_is_gated_like_any_ser
 
 @pytest.mark.parametrize("trusted", [("linear",), ()], ids=["trusted", "untrusted"])
 async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
-    monkeypatch: pytest.MonkeyPatch, trusted: tuple[str, ...]
+    monkeypatch: pytest.MonkeyPatch, trusted: tuple[str, ...], headless_identity: HeadlessIdentity
 ) -> None:
     """The production wiring: a routine's decider reads a trusted server's
     catalogue, so a noun-first read the server marks `readOnlyHint` runs where
@@ -360,6 +360,8 @@ async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
         environment_id="env_x",
         trigger_message="list the flags",
         tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
 
     (sent,) = _confirmations(sends)
@@ -463,8 +465,7 @@ def test_no_production_signature_defaults_the_policy() -> None:
 async def test_run_turn_without_a_policy_is_a_type_error() -> None:
     with pytest.raises(TypeError, match="tool_safety"):
         await run_turn(
-            tool_safety=OPEN_TOOL_SAFETY,  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
-            privacy=TurnPrivacy("test"),
+            privacy=TurnPrivacy("test"),  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
             anthropic=build_fake_anthropic(MARouter().dispatch),
             agent_id="ag",
             environment_id="env",
@@ -473,7 +474,9 @@ async def test_run_turn_without_a_policy_is_a_type_error() -> None:
 
 
 @pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
-async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(enabled: bool) -> None:
+async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(
+    enabled: bool, headless_identity: HeadlessIdentity
+) -> None:
     """Design §3 routines row: the one unattended decider, never AutoApprove; the
     session asks on Daimon's card-only actions and the routine refuses them."""
     daimon = {"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL}
@@ -496,6 +499,8 @@ async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(enabled: bo
         trigger_message="mail the summary",
         mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
         tool_safety=ToolSafetyPolicy(enabled=enabled),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
     (created,) = creates
     (toolset,) = created["agent"]["tools"]
@@ -521,6 +526,7 @@ _BUILTINS: dict[str, object] = {
 async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
     enabled: bool,
     unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession],
+    headless_identity: HeadlessIdentity,
 ) -> None:
     """The roster cannot be removed from a live session, so nothing is sent."""
     creates: list[dict[str, Any]] = []
@@ -537,12 +543,16 @@ async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
             environment_id="env_x",
             trigger_message="file tonight's bugs",
             tool_safety=ToolSafetyPolicy(enabled=enabled),
+            tenant_id=headless_identity.tenant_id,
+            account_id=headless_identity.account_id,
         )
 
     assert sends == []
 
 
-async def test_a_routine_disables_its_sandbox_before_sending() -> None:
+async def test_a_routine_disables_its_sandbox_before_sending(
+    headless_identity: HeadlessIdentity,
+) -> None:
     """Routines cannot generate files using sandbox tools."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
@@ -559,6 +569,8 @@ async def test_a_routine_disables_its_sandbox_before_sending() -> None:
         environment_id="env_x",
         trigger_message="write the report",
         tool_safety=ToolSafetyPolicy(enabled=True),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
 
     assert updates, "the unattended gate rewrites the MCP toolset before the message"
@@ -569,7 +581,9 @@ async def test_a_routine_disables_its_sandbox_before_sending() -> None:
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-async def test_a_routines_own_daimon_tools_pause_for_the_decider(enabled: bool) -> None:
+async def test_a_routines_own_daimon_tools_pause_for_the_decider(
+    enabled: bool, headless_identity: HeadlessIdentity
+) -> None:
     """Trusted is not unasked: Daimon's ordinary tools pause, and the decider allows them."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
@@ -593,6 +607,8 @@ async def test_a_routines_own_daimon_tools_pause_for_the_decider(enabled: bool) 
         trigger_message="list them",
         tool_safety=ToolSafetyPolicy(enabled=enabled),
         mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
 
     toolset = updates[-1]["agent"]["tools"][0]

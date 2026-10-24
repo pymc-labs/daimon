@@ -34,7 +34,7 @@ class AccessPolicyUnreadable(UserFacingError):
         super().__init__(
             detail
             or (
-                "this workspace's access settings can't be read, so no turn was started; "
+                "the access settings here can't be read, so Daimon can't reply; "
                 "ask an admin to fix them"
             )
         )
@@ -189,8 +189,7 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
             raise AccessPolicyUnreadable(
                 tenant_id=tenant_id,
                 detail=(
-                    "this workspace has unsupported Discord role access settings; "
-                    "ask an admin to fix them"
+                    "this space has unsupported role access settings; ask an admin to fix them"
                 ),
             )
         return policy

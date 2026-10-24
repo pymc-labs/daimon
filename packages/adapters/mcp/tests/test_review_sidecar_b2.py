@@ -59,6 +59,8 @@ async def test_unattended_or_missing_origin_cannot_resume_or_rotate(
         role=Role.USER,
         chat_session_id="other" if origin_kind == "other_session" else "routine-session",
         attended=origin_kind == "other_session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         origin_id = None if origin_kind == "none" else str(origin.id)
         deliver = AsyncMock()

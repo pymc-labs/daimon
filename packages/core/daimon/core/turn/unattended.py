@@ -27,7 +27,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
@@ -69,6 +69,7 @@ from daimon.core.turn.unattended_capabilities import (
     protected_tools,
 )
 from mux.contracts.ids import Scope
+from mux.contracts.resources import AgentSpec
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -76,12 +77,40 @@ if TYPE_CHECKING:
     from daimon.core.turn.deps import TurnDeps
 
 
+# Pending the explicit native-policy decision: Preview's default applies.
+# Native automatic tools do not pass through the confirmation decider.
+ALLOW_REVIEWED_NATIVE_UNATTENDED_TOOLS: Final[bool] = False
+
+
+def require_native_unattended_capabilities(spec: AgentSpec | None) -> None:
+    """Refuse unreviewed or automatic native sandbox/custom tools before send.
+
+    Selfhosted inspects every call at its host boundary and Managed Agents
+    rewrites its session. Other providers must expose a reviewed native
+    target; their automatic tools cannot be stopped by refusing a pause.
+    """
+    if spec is None:
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            detail="The tool configuration cannot be checked for a reply nobody is watching.",
+        )
+    if not ALLOW_REVIEWED_NATIVE_UNATTENDED_TOOLS and any(
+        tool.kind in {"builtin", "custom"} and tool.permission == "auto"
+        for tool in spec.tools or ()
+    ):
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            detail="Automatic sandbox or custom tools cannot run without someone watching.",
+        )
+
+
 async def refuse_ungated_confirmation(call: ToolCall) -> ToolConfirmationResult:
     """Refuse a prepared unattended call whose runtime cannot refresh its gate."""
     return ToolConfirmationResult(
         allow=False,
         deny_message=(
-            f"Refused {call.key}: this runtime cannot refresh the session's tool safety "
+            f"Refused {call.key}: this model provider cannot refresh the conversation's "
+            "tool safety "
             "gate before unattended confirmations. The tool call did not run."
         ),
     )

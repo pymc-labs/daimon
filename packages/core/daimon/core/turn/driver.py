@@ -92,7 +92,11 @@ from daimon.core.turn.io import (
     turn_io,
 )
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
-from daimon.core.turn.mutation_gate import initial_send_check, unattended_gate
+from daimon.core.turn.mutation_gate import (
+    initial_send_check,
+    unattended_execution,
+    unattended_gate,
+)
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.persistence import LeaseWaitCancelled, current_persistence
 from daimon.core.turn.posture import (
@@ -324,7 +328,7 @@ async def _decide_or_refuse_on_cancel(
                     io,
                     session_id,
                     fresh,
-                    message="This turn ended before the call was approved; it did not run.",
+                    message="This reply ended before the call was approved; it did not run.",
                     interrupt_unattended=True,
                 ),
                 name="turn.refuse_blocked",
@@ -355,7 +359,7 @@ async def _decide_or_refuse_on_cancel(
                     io,
                     session_id,
                     fresh,
-                    message="The user stopped this turn; the call did not run.",
+                    message="The user stopped this reply; the call did not run.",
                 ),
                 name="turn.refuse_blocked",
             ),
@@ -393,11 +397,13 @@ def unattended_sends(gate: Callable[[], Awaitable[None]] | None) -> Iterator[Non
     """
     unattended_token = _UNATTENDED.set(True)
     token = _UNATTENDED_GATE.set(gate)
+    execution_token = unattended_execution.set(True)
     try:
         with single_attempt_mutation():
             yield
     finally:
         _UNATTENDED_GATE.reset(token)
+        unattended_execution.reset(execution_token)
         _UNATTENDED.reset(unattended_token)
 
 

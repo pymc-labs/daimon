@@ -1024,6 +1024,7 @@ def _desired(system_override: str | None) -> SessionSnapshot:
         memory_store_id="memstore_1",
         vault_id="vault_1",
         system_override=system_override,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

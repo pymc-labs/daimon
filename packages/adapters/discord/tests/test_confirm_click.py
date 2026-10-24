@@ -39,7 +39,13 @@ GUILD, CHANNEL, CARD, BOT, QA, OTHER_QA, HUMAN = 10, 20, 30, 40, 111, 222, 333
 
 
 def _settings(qa: tuple[str, ...] = (str(QA), str(OTHER_QA))) -> Settings:
-    return cast(Settings, SimpleNamespace(discord=SimpleNamespace(qa_bot_user_ids=qa)))
+    return Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://localhost/offline"},
+            "anthropic": {"api_key": "offline"},
+            "discord": {"bot_token": "offline", "qa_bot_user_ids": qa},
+        }
+    )
 
 
 def _write_control(directory: Path, body: object, *, read_only: bool = True) -> Path:

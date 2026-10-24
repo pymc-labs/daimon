@@ -340,7 +340,7 @@ async def _check_destination(
     """
     if kind == "dm":
         if auth.platform != "discord":
-            raise ToolError("DM routines are supported only on Discord")
+            raise ToolError("DM routines are not supported here")
         owner = _require_platform_user_id(auth)
         if destination_id is not None and destination_id != owner:
             raise ToolError("a DM routine can deliver only to its authenticated owner")
@@ -916,7 +916,7 @@ _SANDBOX_PERSON_ONLY = (
 _SANDBOX_ADMIN_ONLY = (
     "A routine's sandbox tools are changed by the operator with "
     "`daimon routines sandbox-tools`, the supported way today. This tool accepts "
-    "only a live Discord server admin's own token, which no Daimon surface issues "
+    "only a live platform admin's own token, which no Daimon surface issues "
     "yet; the routine's owner cannot. Do not retry."
 )
 
@@ -1037,11 +1037,11 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         optionally name where each run's result goes. Channel/thread runs are
         told where; if the agent does not post there itself, daimon posts the end
         of its final reply there. Owner-DM runs queue their successful final reply
-        privately for the owner. On Slack a thread is ``<channel id>:<thread
-        ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
-        are in. Discord ``dm`` delivers only to the authenticated owner; omit
-        ``destination_id`` to derive their user ID. Slack and Teams reject DM
-        destinations. Delivery status and failure reasons are returned by list/get.
+        privately for the owner. Use the canonical thread identifier returned by
+        this platform's read tools, in a channel you are in. Where DM delivery is
+        supported, ``dm`` delivers only to the authenticated owner; omit
+        ``destination_id`` to derive their user ID. Unsupported destinations are
+        refused. Delivery status and failure reasons are returned by list/get.
         A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
@@ -1116,7 +1116,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         clear_destination: bool = False,
     ) -> RoutineRow:
-        """PATCH-update a routine, including owner-only Discord DM delivery.
+        """PATCH-update a routine, including owner-only DM delivery where supported.
 
         Only provided fields are changed. Recruitment-reserved sources/destinations
         and unknown legacy provenance in configured tenants return not-found.
@@ -1161,8 +1161,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         for one routine's own scheduled runs. Admin only.
 
         They are off for every unattended run by default. The supported way today is the
-        operator's ``daimon routines sandbox-tools``. This tool accepts only a live Discord
-        server admin's own token, re-checked against the server on each call; no Daimon
+        operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform
+        admin's own token, re-checked against the server on each call; no Daimon
         surface issues such a token yet, and the tool is kept for a future admin surface.
         Owning the routine is not enough, and agent keys, agents in a conversation, operator
         tokens, legacy tokens and other platforms are refused. DM routines cannot be opted

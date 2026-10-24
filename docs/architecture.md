@@ -1268,6 +1268,13 @@ first message. A non-Anthropic runtime refuses every unattended confirmation
 with a plain explanation that it cannot refresh the tool safety gate. This rule
 applies with safety on or off; the model receives a denial and the turn can
 continue or end. Unattended turns never invoke a human provider-action hook.
+Native providers without host tool inspection must expose a reviewed tool
+configuration and cannot run automatic sandbox or custom tools unattended;
+the send boundary refuses before posting a provider message. In particular,
+OpenAI persistent workers that require automatic `bash` are refused.
+Conversation-only workers without those tools remain supported. Selfhosted
+execution inspects every declared tool at the host boundary, even with tool
+safety off, so it can permit allowed reads while refusing sandbox calls.
 Tool rules come from the session's
 conversation channel (`session_rules_channel`), never its budget channel. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write

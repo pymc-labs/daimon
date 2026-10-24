@@ -363,7 +363,7 @@ _RESUME_WAIT_S = 90.0
 
 _RESUMED_STILL_RUNNING_MSG = (
     "this conversation was paused on tool confirmations; they are answered and the "
-    "paused turn is running again, so your message was not sent. Poll get_session "
+    "reply is running again, so your message was not sent. Poll get_session "
     "until idle, then call continue_turn again."
 )
 
@@ -373,7 +373,8 @@ _RESUME_FAILED_MSG = (
 )
 
 _MESSAGE_REQUIRED_MSG = (
-    "a message is required: only a session paused on tool confirmations can be resumed without one."
+    "a message is required: only a conversation paused on tool confirmations "
+    "can be resumed without one."
 )
 
 _SEAL_CHANGED_DURING_START_MSG = (
@@ -788,12 +789,12 @@ async def _continue_turn_impl(
         if not await _bound_seal(runtime, auth) <= seal_ids(current.metadata):
             raise ToolError(_SEALED_SINCE_START_MSG)
         if current.archived_at is not None:
-            raise ToolError("This session is archived.")
+            raise ToolError("This conversation is archived.")
         await _refuse_spent_session_budget(runtime, auth, current)
         async with runtime.session_factory.begin() as db:
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
-                raise ToolError("This session is closed.")
+                raise ToolError("This conversation is closed.")
         mcp = runtime.settings.mcp
         if mcp.public_url is not None and mcp.jwt_secret is not None:
             assert auth.agent_id is not None  # verified above, including after fence acquisition
@@ -1461,8 +1462,8 @@ def register_agent_chat_tools(
     ) -> AskResult:
         """Ask one question and wait for the final answer and any chart images. Starts a
         persistent turn, waits up to about 120 seconds for idle, and
-        returns the final text plus a resumable handle. Discord callers need live
-        server membership and invoker-policy access before reply delivery. Chart
+        returns the final text plus a resumable handle. Callers need current
+        membership and invoker-policy access before reply delivery where required. Chart
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
@@ -1608,7 +1609,7 @@ def register_agent_chat_tools(
     ) -> Page[SessionEventOut]:
         """List a session's events — the transcript.
 
-        Discord callers must still pass a live membership and invoker-policy check.
+        Callers must still pass current membership and invoker-policy checks where required.
 
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.

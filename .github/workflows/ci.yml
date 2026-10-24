@@ -134,7 +134,7 @@ jobs:
           database: "true"
       - name: pytest (${{ matrix.suite }})
         run: >-
-          uv run pytest --timeout=300 ${{ matrix.paths }} -n 4 --dist worksteal
+          uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal --timeout=300
           -p daimon.testing.ci_shard --ci-shard-by=file
           --ci-shard-suite=${{ matrix.suite }}
           --ci-shard-index=${{ matrix.shard }}
@@ -223,7 +223,7 @@ jobs:
           database: "true"
       - name: pytest (${{ matrix.suite }})
         run: >-
-          uv run pytest --timeout=300 ${{ matrix.paths }} -n 2 -rfE --tb=short
+          uv run pytest ${{ matrix.paths }} -n 2 --timeout=300 -rfE --tb=short
           -p daimon.testing.ci_shard -p daimon.testing.mux_leg_known
           --ci-shard-by=file
           --ci-shard-suite=${{ matrix.suite }}
@@ -280,10 +280,10 @@ jobs:
           database: "true"
       - name: pytest (${{ matrix.configuration }})
         run: >-
-          uv run pytest --timeout=300
+          uv run pytest
           tests/parity/test_turn_leg.py::test_turn_runs_on_the_selected_leg
           packages/core/tests/turn/test_staging_configuration_paths.py
-          -n 2 --durations=20
+          -n 2 --timeout=300 --durations=20
           --junitxml=staging-config-${{ matrix.configuration }}.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -349,7 +349,7 @@ jobs:
             exit 1
           fi
           printf 'journey file: %s\n' "${journeys[@]}"
-          uv run pytest --timeout=300 "${journeys[@]}" -n 2 -rfE --tb=short --durations=20 \
+          uv run pytest "${journeys[@]}" -n 2 --timeout=300 -rfE --tb=short --durations=20 \
             --junitxml=journeys-${{ matrix.leg }}.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -405,7 +405,7 @@ jobs:
           (sleep 360; bash .github/scripts/discord-postgres-diagnostics.sh > "$RUNNER_TEMP/discord-postgres-hang.txt" 2>&1) &
           diagnostic_pid=$!
           trap 'kill "$diagnostic_pid" 2>/dev/null || true' EXIT
-          uv run pytest --timeout=300 ${{ matrix.paths }} -n 2 -rfE --tb=short -o faulthandler_timeout=300 -p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=${{ matrix.suite }} --ci-shard-index=${{ matrix.shard }} --ci-shard-count=${{ matrix.shards }} --durations=20 --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
+          uv run pytest ${{ matrix.paths }} -n 2 --timeout=300 -rfE --tb=short -o faulthandler_timeout=300 -p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=${{ matrix.suite }} --ci-shard-index=${{ matrix.shard }} --ci-shard-count=${{ matrix.shards }} --durations=20 --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -466,7 +466,7 @@ jobs:
           "$codex_dir/codex-x86_64-unknown-linux-musl" --version | grep -Fx 'codex-cli 0.162.1'
       - name: pytest (${{ matrix.suite }})
         run: >-
-          uv run pytest --timeout=300 ${{ matrix.paths }} -n 4 --dist worksteal
+          uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal --timeout=300
           --durations=20 --junitxml=${{ matrix.suite }}.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
@@ -508,7 +508,7 @@ jobs:
         run: >-
           "$RUNNER_TEMP/mux-venv/bin/python" -m pytest
           -c packages/mux/pytest-standalone.ini --rootdir . packages/mux/tests
-          -n 4 --dist worksteal --durations=20 --junitxml=mux-standalone.xml
+          -n 4 --dist worksteal --timeout=300 --durations=20 --junitxml=mux-standalone.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -524,7 +524,7 @@ jobs:
       - uses: ./.github/actions/setup-daimon
       - name: pytest (notebook-host)
         run: >-
-          uv run pytest --timeout=300 apps/notebook-host -n 4 --dist worksteal
+          uv run pytest apps/notebook-host -n 4 --dist worksteal --timeout=300
           --durations=20 --junitxml=notebook-host.xml
       # The real-browser isolation test: two real marimo notebooks on their own
       # *.localhost origins in headless Chromium. Playwright stays out of the

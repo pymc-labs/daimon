@@ -168,11 +168,15 @@ def _anthropic_factory(
         lambda _request, _match: httpx.Response(200, json={}),
     )
 
+    created_sessions = 0
+
     def create_session(request: httpx.Request, _match: object) -> httpx.Response:
+        nonlocal created_sessions
+        created_sessions += 1
         body = json_body(request)
         agent = next(agent for agent in agents if agent.id == body["agent"])
         session = ma_session(
-            id="ses_test",
+            id="ses_test" if created_sessions == 1 else f"ses_test_{created_sessions}",
             agent=agent,
             environment_id=body["environment_id"],
             metadata=body.get("metadata", {}),
@@ -186,17 +190,17 @@ def _anthropic_factory(
     router.add("GET", r"/v1/sessions", lambda _request, _match: list_response([]))
     router.add(
         "POST",
-        r"/v1/sessions/ses_test/events",
+        r"/v1/sessions/ses_test(?:_\d+)?/events",
         lambda _request, _match: send_events_response(),
     )
     router.add(
         "GET",
-        r"/v1/sessions/ses_test/events/stream",
+        r"/v1/sessions/ses_test(?:_\d+)?/events/stream",
         lambda _request, _match: sse_response([event.model_dump(mode="json") for event in events]),
     )
     router.add(
         "GET",
-        r"/v1/sessions/ses_test/events",
+        r"/v1/sessions/ses_test(?:_\d+)?/events",
         lambda _request, _match: list_response([event.model_dump(mode="json") for event in events]),
     )
     transport = ScriptedTransport(router=router)

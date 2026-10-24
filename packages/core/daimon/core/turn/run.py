@@ -114,6 +114,7 @@ from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
     refuse_ungated_confirmation,
+    require_native_unattended_capabilities,
     session_gate,
 )
 from daimon.core.turn.unattended_capabilities import (
@@ -1293,8 +1294,20 @@ async def run_prepared_turn_impl(
                             gate = watch_gate
                         stack.enter_context(unattended_sends(gate))
                     else:
-                        stack.enter_context(unattended_sends(None))
-                        posture = PolicyApproval(decide=refuse_ungated_confirmation)
+                        # Selfhosted pauses every declared tool at the host boundary,
+                        # including automatic tools when unattended. Keep the composed
+                        # read/write and sandbox decider for those inspected actions.
+                        if revision is None or revision.profile != SELFHOSTED_LOOP.profile_id:
+                            posture = PolicyApproval(decide=refuse_ungated_confirmation)
+
+                            async def native_gate() -> None:
+                                require_native_unattended_capabilities(
+                                    prepared._native_spec  # pyright: ignore[reportPrivateUsage]
+                                )
+
+                            stack.enter_context(unattended_sends(native_gate))
+                        else:
+                            stack.enter_context(unattended_sends(None))
                 if selected_path == "legacy":
                     yield posture
                     return

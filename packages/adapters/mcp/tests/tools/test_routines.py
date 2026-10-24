@@ -2087,6 +2087,8 @@ async def test_mcp_dm_creation_verifies_and_retains_thread_origin(
         expires_at=now + timedelta(minutes=10),
         now=now,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     )
     if restricted:
         await set_access_policy(
@@ -2379,6 +2381,8 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
         expires_at=now + timedelta(minutes=10),
         now=now,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     )
     if source == "restricted":
         await set_access_policy(

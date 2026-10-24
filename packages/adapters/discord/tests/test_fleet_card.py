@@ -2747,6 +2747,7 @@ async def test_reserved_fleet_parent_refuses_before_resolving_or_reading_history
 
     thread = _ended_thread()
     thread.guild.id = 60
+    thread.history = MagicMock(side_effect=AssertionError("reserved history must not be read"))
     recruitment = RecruitmentSettings(
         tenants={"60": {"channel_ids": [str(thread.parent_id)], "recruiter_user_ids": ["7"]}}
     )

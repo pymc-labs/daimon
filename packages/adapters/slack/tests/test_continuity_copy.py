@@ -1308,5 +1308,6 @@ def test_selfhosted_tool_turn_skips_output_sweep(
             channel="C_TEST",
             thread_id="1.2",
             team_id="T_TEST",
+            requester_user_id="U_TEST",
             selfhosted=True,
         )

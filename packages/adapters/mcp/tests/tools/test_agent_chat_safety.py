@@ -512,7 +512,7 @@ async def test_a_failed_gate_sends_nothing_and_starts_no_worker(
 @pytest.mark.parametrize(
     ("unconstrainable", "named"),
     [
-        (with_coordinator, "delegation to other agents (session.agent.multiagent)"),
+        (with_coordinator, "delegation to other agents"),
         (with_hidden_capability, "unreviewed value at session.agent.model.effort"),
     ],
     ids=["coordinator", "hidden_field"],

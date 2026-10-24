@@ -430,16 +430,16 @@ async def _build_fire(
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
             async with sm() as s, s.begin():
-                await _refuse(s, row, "routine has no created_by_user_id")
+                await _refuse(s, row, "This routine has no owner. Create it again.")
             return
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
             if tenant is None:
-                await _refuse(s, row, "routine tenant not found")
+                await _refuse(s, row, "The routine's team was not found")
                 return
             if tenant.archived_at is not None:
-                await _refuse(s, row, "routine tenant archived")
+                await _refuse(s, row, "Daimon was removed from here.")
                 return
             platform = tenant.platform
             privacy = TurnPrivacy(

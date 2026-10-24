@@ -3,6 +3,8 @@
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 
+unattended_execution: ContextVar[bool] = ContextVar("turn_unattended_execution", default=False)
+
 unattended_gate: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
     "turn_unattended_gate", default=None
 )

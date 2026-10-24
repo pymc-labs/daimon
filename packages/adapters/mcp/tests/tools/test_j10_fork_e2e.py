@@ -43,6 +43,7 @@ from daimon.core.stores import (
 )
 from daimon.core.stores.domain import Role
 from daimon.core.stores.fleet import WorkerPool
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import read_frozen_root
@@ -305,6 +306,7 @@ async def root_turn_harness(
             account_id=account_id,
             resource_scope=scope,
             memory_read_only=True,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         acknowledged = await create_session_record(
             client,
@@ -450,7 +452,9 @@ async def root_turn_harness(
 
 
 async def _settled(ports, root, count):
-    async with asyncio.timeout(30):
+    # Refreshed membership/capability reads add database work for all three
+    # providers. Keep the completion wait inside the outer per-test ceiling.
+    async with asyncio.timeout(180):
         while True:
             _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
             if len(rows) == count and all(
@@ -616,6 +620,14 @@ async def run_j10(
             await run_root_input(
                 (*j10_root[:4], origin, *j10_root[5:]), lifecycle=lifecycle, message=message
             )
+            # Simulate the in-flight MCP call after the fake root driver has
+            # returned and cleared its grant. Retained origins stay ungranted.
+            from daimon.core.stores.turn_origins import bind_origin_session
+
+            async with deps.sessionmaker.begin() as db:
+                await bind_origin_session(
+                    db, origin_id=origin.id, chat_session_id=AUTH.chat_session_id
+                )
             root, policy = await read_frozen_root(
                 deps, scope, origin_id=origin.id, now=datetime.now(UTC)
             )

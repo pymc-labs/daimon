@@ -553,6 +553,8 @@ async def test_missing_origin_never_discovers_a_running_human_turn(
         responder_name="Daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as first:
         assert (await require_turn_origin(runtime, auth, str(first.id))).id == first.id
         with pytest.raises(ToolError, match="origin_context_id"):
@@ -569,6 +571,8 @@ async def test_missing_origin_never_discovers_a_running_human_turn(
             responder_name="Daimon",
             role=Role.USER,
             chat_session_id="test-session",
+            sender_foreign=False,
+            shared_channel=False,
         ):
             with pytest.raises(ToolError, match="origin_context_id"):
                 await require_turn_origin(runtime, auth, "")

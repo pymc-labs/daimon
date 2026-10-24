@@ -1499,3 +1499,30 @@ async def test_an_opted_in_routine_still_refuses_a_call_that_is_not_a_builtin(na
 
     assert decision.allow is False
     inner.assert_not_awaited()
+
+
+@pytest.mark.parametrize("allow_reviewed", [False, True])
+@pytest.mark.parametrize(
+    "kind,permission", [("builtin", "auto"), ("custom", "auto"), ("builtin", "ask"), (None, None)]
+)
+def test_native_unattended_tools_need_review_and_an_explicit_policy(
+    monkeypatch, allow_reviewed, kind, permission
+):
+    from daimon.core.turn import unattended
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, ToolSpec
+
+    monkeypatch.setattr(unattended, "ALLOW_REVIEWED_NATIVE_UNATTENDED_TOOLS", allow_reviewed)
+    spec = AgentSpec(
+        name="native-worker",
+        model=ModelRef(provider="openai", id="gpt-6-astra"),
+        tools=() if kind is None else (ToolSpec(name="bash", kind=kind, permission=permission),),
+    )
+    if kind is not None and permission == "auto" and not allow_reviewed:
+        with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
+            unattended.require_native_unattended_capabilities(spec)
+    else:
+        unattended.require_native_unattended_capabilities(spec)
+    # Neither policy setting makes an unknown target safe to execute.
+    with pytest.raises(AdmissionDenied, match="tool configuration cannot be checked"):
+        unattended.require_native_unattended_capabilities(None)

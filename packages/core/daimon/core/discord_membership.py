@@ -25,9 +25,9 @@ async def _discord_get(client: httpx.AsyncClient, path: str) -> httpx.Response:
             return response
         retry: object = response.json().get("retry_after")
         if not isinstance(retry, int | float) or not 0 <= retry <= 3:
-            raise ValueError("unbounded Discord rate limit")
+            raise ValueError("unbounded server rate limit")
         await asyncio.sleep(retry)
-    raise ValueError("Discord rate limit exhausted")
+    raise ValueError("server rate limit exhausted")
 
 
 def _discord_client(
@@ -101,7 +101,7 @@ async def verify_discord_source(
     from daimon.core.errors import StoreError
 
     if not channel_id.isascii() or not channel_id.isdecimal() or not guild_id.isdecimal():
-        raise StoreError("the source must be a Discord channel or thread ID")
+        raise StoreError("the source must be a channel or thread ID")
     try:
         async with (
             asyncio.timeout(10),

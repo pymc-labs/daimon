@@ -91,9 +91,7 @@ def make_teams_routine_poster(
 
     async def post(row: RoutineRow) -> DeliveryOutcome:
         if row.destination_kind == "dm":
-            return DeliveryOutcome(
-                status="skipped", note="DM routines are supported only on Discord."
-            )
+            return DeliveryOutcome(status="skipped", note="DM routines are not supported here.")
         if row.tenant_id != tenant_id:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
         cleared = await clear_creator(sessionmaker, row, platform="teams")

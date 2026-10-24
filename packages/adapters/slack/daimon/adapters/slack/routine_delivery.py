@@ -186,9 +186,7 @@ def make_slack_routine_poster(
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     async def _post(row: RoutineRow) -> DeliveryOutcome:
         if row.destination_kind == "dm":
-            return DeliveryOutcome(
-                status="skipped", note="DM routines are supported only on Discord."
-            )
+            return DeliveryOutcome(status="skipped", note="DM routines are not supported here.")
         async with runtime.sessionmaker() as session:
             tenant = await get_tenant(session, row.tenant_id)
         if tenant is None or tenant.archived_at is not None:

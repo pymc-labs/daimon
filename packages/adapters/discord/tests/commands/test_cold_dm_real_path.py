@@ -17,6 +17,7 @@ from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnQueue
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import MARouter
@@ -319,6 +320,7 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
         verified_membership=True,
         is_dm=True,
         dm_source_channel_id="123",
+        requester_org=RequesterOrg.HOST,
     )
     await start_dm(
         deps,

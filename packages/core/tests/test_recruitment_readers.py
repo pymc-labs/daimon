@@ -119,7 +119,14 @@ async def test_enumerated_readers_refuse_parent_and_thread_before_content(
     elif reader == "continuation":
         with pytest.raises(PermissionError):
             await DaimonBot._run_continuation_turn_observed(
-                bot, None, None, thread=channel, tenant_id=tenant, guild_id="101"
+                bot,
+                None,
+                None,
+                thread=channel,
+                tenant_id=tenant,
+                guild_id="101",
+                surface=MagicMock(),
+                origins=MagicMock(),
             )
     elif reader in {"continuation_dispatch", "continuation_direct"}:
         fn = (

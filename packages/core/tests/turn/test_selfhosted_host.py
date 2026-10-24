@@ -505,6 +505,8 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "inspection_allow_unattended"),
         (False, False, "inspection_auto_chat"),
         (False, False, "inspection_auto_unattended"),
+        (False, False, "builtin_auto_unattended"),
+        (False, False, "inspection_safety_off_unattended"),
         (False, False, "long_history"),
         (False, False, "receipt_restart"),
         (False, False, "retained_skills"),
@@ -619,7 +621,11 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             if scenario == "retained_skills"
             else None,
             tools=(
-                ToolSpec(name="write", kind="builtin", permission="ask"),
+                ToolSpec(
+                    name="write",
+                    kind="builtin",
+                    permission="auto" if scenario == "builtin_auto_unattended" else "ask",
+                ),
                 ToolSpec(
                     name="reports",
                     kind="mcp_toolset",
@@ -811,8 +817,13 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         "mcp_ask_accept",
         "stored_deny",
         "proxy_safety",
+        "builtin_auto_unattended",
     ) or scenario.startswith("inspection")
-    if approval_case and scenario != "ask_disabled":
+    if approval_case and scenario not in {
+        "ask_disabled",
+        "builtin_auto_unattended",
+        "inspection_safety_off_unattended",
+    }:
         from daimon.core.tool_safety import ToolSafetyPolicy
 
         request = replace(
@@ -1145,15 +1156,20 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         assert actions == [
             dict(
                 action_id="approval",
-                decision="deny" if scenario in ("ask_deny", "stored_deny") else "allow",
+                decision="deny"
+                if scenario in ("ask_deny", "stored_deny", "builtin_auto_unattended")
+                else "allow",
             )
         ]
         assert len(cards) == (
             0
-            if scenario in ("stored_deny", "proxy_safety") or scenario.startswith("inspection")
+            if scenario in ("stored_deny", "proxy_safety", "builtin_auto_unattended")
+            or scenario.startswith("inspection")
             else 1
         )
-        assert bool(executions) == (scenario not in ("ask_deny", "stored_deny"))
+        assert bool(executions) == (
+            scenario not in ("ask_deny", "stored_deny", "builtin_auto_unattended")
+        )
     if scenario == "proxy_default":
         assert executions == ["neutral"] and cards == [] and actions == []
     assert requests and wire.posts == 1 and len(admitted_keys) == 1

@@ -24,12 +24,14 @@ from daimon.core.config import (
     CryptoSettings,
     DatabaseSettings,
     DiscordSettings,
+    FleetSettings,
     GeminiSettings,
     McpSettings,
     MicrosoftAccountsSettings,
     NotebookSettings,
     Settings,
     SlackSettings,
+    TurnSettings,
 )
 from daimon.core.scope import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -43,6 +45,7 @@ from syrupy.assertion import SnapshotAssertion
 # leaves a group unconfigured) — checked before the snapshot comparison so
 # that failure mode is loud rather than a quietly smaller snapshot.
 _MUST_CONTAIN = {
+    "fleet_spawn",
     "create_watch",
     "list_watches",
     "lead_intake_resolve",
@@ -60,6 +63,8 @@ def _fully_configured_settings() -> Settings:
     registers — a partially-configured Settings would silently omit tools,
     which is the exact partial-truth failure this test exists to catch."""
     return Settings(
+        turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
+        fleet=FleetSettings(enabled=True),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(

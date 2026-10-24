@@ -2165,6 +2165,7 @@ async def test_a_held_session_mounts_its_channel_store_alone(
             memory_read_only=read_only,
             personal_memory=True,
             memory_hold=hold,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     (first,), (second,), unheld = (_memory_mounts(body) for body in bodies)
@@ -2200,6 +2201,7 @@ async def test_a_held_session_without_a_caller_still_mounts_the_channel_store(
         agent_uuid=uuid.uuid4(),
         session_factory=db_session_factory,
         memory_hold=_HELD_PLACE,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     (mounted,) = _memory_mounts(bodies[0])
@@ -2245,6 +2247,7 @@ async def test_a_channel_store_outage_leaves_a_held_session_without_memory_not_w
         session_factory=db_session_factory,
         personal_memory=True,
         memory_hold=_HELD_PLACE,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert _memory_mounts(bodies[0]) == [], "nothing agent-wide or personal fills in for it"
@@ -2277,6 +2280,7 @@ async def test_a_held_turn_never_reaches_a_fleet_worker_capture(
             resource_scope=None,  # type: ignore[arg-type]
             memory_read_only=False,
             hold=_HELD_PLACE,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     with pytest.raises(ScopeViolation, match="held turn has no fleet worker"):
@@ -2286,6 +2290,7 @@ async def test_a_held_turn_never_reaches_a_fleet_worker_capture(
             environment=None,  # type: ignore[arg-type]
             resource_source=SimpleNamespace(),  # type: ignore[arg-type]
             memory_hold=_HELD_PLACE,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -3543,7 +3548,7 @@ async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
     from daimon.core.mcp_server_url import is_session_mcp_url
     from daimon.core.session_snapshot import snapshot_from_created_session
     from daimon.core.session_update_ops import apply_update_ops
-    from daimon.testing.isolated_sdk import build_async_anthropic
+    from mux.testing.isolated_sdk import build_async_anthropic
     from sqlalchemy import text
 
     async with db_session_factory.begin() as db:
@@ -3831,6 +3836,7 @@ async def test_create_session_mounts_the_vault_of_the_turns_hold(
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         hold=hold,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     ordinary = f"daimon-mcp:{account.id}:{agent_uuid}"

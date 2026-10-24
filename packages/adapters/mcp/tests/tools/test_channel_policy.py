@@ -965,6 +965,8 @@ async def test_lead_get_list_apply_dossier_thread_readers(
         now=dt.datetime.now(dt.UTC),
         chat_session_id="test-session" if ambiguous else "other-session",
         attended=True,
+        sender_foreign=False,
+        shared_channel=False,
     )
     await db_session.commit()
     store = IntakeStore(sessionmaker, build_multifernet((_FERNET_KEY,)), tenant)

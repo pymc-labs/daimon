@@ -42,6 +42,7 @@ def _dm(author_id: int) -> MagicMock:
 
 def _no_conversation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(direct_messages, "get_conversation", AsyncMock(return_value=None))
+    monkeypatch.setattr(direct_messages, "list_tenants_by_platform", AsyncMock(return_value=[]))
 
 
 def _conversation_with_dms_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,7 +57,7 @@ async def test_dms_off_for_a_known_server_gets_the_two_line_answer(
     _conversation_with_dms_off(monkeypatch)
     message = _dm(1)
 
-    await _cog()._reply(message)  # pyright: ignore[reportPrivateUsage]
+    await _cog()._explain_no_private_chat(message, dms_on=False)  # pyright: ignore[reportPrivateUsage]
 
     message.channel.send.assert_awaited_once_with(_OFF)
 
@@ -80,7 +81,7 @@ async def test_each_person_is_answered_once_per_process(monkeypatch: pytest.Monk
     first, again, other = _dm(1), _dm(1), _dm(2)
 
     for message in (first, again, other):
-        await cog._reply(message)  # pyright: ignore[reportPrivateUsage]
+        await cog._explain_no_private_chat(message, dms_on=False)  # pyright: ignore[reportPrivateUsage]
 
     first.channel.send.assert_awaited_once()
     again.channel.send.assert_not_awaited()
@@ -96,7 +97,7 @@ async def test_a_failed_answer_is_retried_on_the_next_message(
     failing.channel.send.side_effect = discord.Forbidden(MagicMock(status=403), "Cannot send")
     retry = _dm(1)
 
-    await cog._reply(failing)  # pyright: ignore[reportPrivateUsage]
-    await cog._reply(retry)  # pyright: ignore[reportPrivateUsage]
+    await cog._explain_no_private_chat(failing, dms_on=False)  # pyright: ignore[reportPrivateUsage]
+    await cog._explain_no_private_chat(retry, dms_on=False)  # pyright: ignore[reportPrivateUsage]
 
     retry.channel.send.assert_awaited_once_with(_OFF)

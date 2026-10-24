@@ -28,6 +28,7 @@ from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -213,8 +214,8 @@ async def _recorded_as_gated(
     # Sessions bound after fleet config but before the channel pin clear.
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
-    for confirmed_tools in dict.fromkeys(
-        candidate | lead_tools | watch_tools
+    for confirmed_tools, pre_watch in dict.fromkeys(
+        (candidate | lead_tools | watch_tools, not watch_tools)
         for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
         for watch_tools in (WATCH_CONFIRMED_TOOLS, frozenset[str]())
         if watch_tools or tool_name not in WATCH_CONFIRMED_TOOLS
@@ -230,6 +231,24 @@ async def _recorded_as_gated(
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
                 )
+                if pre_watch:
+                    # Policy-on sessions add watch gates implicitly too. Rebuild
+                    # the exact pre-watch template for non-watch actions only;
+                    # no old hash can authorize watch enrollment or rotation.
+                    tools = [
+                        tool.model_copy(
+                            update={
+                                "configs": [
+                                    config
+                                    for config in tool.configs or []
+                                    if config.name not in WATCH_CONFIRMED_TOOLS
+                                ]
+                            }
+                        )
+                        if tool.type == "mcp_toolset" and tool.mcp_server_name == DAIMON_SERVER_NAME
+                        else tool
+                        for tool in tools
+                    ]
                 if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
                     [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
                 ):

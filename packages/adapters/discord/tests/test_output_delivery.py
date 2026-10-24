@@ -1205,8 +1205,7 @@ async def test_overlapping_turns_attach_each_file_to_its_own_answer() -> None:
 
 
 def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
-    runtime = MagicMock()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    bot = MagicMock(spec=DaimonBot)
     outcome = RunOutcome(
         TurnState(
             content=[
@@ -1220,6 +1219,6 @@ def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
         False,
     )
     with patch.object(bot, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
-        bot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
-            outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
+        DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            bot, outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
         )

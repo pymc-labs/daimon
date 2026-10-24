@@ -311,17 +311,20 @@ async def test_a_wait_past_the_budget_fails_now_without_an_early_retry(
     headers: dict[str, str],
     retry: MutationRetry,
     stop: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def unexpected_wait(self, delay, *, honour_cancel):
+        pytest.fail("a retry outside its budget must refuse before waiting")
+
+    monkeypatch.setattr(TurnPersistence, "_wait_to_retry", unexpected_wait)
     store = stores()
     if retry.deadline is not None:
         retry = MutationRetry(policy=retry.policy, deadline=time.monotonic() + retry.deadline)
     transport = ScriptedTransport()
     transport.queue(rate_limited(headers))
-    started = time.monotonic()
     async with transport.client() as client:
         with pytest.raises(anthropic.RateLimitError) as caught:
             await send(context(store, retry=retry), client)
-    assert time.monotonic() - started < 1.0  # It failed at once instead of waiting.
     transport.assert_consumed()
     assert len(transport.requests) == 1
     assert f"not retried: {stop}" in notes(caught.value)
@@ -382,16 +385,25 @@ async def test_cancellation_during_the_backoff_wait_stops_without_another_send(
 
 async def test_lease_lost_before_the_retry_sends_nothing(
     stores: Callable[[], PostgresStateStore],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = stores()
     transport = ScriptedTransport()
     transport.queue(rate_limited({"retry-after-ms": "300"}))
     persistence = context(store)
+    waiting = asyncio.Event()
+    original_wait = persistence._wait_to_retry
+
+    async def wait_for_theft(delay, *, honour_cancel):
+        waiting.set()
+        await thief
+        return await original_wait(delay, honour_cancel=honour_cancel)
+
+    monkeypatch.setattr(persistence, "_wait_to_retry", wait_for_theft)
 
     async def steal_the_lease() -> None:
-        # Once the refusal is recorded the sender is inside its 300 ms wait.
-        while (await statuses(store))[:1] != ["failed"]:
-            await asyncio.sleep(0.01)
+        # Establish lease loss before the next claim, independent of DB latency.
+        await waiting.wait()
         # A successor whose clock says the sender's lease expired takes it over.
         await stores().acquire_lease(
             binding_slot(BINDING),

@@ -23,6 +23,7 @@ from daimon.core.neutral_resources import (
 )
 from daimon.core.sessions import project_session_resources
 from daimon.core.stores import agent_memory_stores
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import ModelRef
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
@@ -97,6 +98,7 @@ async def capture_agent(
             account_id=actor.account_id,
             resource_scope=scope,
             memory_read_only=True,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     return source, actual
 

@@ -151,7 +151,7 @@ class TenantAccessPolicy(BaseModel):
     @classmethod
     def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
         if not all(is_discord_snowflake(value) for value in ids):
-            raise ValueError("invoker_role_ids must contain Discord snowflakes")
+            raise ValueError("invoker_role_ids must contain numeric role IDs")
         return tuple(dict.fromkeys(ids))
 
     @field_validator("enabled_backends")

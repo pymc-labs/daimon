@@ -416,9 +416,16 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     if not isinstance(original_policy, dict):
                         raise AdmissionDenied(reason="backend_unsupported")
                     agent_policy.update(original_policy)
-                    body["tool_policy"] = merge_tool_policy(
-                        body.get("tool_policy", {}), host_policy
-                    )
+                    from daimon.core.turn.mutation_gate import unattended_execution
+
+                    effective_host_policy = dict(host_policy)
+                    if unattended_execution.get():
+                        # Automatic execution must not bypass the unattended
+                        # decider: builtins are off, and writes need explicit
+                        # unattended authority. Preserve any stronger deny.
+                        for name in original_policy:
+                            effective_host_policy.setdefault(name, "ask")
+                    body["tool_policy"] = merge_tool_policy(original_policy, effective_host_policy)
                 from daimon.core.turn.persistence import current_persistence
                 from daimon.core.turn.selfhosted_tools import mint_turn_mcp_authorization
                 from mux.contracts.ids import ResourceRef

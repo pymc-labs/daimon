@@ -82,7 +82,7 @@ async def collect_routine_files(
             )
         elif len(files) == MAX_FILES:
             notices.append(
-                "More generated files remain in the workspace: "
+                "More generated files remain with the agent: "
                 "this delivery can attach at most 10 files."
             )
             break
@@ -135,7 +135,7 @@ async def deliver_routine_files(
 
 def unsupported_files_note(payload: str | None) -> str:
     return (
-        "\n\nGenerated files are not supported here; they remain in the workspace."
+        "\n\nGenerated files are not supported here; they remain with the agent."
         if decode_payload(payload).files
         else ""
     )

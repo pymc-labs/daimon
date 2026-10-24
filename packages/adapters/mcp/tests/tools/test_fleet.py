@@ -768,9 +768,16 @@ async def test_fleet_tools_say_plainly_why_an_agent_cant_run_a_fleet(root_turn):
         sender_foreign=False,
         shared_channel=False,
         keep_fleet_root=True,
+        chat_session_id="test-session",
     ) as origin:
         # The turn itself runs; only the fleet is off.
         await run_root_input((deps, prepared, grants, intent, origin, scope, binding, transport))
+        # The fixture calls MCP after the fake driver returned; supply its
+        # current execution grant exactly as the real in-flight call has it.
+        from daimon.core.stores.turn_origins import bind_origin_session
+
+        async with deps.sessionmaker.begin() as db:
+            await bind_origin_session(db, origin_id=origin.id, chat_session_id=AUTH.chat_session_id)
         ports = HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal(1), deps=deps)
         bridge = HostFleetToolService(
             FleetOrchestrator(ports),
@@ -1661,6 +1668,7 @@ async def test_a_slack_root_with_no_fleet_is_told_fleets_arent_available_here(ro
         sender_foreign=False,
         shared_channel=False,
         keep_fleet_root=True,
+        chat_session_id="test-session",
     ) as slack_origin:
         from daimon.core.ma_identity import derive_agent_uuid
 
@@ -1734,6 +1742,7 @@ async def test_a_root_refused_in_another_process_is_explained_by_its_own_setup(
         sender_foreign=False,
         shared_channel=False,
         keep_fleet_root=True,
+        chat_session_id="test-session",
     ) as fresh:
         caller = replace(
             AUTH,

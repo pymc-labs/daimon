@@ -173,6 +173,8 @@ async def attended_owner(runtime_watch):
         role=Role.USER,
         chat_session_id=auth.chat_session_id,
         attended=True,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         yield runtime, watch, auth, str(origin.id)
 
@@ -353,6 +355,8 @@ async def test_owner_registration_binds_attended_origin_and_refuses_unattended(r
             role=Role.USER,
             chat_session_id=auth.chat_session_id,
             attended=attended,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             if attended:
                 created = await create_watch_impl(
@@ -504,6 +508,8 @@ async def test_unattended_origin_cannot_reactivate_or_rotate_watch(runtime_watch
         role=Role.USER,
         chat_session_id=auth.chat_session_id,
         attended=False,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="attended"):
             if action == "resume":

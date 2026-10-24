@@ -605,6 +605,8 @@ async def test_native_chat_credential_grant_keeps_source_expiry_and_revocation(
         responder_ma_agent_id="agent_native",
         responder_name="native",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         # Ambient rendering context alone cannot authorize native origin use.
         with execution_origin(None):

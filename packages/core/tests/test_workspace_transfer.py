@@ -306,6 +306,10 @@ async def test_a_checkpoint_without_the_callers_account_runs_on_legacy_and_is_re
             from_agent_name="analysis-bot",
             sleep=_no_sleep,
             now=_now,
+            privacy=TurnPrivacy("test"),
+            tool_safety=OPEN_TOOL_SAFETY,
+            public_url=None,
+            platform="test",
         )
 
     if turn_path == "mux":
@@ -627,7 +631,8 @@ async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_tra
 
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "session_dead"
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_matches(turn_path)
+    assert not state.sent_batches, "a vanished session must refuse before checkpoint send"
 
 
 async def test_transfer_degrades_to_transcript_when_the_bundle_is_oversize(
@@ -1628,6 +1633,7 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
         tool_safety=policy,
         public_url=None,
         platform="discord",
+        account_id=ACCOUNT_ID,
     )
 
     answers = [
@@ -1740,6 +1746,7 @@ async def test_a_checkpoint_follows_its_conversations_rules_not_its_budget_chann
         public_url=None,
         platform="discord",
         channel_id="A",
+        account_id=ACCOUNT_ID,
     )
     await runner(
         old_session_id=old_session,
@@ -1796,6 +1803,7 @@ async def test_a_coordinator_session_is_never_checkpointed(
         tool_safety=ToolSafetyPolicy(enabled=True),
         public_url=None,
         platform="discord",
+        account_id=ACCOUNT_ID,
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -1866,6 +1874,7 @@ async def test_every_mcp_call_of_a_checkpoint_pauses_for_the_decider(
         tool_safety=ToolSafetyPolicy(enabled=enabled),
         public_url=public_url,
         platform="discord",
+        account_id=ACCOUNT_ID,
     )
 
     tools = state.sessions[old_session].agent.tools

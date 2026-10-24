@@ -101,6 +101,7 @@ class _World:
             is_admin=admin and hold is None and not foreign,
             hold=hold,
             foreign_home_id="T-SYN-OTHER" if foreign else None,
+            chat_session_id="fixture-session-grant",
         )
 
 
@@ -325,6 +326,7 @@ async def test_a_named_origin_never_widens_a_held_read(
         role=Role.USER,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="fixture-session-grant",
     ) as origin:
         read = await load_read_policy(world.runtime, auth, origin_context_id=str(origin.id))
 
@@ -405,6 +407,7 @@ def _origin(world: _World, channel_id: str, *, account_id: uuid.UUID | None = No
         role=Role.USER,
         sender_foreign=False,
         shared_channel=False,
+        chat_session_id="fixture-session-grant",
     )
 
 
@@ -472,10 +475,10 @@ async def test_a_held_identity_creates_lists_and_cancels_only_timers_in_its_chan
     assert (await _cancel_timer_impl(world.runtime, unheld, timer_id=elsewhere.timer_id)).cancelled
 
 
-async def test_a_held_identity_without_an_origin_names_its_one_running_turn_only_inside_the_hold(
+async def test_a_held_identity_requires_its_explicit_origin_inside_the_hold(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """An omitted origin_context_id falls back to the caller's one running turn: not one elsewhere."""
+    """A held caller supplies its signed, explicit origin even with only one live turn."""
     world = await _world(committing_sessionmaker, OPEN)
     auth = world.auth(hold())
     fire_at = (datetime.now(UTC) + timedelta(hours=2)).replace(microsecond=0).isoformat()
@@ -485,9 +488,13 @@ async def test_a_held_identity_without_an_origin_names_its_one_running_turn_only
             await _create_timer_impl(
                 world.runtime, auth, origin_context_id="", fire_at=fire_at, note="syn"
             )
-    async with _origin(world, SHARED):
+    async with _origin(world, SHARED) as origin:
+        with pytest.raises(ToolError, match="origin_context_id"):
+            await _create_timer_impl(
+                world.runtime, auth, origin_context_id="", fire_at=fire_at, note="syn"
+            )
         timer = await _create_timer_impl(
-            world.runtime, auth, origin_context_id="", fire_at=fire_at, note="syn"
+            world.runtime, auth, origin_context_id=str(origin.id), fire_at=fire_at, note="syn"
         )
     assert timer.thread_id == "1700.1"
 

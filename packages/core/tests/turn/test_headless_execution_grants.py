@@ -150,6 +150,8 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
         responder_name="daimon",
         role=Role.USER,
         attended=True,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         task = asyncio.create_task(
             run_prepared_turn(

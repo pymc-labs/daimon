@@ -19,8 +19,10 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.cli.run import command as cmd_mod
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma import MARouter
@@ -250,13 +252,13 @@ async def test_a_stamped_session_runs_under_its_own_tenant_and_channel_rules(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Review B, finding 3: not the local CLI tenant, and not without its channel."""
+    """The owned CLI session retains its stamped channel and DM rule context."""
     from daimon.core.authz import Subject
     from daimon.core.stores import agent_tool_rules
-    from daimon.testing.factories import make_tenant
 
     async with db_session_factory() as db:
-        tenant = await make_tenant(db, platform="discord", workspace_id="g-cli")
+        tenant = await get_tenant(db, derive_tenant_uuid(platform="cli", workspace_id="local"))
+        assert tenant is not None
         await agent_tool_rules.set_rule(
             db,
             tenant_id=tenant.id,
@@ -293,11 +295,11 @@ async def test_continuing_a_created_routine_session_keeps_channel_deny(
     from daimon.core.rule_views import routine_origin
     from daimon.core.sessions import create_session
     from daimon.core.stores import agent_tool_rules, routines
-    from daimon.testing.factories import make_tenant
     from daimon.testing.ma_models import ma_environment
 
     async with db_session_factory() as db:
-        tenant = await make_tenant(db, platform=platform, workspace_id="routine-cli")
+        tenant = await get_tenant(db, derive_tenant_uuid(platform="cli", workspace_id="local"))
+        assert tenant is not None
         routine = await routines.create_routine(
             db,
             tenant_id=tenant.id,

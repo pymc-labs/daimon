@@ -285,6 +285,7 @@ async def test_role_removed_after_admission_refuses_reauthorization(
         external_user_id="member-1",
         channel_id="chan-1",
         now=_NOW,
+        requester_org=RequesterOrg.HOST,
     )
     facts[0] = Membership(is_member=True)
     resolver.invalidate(tenant.id, tenant.external_id, "member-1")
@@ -327,6 +328,7 @@ async def test_concurrent_role_admissions_do_not_need_nested_pool_connections(
                     external_user_id=user,
                     channel_id="chan-1",
                     now=_NOW,
+                    requester_org=RequesterOrg.HOST,
                 )
                 for user in ("one", "two")
             )
