@@ -193,12 +193,12 @@ The platform panels support routine management:
   ordering, admin-or-creator) live in `daimon.core.routines`.
 - **Discord** opening `/routines` remains admin-only. Server admins use **New**
   to choose an agent, cron schedule, timezone and message. Creation validates
-  the agent and schedule
-  and enforces the agent's routine rules before saving, with the creator's Discord
+  the agent and schedule and enforces the agent's routine rules before saving,
+  with the creator's Discord
   id and verified source. Routines created in threads retain the parent and
   thread IDs, and count against the parent channel's budget. Unresolved parents
-  are refused. The creator or a server admin can pause,
-  resume or delete a routine; deletion requires confirmation and rechecks permissions.
+  are refused. The creator or a server admin can pause, resume or delete a
+  routine; deletion requires confirmation and rechecks permissions.
   Server admins include the owner, Administrator and Manage Server. The panel
   also shows the last output and refreshes after creation or deletion
   (`packages/adapters/discord/daimon/adapters/discord/routines_panel/`).

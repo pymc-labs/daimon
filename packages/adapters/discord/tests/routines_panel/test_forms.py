@@ -18,7 +18,6 @@ from daimon.adapters.discord.routines_panel.state import (
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.config import RecruitmentSettings, RecruitmentTenantSettings
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_budgets import set_channel_budget
 from daimon.core.stores.routines import (
@@ -55,7 +54,7 @@ async def setup_panel(db_session_factory, monkeypatch, stub_anthropic):
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id="123456")
     runtime = MagicMock(spec=DiscordRuntime)
-    runtime.settings = SimpleNamespace(recruitment=RecruitmentSettings())
+    runtime.settings = SimpleNamespace()
     runtime.sessionmaker = db_session_factory
     runtime.anthropic = stub_anthropic
     state = RoutinesPanelState.initial(rows=[], over_cap_count=0, agent_name_map={})
@@ -305,14 +304,6 @@ def thread_interaction(*, parent_id=987654):
     return event
 
 
-def recruitment_settings():
-    return RecruitmentSettings(
-        tenants={
-            "123456": RecruitmentTenantSettings(channel_ids=("987654",), recruiter_user_ids=("42",))
-        }
-    )
-
-
 async def test_thread_creation_preserves_source_and_parent_budget(setup_panel, db_session_factory):
     view, tenant, refresh, _ = setup_panel
     async with db_session_factory.begin() as session:
@@ -339,12 +330,6 @@ async def test_thread_creation_preserves_source_and_parent_budget(setup_panel, d
         assert row.source_thread_id == "111111"
         assert row.source_provenance_known
         assert row.created_by_user_id == "42" and row.next_fire_at is not None
-        assert (
-            await list_routines_for_tenant(
-                session, tenant_id=tenant.id, recruitment=recruitment_settings()
-            )
-            == []
-        ), "a later settings restart must withhold a routine from this parent"
     assert await is_over_channel_budget(
         sessionmaker=db_session_factory,
         tenant_id=tenant.id,
@@ -360,23 +345,6 @@ async def test_thread_creation_preserves_source_and_parent_budget(setup_panel, d
         now=datetime.now(UTC),
     ), "using the thread id would bypass the parent's exhausted budget"
     refresh.assert_awaited_once_with(click, view)
-
-
-@pytest.mark.parametrize("in_thread", [False, True])
-async def test_creation_refuses_recruitment_origin_at_submit(
-    setup_panel, db_session_factory, in_thread
-):
-    view, tenant, refresh, resolver = setup_panel
-    click = thread_interaction() if in_thread else interaction()
-    modal = await open_modal(view, click)
-    view.runtime.settings.recruitment = recruitment_settings()
-    submit = thread_interaction() if in_thread else interaction()
-    await modal.on_submit(submit)
-    submit.response.send_message.assert_awaited_once_with(embeds.SOURCE_UNAVAILABLE, ephemeral=True)
-    async with db_session_factory() as session:
-        assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
-    resolver.assert_not_awaited()
-    refresh.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
