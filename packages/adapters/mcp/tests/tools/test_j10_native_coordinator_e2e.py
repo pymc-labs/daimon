@@ -109,7 +109,9 @@ async def _chat_catalogue(*, native: bool) -> frozenset[str]:
         return frozenset(tool.name for tool in await client.list_tools())
 
 
-async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit: bool = False):
+async def _coordinator_turn(
+    chat, monkeypatch, backend: str | None, *, explicit: bool = False, source_skills: bool = False
+):
     """The copy (switched to `backend`, or left on Claude) answers one message with fleet
     on. Returns (retained fleet_root operation keys, remembered refusal)."""
     from daimon.core.mcp_oauth import discovery
@@ -139,6 +141,12 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
     # control's copy is a Haiku agent.
     model_id = source["model"]["id"] if isinstance(source["model"], dict) else source["model"]
     source["model"] = {"id": HAIKU if backend is None else model_id, "speed": "fast"}
+    if source_skills:
+        # As Daimon is set up: Anthropic's built-in skills on the Claude source.
+        source["skills"] = [
+            {"type": "anthropic", "skill_id": name, "version": "latest"}
+            for name in ("xlsx", "pptx", "docx", "pdf")
+        ]
     copy = await _fork_agent_impl(
         chat.runtime,
         chat.auth,
@@ -665,3 +673,19 @@ async def test_a_native_root_dispatches_a_worker_and_collects_its_result(
     else:
         (body,) = astra.session_bodies
         assert body["agent"]["model"] == NATIVE["openai"]
+
+
+@pytest.mark.parametrize("backend", ["openai", "gemini"])
+async def test_a_native_root_declares_its_claude_sources_skills_lost(
+    fresh_chat, monkeypatch, backend
+):
+    """Smoke a1d991fb (M07): a GPT copy of a Daimon with skills refused to freeze its root
+    (field=skills). The root runs on its counterpart, which uses its provider's own skills
+    (or none); it declares the Claude source's skills lost instead of claiming them."""
+    keys, refusal, _, frozen, *_ = await _coordinator_turn(
+        fresh_chat, monkeypatch, backend, source_skills=True
+    )
+    assert refusal is None, refusal
+    assert keys
+    assert (frozen.spec.model.provider, frozen.spec.model.id) == (backend, NATIVE[backend])
+    assert not frozen.spec.skills and "skills" in frozen.spec.declared_drops
