@@ -322,6 +322,7 @@ source_modules = [
     "daimon.core.specs",
     "daimon.core.support_escalation",
     "daimon.core.support_routing",
+    "daimon.core.switch_cards",
     "daimon.core.tables",
     "daimon.core.teams_bot_framework",
     "daimon.core.teams_file_offers",

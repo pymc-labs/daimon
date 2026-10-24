@@ -3643,6 +3643,47 @@ class ThreadProviderRelease(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class BackendSwitchCard(Base):
+    """A provider switch waiting on its requester's Confirm card (`daimon.core.switch_cards`).
+
+    Posted by Daimon itself for a turn whose provider shows no confirmation
+    card (OpenAI, Gemini). The click re-verifies the reference before applying;
+    the status moves pending -> claimed -> applied/refused exactly once.
+    """
+
+    __tablename__ = "backend_switch_cards"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'claimed', 'applied', 'refused', 'cancelled')",
+            name="ck_backend_switch_cards_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    setup_thread: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The requester is from another organisation: never an admin at the press.
+    client: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    answering_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class MuxOperation(Base):
     """An idempotent operation: found by (tenant, account, key), owned by a principal.
 

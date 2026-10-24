@@ -1245,3 +1245,248 @@ async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_prev
     prepared = await prepare(prompt)
     assert "This conversation moves" not in prepared.consequence
     assert "other existing threads keep their model" in prepared.consequence
+
+
+async def _switch_card(
+    owned_preview, *, expires_in: float = 600, requester: str = "requester", client: bool = False
+):
+    """A self-posted switch card for the fixture's OpenAI preview, as the MCP tool records it."""
+    from datetime import timedelta
+
+    from daimon.core.confirmation import BackendSwitchReference
+    from daimon.core.stores.backend_switch_cards import create_card, mark_posted
+
+    service, agent, actor, sessions, *_ = owned_preview
+    preview = await service.preview(agent, "openai")
+    reference = BackendSwitchReference.model_validate(
+        {
+            "agent": "Researcher",
+            "target_backend": "openai",
+            "expected_revision": preview.setting_revision,
+            "preview_digest": preview.digest,
+        }
+    )
+    async with sessions.begin() as session:
+        card = await create_card(
+            session,
+            tenant_id=agent.tenant_id,
+            account_id=actor.account_id,
+            platform="discord",
+            channel_id="parent-1",
+            thread_id="thread-1",
+            setup_thread=False,
+            requester_platform_user_id=requester,
+            client=client,
+            answering_agent_name="Researcher",
+            reference=reference.model_dump(mode="json"),
+            expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+        )
+        await mark_posted(session, card_id=card.id, message_id="posted-1")
+    return card
+
+
+def _press(owned_preview, card_id, *, action="confirm", clicker="requester", admin=True):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.config import TurnSettings
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.switch_cards import press_switch_card
+
+    _, agent, _, sessions, client, *_ = owned_preview
+    return press_switch_card(
+        deps=None,
+        sessionmaker=sessions,
+        anthropic=client,
+        turn_settings=TurnSettings(path="mux", channel_backends=True),
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+        tenant_id=agent.tenant_id,
+        card_id=card_id,
+        action=action,
+        clicker=clicker,
+        current_admin=admin if callable(admin) else AsyncMock(return_value=admin),
+        place_word="server",
+        now=datetime.now(UTC),
+        message_id="posted-1",
+    )
+
+
+async def _card_status(owned_preview, card_id):
+    from daimon.core.stores.backend_switch_cards import get_card
+
+    _, agent, _, sessions, *_ = owned_preview
+    async with sessions() as session:
+        card = await get_card(session, tenant_id=agent.tenant_id, card_id=card_id)
+    assert card is not None
+    return card.status
+
+
+async def test_only_the_requester_can_press_a_self_posted_switch_card(owned_preview):
+    """Anyone else's press is ignored and leaves the card usable by its requester."""
+    service, agent, *_ = owned_preview
+    card = await _switch_card(owned_preview)
+    assert await _press(owned_preview, card.id, clicker="someone-else") is None
+    assert await _press(owned_preview, card.id, action="cancel", clicker="someone-else") is None
+    assert await _card_status(owned_preview, card.id) == "pending"
+    assert await service.current(agent) is None
+
+
+async def test_confirming_a_self_posted_card_switches_once(owned_preview):
+    from daimon.core.switch_cards import answered_switch_card
+
+    service, agent, _, _, _, trace, _, reply, _ = owned_preview
+    card = await _switch_card(owned_preview)
+    trace.queue(reply())
+    trace.queue(reply())
+    press = await _press(owned_preview, card.id)
+    assert press is not None and press.applied and press.closed
+    assert press.text.startswith("Switched Researcher to OpenAI.")
+    current = await service.current(agent)
+    assert current is not None and current.backend == "openai"
+    assert await _card_status(owned_preview, card.id) == "applied"
+    assert answered_switch_card(press).state == "applied"
+    # A second press answers with what happened; nothing is applied twice.
+    again = await _press(owned_preview, card.id)
+    assert again is not None and not again.applied and again.text == press.text
+    assert (await service.current(agent)).local == current.local
+
+
+async def test_cancelling_a_self_posted_card_changes_nothing(owned_preview):
+    service, agent, *_ = owned_preview
+    card = await _switch_card(owned_preview)
+    press = await _press(owned_preview, card.id, action="cancel")
+    assert press is not None and press.text == "Cancelled. Nothing changed."
+    assert await _card_status(owned_preview, card.id) == "cancelled"
+    assert await service.current(agent) is None
+
+
+async def test_a_self_posted_card_pressed_after_it_expired_says_so(owned_preview):
+    from daimon.core.switch_cards import EXPIRED_TEXT, answered_switch_card
+
+    service, agent, *_ = owned_preview
+    card = await _switch_card(owned_preview, expires_in=-1)
+    press = await _press(owned_preview, card.id)
+    assert press is not None and press.text == EXPIRED_TEXT
+    assert answered_switch_card(press).state == "expired"
+    assert await service.current(agent) is None
+
+
+async def test_a_switch_that_lands_before_the_press_says_who_won(owned_preview):
+    from daimon.core.switch_cards import answered_switch_card
+
+    service, agent, actor, _, _, trace, _, reply, _ = owned_preview
+    card = await _switch_card(owned_preview)
+    await service.set_backend(agent, "anthropic", 0, actor)
+    trace.queue(reply())
+    press = await _press(owned_preview, card.id)
+    assert press is not None and not press.applied
+    assert press.text.startswith(
+        "Someone just switched Researcher; it's now on Anthropic. Ask again if you still want OpenAI."
+    )
+    assert answered_switch_card(press).state == "refused"
+    assert await _card_status(owned_preview, card.id) == "refused"
+    assert (await service.current(agent)).backend == "anthropic"
+
+
+def test_the_requested_switch_card_names_its_requester_and_expiry():
+    import uuid
+
+    from daimon.core.switch_cards import parse_custom_id, requested_switch_card
+
+    card_id = uuid.uuid4()
+    card = requested_switch_card(
+        card_id,
+        title="Switch Researcher to OpenAI?",
+        facts=("Affects new conversations wherever Researcher answers.",),
+        requester_platform_user_id="42",
+        expires_at=datetime(2026, 10, 23, 18, 0, tzinfo=UTC),
+    )
+    assert card.footer == "Only {requester} can confirm. Expires {expires}."
+    assert card.requester_platform_user_id == "42" and card.expires_at_unix is not None
+    assert [parse_custom_id(button.custom_id or "") for button in card.buttons] == [
+        (card_id, "confirm"),
+        (card_id, "cancel"),
+    ]
+    assert parse_custom_id("bsw:not-a-card:confirm") is None
+
+
+async def test_only_the_posted_message_can_press_its_switch_card(owned_preview):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.config import TurnSettings
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores.backend_switch_cards import mark_posted
+    from daimon.core.switch_cards import press_switch_card
+
+    _, agent, _, sessions, client, *_ = owned_preview
+    card = await _switch_card(owned_preview)
+    async with sessions.begin() as session:
+        await mark_posted(session, card_id=card.id, message_id="posted-1")
+
+    async def press(message_id: str):
+        return await press_switch_card(
+            deps=None,
+            sessionmaker=sessions,
+            anthropic=client,
+            turn_settings=TurnSettings(path="mux", channel_backends=True),
+            deployment_default=DeploymentDefault(agent_name="daimon"),
+            tenant_id=agent.tenant_id,
+            card_id=card.id,
+            action="cancel",
+            clicker="requester",
+            current_admin=AsyncMock(return_value=True),
+            place_word="server",
+            now=datetime.now(UTC),
+            message_id=message_id,
+        )
+
+    assert await press("another-message") is None
+    assert await _card_status(owned_preview, card.id) == "pending"
+    cancelled = await press("posted-1")
+    assert cancelled is not None and cancelled.text == "Cancelled. Nothing changed."
+
+
+async def test_cancel_never_overwrites_a_confirm_that_claimed_the_card_first(owned_preview):
+    from daimon.core.stores.backend_switch_cards import claim, finish
+    from daimon.core.switch_cards import CONFIRMING_TEXT
+
+    _, agent, _, sessions, *_ = owned_preview
+    card = await _switch_card(owned_preview)
+    async with sessions.begin() as session:
+        assert await claim(
+            session, tenant_id=agent.tenant_id, card_id=card.id, now=datetime.now(UTC)
+        )
+    # While that Confirm is still applying, Cancel answers only the presser.
+    cancelling = await _press(owned_preview, card.id, action="cancel")
+    assert cancelling is not None and not cancelling.closed
+    assert cancelling.text == CONFIRMING_TEXT
+    assert await _card_status(owned_preview, card.id) == "claimed"
+    async with sessions.begin() as session:
+        await finish(session, card_id=card.id, status="applied", outcome="Switched Researcher.")
+    late = await _press(owned_preview, card.id, action="cancel")
+    assert late is not None and late.text == "Switched Researcher."
+    assert await _card_status(owned_preview, card.id) == "applied"
+
+
+async def test_an_error_after_the_claim_closes_the_card_in_plain_words(owned_preview):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.switch_cards import FAILED_TEXT
+
+    service, agent, *_ = owned_preview
+    card = await _switch_card(owned_preview)
+    press = await _press(
+        owned_preview, card.id, admin=AsyncMock(side_effect=RuntimeError("platform down"))
+    )
+    assert press is not None and press.closed and press.text == FAILED_TEXT
+    assert await _card_status(owned_preview, card.id) == "refused"
+    assert await service.current(agent) is None
+
+
+async def test_a_requester_from_another_organisation_is_never_an_admin_at_the_press(owned_preview):
+    service, agent, _, _, _, trace, _, reply, _ = owned_preview
+    card = await _switch_card(owned_preview, client=True)
+    trace.queue(reply())
+    press = await _press(owned_preview, card.id, admin=True)
+    assert press is not None and not press.applied
+    assert await _card_status(owned_preview, card.id) == "refused"
+    assert await service.current(agent) is None

@@ -344,11 +344,11 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         origin_context_id=str(chat.origin.id),
         handoff_summary=summary,
     )
-    # A readable catalogue keeps Daimon's MCP on Gemini; only the tool that needs a
-    # confirmation card (Gemini has none) stays behind. Unreadable declares the drop.
+    # A readable catalogue keeps Daimon's MCP on Gemini, the switch tool included:
+    # Daimon posts its card itself (Gemini has none). Unreadable declares the drop.
     if catalogue == "readable":
         assert "mcp" not in preview.declared_drops
-        assert "mcp_tool:daimon-mcp:request_agent_backend_switch" in preview.declared_drops
+        assert "mcp_tool:daimon-mcp:request_agent_backend_switch" not in preview.declared_drops
     else:
         assert "mcp" in preview.declared_drops
     changed = await _request_agent_backend_switch_impl(
