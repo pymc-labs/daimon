@@ -4277,7 +4277,7 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
     before any update; the decider always refuses built-in calls.
     """
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
-    from daimon.core.turn import driver
+    from daimon.core.turn import mutation_gate
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.posture import PolicyApproval
     from daimon.core.turn.unattended import session_gate
@@ -4338,7 +4338,7 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
 
     async def _fake_run_turn(**kwargs: object) -> TurnState:
         postures.append(kwargs["tool_confirmation"])
-        gate = driver._UNATTENDED_GATE.get()  # pyright: ignore[reportPrivateUsage]
+        gate = mutation_gate.unattended_gate.get()
         assert gate is not None
         try:
             await gate()
@@ -4390,7 +4390,7 @@ async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
     """Wakes and fleet workers: trusted Daimon tools, and foreign ones with
     safety off, pause before running; the decider allows them as before."""
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
-    from daimon.core.turn import driver
+    from daimon.core.turn import mutation_gate
     from daimon.core.turn.posture import PolicyApproval
     from mux.testing.drivers.anthropic.ma_models import ma_session
 
@@ -4460,7 +4460,7 @@ async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
 
     async def _fake_run_turn(**kwargs: object) -> TurnState:
         postures.append(kwargs["tool_confirmation"])
-        gate = driver._UNATTENDED_GATE.get()  # pyright: ignore[reportPrivateUsage]
+        gate = mutation_gate.unattended_gate.get()
         assert gate is not None
         await gate()
         return TurnState()

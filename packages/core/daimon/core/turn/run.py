@@ -68,6 +68,7 @@ from daimon.core.turn.admission import (
     decide_before_send,
     reauthorize,
     refresh_approval_gate,
+    require_current_spend,
 )
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
@@ -76,7 +77,12 @@ from daimon.core.turn.approvals import (
     unattended_decider,
 )
 from daimon.core.turn.binding import prepared_persistence
-from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
+from daimon.core.turn.ceiling import (
+    ceiling_error,
+    current_turn_deadline,
+    remaining_s,
+    turn_deadline,
+)
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
@@ -127,7 +133,11 @@ from daimon.core.turn.unattended_capabilities import (
     ServerTool,
     capability_policy,
     capability_posture,
+    constrain_capabilities,
+    invalidate_cached_tools,
     protected_tools,
+    restore_capabilities,
+    send_capabilities,
     unattended_entry_point,
 )
 from daimon.core.turn_origin import current_origin_id, execution_origin
@@ -1137,7 +1147,6 @@ async def run_prepared_turn_impl(
     async def authorize_watch(admission: Admission, session_id: str) -> None:
         assert watch_row is not None
         from daimon.core.continuity.watch_turn import require_watch_send
-        from daimon.core.turn.admission import require_current_spend
 
         await require_watch_send(
             deps.sessionmaker,
@@ -1297,12 +1306,6 @@ async def run_prepared_turn_impl(
                         else:
                             from daimon.core.continuity.watch_turn import watch_capabilities
                             from daimon.core.session_ports_compat import retrieve_session_record
-                            from daimon.core.turn.unattended_capabilities import (
-                                constrain_capabilities,
-                                invalidate_cached_tools,
-                                restore_capabilities,
-                                send_capabilities,
-                            )
 
                             original_snapshot: BetaManagedAgentsSession | None = None
 
@@ -1477,8 +1480,7 @@ async def run_prepared_turn_impl(
             )
             # Only servers the operator trusts for annotations are read; with
             # none trusted no catalogue is ever listed.
-            if getattr(deps.tool_safety, "enabled", False)
-            and getattr(deps.tool_safety, "trusted_annotations", ())
+            if deps.tool_safety.enabled and deps.tool_safety.trusted_annotations
             else None
         )
         rules_channel = channel_for_tool_rules(
@@ -1529,8 +1531,7 @@ async def run_prepared_turn_impl(
                 daimon_rules=bool(prepared.admission.daimon_rule_tools),
                 rules_for=(
                     rule_lookup
-                    if getattr(deps.tool_safety, "enabled", False)
-                    and getattr(deps.tool_safety, "agent_rules", False)
+                    if deps.tool_safety.enabled and deps.tool_safety.agent_rules
                     else None
                 ),
                 rule_card_for=(
@@ -1557,8 +1558,7 @@ async def run_prepared_turn_impl(
                             is not None
                             else None
                         )
-                        if getattr(deps.tool_safety, "enabled", False)
-                        and getattr(deps.tool_safety, "agent_rules", False)
+                        if deps.tool_safety.enabled and deps.tool_safety.agent_rules
                         else None
                     )
                 ),
@@ -1905,8 +1905,6 @@ async def run_prepared_turn_impl(
                 recovered=recovered,
                 continuity=continuity_cell[0],
             )
-
-    from daimon.core.turn.ceiling import current_turn_deadline
 
     # Set for the whole turn, so anything inside it (a card posted mid-turn, in this
     # task or one it starts) reads the deadline and never promises a time past it.
