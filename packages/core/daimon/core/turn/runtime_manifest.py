@@ -18,6 +18,11 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_
 from uuid import UUID
 
 import structlog
+from daimon.core.caller_resources import (
+    APP_SESSION_VAULT_PREFIX,
+    CALLER_RESOURCES_ID,
+    CALLER_VAULT_PREFIX,
+)
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
@@ -858,9 +863,10 @@ async def _freeze_root(
         # memory store exists) does the turn run with fleet off: nothing is
         # retained and the fleet tools say why. Any other refusal (policy, grant,
         # backend, budget, identity) still fails the turn as before.
-        from daimon.core.neutral_resources import fleet_root_obstacle
+        from daimon.core.neutral_resources import fleet_root_obstacles
 
-        obstacle = fleet_root_obstacle(source)
+        obstacles = fleet_root_obstacles(source)
+        obstacle = obstacles[0] if obstacles else None
         if obstacle is None and error.field == "memory" and source.memory_store_id is None:
             obstacle = "memory"
         if obstacle is None:
@@ -871,6 +877,8 @@ async def _freeze_root(
             field=error.field,
             reason=error.reason,
             obstacle=obstacle,
+            # Every obstacle, not only the one shown: one can mask another.
+            obstacles=list(obstacles),
             origin_id=str(origin_id),
         )
         _remember_root_refusal(origin_id, obstacle)
@@ -2216,6 +2224,15 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
     return frozenset(paired)
 
 
+def _caller_private(binding: ResourceBinding) -> bool:
+    """A login that belongs to the person asking (their caller-mcp vault, in any of
+    its variants), never to the agent or a worker."""
+    return any(
+        value is not None and value.startswith(CALLER_VAULT_PREFIX)
+        for value in (binding.id, binding.credential_ref)
+    )
+
+
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     """Exclude validated native-only capabilities and their paired resources.
 
@@ -2228,6 +2245,9 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
       (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
     - stored secrets the session would write to a file (`.env`);
     - repositories cloned with a login;
+    - the caller's own logins (every `caller-mcp:` vault variant), never carried, and
+      their private carry (`caller-resources`), declared as `files`;
+    - a GitHub App session's repository vault (`app-session-vault:*`), as `repository`;
     - memory, while the agent's memory store doesn't exist yet (its first turn).
     """
     spec = source.effective_spec
@@ -2274,6 +2294,20 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
             continue
         if binding.kind == "credential" and binding.target_path is not None:
             drops.add("files")
+            continue
+        if _caller_private(binding):
+            # The caller's own login (every caller-mcp vault variant, Slack turn and
+            # hold included) is never worker authority: excluded, so nothing carries it.
+            continue
+        if binding.kind == "native" and binding.id == CALLER_RESOURCES_ID:
+            # The caller's private carry (a DM, a seal, attached material): workers run
+            # without it, declared. Not as `credentials`: that would discharge the
+            # check for a login still among the resources.
+            drops.add("files")
+            continue
+        if binding.kind == "native" and binding.id.startswith(APP_SESSION_VAULT_PREFIX):
+            # A GitHub App session's repository vault: workers run without it, declared.
+            drops.add("repository")
             continue
         resources.append(binding)
     repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
@@ -2367,6 +2401,35 @@ def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
     if "model_controls" not in target.declared_drops:
         raise ValueError("native model controls require an explicit declared loss")
     return target.model_copy(update={"extensions": None})
+
+
+def memory_mount_retained(source: BackendAgent, resources: tuple[ResourceBinding, ...]) -> bool:
+    """Whether `resources` carry the agent's memory store exactly as its sessions mount
+    it: the store is the only resource, in the agent's own resource scope, with a
+    settled read/write posture. Only then can that store go where the resources go."""
+    from daimon.core.memory_resource import memory_mount
+
+    if len(resources) != 1 or source.memory_store_id is None:
+        return False
+    native, ref = resources[0].native, resources[0].resource
+    return (
+        source.source is not None
+        and source.resource_scope is not None
+        and source.memory_read_only is not None
+        and ref is not None
+        and ref.provider == source.source.ref.provider
+        and ref.kind == "memory_store"
+        and ref.id == source.memory_store_id
+        and (ref.tenant_id, ref.account_id)
+        == (source.resource_scope.tenant_id, source.resource_scope.account_id)
+        and native is not None
+        and (native.namespace, native.version) == ("anthropic.session_resource_create", 1)
+        and native.value
+        in (
+            {"resource": memory_mount(source.memory_store_id, read_only=True)},
+            {"resource": memory_mount(source.memory_store_id, read_only=source.memory_read_only)},
+        )
+    )
 
 
 def classify_source_obligations(
@@ -2577,36 +2640,9 @@ def classify_source_obligations(
         (source.memory_required is not False or source.memory_store_id is not None)
         and "memory" not in drops
         and not native_retained
+        and not memory_mount_retained(source, resources)
     ):
-        from daimon.core.memory_resource import memory_mount
-
-        retained = False
-        if len(resources) == 1 and source.memory_store_id is not None:
-            native, ref = resources[0].native, resources[0].resource
-            retained = (
-                source.source is not None
-                and source.resource_scope is not None
-                and source.memory_read_only is not None
-                and ref is not None
-                and ref.provider == source.source.ref.provider
-                and ref.kind == "memory_store"
-                and ref.id == source.memory_store_id
-                and (ref.tenant_id, ref.account_id)
-                == (source.resource_scope.tenant_id, source.resource_scope.account_id)
-                and native is not None
-                and (native.namespace, native.version) == ("anthropic.session_resource_create", 1)
-                and native.value
-                in (
-                    {"resource": memory_mount(source.memory_store_id, read_only=True)},
-                    {
-                        "resource": memory_mount(
-                            source.memory_store_id, read_only=source.memory_read_only
-                        )
-                    },
-                )
-            )
-        if not retained:
-            missing.add("memory")
+        missing.add("memory")
     if source.environment is not None and source.environment.spec.native_config is not None:
         from mux.drivers.anthropic import EnvironmentConfig
 

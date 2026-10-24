@@ -41,6 +41,11 @@ from daimon.core.agent_mcp_credentials import (
     resolve_agent_mcp_credentials,
     resolve_hidden_mcp_server_names,
 )
+from daimon.core.caller_resources import (
+    APP_SESSION_VAULT_PREFIX,
+    CALLER_RESOURCES_ID,
+    CALLER_VAULT_PREFIX,
+)
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
     github_repo_map_sha256,
@@ -364,7 +369,7 @@ async def project_session_resources(
         )
         generations.append((reference, updated))
     if caller_vault:
-        reference = f"caller-mcp:{tenant_id}:{account_id}:{agent_uuid}"
+        reference = f"{CALLER_VAULT_PREFIX}{tenant_id}:{account_id}:{agent_uuid}"
         if slack_turn_context_id is not None:
             reference += f":slack-turn:{slack_turn_context_id}"
         if hold is not None:
@@ -385,7 +390,7 @@ async def project_session_resources(
         # Without a repository grant, the App vault carries no GitHub source
         # obligation. Caller MCP credentials are captured separately above.
         requirements.append(
-            ResourceBinding(id=f"app-session-vault:{tenant_id}:{agent_uuid}", kind="native")
+            ResourceBinding(id=f"{APP_SESSION_VAULT_PREFIX}{tenant_id}:{agent_uuid}", kind="native")
         )
     if (
         extra_resources
@@ -398,7 +403,7 @@ async def project_session_resources(
         or (app_mode and agent_github_app is not None and repos)
     ):
         # Opaque carry resources and private credentials are not absent obligations.
-        requirements.append(ResourceBinding(id="caller-resources", kind="native"))
+        requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))
     effective = agent_spec(payload)
     if source.source is not None:
         # Classify the complete session skill list before neutral projection loses
