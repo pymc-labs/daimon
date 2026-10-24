@@ -2878,6 +2878,51 @@ def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> A
     )
 
 
+def _with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+    """`target` as a consent recorded before a template kept the source's tools names it.
+
+    That consent (before #1483) declared `tools` a whole loss: no tools on the
+    target, `tools` among its drops, and neither of today's granular web losses
+    (an OpenAI consent already named web fetch). Only that difference is rebuilt;
+    the copy then runs with its tools from now on.
+    """
+    if "tools" in target.declared_drops or not target.tools:
+        return None
+    from mux.profiles.openai import PERSISTENT_WORKSPACE
+
+    granular: set[str] = {"builtin_tool:web_search"}
+    if target.model.provider != PERSISTENT_WORKSPACE.provider:
+        granular.add("builtin_tool:web_fetch")
+    drops = tuple(sorted({*target.declared_drops, "tools"} - granular))
+    return target.model_copy(
+        update={
+            "tools": (),
+            "declared_drops": drops,
+            "system": compose_source_instructions(
+                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
+            ),
+        }
+    )
+
+
+def _consented_before(
+    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+) -> bool:
+    """A consent recorded before a template kept the source's tools (#1483) or
+    offered the switch tool (#1438).
+
+    Either difference alone, or both, is rebuilt; anything else still needs a
+    fresh confirmation.
+    """
+    without_tools = _with_tools_dropped(target, source_system)
+    candidates = (
+        _with_switch_tool_dropped(target, source_system),
+        without_tools,
+        _with_switch_tool_dropped(without_tools, source_system) if without_tools else None,
+    )
+    return any(_consented(candidate, consent) for candidate in candidates)
+
+
 def source_preservation_pin(source: BackendAgent) -> str:
     """Pin complete owner-captured intent independently of the current caller address."""
     updates: dict[str, object] = {"resource_scope": None}
@@ -3049,9 +3094,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not _consented(target, consent) and not _consented(
-            _with_switch_tool_dropped(target, spec.system), consent
-        ):
+        if not _consented(target, consent) and not _consented_before(target, spec.system, consent):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
         worker is None
