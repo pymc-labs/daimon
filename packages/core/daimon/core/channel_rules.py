@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 import structlog
-from anthropic import APIError, AsyncAnthropic
+from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.agent_fork import fork_agent, fork_host_agent
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
@@ -64,10 +64,9 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
-from daimon.core.stores.neutral_catalog import CatalogConflict
 from daimon.core.stores.scoped_config_read import get_scope, list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
-from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.errors import ScopeViolation
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -581,31 +580,34 @@ async def _archive_unused_copy(
             if made is None or made.id != agent_id:
                 return False
             await resource_host.retire(made.revision.catalog_id)
-    except (APIError, ProviderError, CatalogConflict, UnsupportedCapability):
+    except Exception:
+        # Any failure (not only the provider's): the caller says the copy may remain,
+        # never lets a raw error reach the person.
         _log.error("channel_rules.copy_archive_failed", exc_info=True, **log_fields)
         return False
     return True
 
 
 async def _despite_cancellation[T](work: Awaitable[T]) -> T:
-    """Run `work` to the end even if this task is cancelled meanwhile (an anyio scope
-    re-cancels every await), then re-raise that cancellation."""
+    """Run `work` to the end even if this task is cancelled meanwhile, then let that
+    cancellation go on. An anyio scope (the MCP server's) re-cancels every await, so
+    the wait is shielded from it; a native one-shot `task.cancel()` is absorbed by
+    `asyncio.shield` and re-raised once `work` is done. One wait, no loop per tick."""
+    import anyio
+
     task = asyncio.ensure_future(work)
     cancelled: asyncio.CancelledError | None = None
-    while True:
+    with anyio.CancelScope(shield=True):
         try:
-            result = await asyncio.shield(task)
-            break
+            await asyncio.shield(task)
         except asyncio.CancelledError as exc:
-            if task.done() and not task.cancelled():
-                result = task.result()
-                break
             if task.cancelled():
                 raise
             cancelled = exc
+            await asyncio.wait({task})
     if cancelled is not None:
         raise cancelled
-    return result
+    return task.result()
 
 
 async def _with_network_warning(
@@ -720,7 +722,14 @@ async def set_channel_rule(
         source_agent = known.get(source) or await find_agent_by_daimon_tag(
             anthropic, tenant_id=tenant_id, name=source
         )
-        if start_copy is None and source_agent is not None:
+        if start_copy is None:
+            if source_agent is None:
+                # Gone or renamed since it was named here: refuse rather than copy an
+                # agent whose provider was never read.
+                raise DaimonError(
+                    f"I couldn't find {source} just now, so nothing was copied. Try again "
+                    "in a moment. Nothing was changed."
+                )
             await _refuse_a_copy_off_claude(
                 sessionmaker, tenant_id=tenant_id, source_name=source, source_agent=source_agent
             )
