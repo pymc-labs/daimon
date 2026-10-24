@@ -21,6 +21,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.switch_cards import parse_custom_id, press_switch_card
 from daimon.core.turn.deps import build_turn_deps
+from fastmcp.exceptions import ToolError
 
 from .test_backend_switch import active_chat as active_chat
 from .test_fleet_config import config
@@ -110,8 +111,10 @@ async def test_j10_a_card_that_could_not_be_posted_never_blocks_asking_again(
     )
     agent()
     agent()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ToolError) as unposted:
         await _request_fleet_config_impl(runtime, gpt_turn, **args)
+    assert str(unposted.value) == "Couldn't post the confirmation card; nothing changed."
+    assert "Discord is down" not in str(unposted.value)
     posted = AsyncMock(return_value="card-message")
     monkeypatch.setattr(switch_card_mod, "post_switch_card", posted)
     agent()

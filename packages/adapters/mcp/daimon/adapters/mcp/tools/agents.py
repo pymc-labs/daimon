@@ -2154,6 +2154,12 @@ async def post_own_card(
         if reference.agent_name is not None:
             matching["agent_name"] = reference.agent_name
         waiting_text = "There's already a Confirm card waiting for you for this change."
+    # A pin card belongs to its channel: one waiting elsewhere is another request.
+    in_channel = (
+        origin.parent_channel_id
+        if not switching and reference.operation == "channel_pin_clear"
+        else None
+    )
     now = datetime.datetime.now(datetime.UTC)
     # Outside any turn, so not capped by one; never past a day, and the card says when.
     expires_at = now + datetime.timedelta(
@@ -2165,6 +2171,7 @@ async def post_own_card(
             tenant_id=auth.tenant_id,
             requester_platform_user_id=auth.platform_user_id,
             matching=matching,
+            channel_id=in_channel,
             now=now,
         )
     if waiting:
@@ -2239,17 +2246,23 @@ async def post_own_card(
     )
     from daimon.adapters.mcp.tools.discord._switch_card import post_switch_card
 
+    unposted = "Couldn't post the confirmation card; nothing changed."
     try:
         message_id = await post_switch_card(
             runtime, auth, channel_id=origin.thread_id, card=card, origin=turn_origin_place(origin)
         )
-    except Exception:
-        # Never pressable, so it must not hold the one waiting slot either.
         async with runtime.session_factory.begin() as session:
-            await cards.abandon(session, card_id=row.id, outcome="The card couldn't be posted.")
-        raise
-    async with runtime.session_factory.begin() as session:
-        await cards.mark_posted(session, card_id=row.id, message_id=message_id)
+            await cards.mark_posted(session, card_id=row.id, message_id=message_id)
+    except BaseException as exc:
+        # Never pressable (unposted, or its message unrecorded), so it must not
+        # hold the one waiting slot either; cancellation included.
+        with anyio.CancelScope(shield=True):
+            async with runtime.session_factory.begin() as session:
+                await cards.abandon(session, card_id=row.id, outcome=unposted)
+        if not isinstance(exc, Exception):
+            raise
+        log.warning("own_card.post_failed", card_id=str(row.id), error_type=type(exc).__name__)
+        raise ToolError(unposted) from exc
     return (
         "I posted a Confirm card in this conversation. Nothing changes until the requester "
         "presses Confirm on it. Tell them so; do not call this tool again for this change."

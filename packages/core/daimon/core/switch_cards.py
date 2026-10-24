@@ -200,6 +200,10 @@ def answered_switch_card(press: SwitchCardPress) -> PostedCard:
     return PostedCard(kind="switch", state="refused", headline=f"🛡️ {press.text}")
 
 
+def _nothing_changed(text: str) -> str:
+    return text if text.endswith("Nothing changed.") else f"{text} Nothing changed."
+
+
 @dataclass(frozen=True)
 class SwitchCardPress:
     """What a press did: the card's new words, and whether the card is now closed.
@@ -415,7 +419,7 @@ async def _apply(
     )
     refusal = await check(prompt, clicker)
     if refusal is not None:
-        return await end("refused", refusal)
+        return await end("refused", _nothing_changed(refusal))
     actor = BackendActor(tenant_id=tenant_id, account_id=claimed.account_id, subject=subject)
     try:
         agent = await load_backend_agent(
@@ -546,7 +550,7 @@ async def _apply_configuration(
     )
     refusal = await check(prompt, clicker)
     if refusal is not None:
-        return await end("refused", refusal)
+        return await end("refused", _nothing_changed(refusal))
     actor = BackendActor(tenant_id=tenant_id, account_id=claimed.account_id, subject=subject)
     now = datetime.datetime.now(datetime.UTC)
     stale = "This changed since the card was posted. Ask again to redo it. Nothing changed."
