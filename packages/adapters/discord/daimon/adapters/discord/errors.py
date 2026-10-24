@@ -25,7 +25,7 @@ from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
-from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
+from daimon.core.turn.errors import SessionAgentMismatch
 from daimon.core.turn.notices import provider_quota_copy, short_ref
 from mux.errors import ProviderError
 from ulid import ULID
@@ -122,7 +122,7 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     """What happened and what to do, by cause. Never the exception's text."""
     if isinstance(exc, TurnError) and isinstance(exc.cause, Exception):
         return _cause_lines(exc.cause)
-    if isinstance(exc, (PolicyBusyError, FenceUnavailable, SessionBusyError)):
+    if isinstance(exc, (PolicyBusyError, FenceUnavailable)):
         return _DAIMON_BUSY
     if spend_limit_error(exc) is not None:
         return USAGE_LIMIT_LINES

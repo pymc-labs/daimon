@@ -149,18 +149,6 @@ def test_other_discord_rejections_say_discord_did_not_accept() -> None:
     )
 
 
-def test_a_busy_continuation_is_daimon_busy_not_our_side() -> None:
-    """J6g: a bind behind a still-running turn is transient, not an internal error."""
-    from datetime import UTC, datetime
-
-    from daimon.core.turn.errors import SessionBusyError
-
-    error = SessionBusyError(pending_reasons=("agent_identity",), retry_after=datetime.now(UTC))
-    assert render_error(error, request_id=TEST_RID) == (
-        "Daimon is busy right now.\n\nTry again in a moment.\n\n" + REF
-    )
-
-
 def test_the_ref_is_the_last_six_and_the_full_id_is_logged() -> None:
     rid = generate_request_id()
     with capture_logs() as logs:
