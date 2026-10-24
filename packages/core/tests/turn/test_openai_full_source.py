@@ -371,18 +371,11 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
 
     service = AgentBackendService(sessions, enabled=True, capture_source=capture)
     quote = await service.preview(source, "openai")
-    expected_drops = ("mcp_tool:daimon-mcp:add_skill", "memory") if gated else ("memory",)
+    # Gated and publishing tools are kept: Daimon confirms them on its own card
+    # (`tool_safety.provider_carded_tools`), pinned row or template alike.
+    expected_drops: tuple[str, ...] = ("memory",)
     if native_defaults:
-        # A pinned row has no confirmation card either: every gated or publishing
-        # tool is a declared loss, exactly as in a template.
-        expected_drops = (
-            "builtin_tool:web_fetch",
-            "mcp_tool:daimon-mcp:add_skill",
-            "mcp_tool:daimon-mcp:create_attachment_upload_url",
-            "mcp_tool:daimon-mcp:create_notebook_upload_url",
-            "mcp_tool:daimon-mcp:publish_report",
-            "memory",
-        )
+        expected_drops = ("builtin_tool:web_fetch", "memory")
     assert quote.allowed and quote.declared_drops == expected_drops
     if native_defaults:
         from daimon.core.channel_backend import AgentBackendRefused
@@ -556,16 +549,17 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
             },
         )
         assert not result["result"].get("isError", False)
-    # The pinned row's credential has no confirmation card: the server refuses
-    # every gated or publishing tool for it by name (the proxy refuses them anyway).
+    # The pinned row's credential has no card of its own: the server no longer
+    # refuses the gated or publishing tools by name; their own card gate asks for
+    # Daimon's card on the confirm call (`_tool_approval`).
     for name in ("publish_report", "create_attachment_upload_url", "add_skill"):
-        refused = await mcp_session(
+        reached = await mcp_session(
             source_mcp,
             token=token,
             method="tools/call",
             params={"name": name, "arguments": {}},
         )
-        assert "confirmation card" in json.dumps(refused), name
+        assert "confirmation card" not in json.dumps(reached), name
     assert "Bearer" not in json.dumps(wire.agent)
 
 
@@ -642,25 +636,26 @@ ASK_PARAMS = {
 
 @pytest.mark.parametrize("consent_request", [ASK_PARAMS], indirect=True)
 @pytest.mark.parametrize("full_openai", [True], indirect=True)
-async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(full_openai):
+async def test_confirmation_gated_mcp_tool_is_kept_with_its_siblings(full_openai):
+    """An always-ask gated tool stays on GPT: Daimon posts its card itself."""
     request, _, canonical, wire, *_ = full_openai
     from daimon.core.turn.runtime_manifest import classify_source_obligations
 
     target = canonical.target_spec
-    assert target.declared_drops == ("mcp_tool:daimon-mcp:add_skill", "memory")
-    assert "mcp_tool:daimon-mcp:add_skill" in target.system
+    assert target.declared_drops == ("memory",)
+    assert "mcp_tool:daimon-mcp:add_skill" not in target.system
     assert len(target.skills) == 11
-    assert target.mcp_servers[0].tool_policy["allowed_tools"] == ["search_tools", "call_tool"]
-    assert wire.agent["tools"][-1]["allowed_tools"] == ["search_tools", "call_tool"]
-    # Exact captured evidence alone cannot waive this loss: explicit consent
-    # is mandatory even when all siblings are represented.
+    kept = {"search_tools", "call_tool", "add_skill"}
+    assert set(target.mcp_servers[0].tool_policy["allowed_tools"]) == kept
+    assert set(wire.agent["tools"][-1]["allowed_tools"]) == kept
+    # Nothing about it needs a consented loss any more.
     source = await capture_preparation_source(request, fresh=True)
     missing = classify_source_obligations(
         source,
         target.model_copy(update={"declared_drops": ("memory",)}),
         environment=source.representations[0].environment,
     )
-    assert "mcp_tool:daimon-mcp:add_skill" in missing
+    assert "mcp_tool:daimon-mcp:add_skill" not in missing
     prepared = await bind_session_impl(
         request.deps,
         request.admission,
@@ -673,7 +668,7 @@ async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(f
     )
     assert prepared.session_ref.provider == "openai"
     assert len(wire.posts) == 1
-    assert wire.posts[0]["agent"]["tools"][0]["allowed_tools"] == ["search_tools", "call_tool"]
+    assert set(wire.posts[0]["agent"]["tools"][0]["allowed_tools"]) == kept
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -740,22 +735,23 @@ NATIVE_DEFAULT_PARAMS = {
 @pytest.mark.parametrize("full_openai", ["native-defaults"], indirect=True)
 async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_openai):
     """A pinned row with the full live catalogue still admits and runs: its skills,
-    builtins and non-gated MCP tools stay executable; gated/publishing tools are losses."""
+    builtins and MCP tools stay executable, gated/publishing ones included (Daimon
+    cards them); only web_fetch is a loss."""
     request, _, canonical, wire, *_ = full_openai
     target = canonical.target_spec
     assert {tool.name for tool in target.tools} == {"bash", "web_search"}
     assert len(target.skills) == 11
-    assert target.declared_drops == (
-        "builtin_tool:web_fetch",
-        "mcp_tool:daimon-mcp:add_skill",
-        "mcp_tool:daimon-mcp:create_attachment_upload_url",
-        "mcp_tool:daimon-mcp:create_notebook_upload_url",
-        "mcp_tool:daimon-mcp:publish_report",
-        "memory",
-    )
+    assert target.declared_drops == ("builtin_tool:web_fetch", "memory")
     assert "builtin_tool:web_fetch" in target.system
-    expected = ["call_tool", "search_tools"]
-    assert target.mcp_servers[0].tool_policy["allowed_tools"] == expected
+    expected = target.mcp_servers[0].tool_policy["allowed_tools"]
+    assert {
+        "call_tool",
+        "search_tools",
+        "add_skill",
+        "create_attachment_upload_url",
+        "create_notebook_upload_url",
+        "publish_report",
+    } <= set(expected)
     prepared = await bind_session_impl(
         request.deps,
         request.admission,

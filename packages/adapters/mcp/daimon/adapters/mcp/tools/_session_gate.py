@@ -61,6 +61,15 @@ async def session_card_gap(
     it or, failing that, as daimon recorded sending it (`_recorded_as_gated`).
     An `agent_chat` or unattended session has no origin.
     """
+    if auth.no_confirmation_surface:
+        from daimon.core.tool_safety import token_carded_tools
+
+        if tool_name in token_carded_tools():
+            # An OpenAI/Gemini turn has no card of its own: Daimon's own card
+            # approves this exact call (`_tool_approval`).
+            from daimon.adapters.mcp.tools._tool_approval import require_tool_approval
+
+            return await require_tool_approval(runtime, auth, origin, tool_name=tool_name)
     if origin is None:
         return "no_origin"
     async with runtime.session_factory() as session:

@@ -425,16 +425,38 @@ class IdentityMiddleware(Middleware):
         if context.method not in {"tools/call", "resources/read", "prompts/get"}:
             return await call_next(context)
         if identity.no_confirmation_surface and context.method == "tools/call":
-            from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
+            from daimon.core.tool_approvals import args_digest, pending_call
+            from daimon.core.tool_safety import (
+                CONFIRMED_DAIMON_TOOLS,
+                confirmation_gated_tools,
+                provider_carded_tools,
+                token_carded_tools,
+            )
 
             # `call_tool` re-enters here with the inner tool's name, so the proxy is covered.
-            # A self-carded tool posts its own card instead of acting (`switch_cards`).
-            if str(getattr(context.message, "name", "")) in (
-                confirmation_gated_tools() - self_carded_tools()
-            ):
+            # Daimon confirms the carded ones itself: a self-carded tool posts its own
+            # card instead of acting (`switch_cards`); a token-carded one runs once its
+            # exact call is approved on Daimon's card (`tool_approvals`).
+            name = str(getattr(context.message, "name", ""))
+            if name in confirmation_gated_tools() - provider_carded_tools():
                 raise ToolError(
                     "This tool needs a confirmation card, which this conversation can't show."
                 )
+            if name in token_carded_tools():
+                arguments = dict(getattr(context.message, "arguments", None) or {})
+                gating = CONFIRMED_DAIMON_TOOLS.get(name)
+                # A call without its gating field (an add_skill preview) only reads.
+                if gating is None or gating in arguments:
+                    recorded = pending_call.set((name, args_digest(name, arguments), arguments))
+                    try:
+                        return await self._dispatch_selfhosted(context, call_next, identity)
+                    finally:
+                        pending_call.reset(recorded)
+        return await self._dispatch_selfhosted(context, call_next, identity)
+
+    async def _dispatch_selfhosted(
+        self, context: MiddlewareContext, call_next: CallNext, identity: AuthIdentity
+    ) -> object:
         selfhosted = identity.anthropic_disabled
         if identity.bound_channel_id is not None and identity.platform is not None:
             async with self._sessionmaker() as session:

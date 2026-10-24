@@ -1934,9 +1934,9 @@ async def _capture_source_capabilities(
             # every confirmation-gated or publishing tool stays unavailable (and
             # the server refuses it for their provider-turn credentials too),
             # except those whose card Daimon posts itself.
-            from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
+            from daimon.core.tool_safety import confirmation_gated_tools, provider_carded_tools
 
-            gated, carded = confirmation_gated_tools(), self_carded_tools()
+            gated, carded = confirmation_gated_tools(), provider_carded_tools()
             permissions = {
                 # A self-carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.
@@ -2836,14 +2836,14 @@ def _consented_before_self_cards(
 ) -> bool:
     """Whether `consent` was recorded before some self-carded tools were offered.
 
-    Such a consent declared them losses (`tool_safety.self_carded_tools`): not
+    Such a consent declared them losses (`tool_safety.provider_carded_tools`): not
     allowed on Daimon's MCP, more drops, and the drops line in the instructions.
     Every subset of the ones `target` now allows is rebuilt that way; any other
     difference still needs a fresh confirmation.
     """
     from itertools import combinations
 
-    from daimon.core.tool_safety import self_carded_tools
+    from daimon.core.tool_safety import provider_carded_tools
 
     allowed: set[str] = set()
     for server in target.mcp_servers or ():
@@ -2852,7 +2852,7 @@ def _consented_before_self_cards(
             allowed.update(str(name) for name in listed)
     offered = sorted(
         tool
-        for tool in self_carded_tools() & allowed
+        for tool in provider_carded_tools() & allowed
         if f"mcp_tool:{DAIMON_SERVER_NAME}:{tool}" not in target.declared_drops
     )
     return any(
