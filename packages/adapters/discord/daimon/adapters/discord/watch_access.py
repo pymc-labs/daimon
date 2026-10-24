@@ -115,11 +115,7 @@ async def require_watch_thread_access(
                 membership = await thread.fetch_member(member.id)
                 if membership.id != member.id or membership.thread_id != thread.id:
                     raise ValueError("Watch thread membership binding changed")
-    except (discord.Forbidden, discord.NotFound):
-        reason = "Watch paused: reporting thread or owner membership is unavailable."
-    except discord.HTTPException as err:
-        if err.status not in {403, 404}:
-            raise
+    except (discord.Forbidden, discord.NotFound, ValueError):
         reason = "Watch paused: reporting thread or owner membership is unavailable."
     if reason is not None:
         async with sessions.begin() as db:

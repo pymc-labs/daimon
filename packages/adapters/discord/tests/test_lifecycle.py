@@ -3368,6 +3368,35 @@ async def test_rendered_table_expansion_respects_last_answer_slot(monkeypatch, t
     assert file.fp.closed
 
 
+@pytest.mark.parametrize("ending", ["success", "failure"])
+async def test_refused_watch_final_ends_card_and_stops_cancel(ending, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.turn.run import _DeferredFailureLifecycle
+
+    cancel_view = discord.ui.View(timeout=None)
+    inner, sends, edits = _make_lifecycle(cancel_view=cancel_view)
+    await inner.post_initial()
+    before = (len(sends), len(edits))
+    repair = MagicMock()
+    monkeypatch.setattr(inner._card_writes, "queue_repair", repair)
+    monkeypatch.setattr("daimon.core.turn.run.asyncio.sleep", AsyncMock())
+    lifecycle = _DeferredFailureLifecycle(
+        inner=inner, authorize_final=AsyncMock(side_effect=OSError("connection reset"))
+    )
+    state = _make_success_state("Private answer")
+    if ending == "success":
+        await lifecycle.on_terminal_success(state)
+    else:
+        await lifecycle.on_terminal_failure(state, RuntimeError("model failed"))
+        await lifecycle.flush_held_failure()
+    assert inner._terminal
+    assert inner._ended_before is not None
+    assert cancel_view.is_finished()
+    repair.assert_called_once()
+    assert (len(sends), len(edits)) == before
+
+
 @pytest.mark.parametrize("ending", ["success", "interrupted", "error", "chunks", "attachment"])
 async def test_watch_output_revocation_latches_all_discord_writes(ending):
     import contextlib

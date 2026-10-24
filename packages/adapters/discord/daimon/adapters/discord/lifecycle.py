@@ -1241,6 +1241,17 @@ class DiscordTurnLifecycle(OutputGate):
         else:
             self._ended_before = discord.utils.time_snowflake(datetime.now(UTC), high=True)
 
+    async def on_output_refused(self) -> None:
+        """End a refused watch locally without an unauthorized platform write."""
+        try:
+            await self._settle_progress()
+        finally:
+            self._terminal = True
+            if self._cancel_view is not None:
+                self._cancel_view.stop()
+            self._mark_ended()
+            self._card_writes.queue_repair()
+
     async def on_terminal_success(self, state: TurnState) -> None:
         self._discord_mark = None  # only the terminal sends and edits close the window
         try:

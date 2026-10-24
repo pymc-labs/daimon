@@ -357,14 +357,27 @@ class _DeferredFailureLifecycle:
             return
         await self.inner.on_render(state)
 
-    async def on_terminal_success(self, state: TurnState) -> None:
-        if self.authorize_final is not None:
+    async def _may_finish(self) -> bool:
+        if self.authorize_final is None:
+            return True
+        for attempt in range(3):
             try:
                 await self.authorize_final()
+                return True
             except Exception as err:
+                if not isinstance(err, AdmissionDenied) and attempt < 2:
+                    await asyncio.sleep(attempt + 1)
+                    continue
                 log.warning("turn.final_output_refused", error_type=type(err).__name__)
-                return
-        await self.inner.on_terminal_success(state)
+                cleanup = getattr(self.inner, "on_output_refused", None)
+                if cleanup is not None:
+                    await cast(Callable[[], Awaitable[None]], cleanup)()
+                return False
+        return False
+
+    async def on_terminal_success(self, state: TurnState) -> None:
+        if await self._may_finish():
+            await self.inner.on_terminal_success(state)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         self._held = (state, err)
@@ -398,13 +411,8 @@ class _DeferredFailureLifecycle:
         self._held = None
         if termination is not None:
             state = replace(state, termination=termination)
-        if self.authorize_final is not None:
-            try:
-                await self.authorize_final()
-            except Exception as denied:
-                log.warning("turn.final_output_refused", error_type=type(denied).__name__)
-                return
-        await self.inner.on_terminal_failure(state, err)
+        if await self._may_finish():
+            await self.inner.on_terminal_failure(state, err)
 
 
 async def _mirror_cancel(cancel: asyncio.Event, fresh_cancel: asyncio.Event) -> None:
