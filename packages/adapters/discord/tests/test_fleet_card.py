@@ -1995,9 +1995,15 @@ async def test_real_runtime_root_refuses_retargeting_before_a_card_post(discord_
         run_id=uuid4() if fault == "run" else None,
     )
     assert card is not None
-    with pytest.raises(FleetRefused):
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs, pytest.raises(FleetRefused):
         await card.refresh()
     send.assert_not_awaited()
+    if fault == "origin":
+        # The generic refusal no longer hides its cause (J5, smoke 857a82bb).
+        (named,) = [e for e in logs if e["event"] == "fleet.card_root_unavailable"]
+        assert named["error_class"] == "WorkerSpecRefused" and named["reason"] == "stale"
 
 
 @pytest.mark.parametrize("admin", [False, True])
@@ -2718,3 +2724,29 @@ def test_a_setup_error_reads_as_ours_with_a_log_reference():
         f"failed: a setup error on our side; give an admin the reference (ref {str(failed.id)[:8]})"
     )
     assert "couldn't be set up on that model" not in status
+
+
+async def test_a_root_gone_stale_mid_turn_keeps_its_card_instead_of_failing_every_render():
+    # J5 (smoke 857a82bb): the root's agent changed mid-turn, read_frozen_root refused
+    # "stale", and every render tick failed with "Fleets aren't available right now".
+    from daimon.adapters.discord.posted_controls.fleet import StaleFleetRoot
+
+    card, _, loader, send, edit = setup()
+    first = MagicMock(spec=discord.Message)
+    first.id = 900
+    send.return_value = first
+    loader.side_effect = StaleFleetRoot()
+    # Never shown: it refuses once, as any unprovable root does, then stays a plain
+    # turn instead of refusing on every tick.
+    with pytest.raises(StaleFleetRoot):
+        await card.refresh()
+    assert await card.refresh() is False
+    send.assert_not_awaited()
+    # Shown once, then the root went stale: the card stays as it was, no error.
+    loader.side_effect = None
+    assert await card.refresh() is True
+    edits = edit.await_count
+    loader.side_effect = StaleFleetRoot()
+    assert await card.refresh() is True
+    assert await card.refresh() is True
+    assert edit.await_count == edits

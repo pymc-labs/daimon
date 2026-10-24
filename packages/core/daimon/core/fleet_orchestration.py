@@ -2281,8 +2281,6 @@ class HostFleetPorts:
                 )
                 pair = next((pair for pair in locked[0] if pair[0].id == run_id), None)
                 if pair is None:
-                    from daimon.core.fleet import FleetConflict
-
                     raise FleetConflict(f"no fleet run {run_id} in this tenant")
                 run, workers = pair
                 _scope(parent, run)

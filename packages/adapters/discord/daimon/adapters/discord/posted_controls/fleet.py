@@ -636,7 +636,17 @@ class DiscordFleetCardFactory:
                 if parent.subject.platform_user_id != str(requester_id):
                     raise FleetRefused("foreign_run")
                 return replace(parent, subject=subject), policy
-            except (WorkerSpecRefused, ScopeViolation, SQLAlchemyError):
+            except (WorkerSpecRefused, ScopeViolation, SQLAlchemyError) as error:
+                # Name the real cause once: the refusal the card shows is generic.
+                log.warning(
+                    "fleet.card_root_unavailable",
+                    error_class=type(error).__name__,
+                    field=getattr(error, "field", None),
+                    reason=getattr(error, "reason", None),
+                    run_id=str(run_id) if run_id is not None else None,
+                )
+                if isinstance(error, WorkerSpecRefused) and error.reason == "stale":
+                    raise StaleFleetRoot() from None
                 raise FleetRefused("prerequisites_unavailable") from None
 
         return cls(service, resolve, record_card(deps.sessionmaker))
@@ -750,6 +760,16 @@ def _refusal_text(refused: FleetRefused | WorkerSpecRefused, action: Control) ->
     return _NOT_HERE
 
 
+class StaleFleetRoot(FleetRefused):
+    """The root's frozen authority no longer matches (e.g. its agent changed mid-turn).
+
+    A button press still refuses; the render loop keeps showing the run as it was.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("prerequisites_unavailable")
+
+
 class DiscordFleetCard:
     """One orchestrator card; all reads and controls use the same core owner."""
 
@@ -788,6 +808,7 @@ class DiscordFleetCard:
         self._record = record
         # The run the last rendered view showed, for `record`.
         self._rendered: FleetRun | None = None
+        self._stale_refused = False
 
     @property
     def run_id(self) -> uuid.UUID | None:
@@ -853,7 +874,20 @@ class DiscordFleetCard:
     async def refresh(self) -> bool:
         """Called from the existing render loop, never from a native event tap."""
         async with self._lock:
-            snapshot = await self._snapshot(None)
+            try:
+                snapshot = await self._snapshot(None)
+            except StaleFleetRoot:
+                # The root went stale mid-turn (e.g. its agent changed): a card already
+                # shown stays as it was instead of failing every render tick (J5, smoke
+                # 857a82bb); its buttons still re-check authority when pressed. One never
+                # shown refuses once, as any unprovable root does, then renders as a
+                # plain turn rather than refusing again on every tick.
+                if self._message is not None:
+                    return True
+                if not self._stale_refused:
+                    self._stale_refused = True
+                    raise
+                return False
             if snapshot is None:
                 return False
             _, _, run, workers = snapshot

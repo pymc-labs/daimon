@@ -1319,13 +1319,6 @@ class _BudgetSnapshotDue(Exception):
     """This poll decides from the lock-free snapshot; the locked refresh ran recently."""
 
 
-def _lock_timed_out(error: DBAPIError) -> bool:
-    return (
-        "lock timeout" in str(error.orig).lower()
-        or getattr(error.orig, "sqlstate", None) == "55P03"
-    )
-
-
 class _BudgetLockBusy(Exception):
     """The tenant fleet lock is held by a writer; this poll is skipped, not failed."""
 
@@ -1482,7 +1475,7 @@ async def watch_fleet_budget(
                                     {"key": lock_key},
                                 )
                         except DBAPIError as error:
-                            if not _lock_timed_out(error):
+                            if not fleet_store.lock_timed_out(error):
                                 raise
                             raise _BudgetLockBusy(await _lock_holder(session, lock_key)) from None
                         # Holding the tenant lock, a row lock (a run or worker another
@@ -1500,8 +1493,13 @@ async def watch_fleet_budget(
                                 markup=markup,
                             )
                         except DBAPIError as error:
-                            if not _lock_timed_out(error):
+                            if not fleet_store.lock_timed_out(error):
                                 raise
+                            # A run/worker writer that never takes the tenant lock still
+                            # holds its row: don't retake the tenant lock every poll to
+                            # wait on it again. The snapshot decides until the next
+                            # locked refresh is due, counted from this timeout.
+                            last_locked = asyncio.get_running_loop().time()
                             raise _BudgetLockBusy(None) from None
                         if any(worker_id not in usages for worker_id, _ in watched):
                             raise FleetConflict("watched worker is unavailable")
@@ -1763,7 +1761,10 @@ async def admit_fleet_worker(
             markup=markup,
             roots=roots,
             # add_worker writes no run row, only (maybe) this worker: the graph locked
-            # above, plus the worker as inserted, is what a re-read would return.
+            # above, plus the worker as inserted, is what a re-read would return. No
+            # persisted-read guard is needed here: the graph was read persisted=True
+            # before any write in this transaction, and add_worker flushes and
+            # refreshes the row it inserts, so nothing unflushed can be in it.
             locked=fleet_store.with_worker(graph, started_at, worker),
         )
         if not usage.admitted and usage.worker.status == "pending":

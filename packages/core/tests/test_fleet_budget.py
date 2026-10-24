@@ -1561,6 +1561,98 @@ def count_budget_locks(monkeypatch) -> dict[int, int]:
     return counts
 
 
+async def test_a_watch_backs_off_the_tenant_lock_while_a_row_writer_holds_its_worker(
+    sm, monkeypatch
+):
+    """#1505 review: after a row-lock timeout the watch retook the tenant lock on the
+    very next poll and waited ~2 s again, holding admissions and claims behind it for as
+    long as the row writer (~7 s on staging) kept its row. Now the next locked attempt
+    waits a full locked-refresh interval from the timeout; the snapshot decides meanwhile."""
+    from daimon.core import channel_budget
+    from daimon.core._models import FleetWorker as WorkerRow
+    from sqlalchemy import select
+
+    parent, _ = await setup(sm)
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    loop = asyncio.get_running_loop()
+    attempts: list[float] = []
+    original = channel_budget.produce_fleet_budget
+
+    async def counted(*args, **kwargs):
+        attempts.append(loop.time())
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(channel_budget, "produce_fleet_budget", counted)
+    finished, cancelled = asyncio.Event(), asyncio.Event()
+    async with sm() as writer, writer.begin():
+        await writer.execute(select(WorkerRow).where(WorkerRow.id == worker.id).with_for_update())
+        began = loop.time()
+        task = asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled={worker.id: cancelled},
+                finished=finished,
+                poll_interval=0.2,
+                read_timeout=30,
+            )
+        )
+        await asyncio.sleep(3.8)
+    finished.set()
+    try:
+        assert await asyncio.wait_for(task, 10) == "finished"
+        assert not cancelled.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    during = [at - began for at in attempts if at - began < 3.8]
+    # One locked attempt (it waits ~2 s on the row, then lets go); the next is due a full
+    # locked-refresh interval after that timeout, past the window. Polls in between read
+    # the snapshot.
+    assert len(during) == 1, during
+
+
+async def test_a_wait_or_retained_control_read_never_queues_behind_a_ledger_insert(sm):
+    """#1505 (d): wait and retained_control take the tenant row as a key share
+    (financial=False), so an open ledger insert's foreign-key lock on that row never
+    blocks them, while a funds lock (financial=True) still queues behind it."""
+    from sqlalchemy.exc import DBAPIError
+
+    parent, run = await setup(sm)
+    async with sm() as ledger, ledger.begin():
+        await tenant_ledger.insert_entry(
+            ledger,
+            tenant_id=run.tenant_id,
+            delta_usd=Decimal(1),
+            reason="topup",
+            idempotency_key=f"keyshare:{run.id}",
+        )
+        async with sm() as reader, reader.begin():
+            await reader.execute(text("SET LOCAL lock_timeout = '1s'"))
+            graph, _ = await fleet.lock_budget(
+                reader,
+                tenant_id=run.tenant_id,
+                actor_id=parent.fleet.account_id,
+                run_id=run.id,
+                financial=False,
+            )
+            assert any(pair[0].id == run.id for pair in graph)
+        with pytest.raises(DBAPIError) as funds:
+            async with sm() as payer, payer.begin():
+                await payer.execute(text("SET LOCAL lock_timeout = '1s'"))
+                await fleet.lock_budget(
+                    payer,
+                    tenant_id=run.tenant_id,
+                    actor_id=parent.fleet.account_id,
+                    run_id=run.id,
+                    financial=True,
+                )
+        assert fleet.lock_timed_out(funds.value)
+
+
 async def test_a_pool_claim_gives_up_on_a_busy_tenant_lock_instead_of_queueing(sm):
     """P2 lockwatch 455c58a6: a claim polled every 0.5-2 s per pending worker queued on
     the tenant fleet lock with no timeout. Past CLAIM_LOCK_TIMEOUT it now claims nothing
