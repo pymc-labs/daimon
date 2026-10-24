@@ -322,17 +322,18 @@ async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revoke
     assert await _revoked(request, second)
 
     # What the provider holds during a turn calls Daimon's MCP: the copy's switch
-    # and hand-off tools are offered and run. The confirmation-gated switch stays
-    # refused for this credential until Daimon posts its own card (PR 2).
+    # and hand-off tools are offered and run. The switch runs for this credential
+    # too: its confirm call posts Daimon's own card (`daimon.core.switch_cards`).
     live = await live_token(request)
     await offered_and_run(source_mcp, live)
-    refused = await mcp_session(
+    switched = await mcp_session(
         source_mcp,
         token=live,
         method="tools/call",
         params={"name": "request_agent_backend_switch", "arguments": {}},
     )
-    assert "confirmation card" in json.dumps(refused)
+    assert "confirmation card" not in json.dumps(switched)
+    assert switched["result"]["isError"] is False
 
 
 async def offered_and_run(source_mcp, token: str) -> None:

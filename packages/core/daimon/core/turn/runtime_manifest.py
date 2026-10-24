@@ -1937,9 +1937,17 @@ async def _capture_source_capabilities(
             # except those whose card Daimon posts itself.
             from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
 
-            gated = confirmation_gated_tools() - self_carded_tools()
+            gated, carded = confirmation_gated_tools(), self_carded_tools()
             permissions = {
-                name: "ask" if name in gated else permission
+                # A self-carded tool runs (Daimon posts its card) unless the agent
+                # turned it off, which stays a named loss as before.
+                name: (
+                    "auto"
+                    if name in carded and permission != "disabled"
+                    else "ask"
+                    if name in gated
+                    else permission
+                )
                 for name, permission in permissions.items()
             }
             if not any(permission == "auto" for permission in permissions.values()):
