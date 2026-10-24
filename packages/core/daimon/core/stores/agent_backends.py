@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 
 from daimon.core._models import (
     Account,
@@ -75,6 +76,24 @@ async def current(
     else:
         row = await session.scalar(query)
     return AgentBackendRevision.model_validate(row) if row is not None else None
+
+
+async def current_many(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, AgentBackendRevision]:
+    """`current` for many agents in one read; an agent with no revision is absent."""
+    if not agent_ids:
+        return {}
+    rows = await session.scalars(
+        select(AgentBackendRevisionRecord)
+        .where(
+            AgentBackendRevisionRecord.tenant_id == tenant_id,
+            AgentBackendRevisionRecord.agent_id.in_(list(agent_ids)),
+        )
+        .distinct(AgentBackendRevisionRecord.agent_id)
+        .order_by(AgentBackendRevisionRecord.agent_id, AgentBackendRevisionRecord.local.desc())
+    )
+    return {row.agent_id: AgentBackendRevision.model_validate(row) for row in rows}
 
 
 async def has_backend_preference_by_name(

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 137 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 138 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -90,6 +90,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `list_agents` | all callers | List agents visible here, including their attached ``mcp_servers`` and ``skills``. |
 | `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
 | `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
+| `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
 
 ## `channel_budgets`
