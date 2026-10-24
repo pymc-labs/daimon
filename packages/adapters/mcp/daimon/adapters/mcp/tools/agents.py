@@ -688,6 +688,9 @@ async def _start_on_backend(
         agent = await channel_backend.load_backend_agent(
             runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name=name
         )
+        # Its owner (the creator, recorded above) or an admin, as the write re-checks
+        # (from the latent audit's dsh patch: a plain refusal, not a write-time one).
+        await _require_agent_editor(service, agent, actor, auth)
         preview = await service.preview(agent, backend, model)
         if not preview.allowed:
             raise ToolError(f"{provider_name(backend)} isn't turned on here. Nothing was created.")
@@ -701,7 +704,8 @@ async def _start_on_backend(
             accepted_drops=preview.declared_drops,
         )
     except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
-        refusal = str(_backend_switch_refusal(exc, name, backend, auth))
+        # It was saved on the default provider and hasn't moved yet (dsh).
+        refusal = str(_backend_switch_refusal(exc, name, backend, auth, current=DEFAULT_BACKEND))
         raise ToolError(
             refusal.removesuffix(" Nothing changed.") + " Nothing was created."
         ) from exc
