@@ -1174,6 +1174,33 @@ async def test_fleet_r3_r4_plain_task_workers_resolve_with_default_limits(captur
         task_worker_spec(root, role="W", task="  ")
 
 
+@pytest.mark.parametrize("captured", ["haiku55"], indirect=True)
+@pytest.mark.parametrize("native", [None, ("gemini", "gemini-3.8-flash"), ("openai", "gpt-6-luna")])
+async def test_a_native_roots_task_worker_never_carries_its_claude_sources_workspace(
+    captured, native
+):
+    """A GPT/Gemini root runs on its counterpart's model, not where its Claude source's
+    environment, memory and MCP live: a worker on the root's own model declares them
+    lost, as a worker on another provider under a Claude root does (J10 follow-up)."""
+    from daimon.core.neutral_resources import task_worker_spec
+    from mux.contracts.ids import ModelRef
+
+    root = compose(captured)
+    if native is not None:
+        provider, model = native
+        root = replace(
+            root, spec=root.spec.model_copy(update={"model": ModelRef(provider=provider, id=model)})
+        )
+    spec = task_worker_spec(root, role="W", task="Compare X and Y.")
+    assert spec.model == root.spec.model
+    workspace = {"mcp", "memory", "sandbox"}
+    assert (
+        workspace <= set(spec.declared_drops)
+        if native
+        else not workspace & set(spec.declared_drops)
+    )
+
+
 def _worker(backend: str, budget: str, *, status: str = "pending", reserved: str = "0"):
     from types import SimpleNamespace
 

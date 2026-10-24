@@ -1087,8 +1087,8 @@ def task_worker_spec(
     loss of the root's model controls (e.g. effort), which that model may not accept;
     a worker on another profile (another provider, or an OpenAI worker under a GPT
     root's persistent workspace) also declares the root capabilities it cannot
-    represent, so its workspace is never carried. The resolver still checks every
-    ceiling.
+    represent, so its workspace is never carried; nor is it under a GPT/Gemini root,
+    whose workspace is its Claude source's. The resolver still checks every ceiling.
     """
     from mux.profiles import backend_selection, worker_selection
 
@@ -1111,7 +1111,15 @@ def task_worker_spec(
         ),
         worker_selection(choice.provider).profile,
     )
-    if choice.provider != root.provider or granted != backend_selection(root.provider).profile:
+    # A GPT/Gemini root runs on its counterpart, not on its Claude source, so the
+    # source's workspace (environment, memory, MCP) is never where it runs: none of
+    # its workers can carry that workspace either.
+    native_root = any(ref.provider != root.provider for ref in parent.source_agents)
+    if (
+        native_root
+        or choice.provider != root.provider
+        or granted != backend_selection(root.provider).profile
+    ):
         drops |= {"mcp", "memory", "sandbox"}
     if choice.id != root.id and parent.spec.extensions:
         drops.add("model_controls")
