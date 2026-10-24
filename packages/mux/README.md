@@ -56,7 +56,9 @@ this permits the in-cluster ACA fallback explicitly. Foundry fields are accepted
 only for the Foundry transport.
 
 Source loss consent can name the unsupported native URL-fetch capability as
-`builtin_tool:web_fetch`. This does not waive other builtin tools or authorize
+`builtin_tool:web_fetch`, and web search as `builtin_tool:web_search` where the
+target doesn't carry it (an agent template: OpenAI's web search is unpriced and
+Gemini's grounding is off). Neither waives other builtin tools or authorizes
 shell-based emulation of the missing native tool.
 
 MCP source permissions can be resolved per tool with `mcp_permissions` without

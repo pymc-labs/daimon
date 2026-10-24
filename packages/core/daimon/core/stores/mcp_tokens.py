@@ -10,6 +10,7 @@ No try/except — exceptions propagate (guideline:architecture).
 - list_mcp_tokens: operator listing, live tokens only unless asked.
 - lock_mcp_token / add_issued_usd: the per-token promo issuing ceiling.
 - update_mcp_token_scopes: replace a live operator token's scopes.
+- charge_skill_bytes: a provider turn's skill-read budget, checked and added atomically.
 
 Injected `now` follows guideline:architecture — no datetime.now() calls
 inside core logic.
@@ -115,6 +116,37 @@ async def revoke_mcp_token(
     if orm is None:
         return None
     return McpTokenRow.model_validate(orm)
+
+
+async def charge_skill_bytes(
+    session: AsyncSession,
+    *,
+    jti: uuid.UUID,
+    tenant_id: uuid.UUID,
+    size: int,
+    budget: int,
+) -> bool:
+    """Add `size` to a live provider-turn token's skill bytes if it stays within `budget`.
+
+    One atomic UPDATE checks and adds, so concurrent reads on any instance can't
+    pass the budget together. False when it would, or the token isn't a live
+    provider-turn token of this tenant.
+    """
+    if size < 0:
+        raise ValueError("size must be non-negative")
+    stmt = (
+        update(McpToken)
+        .where(
+            McpToken.jti == jti,
+            McpToken.tenant_id == tenant_id,
+            McpToken.surface == "provider_turn",
+            McpToken.revoked_at.is_(None),
+            McpToken.skill_bytes_read + size <= budget,
+        )
+        .values(skill_bytes_read=McpToken.skill_bytes_read + size)
+        .returning(McpToken.jti)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def list_live_tokens_by_label(

@@ -85,6 +85,23 @@ def _fleet_server(auth) -> FastMCP:
     return mcp
 
 
+def _server_as(identity: object) -> FastMCP:
+    """`_server`, with every request authenticated as `identity` (as IdentityMiddleware)."""
+    from fastmcp.server.middleware import Middleware
+
+    class As(Middleware):
+        async def on_message(self, context, call_next):  # type: ignore[no-untyped-def]
+            await context.fastmcp_context.set_state("auth", identity, serializable=False)
+            return await call_next(context)
+
+    mcp = FastMCP("test")
+    for name in [*_GATED, "list_agents", "skill_list", "skill_read"]:
+        mcp.tool(lambda: "ok", name=name)
+    mcp.add_middleware(As())
+    mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
+    return mcp
+
+
 @pytest.mark.parametrize("native", [True, False])
 async def test_a_gpt_or_gemini_turn_sees_the_fleet_tools_by_name(native: bool) -> None:
     """M07 (diagnosis credit: dsh): a GPT/Gemini copy's native tool allowlist is built
@@ -109,3 +126,25 @@ async def test_a_gpt_or_gemini_turn_sees_the_fleet_tools_by_name(native: bool) -
     assert names == {"search_tools", "call_tool", *(pinned if native else ())}
     # The rest stays reachable through search either way.
     assert "fleet_kill" in str(found.content)
+
+
+@pytest.mark.parametrize("provider_turn", [True, False])
+async def test_a_gpt_or_gemini_turn_lists_its_skill_tools_by_name(provider_turn: bool) -> None:
+    """J6 b: its template's catalogue carries skill_list/skill_read; an Anthropic chat
+    turn (its skills load natively) keeps the plain search collapse."""
+    import uuid
+
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
+
+    identity = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.USER,
+        chat_agent_id=uuid.uuid4(),
+        no_confirmation_surface=provider_turn,
+    )
+    async with Client(_server_as(identity)) as client:
+        names = {tool.name for tool in await client.list_tools()}
+    skills = {"skill_list", "skill_read"}
+    assert (skills <= names) is provider_turn, names
+    assert "list_agents" not in names, "everything else stays behind search"

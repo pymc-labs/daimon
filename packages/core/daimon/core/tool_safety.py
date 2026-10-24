@@ -242,6 +242,11 @@ NATIVE_FLEET_TOOLS: Final[frozenset[str]] = frozenset(
     {"fleet_spawn", "fleet_collect", "fleet_status", "fleet_agents"}
 )
 
+#: Daimon MCP's tools that carry an agent's custom skills off Anthropic (J6 b): a GPT
+#: or Gemini turn lists them by name, and an agent template keeps its skills through
+#: them. Read-only, never confirmation-gated.
+SKILL_READ_TOOLS: Final[tuple[str, ...]] = ("skill_list", "skill_read")
+
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
 # be anything) stays out, so it falls to the fail-closed `write` default.

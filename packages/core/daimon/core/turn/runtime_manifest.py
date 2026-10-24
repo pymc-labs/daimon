@@ -40,7 +40,7 @@ from daimon.core.neutral_resources import (
     WorkerSpecRefused,
     resolve_worker_spec,
 )
-from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, SKILL_READ_TOOLS
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
@@ -95,6 +95,10 @@ _WILDCARD = "*"
 #: Built-in web tools an agent template never carries off Anthropic: they are named
 #: losses (OpenAI's web_search is unpriced and uncounted; Gemini's grounding is off).
 _WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+SKILL_READ_INSTRUCTION = (
+    "Your skills don't load by themselves here: call skill_list to see them, and "
+    "skill_read the one that fits before you start a task it covers."
+)
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -1963,6 +1967,7 @@ async def _capture_source_capabilities(
             )
             own_tools = tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             template_losses: tuple[str, ...] = ()
+            skills_by_tools = False
             if template:
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
@@ -1988,7 +1993,16 @@ async def _capture_source_capabilities(
                     # Tools it can't map (custom tools, a partial toolset) go whole.
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
-                if any(s.source in (None, "custom") for s in spec.skills or ()):
+                # Its custom skills come along as Daimon MCP's skill_list/skill_read
+                # when both are in its executable catalogue (J6 b); otherwise they
+                # are a whole loss its consent must name.
+                skills_by_tools = any(
+                    s.source in (None, "custom") for s in spec.skills or ()
+                ) and all(permissions.get(name) == "auto" for name in SKILL_READ_TOOLS)
+                if (
+                    any(s.source in (None, "custom") for s in spec.skills or ())
+                    and not skills_by_tools
+                ):
                     template_losses = ("skills", *template_losses)
             else:
                 mapped_tools = represented_execution_tools(
@@ -2134,7 +2148,11 @@ async def _capture_source_capabilities(
                 name=spec.name,
                 description=spec.description,
                 model=inputs.model,
-                system=spec.system,
+                system=(
+                    compose_source_instructions(spec.system, SKILL_READ_INSTRUCTION)
+                    if skills_by_tools
+                    else spec.system
+                ),
                 metadata=spec.metadata,
                 tools=mapped_tools,
                 skills=tuple(item.target for item in inputs.skills),
@@ -2815,8 +2833,10 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     if target.declared_drops:
         target = target.model_copy(
             update={
+                # The target's own text (the source's, plus any representation
+                # paragraph such as the skill tools line), then the losses.
                 "system": compose_source_instructions(
-                    spec.system,
+                    target.system,
                     "Unavailable capabilities: " + ", ".join(target.declared_drops) + ".",
                 )
             }

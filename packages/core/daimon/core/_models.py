@@ -1645,6 +1645,7 @@ class McpToken(Base):
             "surface IS NULL OR (surface = 'provider_turn' AND kind = 'agent')",
             name="ck_mcp_tokens_surface",
         ),
+        CheckConstraint("skill_bytes_read >= 0", name="ck_mcp_tokens_skill_bytes_read"),
     )
 
     jti: Mapped[uuid.UUID] = mapped_column(
@@ -1675,6 +1676,10 @@ class McpToken(Base):
     max_issued_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     issued_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 2), nullable=False, server_default=text("0")
+    )
+    # Skill bytes a provider turn has read through `skill_read`, against its budget.
+    skill_bytes_read: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
     )
     # The channel the token was minted in, whose calls then run inside it; both
     # NULL for a token bound to no channel.
