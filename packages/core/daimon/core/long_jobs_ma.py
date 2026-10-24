@@ -41,7 +41,6 @@ from daimon.core.turn.unattended import session_gate, unattended_posture
 from daimon.core.usage_sweep import session_billing, settle_session
 from mux.contracts.ids import PageRequest, Scope
 from mux.contracts.resources import SessionFilter
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _WORKER_SYSTEM = (
@@ -324,7 +323,7 @@ class ManagedLongJobPort:
                     return None
                 try:
                     return LongJobManifest.model_validate(json.loads(raw))
-                except (ValueError, ValidationError):
+                except ValueError:
                     return None
         return None
 

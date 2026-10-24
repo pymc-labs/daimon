@@ -46,20 +46,14 @@ async def register_page_watch(
     page_id: uuid.UUID,
     expires_at: datetime,
     now: datetime,
-    max_fires: int | None = None,
     max_turns_per_day: int = 24,
-    projection: str | None = None,
 ) -> WatchRow:
     """Register a human-admitted owner's exact live binding; never called by ingress."""
-    if projection is not None:
-        from daimon.core.continuity.watch_projection import projection_path
-
-        projection_path(projection)
     if binding.platform != "discord":
         raise ValueError("Page-event enrollment currently requires a Discord thread")
     if not 0 < len(instructions) <= 2000 or not now < expires_at <= now + timedelta(days=30):
         raise ValueError("Instructions or watch lifetime out of bounds")
-    if not 1 <= max_turns_per_day <= 24 or (max_fires is not None and max_fires < 1):
+    if not 1 <= max_turns_per_day <= 24:
         raise ValueError("Invalid watch caps")
     principal = await find_platform_principal(
         session,
@@ -112,10 +106,9 @@ async def register_page_watch(
         session_id=live.ma_session_id,
         instructions=instructions,
         page_id=page_id,
-        rule={} if projection is None else {"projection": projection},
+        rule={},
         expires_at=expires_at,
         producer=f"watch:{uuid.uuid4()}",
-        max_fires=max_fires,
         max_turns_per_day=max_turns_per_day,
     )
     session.add(row)
@@ -231,15 +224,6 @@ async def revoke_capabilities(session: AsyncSession, watch_id: uuid.UUID, *, now
         update(WatchCapability).where(WatchCapability.watch_id == watch_id).values(revoked_at=now)
     )
     await _cancel_queued(session, [watch_id])
-
-
-async def stop_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datetime) -> None:
-    await revoke_capabilities(session, watch_id, now=now)
-    await session.execute(
-        update(Watch)
-        .where(Watch.id == watch_id)
-        .values(status="stopped", revision=Watch.revision + 1)
-    )
 
 
 async def set_watch_control(session: AsyncSession, *, scope: str, enabled: bool) -> None:
@@ -591,7 +575,7 @@ async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
 
 async def delete_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datetime) -> None:
     """Revoke first. Preserve cancelled queue audit rows without evidence contents."""
-    await stop_watch(session, watch_id, now=now)
+    await revoke_capabilities(session, watch_id, now=now)
     await session.execute(delete(Watch).where(Watch.id == watch_id))
 
 

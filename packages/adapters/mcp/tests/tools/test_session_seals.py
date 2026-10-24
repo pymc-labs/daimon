@@ -50,6 +50,7 @@ from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _AGENT = "ag_acme"
@@ -1017,7 +1018,7 @@ async def test_long_job_source_and_worker_remain_private_after_unseal(
     ],
 )
 async def test_long_job_act_read_invariant(
-    world, monkeypatch, caller_kind, sealed, inside, readable
+    world: _World, monkeypatch, caller_kind, sealed, inside, readable
 ):
     import json
     from dataclasses import replace
@@ -1120,15 +1121,30 @@ async def test_long_job_act_read_invariant(
                     "owner_account_id": str(job.owner_account_id),
                 }
         async with world.sessionmaker.begin() as db:
-            audits = await store.list_cancel_audits(db, tenant_id=job.tenant_id, job_id=job.id)
+            await store.scope(db, job.tenant_id)
+            audits = (
+                (
+                    await db.execute(
+                        text(
+                            "SELECT to_jsonb(a) FROM long_job_cancel_audit a "
+                            "WHERE tenant_id=:tenant_id AND id=:job_id"
+                        ),
+                        {"tenant_id": job.tenant_id, "job_id": job.id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
             live = await store.get(
                 db, job.id, tenant_id=job.tenant_id, owner_account_id=job.owner_account_id
             )
             assert live is not None and live.cancel_requested is act
             assert len(audits) == int(act)
             if act:
-                audit = audits[0].model_dump(mode="json")
+                audit = audits[0]
                 assert set(audit) == {
+                    "audit_id",
+                    "tenant_id",
                     "id",
                     "state",
                     "owner_account_id",

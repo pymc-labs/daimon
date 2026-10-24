@@ -125,11 +125,7 @@ class LongJobExecutor:
                 outcome = "cancelled"
             elif outcome is None and deadline is not None and self.clock() >= deadline:
                 outcome = "timed_out"
-            if (
-                outcome is None
-                and current.worker_session_id is None
-                and not current.cancel_requested
-            ):
+            if outcome is None and current.worker_session_id is None:
                 try:
                     await require_admission(self.sm, current)
                     async with self.sm.begin() as db:
