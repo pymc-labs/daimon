@@ -318,6 +318,30 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     assert all(r.method == "GET" for r in trace.requests)
 
 
+async def test_the_first_preview_tells_the_model_to_post_the_card_in_the_same_turn(active_chat):
+    """SMOKE 42591c55 J5: the model read "If they want to proceed" and asked the person
+    to reply "yes" instead of calling again, so no card was posted. The preview must say
+    the originating request is the go-ahead and that the card, not a chat reply, confirms.
+    """
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    _without_own_tools(payload)
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="openai",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview"
+    summary = " ".join(preview.summary.lower().split())
+    assert "same reply" in summary, preview.summary
+    assert "do not ask" in summary and "reply yes" in summary, preview.summary
+    assert "confirm on it" in summary, preview.summary
+    assert not trace.replies and not trace.violations
+
+
 @pytest.mark.parametrize("missing", ["native_session", "ungated_session", "feature_off"])
 async def test_no_verified_native_card_refuses_before_source_agent_reads(active_chat, missing):
     from daimon.core.config import TurnSettings
