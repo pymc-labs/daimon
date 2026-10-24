@@ -78,9 +78,11 @@ from daimon.core.neutral_resources import WorkerPermissions, resolve_worker_spec
 from daimon.core.platform_system import system_for_platform
 from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.rule_views import RoutineOrigin
+from daimon.core.session_fence_retry import retry_fences
 from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import fleet as fleet_store
+from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.mux_state import PostgresStateStore, database_clock
 from daimon.core.tool_safety import (
@@ -124,7 +126,7 @@ from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.actions import UserMessage
-from mux.contracts.config import BackendConfig
+from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ChannelRef, Scope, ThreadRef
 from mux.contracts.resources import Agent, AgentSpec, ProviderBinding
@@ -1241,18 +1243,30 @@ async def run_worker(
                         # read, a second pooled session or the fleet lock (SMOKE d75dd687).
                         resolve_source = await capture_preparation_source(source_request)
                         await guard(captured=resolve_source)
-                        async with deps.sessionmaker.begin() as db:
-                            retained, _, origin = await resolve_turn_backend(
-                                db,
-                                revision.channel,
-                                source,
-                                enabled=True,
-                                retained_revision=revision.local,
-                                worker=resolved,
-                                validate_origin=lambda selection, origin, retained: origin_check(
-                                    db, resolve_source
-                                ),
-                            )
+
+                        # resolve_turn_backend takes the tenant's shared policy fence with
+                        # one try-lock: retry it like a turn does, or a concurrent policy
+                        # writer (a copy, a switch, a rule) fails the worker (J3 8970b4ef).
+                        # The transaction only reads, so a miss rolls back and re-checks.
+                        async def resolve_attempt() -> tuple[
+                            ConfigRevision | None, bool, Literal["channel", "agent", "default"]
+                        ]:
+                            async with deps.sessionmaker.begin() as db:
+                                return await resolve_turn_backend(
+                                    db,
+                                    revision.channel,
+                                    source,
+                                    enabled=True,
+                                    retained_revision=revision.local,
+                                    worker=resolved,
+                                    validate_origin=lambda selection, origin, retained: (
+                                        origin_check(db, resolve_source)
+                                    ),
+                                )
+
+                        retained, _, origin = await retry_fences(
+                            resolve_attempt, busy_error=PolicyBusyError
+                        )
                     if retained != revision or origin != "agent":
                         raise FleetConflict(
                             "worker retained revision no longer authorizes preparation",
