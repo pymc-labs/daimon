@@ -114,13 +114,17 @@ from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.continuity.continuation import (
+    MAX_REQUESTED_WORK,
     ContinuationDecision,
+    ContinuationRequest,
     check_wake_responder,
     load_asking_agent_id,
+    record_continuation,
 )
 from daimon.core.continuity.messages import (
     render_access_changed_try_again,
     render_current_work_must_finish,
+    render_message_queued_behind_turn,
     render_preparation_failed,
     render_replacement_summary,
     render_unexpected_loss,
@@ -218,6 +222,7 @@ from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
+    session_busy_in,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
@@ -4140,22 +4145,23 @@ class DaimonBot(commands.Bot):
     ) -> None:
         """Turn a failed continuation's still-pending card into plain copy; never raises."""
         from daimon.core.neutral_resources import WorkerSpecRefused
-        from daimon.core.turn.errors import SessionBusyError
 
         if surface.end_card is None or (
             surface.thread is not None and self._thread_stops.get(surface.thread.id) is not None
         ):
             return
-        if isinstance(exc, SessionBusyError):
+        busy = session_busy_in(exc)
+        if busy is not None:
             # The thread's previous turn still holds the session: dispatch releases
             # this row and retries it at the next turn tail. That is not a failure,
             # so the status card must not become "Something went wrong on our side"
-            # (J6g: the copy answered, then a second error reply).
+            # (J6g: the copy answered, then a second error reply). The busy bind may
+            # arrive wrapped in the turn's own TurnError; unwrap its cause chain.
             log.info(
                 "continuation.busy_bind_not_an_error",
                 reason=row.reason,
-                pending=list(exc.pending_reasons),
-                retry_after=exc.retry_after.isoformat(),
+                pending=list(busy.pending_reasons),
+                retry_after=busy.retry_after.isoformat(),
             )
             return
         rid = bound_request_id()
@@ -5609,10 +5615,58 @@ class DaimonBot(commands.Bot):
             # this thread is still running, and the session it is running in
             # belongs to the OUTGOING responder. Making the change around it
             # would answer as one agent inside another agent's workspace, so no
-            # turn runs here -- the person is told the in-flight message
-            # finishes first and the switch applies to their next one. A seal
-            # that landed while the turn was prepared defers it the same way;
-            # the next message is prepared read-only, so it says to send again.
+            # turn runs here. A thread already handed to `agent` queues this
+            # message for it and answers once the in-flight turn ends (M07g);
+            # every other change is told to send again. A seal defers it the
+            # same way; the next message is prepared read-only, so it says so.
+            queued_work = strip_mentions(
+                message.content, self._plain_text_names(message.guild)
+            ).strip()
+            if (
+                "seal" not in busy.pending_reasons
+                and admission.config.thread_binding_kind in ("handoff", "owner")
+                and queued_work
+                and len(queued_work) <= MAX_REQUESTED_WORK
+                and not message.attachments
+            ):
+                # Only a plain message the queue can carry whole: an attachment
+                # or a longer message is still told to send again, never cut.
+                try:
+                    await record_continuation(
+                        self.runtime.sessionmaker,
+                        ContinuationRequest(
+                            tenant_id=tenant_id,
+                            platform="discord",
+                            parent_channel_id=parent_channel_id,
+                            thread_id=str(thread.id),
+                            requester_account_id=admission.account_id,
+                            requester_external_user_id=str(message.author.id),
+                            target_ma_agent_id=str(agent.id),
+                            target_name=admission.config.agent_name or agent.name,
+                            requested_work=queued_work,
+                            reason="task_handoff",
+                            idempotency_key=uuid.uuid4(),
+                        ),
+                    )
+                except Exception as error:
+                    log.warning(
+                        "turn.handoff_busy_queue_failed",
+                        thread_id=str(thread.id),
+                        error_class=type(error).__name__,
+                    )
+                else:
+                    queued_text = render_message_queued_behind_turn(agent.name)
+                    if lifecycle.message_ref is not None:
+                        await lifecycle.edit_card(content=queued_text, embed=None, view=None)
+                    else:
+                        await turn_send(queued_text)
+                    await retire_terminal_turn_card(
+                        self.runtime.sessionmaker,
+                        intent_id=turn_card_intent.id,
+                        expected_message_id=lifecycle.card_message_id,
+                        no_post_confirmed=not lifecycle.first_post_attempted,
+                    )
+                    return
             busy_text = (
                 render_access_changed_try_again()
                 if "seal" in busy.pending_reasons

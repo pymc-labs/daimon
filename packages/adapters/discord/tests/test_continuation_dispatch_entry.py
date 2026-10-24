@@ -487,6 +487,29 @@ async def test_a_busy_continuation_does_not_end_its_card_with_a_generic_error(
     end_card.assert_not_awaited()
 
 
+async def test_a_wrapped_busy_continuation_does_not_end_its_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A busy bind can arrive wrapped in the turn's own TurnError (J6g)."""
+    from types import SimpleNamespace
+
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.errors import SessionBusyError
+
+    bot = make_bot(_make_runtime(db_session_factory))
+    end_card = AsyncMock()
+    surface = SimpleNamespace(end_card=end_card, thread=None)
+    row = SimpleNamespace(reason="task_handoff")
+    busy = SessionBusyError(
+        pending_reasons=("agent_identity",),
+        retry_after=datetime.now(UTC),
+    )
+    await bot._end_continuation_card(  # pyright: ignore[reportPrivateUsage]
+        row, TurnError(kind="upstream", cause=busy), surface
+    )
+    end_card.assert_not_awaited()
+
+
 async def test_continuation_turn_omits_handoff_notice_for_private_input(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

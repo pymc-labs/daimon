@@ -196,6 +196,23 @@ class SessionBusyError(DaimonError):
         self.retry_after: datetime = retry_after
 
 
+def session_busy_in(error: BaseException) -> SessionBusyError | None:
+    """The busy bind behind `error`, however the turn wrapped it.
+
+    A turn can carry the bind's `SessionBusyError` as its own `TurnError`'s
+    `cause` (or as `__cause__`); either way nothing ran and the work waits.
+    """
+    seen: set[int] = set()
+    current: object = error
+    while isinstance(current, BaseException) and id(current) not in seen:
+        if isinstance(current, SessionBusyError):
+            return current
+        seen.add(id(current))
+        cause = getattr(current, "cause", None)
+        current = cause if isinstance(cause, BaseException) else current.__cause__
+    return None
+
+
 class SessionAgentMismatch(DaimonError):
     """An existing workspace belongs to a different responder; leave it intact."""
 

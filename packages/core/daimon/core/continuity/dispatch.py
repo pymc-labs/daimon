@@ -49,6 +49,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
     TurnNotStarted,
+    session_busy_in,
 )
 from daimon.core.turn.protection import protection_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -322,7 +323,18 @@ async def dispatch_pending_continuations(
                 retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
                 await release_wake(sessionmaker, claim, retry_at=retry_at)
             except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
-                log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
-                await _settle(sessionmaker, claim, "dispatch_failed", now)
+                # A busy bind can reach here wrapped in the turn's own error. The
+                # row did not run: release it like the direct case above instead of
+                # settling work that never happened (J6g).
+                busy = session_busy_in(exc)
+                if busy is not None:
+                    await release_wake(
+                        sessionmaker,
+                        claim,
+                        retry_at=busy_retry_at(row, now=now(), not_before=busy.retry_after),
+                    )
+                else:
+                    log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
+                    await _settle(sessionmaker, claim, "dispatch_failed", now)
             else:
                 await _settle(sessionmaker, claim, None, now)

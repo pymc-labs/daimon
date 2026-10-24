@@ -219,6 +219,48 @@ async def test_a_busy_handoff_is_released_for_the_next_turn_tail(
     assert await _status(db_session_factory, key) == ("delivered", None)
 
 
+async def test_a_wrapped_busy_handoff_is_released_for_the_next_turn_tail(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """The turn can wrap the busy bind in its own TurnError (J6g)."""
+    from daimon.core.errors import TurnError
+
+    key = await _queue(db_session_factory, caller, "w")
+    busy = SessionBusyError(pending_reasons=("x",), retry_after=_SOON)
+    await _dispatch(db_session_factory, caller, run=TurnError(kind="upstream", cause=busy))
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.attempts, row.available_at) == ("pending", 0, None), (
+        "a wrapped busy bind is not a dispatch failure: the row waits again"
+    )
+    assert await _dispatch(db_session_factory, caller) == (["w"], []), "the next tail runs it"
+
+
+async def test_a_message_queued_behind_a_hand_off_is_answered_exactly_once(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """M07g: the person writes again while the hand-off's turn still runs.
+
+    Their message is queued for the copy after the hand-off's own work, so it
+    supersedes that work: the copy answers the newer message once and the stale
+    request never runs, now or at a later turn tail.
+    """
+    handed = await _queue(db_session_factory, caller, "summarise the thread for me")
+    queued = await _queue(db_session_factory, caller, "which model are you running on?")
+    first, second = await _row(db_session_factory, handed), await _row(db_session_factory, queued)
+    assert first.created_at < second.created_at
+    said_at = first.created_at + (second.created_at - first.created_at) / 2
+
+    assert await _dispatch(db_session_factory, caller, latest=said_at) == (
+        ["which model are you running on?"],
+        [],
+    )
+    assert await _status(db_session_factory, handed) == ("skipped", "skip_superseded")
+    assert await _status(db_session_factory, queued) == ("delivered", None)
+    assert await _dispatch(db_session_factory, caller, latest=said_at) == ([], []), (
+        "nothing answers a second time"
+    )
+
+
 async def test_a_busy_wake_is_released_until_the_session_frees(
     db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
 ) -> None:

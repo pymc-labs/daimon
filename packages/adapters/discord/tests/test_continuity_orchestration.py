@@ -29,6 +29,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
+    render_message_queued_behind_turn,
     render_replacement_summary,
     render_unexpected_loss,
 )
@@ -918,6 +919,86 @@ async def test_session_busy_posts_must_finish_copy_and_runs_no_turn(
     assert render_current_work_must_finish("test-agent", handoff=True) in edited, (
         f"expected the busy copy edited into the status embed, got {edited}"
     )
+    await _assert_no_recoverable_cards(db_session_factory)
+
+
+@patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+async def test_a_hand_off_that_binds_busy_queues_the_message_for_the_copy(
+    mock_resolve_config: AsyncMock,
+    mock_resolve_env: AsyncMock,
+    mock_resolve_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """M07g: a message to a thread just handed to a copy must answer once, not ask
+    the person to send it again while the outgoing turn is still running.
+
+    A plain message is queued whole for the copy; one with an attachment can't be
+    carried by the queue, so it is still told to send again.
+    """
+    from daimon.core.stores.task_continuations import list_pending_continuations
+
+    guild_id = "700000012"
+    tenant_id = await _seed_tenant(db_session, guild_id=guild_id)
+    mock_resolve_config.return_value = _stub_resolved_config(
+        thread_binding_id=uuid.uuid4(), thread_binding_kind="handoff"
+    )
+    mock_resolve_agent.return_value = "ag_test"
+    mock_resolve_env.return_value = "env_test"
+
+    agent = ma_agent(id="ag_test", tenant_id=tenant_id)
+
+    def _agents_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=agent.model_dump(mode="json"))
+
+    bot = make_bot(
+        _make_runtime(db_session_factory, anthropic=build_stub_anthropic(_agents_handler))
+    )
+    plain = _make_thread_message(
+        guild_id=int(guild_id), content="<@999> which model are you running on?"
+    )
+    with_file = _make_thread_message(
+        guild_id=int(guild_id), content="<@999> read this file for me please"
+    )
+    with_file.attachments = [MagicMock(filename="notes.txt")]
+
+    for message in (plain, with_file):
+        with (
+            patch(
+                "daimon.adapters.discord.bot.bind_session",
+                new_callable=AsyncMock,
+                side_effect=SessionBusyError(
+                    pending_reasons=("agent_identity",), retry_after=datetime.now(UTC)
+                ),
+            ),
+            patch(
+                "daimon.adapters.discord.bot.run_prepared_turn", new_callable=AsyncMock
+            ) as mock_run_prepared_turn,
+        ):
+            await bot.on_message(message)
+        mock_run_prepared_turn.assert_not_called()
+
+    async with db_session_factory() as session:
+        rows = await list_pending_continuations(
+            session, tenant_id=tenant_id, platform="discord", thread_id="5555"
+        )
+    assert [
+        (r.status, r.reason, r.target_ma_agent_id, r.requested_work, r.thread_id) for r in rows
+    ] == [("pending", "task_handoff", "ag_test", "which model are you running on?", "5555")], (
+        "only the plain message is queued for the copy, whole"
+    )
+
+    def _said(message: MagicMock) -> list[str | None]:
+        ref = message.channel.send.return_value
+        return [c.kwargs.get("content") for c in ref.edit.call_args_list] + [
+            c.kwargs.get("content") for c in message.channel.send.call_args_list
+        ]
+
+    assert render_message_queued_behind_turn("test-agent") in _said(plain), _said(plain)
+    assert render_current_work_must_finish("test-agent", handoff=True) not in _said(plain)
+    assert render_current_work_must_finish("test-agent", handoff=True) in _said(with_file)
     await _assert_no_recoverable_cards(db_session_factory)
 
 
