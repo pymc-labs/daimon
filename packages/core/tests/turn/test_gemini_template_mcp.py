@@ -795,6 +795,53 @@ async def test_a_consent_that_dropped_skills_and_the_switch_tool_still_prepares(
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_tools_skills_and_the_switch_tool_still_prepares(
+    consent_recorded_before_self_cards,
+    consent_recorded_before_skill_tools,
+    consent_recorded_before_template_tools,
+    template,
+    monkeypatch,
+):
+    """All three older differences at once: switched before #1483 kept its tools,
+    before skills came along and before the switch tool was offered. It prepares,
+    with all three now kept."""
+    from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
+
+    request, quote, *_ = template
+    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+    assert {"tools", "skills", switch_drop} <= set(quote.declared_drops)
+    consent_recorded_before_self_cards["old"] = False
+    monkeypatch.setattr(consent_recorded_before_skill_tools, "SKILL_READ_PROXY", "call_tool")
+    consent_recorded_before_template_tools()
+    selected, _ = await _prepared(request)
+    spec = selected.target_spec
+    assert not {"tools", "skills", switch_drop} & set(spec.declared_drops)
+    assert [tool.name for tool in spec.tools or ()] == ["code_execution"]
+    assert SKILL_READ_INSTRUCTION in (spec.system or "")
+    assert "request_agent_backend_switch" in _connection(selected).tool_policy["allowed_tools"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_new_confirmation(
+    consent_recorded_before_self_cards,
+    consent_recorded_before_template_tools,
+    template,
+    monkeypatch,
+):
+    """Tools are explained by #1483; one more gated tool offered is not: a fresh card."""
+    from daimon.core import tool_safety
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, quote, *_ = template
+    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
+    consent_recorded_before_template_tools()
+    # The switch tool stays dropped as consented; add_skill is newly offered.
+    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: frozenset({"add_skill"}))
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
+        await _prepared(request)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
     consent_recorded_before_self_cards, template, monkeypatch
 ):
