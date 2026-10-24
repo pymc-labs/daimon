@@ -111,16 +111,20 @@ async def waiting_for(
     *,
     tenant_id: uuid.UUID,
     requester_platform_user_id: str,
-    agent_name: str,
+    matching: dict[str, str],
     now: datetime,
 ) -> bool:
-    """Whether this requester already has an unanswered, unexpired card for this agent."""
+    """Whether this requester already has an unanswered, unexpired card like this one.
+
+    `matching` names the reference fields that make two cards the same request
+    (the agent a switch moves; a configuration's operation and agent).
+    """
     found = await session.scalar(
         select(BackendSwitchCard.id)
         .where(
             BackendSwitchCard.tenant_id == tenant_id,
             BackendSwitchCard.requester_platform_user_id == requester_platform_user_id,
-            BackendSwitchCard.reference["agent"].astext == agent_name,
+            BackendSwitchCard.reference.contains(matching),
             BackendSwitchCard.status.in_(("pending", "claimed")),
             BackendSwitchCard.expires_at > now,
         )
@@ -134,6 +138,15 @@ async def mark_posted(session: AsyncSession, *, card_id: uuid.UUID, message_id: 
         update(BackendSwitchCard)
         .where(BackendSwitchCard.id == card_id)
         .values(message_id=message_id)
+    )
+
+
+async def abandon(session: AsyncSession, *, card_id: uuid.UUID, outcome: str) -> None:
+    """A card whose post failed: never pressable, and no longer waiting."""
+    await session.execute(
+        update(BackendSwitchCard)
+        .where(BackendSwitchCard.id == card_id, BackendSwitchCard.status == "pending")
+        .values(status="refused", outcome=outcome)
     )
 
 

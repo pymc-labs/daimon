@@ -688,7 +688,11 @@ def consent_recorded_before_self_cards(monkeypatch):
     listed = discovery.list_mcp_tools
 
     async def with_gated_tools(url, token):
-        return frozenset(await listed(url, token)) | {"request_agent_backend_switch", "add_skill"}
+        return frozenset(await listed(url, token)) | {
+            "request_agent_backend_switch",
+            "request_fleet_config",
+            "add_skill",
+        }
 
     monkeypatch.setattr(discovery, "list_mcp_tools", with_gated_tools)
     real = tool_safety.self_carded_tools
@@ -705,29 +709,33 @@ async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
 ):
     """Agents switched before the switch tool was offered keep working without re-confirming."""
     request, quote, *_ = template
-    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
-    assert switch_drop in quote.declared_drops, "the consent was recorded the old way"
+    carded = ("request_agent_backend_switch", "request_fleet_config")
+    for tool in carded:
+        assert f"mcp_tool:daimon-mcp:{tool}" in quote.declared_drops, "recorded the old way"
     consent_recorded_before_self_cards["old"] = False
     selected, _ = await _prepared(request)
     allowed = _connection(selected).tool_policy["allowed_tools"]
-    assert "request_agent_backend_switch" in allowed, "the tool is offered from now on"
-    assert switch_drop not in selected.target_spec.declared_drops
+    for tool in carded:
+        assert tool in allowed, "offered from now on"
+        assert f"mcp_tool:daimon-mcp:{tool}" not in selected.target_spec.declared_drops
+    assert "mcp_tool:daimon-mcp:add_skill" in selected.target_spec.declared_drops
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
     consent_recorded_before_self_cards, template, monkeypatch
 ):
-    from daimon.core import tool_safety
     from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.mcp_oauth import discovery
 
     request, *_ = template
     consent_recorded_before_self_cards["old"] = False
-    # One more gated tool now offered as well: more than the switch tool changed.
-    monkeypatch.setattr(
-        tool_safety,
-        "self_carded_tools",
-        lambda: frozenset({"request_agent_backend_switch", "add_skill"}),
-    )
+    listed = discovery.list_mcp_tools
+
+    # A new, ordinary tool appeared too: more than self-carded tools changed.
+    async def with_a_new_tool(url, token):
+        return frozenset(await listed(url, token)) | {"brand_new_tool"}
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", with_a_new_tool)
     with pytest.raises((AgentBackendRefused, AdmissionDenied)):
         await _prepared(request)
