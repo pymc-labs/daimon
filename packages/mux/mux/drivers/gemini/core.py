@@ -54,7 +54,7 @@ from mux.drivers.gemini.mcp_auth import (
     validate_intent,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
-from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner
+from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner, read_records
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
@@ -299,13 +299,50 @@ class Base:
             raise ProviderError(
                 "upstream", retryable=False, native_code="interaction_identity_mismatch"
             )
+        self._same_workspace(record, raw)
+        return raw
+
+    @staticmethod
+    def _same_workspace(record: SessionRecord, raw: Object) -> None:
         expected = record.environment_id
         actual = raw.get("environment_id")
         if expected is not None and actual is not None and actual != expected:
             raise ContinuityLost(
                 record.session.binding.id, ("Gemini replaced the reused workspace.",)
             )
-        return raw
+
+    async def _fetch_interactions(
+        self, scope: Scope, session: ResourceRef
+    ) -> tuple[tuple[str, str, Object], ...]:
+        """Read every interaction of the session from the provider, holding no lock.
+
+        The interactions come from a committed snapshot and the GETs run outside the
+        records transaction, so a slow provider read never holds the account's
+        records row (every other session in the account waits on it).
+        """
+        async with read_records(self._storage) as snapshot:
+            seen = self._record(snapshot, scope, session)
+            pending = tuple(seen.interactions.items())
+        fetched: list[tuple[str, str, Object]] = []
+        for interaction, root in pending:
+            fetched.append((interaction, root, await self._get(seen, interaction)))
+        return tuple(fetched)
+
+    def _apply_fetched(
+        self, record: SessionRecord, fetched: tuple[tuple[str, str, Object], ...]
+    ) -> None:
+        """Apply provider reads to the current record, inside the write transaction.
+
+        A read applies only to the interaction it was made for: one removed or
+        replaced since (its root changed) is skipped, never written onto another
+        turn. The workspace is checked again against the current record, and
+        `_observe` ignores a read older than the one already recorded.
+        """
+        for interaction, root, raw in fetched:
+            if record.interactions.get(interaction) != root:
+                continue
+            self._same_workspace(record, raw)
+            self._observe(record, raw, root)
 
     def _observe(self, record: SessionRecord, raw: Object, root: str) -> None:
         try:
@@ -1238,17 +1275,17 @@ class GeminiEvents(Base):
                 await close()
 
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
-        async with self._storage.transaction() as records:
+        async with read_records(self._storage) as records:
             return page_values(tuple(self._record(records, scope, session).events.values()), page)
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         return await self.retrying(lambda: self._reconcile(scope, session))
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
+        fetched = await self._fetch_interactions(scope, session)
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
-            for interaction, root in record.interactions.items():
-                self._observe(record, await self._get(record, interaction), root)
+            self._apply_fetched(record, fetched)
             s = record.session
             return ProjectionSnapshot(
                 session=session,

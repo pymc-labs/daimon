@@ -1,5 +1,6 @@
 """Offline Gemini port probes using documented wire records and no provider access."""
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -1137,3 +1138,42 @@ async def test_usage_reconcile_retries_a_high_demand_read(setup: Setup) -> None:
     t.reads["i1"] = [high_demand(), native()]
     assert await ma.usage.reconcile(SCOPE, s.ref)
     assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reading", ["usage", "events"])
+@pytest.mark.parametrize("change", ["removed", "replaced"])
+async def test_reconcile_never_applies_a_read_to_an_interaction_changed_meanwhile(
+    setup: Setup, reading: str, change: str
+) -> None:
+    """The provider reads run outside the records transaction; the result is applied
+    in a short one afterwards. An interaction removed, or given to another turn, while
+    its read ran must never receive that read."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(usage=None))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    before = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    t.saved["i1"]["usage"] = {
+        "total_input_tokens": 10,
+        "total_output_tokens": 100,
+        "total_thought_tokens": 0,
+    }
+    t.saved["i1"]["updated"] = datetime.now(UTC).isoformat()
+    real_get = t.get
+
+    async def get_then_change(interaction: str) -> Object:
+        raw = await real_get(interaction)
+        async with storage.transaction() as records:  # another writer, mid-read
+            record = records.sessions[s.ref.id]
+            if change == "removed":
+                del record.interactions[interaction]
+            else:
+                record.interactions[interaction] = "another-turn"
+        return raw
+
+    t.get = get_then_change  # type: ignore[method-assign]
+    if reading == "usage":
+        await asyncio.wait_for(ma.usage.reconcile(SCOPE, s.ref), 5)
+    else:
+        await asyncio.wait_for(ma.events.reconcile(SCOPE, s.ref), 5)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == before
