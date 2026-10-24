@@ -18,6 +18,11 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_
 from uuid import UUID
 
 import structlog
+from daimon.core.caller_resources import (
+    APP_SESSION_VAULT_PREFIX,
+    CALLER_RESOURCES_ID,
+    CALLER_VAULT_PREFIX,
+)
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
@@ -2219,6 +2224,15 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
     return frozenset(paired)
 
 
+def _caller_private(binding: ResourceBinding) -> bool:
+    """A login that belongs to the person asking (their caller-mcp vault, in any of
+    its variants), never to the agent or a worker."""
+    return any(
+        value is not None and value.startswith(CALLER_VAULT_PREFIX)
+        for value in (binding.id, binding.credential_ref)
+    )
+
+
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     """Exclude validated native-only capabilities and their paired resources.
 
@@ -2231,7 +2245,9 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
       (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
     - stored secrets the session would write to a file (`.env`);
     - repositories cloned with a login;
-    - the caller's own private carry (`caller-resources`), declared as `credentials`;
+    - the caller's own logins (every `caller-mcp:` vault variant), never carried, and
+      their private carry (`caller-resources`), declared as `files`;
+    - a GitHub App session's repository vault (`app-session-vault:*`), as `repository`;
     - memory, while the agent's memory store doesn't exist yet (its first turn).
     """
     spec = source.effective_spec
@@ -2267,8 +2283,6 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
         for server in spec.mcp_servers or ()
         if server.name in logins and server.credential_ref is not None
     }
-    from daimon.core.sessions import CALLER_RESOURCES_ID
-
     resources: list[ResourceBinding] = []
     for binding in source.resource_requirements:
         paired = _mcp_credential_servers(source, binding)
@@ -2281,10 +2295,19 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
         if binding.kind == "credential" and binding.target_path is not None:
             drops.add("files")
             continue
+        if _caller_private(binding):
+            # The caller's own login (every caller-mcp vault variant, Slack turn and
+            # hold included) is never worker authority: excluded, so nothing carries it.
+            continue
         if binding.kind == "native" and binding.id == CALLER_RESOURCES_ID:
-            # The caller's own private carry (a DM, a seal, a Slack turn context, a held
-            # vault) is theirs, not a worker's: workers run without it, declared.
-            drops.add("credentials")
+            # The caller's private carry (a DM, a seal, attached material): workers run
+            # without it, declared. Not as `credentials`: that would discharge the
+            # check for a login still among the resources.
+            drops.add("files")
+            continue
+        if binding.kind == "native" and binding.id.startswith(APP_SESSION_VAULT_PREFIX):
+            # A GitHub App session's repository vault: workers run without it, declared.
+            drops.add("repository")
             continue
         resources.append(binding)
     repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
