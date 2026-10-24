@@ -4140,10 +4140,23 @@ class DaimonBot(commands.Bot):
     ) -> None:
         """Turn a failed continuation's still-pending card into plain copy; never raises."""
         from daimon.core.neutral_resources import WorkerSpecRefused
+        from daimon.core.turn.errors import SessionBusyError
 
         if surface.end_card is None or (
             surface.thread is not None and self._thread_stops.get(surface.thread.id) is not None
         ):
+            return
+        if isinstance(exc, SessionBusyError):
+            # The thread's previous turn still holds the session: dispatch releases
+            # this row and retries it at the next turn tail. That is not a failure,
+            # so the status card must not become "Something went wrong on our side"
+            # (J6g: the copy answered, then a second error reply).
+            log.info(
+                "continuation.busy_bind_not_an_error",
+                reason=row.reason,
+                pending=list(exc.pending_reasons),
+                retry_after=exc.retry_after.isoformat(),
+            )
             return
         rid = bound_request_id()
         if row.reason == "worker_finished" and isinstance(
