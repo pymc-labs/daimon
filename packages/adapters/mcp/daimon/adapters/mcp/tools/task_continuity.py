@@ -343,7 +343,13 @@ async def _hand_off_task_impl(
                 )
             if repo is not None and unsaved_work is None:
                 # Raised inside the transaction, so the binding rolls back.
-                raise ToolError(render_tool_unsaved_work_question(repo))
+                raise ToolError(
+                    render_tool_unsaved_work_question(
+                        repo,
+                        # A switch's hand-off: the answer rides the switch's calls.
+                        retry="hand_off_task" if switch is None else "request_agent_backend_switch",
+                    )
+                )
             if switch == "check":
                 raise _HandOffChecked
             if unsaved_work is not None and live_session is not None:

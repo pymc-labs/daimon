@@ -551,35 +551,10 @@ async def test_a_repo_bound_thread_answers_the_unsaved_work_question_before_the_
 ):
     """A thread with a repo bound: the uncommitted-work question comes with the preview,
     before any card, and its answer rides the confirmed call (#1463 review 2)."""
-    from daimon.core.session_snapshot import SessionSnapshot
     from daimon.core.stores.thread_sessions import get_live_thread_session
-    from sqlalchemy import text
 
     chat = fresh_chat
-    snapshot = SessionSnapshot(
-        ma_agent_id="agent_daimon",
-        model_id="claude-sonnet-5",
-        system_sha256=None,
-        skills_sha256="skills",
-        environment_id="env_1",
-        repo_url="https://github.com/acme/data",
-        repo_branch="main",
-        memory_store_id=None,
-        vault_id=None,
-        tools_sha256="tools",
-        mcp_servers_sha256="mcp",
-        env_sha256=None,
-        agent_version=1,
-        agent_name="Daimon",
-    )
-    async with chat.runtime.session_factory.begin() as session:
-        await session.execute(
-            text(
-                "UPDATE thread_sessions SET effective_config = CAST(:config AS jsonb) "
-                "WHERE ma_session_id = 'sess_daimon'"
-            ),
-            {"config": snapshot.model_dump_json()},
-        )
+    await _bind_a_repo(chat)
     copy = await _new_copy(chat)
     with pytest.raises(ToolError, match="uncommitted changes in https://github.com/acme/data"):
         await _switch(chat, copy.name)
@@ -639,3 +614,144 @@ async def test_switching_an_older_copy_never_moves_this_thread(fresh_chat, made)
             chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
         )
     assert "post its switch card now" not in str(refused.value)
+
+
+async def _card(chat: Chat, name: str, preview, **extra):
+    """The card the host posts for a confirmed call, prepared as the host does."""
+    from functools import partial
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools.agents import (
+        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.channel_backend import make_backend_service
+    from daimon.core.confirmation import backend_switch_callbacks, prompt_for_tool_call
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+
+    service = make_backend_service(
+        chat.runtime.session_factory,
+        chat.runtime.settings.turn,
+        capture_source=partial(_capture_backend_source, chat.runtime, chat.auth, chat.origin),
+    )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=chat.runtime.session_factory,
+        anthropic=chat.runtime.client,
+        tenant_id=chat.auth.tenant_id,
+        account_id=chat.auth.account_id,
+        current_admin=AsyncMock(return_value=chat.auth.is_admin),
+    )
+    return await prepare(
+        prompt_for_tool_call(
+            ToolCall(
+                tool_use_id="j1-card",
+                server_name=DAIMON_SERVER_NAME,
+                tool_name="request_agent_backend_switch",
+                input={
+                    "agent_name": name,
+                    "target_backend": "openai",
+                    "expected_revision": preview.expected_revision,
+                    "preview_digest": preview.preview_digest,
+                    "accepted_drops": list(preview.declared_drops),
+                    **extra,
+                },
+            ),
+            requester_platform_user_id="123",
+            now=datetime.now(UTC),
+        )
+    )
+
+
+async def _bind_a_repo(chat: Chat) -> None:
+    from daimon.core.session_snapshot import SessionSnapshot
+    from sqlalchemy import text
+
+    snapshot = SessionSnapshot(
+        ma_agent_id="agent_daimon",
+        model_id="claude-sonnet-5",
+        system_sha256=None,
+        skills_sha256="skills",
+        environment_id="env_1",
+        repo_url="https://github.com/acme/data",
+        repo_branch="main",
+        memory_store_id=None,
+        vault_id=None,
+        tools_sha256="tools",
+        mcp_servers_sha256="mcp",
+        env_sha256=None,
+        agent_version=1,
+        agent_name="Daimon",
+    )
+    async with chat.runtime.session_factory.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE thread_sessions SET effective_config = CAST(:config AS jsonb) "
+                "WHERE ma_session_id = 'sess_daimon'"
+            ),
+            {"config": snapshot.model_dump_json()},
+        )
+
+
+async def test_the_unsaved_work_answer_is_bound_to_the_card(fresh_chat):
+    """The answer the person gave is the one the card shows and the switch applies: an
+    answer changed or invented after the preview is a different request (#1463 r2 a)."""
+    chat = fresh_chat
+    await _bind_a_repo(chat)
+    copy = await _new_copy(chat)
+    with pytest.raises(ToolError) as asked:
+        await _switch(chat, copy.name)
+    # The question names the tool whose retry carries the answer, never the hand-off
+    # that refuses a copy awaiting its switch.
+    assert "call request_agent_backend_switch again with unsaved_work" in str(asked.value)
+    preview = await _switch(chat, copy.name, unsaved_work="leave")
+    card = await _card(chat, copy.name, preview, unsaved_work="leave")
+    assert "Uncommitted changes in the repo are left where they are" in (card.consequence or "")
+    for changed in ("copy", None):
+        with pytest.raises(ValueError, match="This preview changed"):
+            await _card(chat, copy.name, preview, unsaved_work=changed)
+        with pytest.raises(ToolError):
+            await _switch(
+                chat,
+                copy.name,
+                expected_revision=preview.expected_revision,
+                preview_digest=preview.preview_digest,
+                accepted_drops=preview.declared_drops,
+                unsaved_work=changed,
+            )
+        assert await _handed_to(chat) is None
+        assert await _provider_of(chat, copy.name) in (None, "anthropic")
+
+
+async def test_a_hand_off_that_fails_after_the_switch_says_the_switch_landed(
+    fresh_chat, monkeypatch
+):
+    """The switch landed but writing the hand-off failed (a database error): the reply
+    says where the copy is now and where to find it (#1463 r2 b)."""
+    from daimon.adapters.mcp.tools import task_continuity
+    from sqlalchemy.exc import OperationalError
+
+    chat = fresh_chat
+    real = task_continuity._hand_off_task_impl  # pyright: ignore[reportPrivateUsage]
+
+    async def failing(*args, **kwargs):
+        if kwargs.get("switch") == "commit":
+            raise OperationalError("INSERT", {}, Exception("connection lost"))
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(task_continuity, "_hand_off_task_impl", failing)
+    copy = await _new_copy(chat)
+    preview = await _switch(chat, copy.name)
+    with pytest.raises(ToolError) as failed:
+        await _switch(
+            chat,
+            copy.name,
+            expected_revision=preview.expected_revision,
+            preview_digest=preview.preview_digest,
+            accepted_drops=preview.declared_drops,
+        )
+    assert str(failed.value) == (
+        f"{copy.name} now uses OpenAI, but this conversation couldn't be handed to it: "
+        f"something went wrong on our side. Ask {copy.name} in a new conversation."
+    )
+    assert await _provider_of(chat, copy.name) == "openai"
+    assert await _handed_to(chat) is None
