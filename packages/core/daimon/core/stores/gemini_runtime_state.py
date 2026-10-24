@@ -162,7 +162,7 @@ class PostgresPayloadDatabase:
             await complete(stack.aclose())
 
     async def read(self) -> str | None:
-        """The last committed payload, for a pure read: no fence, no row lock.
+        """The last committed payload, for a pure read: no fence, no row lock, no write.
 
         Every session in the account shares this row, so a usage or event listing that
         waited behind its writers (fence plus FOR UPDATE NOWAIT, 5 s before dispatch)
@@ -173,8 +173,10 @@ class PostgresPayloadDatabase:
         async def attempt() -> str | None:
             try:
                 async with asyncio.timeout_at(deadline):
+                    # A plain SELECT takes no lock. No `SET TRANSACTION READ ONLY`: a
+                    # factory bound to one connection joins its caller's transaction,
+                    # and that would make the caller's own later writes fail.
                     async with self._sessions() as session, session.begin():
-                        await session.execute(text("SET TRANSACTION READ ONLY"))
                         await self._require_account(session, locking=False)
                         return await session.scalar(
                             select(GeminiRuntimeState.body).where(
