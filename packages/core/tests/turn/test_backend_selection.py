@@ -371,6 +371,12 @@ async def test_agent_preference_and_revert_select_new_threads_without_channel_ov
     assert old.ma_session_id == original.ma_session_id and old.admission.backend_revision is None
     assert old.admission.backend_footer_profile == "anthropic.managed_agents"
     assert await host.store.get_binding(host.slot) == original_binding
+    # M03: the thread tried to follow its agent to OpenAI, which can't serve it here;
+    # that move was withdrawn, so nothing is left to move it on a later message.
+    from daimon.core.stores import thread_provider_releases
+
+    async with host.sessions() as db:
+        assert await thread_provider_releases.requested_generation(db, host.slot) is None
     restored = await service.revert(agent, actor, expected_revision=changed.local)
     assert restored.backend is None and restored.previous_local == changed.local
     new_default = await host.prepare("after-revert")

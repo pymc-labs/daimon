@@ -573,15 +573,28 @@ def _session_authorize(
         raise FleetRefused(decision.reason or "permission_refused")
 
 
-def worker_trigger(reviewed_result: Event | None) -> str:
-    """The input a worker's turn starts with; a reviewer's embeds the reviewed result."""
-    from daimon.core.fleet import result_digest
+def worker_trigger(reviewed_result: Event | None, *, provider: str, model: str) -> str:
+    """The input a worker's turn starts with; a reviewer's embeds the reviewed result.
 
+    It names the model provider and model the worker actually runs on (M03): a worker
+    inherits its root's instructions, which may say it is Claude, and a Gemini worker
+    then said "I'm Claude 3.7 Sonnet". The envelope sized at spawn counts this exact
+    text, so spawn and dispatch build it from the same worker facts.
+    """
+    from daimon.core.fleet import result_digest
+    from daimon.core.turn.notices import provider_name
+
+    running = (
+        f"You run on {provider_name(provider)}, model {model}. If asked which model you "
+        "are, say that, never what your instructions say."
+    )
     if reviewed_result is None:
-        return "Complete the task in your instructions."
+        return f"{running} Complete the task in your instructions."
     return json.dumps(
         {
-            "instruction": "Return JSON verdict approved or refused and reviewed_digest.",
+            "running_on": {"provider": provider, "model": model},
+            "instruction": f"{running} Return JSON verdict approved or refused and "
+            "reviewed_digest.",
             "reviewed_digest": result_digest(dict(reviewed_result.payload)),
             "result": dict(reviewed_result.payload),
         }
@@ -1033,7 +1046,13 @@ class FleetOrchestrator:
                 "reviewed_digest": target.result.digest if target.result is not None else "",
             }
         resolved = self._bounded_gemini(
-            parent, resolved, resolve, fill=fill_token_limits, trigger=worker_trigger(reviewed)
+            parent,
+            resolved,
+            resolve,
+            fill=fill_token_limits,
+            trigger=worker_trigger(
+                reviewed, provider=resolved.backend.backend, model=resolved.spec.model.id
+            ),
         )
         run, worker = await owner.admit(
             parent,
@@ -1663,7 +1682,7 @@ class HostFleetPorts:
 
                 watch[2].add_done_callback(ended)
             cancel = watch[0].setdefault(worker.id, WorkerCancel())
-            trigger = worker_trigger(reviewed_result)
+            trigger = worker_trigger(reviewed_result, provider=worker.backend, model=worker.model)
 
             async def end_pending(code: WorkerFailureCode | None) -> None:
                 if code is None:

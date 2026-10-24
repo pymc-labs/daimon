@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -255,6 +255,8 @@ def render_turn_origin(
     responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
     handoff: HandoffNotice | None = None,
+    running_on: Mapping[str, str] | None = None,
+    moved: Mapping[str, str | None] | None = None,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -281,6 +283,13 @@ def render_turn_origin(
     tells a person a command from another platform. For a sender from another
     organisation (`origin.sender_foreign`, Teams), who has no private chat with Daimon,
     the words send setup and billing to someone in the organisation that added it.
+
+    `running_on` is the model provider and model this message actually runs on
+    (`daimon.core.turn.admission.running_on`), so "what model are you" is answered
+    from what runs, not from the agent's settings. `moved` says, once, that this
+    conversation just followed its agent's switch to another provider ("moved"),
+    or stays where it is because it is shared ("stays"); `provider`/`model` name
+    the agent's selection.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -321,6 +330,10 @@ def render_turn_origin(
             "applied": list(session_state.applied),
             "lost": list(session_state.lost),
         }
+    if running_on is not None:
+        controls["running_on"] = dict(running_on)
+    if moved is not None:
+        controls["conversation_move"] = dict(moved)
     if handoff is not None:
         controls["handoff"] = {
             "from_name": handoff.from_name,
@@ -367,6 +380,19 @@ def render_turn_origin(
     )
     if words is not None and origin.platform in CHAT_PLATFORMS:
         rendered += words_sentence(origin.platform)
+    if running_on is not None:
+        rendered += (
+            " running_on is the model provider and model this reply actually runs on: "
+            "answer what model you are from it, never from your settings."
+        )
+    if moved is not None:
+        rendered += (
+            " conversation_move: when kind is moved, this conversation just moved to "
+            "that provider and model: say so first, once, and that earlier messages here "
+            "aren't carried over. When kind is stays, this conversation is shared and "
+            "stays on running_on while new conversations use that provider and model: "
+            "say so only if asked about your model or the switch."
+        )
     rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence

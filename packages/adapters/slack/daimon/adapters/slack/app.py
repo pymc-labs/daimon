@@ -258,7 +258,7 @@ from daimon.core.stores.turn_card_intents import (
 )
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
@@ -2970,6 +2970,7 @@ class SlackApp:
                 return (
                     render_turn_origin(
                         recovery_origin,
+                        **backend_facts(admission),
                         responder_handle=responder_handle(self.runtime.settings),
                         responder_account=account,
                         session_state=session_state,
@@ -3086,6 +3087,7 @@ class SlackApp:
                         user_message=(
                             render_turn_origin(
                                 origin,
+                                **backend_facts(admission),
                                 responder_handle=responder_handle(self.runtime.settings),
                                 responder_account=account,
                                 session_state=session_state,
@@ -3527,6 +3529,7 @@ class SlackApp:
             return (
                 render_turn_origin(
                     recovery_origin,
+                    **backend_facts(follow_admission),
                     responder_handle=responder_handle(self.runtime.settings),
                     responder_account=account,
                     handoff=handoff_notice,
@@ -3615,6 +3618,7 @@ class SlackApp:
                     user_message=(
                         render_turn_origin(
                             follow_origin,
+                            **backend_facts(follow_admission),
                             responder_handle=responder_handle(self.runtime.settings),
                             responder_account=account,
                             handoff=handoff_notice,
