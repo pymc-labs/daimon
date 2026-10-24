@@ -73,7 +73,10 @@ async def handle_dm_notice(interaction: discord.Interaction, runtime: DiscordRun
             is_platform_admin=True,
         )
         account_id = await admin_account_for_platform_user(
-            session, tenant_id=tenant_id, external_id=str(interaction.user.id)
+            session,
+            tenant_id=tenant_id,
+            external_id=str(interaction.user.id),
+            is_platform_admin=is_member_guild_admin(member, guild_owner_id=member.guild.owner_id),
         )
     visible: tuple[str, ...] = ()
     if runtime.settings.crypto.keys:
@@ -262,6 +265,7 @@ class NewRepoCard(discord.ui.View):
                     session,
                     tenant_id=self.group.tenant_id,
                     external_id=str(interaction.user.id),
+                    is_platform_admin=is_platform_admin(interaction),
                 )
                 for notice in self.group.notices:
                     await dismiss_notice(
@@ -317,6 +321,7 @@ async def send_pending_notice(
                     session,
                     tenant_id=tenant_id,
                     external_id=str(interaction.user.id),
+                    is_platform_admin=is_platform_admin(interaction),
                 )
             except ValueError:
                 account_id = None

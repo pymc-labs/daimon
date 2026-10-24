@@ -26,6 +26,8 @@ from daimon.core._models import (
     Tenant,
     TenantGitHubRepo,
 )
+from daimon.core.admin_authority import resolve_authority
+from daimon.core.config import Settings
 from daimon.core.continuity.continuation import sanitize_requested_work
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores import github_access
@@ -37,7 +39,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PINNED_AGENT_MESSAGE = "Connect this repository directly for the pinned agent."
 CHANNEL_LIMITED_REPO_MESSAGE = (
@@ -106,19 +108,46 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _may_hold_link(
-    account: Account | None, *, tenant_id: uuid.UUID, agent_id: uuid.UUID | None
+async def _may_hold_link(
+    session: AsyncSession,
+    account: Account | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID | None,
+    verified_platform_admin: bool = False,
+    settings: Settings | None = None,
 ) -> bool:
-    """A workspace admin's link, or a member's link for one agent.
+    """Keep tenant/snapshot checks, accepting fresh platform evidence without a role write.
 
-    Whether the member manages that agent is checked where the link is made
-    and again when the repos are confirmed, by the caller of `confirm`.
+    Agent links retain their separate live manager check at mint and confirm.
+    Browser reads can re-attest a new platform admin whose snapshot is still USER.
     """
-    return (
-        account is not None
-        and account.tenant_id == tenant_id
-        and (account.role == "admin" or agent_id is not None)
+    if account is None or account.tenant_id != tenant_id:
+        return False
+    if account.role == "admin" or agent_id is not None or verified_platform_admin is True:
+        return True
+    if settings is None:
+        return False
+    principal = (
+        await session.execute(
+            select(PlatformPrincipal)
+            .join(Tenant, Tenant.id == PlatformPrincipal.tenant_id)
+            .where(
+                PlatformPrincipal.account_id == account.id,
+                PlatformPrincipal.tenant_id == tenant_id,
+                PlatformPrincipal.platform == Tenant.platform,
+            )
+        )
+    ).scalar_one_or_none()
+    if principal is None or principal.foreign_home_id is not None:
+        return False
+    authority = await resolve_authority(
+        async_sessionmaker(session.bind, expire_on_commit=False),
+        settings,
+        tenant_id=tenant_id,
+        platform_user_id=principal.external_id,
     )
+    return authority.platform_admin
 
 
 async def cli_account_id(
@@ -132,10 +161,14 @@ async def cli_account_id(
 
 
 async def admin_account_for_platform_user(
-    session: AsyncSession, *, tenant_id: uuid.UUID, external_id: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    external_id: str,
+    is_platform_admin: bool = False,
 ) -> uuid.UUID:
-    """Resolve an invitation requester through the tenant's platform principal."""
-    account_id = await session.scalar(
+    """Resolve a native-verified admin, or retain the operator CLI's stored snapshot."""
+    query = (
         select(Account.id)
         .join(PlatformPrincipal, PlatformPrincipal.account_id == Account.id)
         .join(Tenant, Tenant.id == Account.tenant_id)
@@ -144,9 +177,13 @@ async def admin_account_for_platform_user(
             PlatformPrincipal.tenant_id == tenant_id,
             PlatformPrincipal.platform == Tenant.platform,
             PlatformPrincipal.external_id == external_id,
-            Account.role == "admin",
+            Tenant.archived_at.is_(None),
+            PlatformPrincipal.foreign_home_id.is_(None),
         )
     )
+    if is_platform_admin is False:
+        query = query.where(Account.role == "admin")
+    account_id = await session.scalar(query)
     if account_id is None:
         raise ValueError("requester platform user ID must belong to a workspace admin")
     return account_id
@@ -209,6 +246,7 @@ async def mint_invitation(
     agent_name: str | None = None,
     agent_ma_id: str | None = None,
     agent_manager_verified: bool = False,
+    verified_platform_admin: bool = False,
     operator_issued: bool = False,
     origin_platform: str | None = None,
     origin_parent_channel_id: str | None = None,
@@ -224,10 +262,18 @@ async def mint_invitation(
     has checked they manage (`agent_manager_verified`)."""
     account = await session.get(Account, requester_account_id)
     if account is None or (
-        account.role != "admin" and not (agent_id is not None and agent_manager_verified)
+        account.role != "admin"
+        and verified_platform_admin is not True
+        and not (agent_id is not None and agent_manager_verified)
     ):
         raise ValueError("requester must be a tenant admin")
-    if not _may_hold_link(account, tenant_id=tenant_id, agent_id=agent_id):
+    if not await _may_hold_link(
+        session,
+        account,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        verified_platform_admin=verified_platform_admin,
+    ):
         raise ValueError("requester must be a tenant admin")
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
@@ -496,18 +542,22 @@ async def _drop_stale_grants(
     await session.flush()
 
 
-async def get_invitation(session: AsyncSession, token_hash: str) -> Invitation | None:
+async def get_invitation(
+    session: AsyncSession, token_hash: str, *, settings: Settings | None = None
+) -> Invitation | None:
     row = await session.get(GitHubConnectInvitation, token_hash)
     if row is None or row.used_at is not None or row.expires_at <= datetime.now(UTC):
         return None
     account = await session.get(Account, row.requester_account_id)
-    if not _may_hold_link(account, tenant_id=row.tenant_id, agent_id=row.agent_id):
+    if not await _may_hold_link(
+        session, account, tenant_id=row.tenant_id, agent_id=row.agent_id, settings=settings
+    ):
         return None
     return Invitation.model_validate(row)
 
 
 async def invitation_status(
-    session: AsyncSession, token_hash: str
+    session: AsyncSession, token_hash: str, *, settings: Settings | None = None
 ) -> tuple[Literal["invalid", "used", "expired", "requester_left", "active"], Invitation | None]:
     row = await session.get(GitHubConnectInvitation, token_hash)
     if row is None:
@@ -518,7 +568,9 @@ async def invitation_status(
     if row.expires_at <= datetime.now(UTC):
         return "expired", invitation
     account = await session.get(Account, row.requester_account_id)
-    if not _may_hold_link(account, tenant_id=row.tenant_id, agent_id=row.agent_id):
+    if not await _may_hold_link(
+        session, account, tenant_id=row.tenant_id, agent_id=row.agent_id, settings=settings
+    ):
         return "requester_left", invitation
     return "active", invitation
 
@@ -646,7 +698,7 @@ async def bind_discord_connect_click(
         )
     )
     if (
-        not _may_hold_link(account, tenant_id=tenant_id, agent_id=intent.agent_id)
+        not await _may_hold_link(session, account, tenant_id=tenant_id, agent_id=intent.agent_id)
         or principal is None
     ):
         return None
@@ -795,7 +847,9 @@ async def delete_expired_flows(session: AsyncSession, *, now: datetime, limit: i
     return cast(CursorResult[Any], result).rowcount
 
 
-async def get_flow(session: AsyncSession, *, state: str, cookie: str) -> Flow | None:
+async def get_flow(
+    session: AsyncSession, *, state: str, cookie: str, settings: Settings | None = None
+) -> Flow | None:
     if not state or not cookie:
         return None
     row = await session.get(GitHubConnectFlow, digest(state))
@@ -806,7 +860,7 @@ async def get_flow(session: AsyncSession, *, state: str, cookie: str) -> Flow | 
         or row.expires_at <= datetime.now(UTC)
     ):
         return None
-    if await get_invitation(session, row.invitation_hash) is None:
+    if await get_invitation(session, row.invitation_hash, settings=settings) is None:
         return None
     return Flow.model_validate(row)
 
@@ -1057,6 +1111,7 @@ async def confirm(
     github_user_id: int,
     repos: list[RepoConfirmation],
     requester_manages_agent: bool = False,
+    verified_platform_admin: bool = False,
     expected_agent_snapshot: str | None = None,
 ) -> bool:
     """Consume the invitation and write confirmed rows in the caller's transaction.
@@ -1093,10 +1148,20 @@ async def confirm(
     ):
         return False
     account = await session.get(Account, invitation.requester_account_id, with_for_update=True)
-    if not _may_hold_link(account, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id):
+    if not await _may_hold_link(
+        session,
+        account,
+        tenant_id=invitation.tenant_id,
+        agent_id=invitation.agent_id,
+        verified_platform_admin=verified_platform_admin,
+    ):
         return False
     assert account is not None
-    if account.role != "admin" and not requester_manages_agent:
+    if (
+        account.role != "admin"
+        and not requester_manages_agent
+        and verified_platform_admin is not True
+    ):
         return False
     if len({repo.repo_id for repo in repos}) != len(repos):
         return False

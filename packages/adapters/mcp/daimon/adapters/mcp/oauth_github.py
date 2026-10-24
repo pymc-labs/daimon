@@ -2088,7 +2088,9 @@ def build_oauth_github_routes(
             )
             authenticated = invitation is not None
             if invitation is None and invitation_hash:
-                status, candidate = await github_connect.invitation_status(session, invitation_hash)
+                status, candidate = await github_connect.invitation_status(
+                    session, invitation_hash, settings=settings
+                )
                 if status == "used" and candidate is not None:
                     invitation = candidate
             if invitation is None:
@@ -2135,7 +2137,9 @@ def build_oauth_github_routes(
         token = request.path_params["token"]
         invitation_hash = github_connect.digest(token)
         async with sessionmaker() as session:
-            status, invitation = await github_connect.invitation_status(session, invitation_hash)
+            status, invitation = await github_connect.invitation_status(
+                session, invitation_hash, settings=settings
+            )
             if status != "active":
                 if invitation is None:
                     return _error()
@@ -2170,7 +2174,10 @@ def build_oauth_github_routes(
             .decode()
         )
         async with sessionmaker.begin() as session:
-            if await github_connect.get_invitation(session, invitation_hash) is None:
+            if (
+                await github_connect.get_invitation(session, invitation_hash, settings=settings)
+                is None
+            ):
                 return _error()
             await github_connect.create_flow(
                 session,
@@ -2207,9 +2214,13 @@ def build_oauth_github_routes(
         cookie = request.cookies.get(_COOKIE, "")
         if not code:
             async with sessionmaker() as session:
-                refused_flow = await github_connect.get_flow(session, state=state, cookie=cookie)
+                refused_flow = await github_connect.get_flow(
+                    session, state=state, cookie=cookie, settings=settings
+                )
                 refused_invitation = (
-                    await github_connect.get_invitation(session, refused_flow.invitation_hash)
+                    await github_connect.get_invitation(
+                        session, refused_flow.invitation_hash, settings=settings
+                    )
                     if refused_flow is not None
                     else None
                 )
@@ -2226,7 +2237,9 @@ def build_oauth_github_routes(
                 else ""
             )
         async with sessionmaker() as session:
-            flow = await github_connect.get_flow(session, state=state, cookie=cookie)
+            flow = await github_connect.get_flow(
+                session, state=state, cookie=cookie, settings=settings
+            )
         if flow is None or flow.encrypted_user_token is not None:
             return _error()
         verifier = decrypt_token(fernet, flow.encrypted_verifier)
@@ -2259,7 +2272,12 @@ def build_oauth_github_routes(
             retry_url = f"{root}/oauth/github/connect/{retry_token}" if retry_token else None
             return _error("Couldn't reach GitHub", 502, retry_url)
         async with sessionmaker.begin() as session:
-            if await github_connect.get_flow(session, state=state, cookie=cookie) is None:
+            if (
+                await github_connect.get_flow(
+                    session, state=state, cookie=cookie, settings=settings
+                )
+                is None
+            ):
                 return _error()
             saved = await github_connect.set_user_token(
                 session,
@@ -2276,7 +2294,7 @@ def build_oauth_github_routes(
         state = request.query_params.get("state") or request.cookies.get(_STATE_COOKIE, "")
         async with sessionmaker() as session:
             flow = await github_connect.get_flow(
-                session, state=state, cookie=request.cookies.get(_COOKIE, "")
+                session, state=state, cookie=request.cookies.get(_COOKIE, ""), settings=settings
             )
         if flow is None or flow.encrypted_user_token is None:
             return _error()
@@ -2315,7 +2333,9 @@ def build_oauth_github_routes(
                 used = await successful_page(state, cookie)
                 return used if used is not None else _cancelled_page()
             async with sessionmaker() as session:
-                invitation = await github_connect.get_invitation(session, cancelled.invitation_hash)
+                invitation = await github_connect.get_invitation(
+                    session, cancelled.invitation_hash, settings=settings
+                )
                 requester = (
                     await get_account_with_tenant(
                         session, account_id=invitation.requester_account_id
@@ -2352,13 +2372,17 @@ def build_oauth_github_routes(
             return _error(message, status, retry_confirm_url)
 
         async with sessionmaker() as session:
-            flow = await github_connect.get_flow(session, state=state, cookie=cookie)
+            flow = await github_connect.get_flow(
+                session, state=state, cookie=cookie, settings=settings
+            )
             if flow is None or flow.encrypted_user_token is None or flow.github_user_id is None:
                 used = await successful_page(state, cookie, invitation_hash)
                 if used is not None:
                     return used
                 return _error()
-            invitation = await github_connect.get_invitation(session, flow.invitation_hash)
+            invitation = await github_connect.get_invitation(
+                session, flow.invitation_hash, settings=settings
+            )
             if invitation is None:
                 used = await successful_page(state, cookie, invitation_hash)
                 if used is not None:
@@ -2600,6 +2624,7 @@ def build_oauth_github_routes(
                 )
                 for repo_id in selected_ids
             ]
+            still_admin = False
             if not invitation.operator_issued:
                 if (
                     invitation.requester_platform_user_id is not None
@@ -2640,6 +2665,7 @@ def build_oauth_github_routes(
                         cookie=cookie,
                         github_user_id=flow.github_user_id,
                         repos=repos,
+                        verified_platform_admin=still_admin,
                         requester_manages_agent=manages,
                         expected_agent_snapshot=snapshot,
                     )
@@ -2877,6 +2903,7 @@ def build_oauth_github_routes(
                 for repo_id in selected_ids
             ]
             live = await live_agent(invitation)
+            still_admin = False
             if not invitation.operator_issued:
                 if (
                     invitation.requester_platform_user_id is not None
@@ -2908,6 +2935,7 @@ def build_oauth_github_routes(
                         cookie=cookie,
                         github_user_id=flow.github_user_id,
                         repos=repos,
+                        verified_platform_admin=still_admin,
                         requester_manages_agent=deployment_default is not None
                         and await may_manage_agent(session, invitation, requester, live),
                     )

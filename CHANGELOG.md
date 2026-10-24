@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Let newly recognized platform admins connect GitHub repos without first sending
+  a chat message to refresh their stored role. Delegated admins remain excluded.
+
 - Keep long-job policy and worker spending-limit administration platform-only.
   Worker spending tools require a personal CLI credential; chat and routine
   execution cannot change caps. Foreign and held callers receive no admin authority.

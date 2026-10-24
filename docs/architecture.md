@@ -2884,11 +2884,14 @@ tokens are dedicated checkout HTTP credentials and cannot exercise personal
 user authority or MCP money tools.
 
 Account roles have exactly three write sites: turn admission and the
-Discord/Slack GitHub connect commands, all from live platform facts. Operator
-panels refuse minting until an admin turn has recorded that platform snapshot,
-with an actionable message. This prevents minting a token already barred by
-the verifier’s native-role check. GitHub
-link helpers, removal notices and operator-token minting never write roles.
+Discord/Slack GitHub connect commands, all from live platform facts. GitHub
+connection panels pass current platform authority to invitation stores;
+browser links re-attest new admins whose stored role is still user. These
+paths do not write role snapshots. Operator panels refuse minting until an
+admin turn has recorded that platform snapshot, with an actionable message.
+This prevents minting a token already barred by the verifier’s native-role
+check. GitHub link helpers, removal notices and operator-token minting never
+write roles.
 Turn-origin roles also record platform authority; `effective_role` is
 rendered separately for the model. The hub retains its platform-only
 transcript exception. Its live delegated agent-pin exemption grants no
