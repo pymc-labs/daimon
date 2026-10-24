@@ -338,6 +338,7 @@ source_modules = [
     "daimon.core.thread_naming",
     "daimon.core.thread_participation",
     "daimon.core.thread_release",
+    "daimon.core.tool_approvals",
     "daimon.core.tool_safety",
     "daimon.core.turn",
     "daimon.core.turn_card_intent_sweep",

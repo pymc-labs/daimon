@@ -78,7 +78,9 @@ CardState = Literal[
 ]
 #: `env_file` is a bulk upload of one .env file; the other four match the
 #: single-value request kinds in `daimon.core.credential_requests`.
-CardKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "fleet", "switch"]
+CardKind = Literal[
+    "env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "fleet", "switch", "approval"
+]
 RefusalReason = Literal[
     "admin_required",
     "replacement_admin_required",

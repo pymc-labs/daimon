@@ -27,7 +27,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores import mux_state
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.mux_state import PostgresStateStore
-from daimon.core.tool_safety import confirmation_gated_tools
+from daimon.core.tool_safety import confirmation_gated_tools, provider_carded_tools
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_deployment import GeminiPlan, build_gemini_runtime
 from daimon.core.turn.gemini_state import SQLiteGeminiStorage
@@ -104,6 +104,7 @@ GATED_CATALOGUE = (
     "call_tool",
     "create_attachment_upload_url",
     "create_notebook_upload_url",
+    "microsoft_send",
     "publish_report",
     "search_tools",
 )
@@ -114,7 +115,11 @@ GATED_PARAMS = {
         {
             **PARAMS["tools"][1],
             "configs": [
-                {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+                {
+                    "name": "microsoft_send",
+                    "enabled": True,
+                    "permission_policy": {"type": "always_ask"},
+                }
             ],
         },
     ],
@@ -757,8 +762,10 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
         assert body["system_instruction"] == canonical.target_spec.system
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
+        # Provider-carded tools are offered (Daimon posts their Approve card itself);
+        # a gated tool with no such card is not.
         expected_mcp = (
-            set(GATED_CATALOGUE) - confirmation_gated_tools()
+            set(GATED_CATALOGUE) - (confirmation_gated_tools() - provider_carded_tools())
             if gated
             else {"search_tools", "call_tool"}
         )
@@ -783,16 +790,17 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     assert isinstance(full, tuple), "gated source lost the whole MCP representation"
     request, plan, canonical, native, _, posts, *_ = full
     target = canonical.target_spec
-    # No Gemini turn has a confirmation card: every gated or publishing tool in
-    # the catalogue is a declared loss, pinned row or template alike.
-    gated = sorted(set(GATED_CATALOGUE) & confirmation_gated_tools())
+    # No Gemini turn has a confirmation card: a gated tool Daimon can't confirm on
+    # its own card is a declared loss, pinned row or template alike; the ones it
+    # cards (publishing, add_skill) stay (`tool_safety.provider_carded_tools`).
+    gated = sorted(set(GATED_CATALOGUE) & (confirmation_gated_tools() - provider_carded_tools()))
     markers = tuple(f"mcp_tool:daimon-mcp:{name}" for name in gated)
-    assert {"add_skill", "publish_report"} <= set(gated)
+    assert gated == ["microsoft_send"]
     assert target.declared_drops == (*markers, "memory", "sandbox")
     assert all(marker in target.system for marker in markers)
     assert not {"tools", "skills", "mcp"}.intersection(target.declared_drops)
     assert len(target.skills) == len(native["base_environment"]["sources"]) == 11
-    allowed = set(GATED_CATALOGUE) - confirmation_gated_tools()
+    allowed = set(GATED_CATALOGUE) - set(gated)
     assert set(target.mcp_servers[0].tool_policy["allowed_tools"]) == allowed
     remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")
     assert remote["allowed_tools"] == [
@@ -833,7 +841,7 @@ async def test_gemini_gated_loss_does_not_waive_runtime_catalogue_verification(f
 async def test_gemini_native_readback_cannot_reenable_a_declared_unavailable_tool(full):
     request, _, _, native, _, posts, *_ = full
     remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")
-    remote["allowed_tools"][0]["tools"].append("add_skill")
+    remote["allowed_tools"][0]["tools"].append("microsoft_send")
     with pytest.raises((AdmissionDenied, UnsupportedCapability)):
         await read_preparation_counterpart(scope_channel_runtimes(request)[0])
     assert not posts

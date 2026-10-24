@@ -401,7 +401,9 @@ GATED = ("add_skill", "publish_report", "create_notebook_upload_url")
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(template, monkeypatch):
+async def test_gated_and_publishing_tools_are_offered_in_a_template_daimon_cards_them(
+    template, monkeypatch
+):
     from daimon.core.mcp_oauth import discovery
 
     request, *_ = template
@@ -417,8 +419,9 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     (connection,) = representation.target.mcp_servers
     allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
-    assert allowed == {"search_tools", "call_tool"}
-    assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
+    # Daimon posts their card itself (`tool_safety.provider_carded_tools`).
+    assert allowed == {"search_tools", "call_tool", *GATED}
+    assert representation.unavailable_mcp_tools == ()
     assert represented_source(captured, representation.target) == representation
 
 
@@ -515,11 +518,9 @@ async def test_the_server_refuses_gated_tools_for_a_provider_turn_credential(
     assert "describe_agent" in ran and "error" not in harmless
     # The proxy never runs a gated tool, for any credential.
     assert '"isError": true' in json.dumps(proxied)
-    if refused:
-        assert ran.count("add_skill") == 0, "the server refuses the gated tool by name too"
-        assert "confirmation card" in json.dumps(gated)
-    else:
-        assert ran.count("add_skill") == 1
+    # By name it reaches the tool for every credential: a provider turn's card is
+    # Daimon's own, asked for by the tool's gate on its confirm call.
+    assert ran.count("add_skill") == 1 and "confirmation card" not in json.dumps(gated)
 
 
 async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch):
@@ -675,8 +676,8 @@ async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimo
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     (connection,) = representation.target.mcp_servers
     allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
-    assert allowed == {"search_tools", "call_tool", "request_agent_backend_switch"}
-    assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
+    assert allowed == {"search_tools", "call_tool", "request_agent_backend_switch", *GATED}
+    assert representation.unavailable_mcp_tools == ()
 
 
 @pytest.fixture
@@ -699,10 +700,10 @@ def consent_recorded_before_self_cards(monkeypatch):
         }
 
     monkeypatch.setattr(discovery, "list_mcp_tools", with_gated_tools)
-    real = tool_safety.self_carded_tools
+    real = tool_safety.provider_carded_tools
     state = {"old": True}
     monkeypatch.setattr(
-        tool_safety, "self_carded_tools", lambda: frozenset() if state["old"] else real()
+        tool_safety, "provider_carded_tools", lambda: frozenset() if state["old"] else real()
     )
     return state
 
@@ -713,7 +714,7 @@ async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
 ):
     """Agents switched before the switch tool was offered keep working without re-confirming."""
     request, quote, *_ = template
-    carded = ("request_agent_backend_switch", "request_fleet_config")
+    carded = ("request_agent_backend_switch", "request_fleet_config", "add_skill")
     for tool in carded:
         assert f"mcp_tool:daimon-mcp:{tool}" in quote.declared_drops, "recorded the old way"
     consent_recorded_before_self_cards["old"] = False
@@ -722,7 +723,6 @@ async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
     for tool in carded:
         assert tool in allowed, "offered from now on"
         assert f"mcp_tool:daimon-mcp:{tool}" not in selected.target_spec.declared_drops
-    assert "mcp_tool:daimon-mcp:add_skill" in selected.target_spec.declared_drops
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

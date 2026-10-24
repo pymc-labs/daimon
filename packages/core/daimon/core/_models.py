@@ -3695,6 +3695,46 @@ class BackendSwitchCard(Base):
     )
 
 
+class ToolApprovalCard(Base):
+    """Daimon's own Approve card for one gated call on an OpenAI/Gemini turn
+    (`daimon.core.tool_approvals`). An approval lets the identical call run once."""
+
+    __tablename__ = "tool_approval_cards"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'consumed', 'cancelled', 'refused')",
+            name="ck_tool_approval_cards_status",
+        ),
+        Index(
+            "ix_tool_approval_cards_call",
+            "tenant_id",
+            "account_id",
+            "tool_name",
+            "args_digest",
+            "status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    args_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class MuxOperation(Base):
     """An idempotent operation: found by (tenant, account, key), owned by a principal.
 

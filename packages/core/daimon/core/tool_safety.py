@@ -191,6 +191,22 @@ def self_carded_tools() -> frozenset[str]:
     )
 
 
+def token_carded_tools() -> frozenset[str]:
+    """Gated tools a provider turn runs once its requester approves Daimon's own card.
+
+    The tool can't post a card and apply on its own (it runs in the MCP process),
+    so the card approves one exact call and the agent's retry of it runs
+    (`daimon.core.tool_approvals`). A publish tool needs no card where the
+    agent may publish without asking.
+    """
+    return frozenset({"add_skill", *PUBLISH_TOOLS})
+
+
+def provider_carded_tools() -> frozenset[str]:
+    """Every gated tool an OpenAI/Gemini turn may call: Daimon confirms it itself."""
+    return self_carded_tools() | token_carded_tools()
+
+
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     """Project authoritative backend-selection eligibility into session controls."""
     return (

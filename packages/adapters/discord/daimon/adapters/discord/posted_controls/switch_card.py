@@ -24,6 +24,12 @@ from daimon.core.switch_cards import (
     answered_switch_card,
     press_switch_card,
 )
+from daimon.core.tool_approvals import CUSTOM_ID_PATTERN as APPROVAL_CUSTOM_ID_PATTERN
+from daimon.core.tool_approvals import (
+    ApprovalAction,
+    answered_approval_card,
+    press_tool_approval,
+)
 
 import discord
 
@@ -34,6 +40,7 @@ log = structlog.get_logger()
 
 #: A press by anyone but the requester: the card stays as it is.
 NOT_YOURS = "Only the person who asked can confirm this switch."
+NOT_YOURS_APPROVAL = "Only the person who asked can approve this."
 UNAVAILABLE = "This switch card is unavailable. Ask again to redo it."
 
 
@@ -112,5 +119,69 @@ class SwitchCardControl(
             return
         await interaction.message.edit(
             view=build_card_view(answered_switch_card(press)),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class ToolApprovalControl(
+    discord.ui.DynamicItem[discord.ui.Button[discord.ui.LayoutView]],
+    template=APPROVAL_CUSTOM_ID_PATTERN,
+):
+    """Approve or Cancel on Daimon's own approval card (`daimon.core.tool_approvals`).
+
+    An approval lets the agent's identical retry of that one call run once; the
+    press itself runs nothing.
+    """
+
+    def __init__(self, button: discord.ui.Button[discord.ui.LayoutView]) -> None:
+        super().__init__(button)
+        match = self.template.fullmatch(button.custom_id or "")
+        if match is None:
+            raise ValueError("not an approval card control")
+        self.card_id = uuid.UUID(match["card"])
+        self.press: ApprovalAction = cast(ApprovalAction, match["action"])
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> Self:
+        return cls(
+            discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label=getattr(item, "label", None),
+                custom_id=match[0],
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        bot = cast("DaimonBot", interaction.client)
+        guild = interaction.guild
+        if guild is None or interaction.message is None:
+            await interaction.response.send_message(UNAVAILABLE, ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            press = await press_tool_approval(
+                sessionmaker=bot.runtime.sessionmaker,
+                tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild.id)),
+                card_id=self.card_id,
+                action=self.press,
+                clicker=str(interaction.user.id),
+                message_id=str(interaction.message.id),
+                now=datetime.now(UTC),
+            )
+        except Exception:
+            log.exception("tool_approval.press_failed", card_id=str(self.card_id))
+            await interaction.followup.send(UNAVAILABLE, ephemeral=True)
+            return
+        if press is None:
+            await interaction.followup.send(NOT_YOURS_APPROVAL, ephemeral=True)
+            return
+        await interaction.message.edit(
+            view=build_card_view(answered_approval_card(press.text)),
             allowed_mentions=discord.AllowedMentions.none(),
         )
