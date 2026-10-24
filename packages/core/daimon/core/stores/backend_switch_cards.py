@@ -206,11 +206,9 @@ async def record_refresh(
     """A switch card re-previewed when it was built (J5): the stale preview it was asked
     with, and the one it showed. Never pressable (no message) and never a waiting card
     (no top-level agent); the approved call spends it once (`consume_refresh`)."""
-    # This account's refreshes that expired unspent go first: nothing else sweeps them.
+    # Every refresh that expired unspent goes first: nothing else sweeps them.
     await session.execute(
         delete(BackendSwitchCard).where(
-            BackendSwitchCard.tenant_id == tenant_id,
-            BackendSwitchCard.account_id == account_id,
             BackendSwitchCard.reference.has_key("refresh"),
             BackendSwitchCard.status.in_(("pending", "claimed")),
             BackendSwitchCard.expires_at <= func.now(),
@@ -244,7 +242,7 @@ async def record_refresh(
 def _refresh_row(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
-    agent_name: str,
+    agent_name: str | None,
     stale_digest: str,
     fresh_digest: str,
     fresh_revision: int | str,
@@ -262,7 +260,7 @@ def _refresh_row(
                 {
                     "refresh": {
                         "operation": operation,
-                        "agent": agent_name,
+                        **({"agent": agent_name} if agent_name is not None else {}),
                         "of": stale_digest,
                         "fresh": fresh_digest,
                         "revision": fresh_revision,
@@ -310,6 +308,37 @@ async def approve_refresh(
         .returning(BackendSwitchCard.id)
     )
     return approved is not None
+
+
+async def cancel_refresh(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    stale_digest: str,
+    fresh_digest: str,
+    fresh_revision: int | str,
+    now: datetime,
+    operation: str = "switch",
+) -> None:
+    """A Confirm passed the click check, but its card was then already answered or
+    expired: the refresh it approved is never spent (claimed -> cancelled)."""
+    target = _refresh_row(
+        tenant_id,
+        account_id,
+        None,
+        stale_digest,
+        fresh_digest,
+        fresh_revision,
+        "claimed",
+        now,
+        operation,
+    )
+    await session.execute(
+        update(BackendSwitchCard)
+        .where(BackendSwitchCard.id == target, BackendSwitchCard.status == "claimed")
+        .values(status="cancelled", outcome="Its card was already answered or expired.")
+    )
 
 
 async def consume_refresh(

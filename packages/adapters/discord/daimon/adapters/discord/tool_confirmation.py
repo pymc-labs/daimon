@@ -47,6 +47,7 @@ from daimon.core.posted_controls.lifecycle import (
     queue_card_edit,
     settle_local_admin_confirmation,
     settle_local_confirmation,
+    undo_confirmation_admin,
     wait_local_confirmation,
 )
 from daimon.core.posted_controls.tool_rule_confirmation import (
@@ -272,7 +273,10 @@ class _ConfirmationView(discord.ui.LayoutView):
         refusal = await check_confirmation_admin(self._prompt, clicker, self._check_admin, answer)
         if refusal is not None:
             return refusal
-        return settle_local_confirmation(self._prompt, self._answer, clicker, answer)
+        settled = settle_local_confirmation(self._prompt, self._answer, clicker, answer)
+        if settled is not None:
+            await undo_confirmation_admin(self._prompt, clicker, answer, self._check_admin)
+        return settled
 
     async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
         refusal = await self.authorize(str(interaction.user.id), answer)

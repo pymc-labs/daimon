@@ -51,6 +51,7 @@ from daimon.core.posted_controls.lifecycle import (
     check_confirmation_admin,
     edit_card_within,
     queue_card_edit,
+    undo_confirmation_admin,
 )
 from daimon.core.posted_controls.tool_rule_confirmation import (
     ASK_ADMIN_MESSAGE,
@@ -344,6 +345,7 @@ class SlackConfirmationCards:
             await _ephemeral(posted, clicker, refusal)
             return
         if refusal := self._controls.claim(token, clicker, answer):
+            await undo_confirmation_admin(posted.prompt, clicker, answer, posted.check_admin)
             if refusal == NOT_YOURS_MESSAGE:
                 refusal = refusal.format(requester=f"<@{posted.prompt.requester_platform_user_id}>")
             await _ephemeral(posted, clicker, refusal)
