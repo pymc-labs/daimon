@@ -100,6 +100,22 @@ def fleet_model(value: str, models: Sequence[ModelRef]) -> str:
         ) from None
 
 
+#: Family words a person says alone ("fork yourself across haiku, luna and flash").
+_FAMILIES = ("opus", "sonnet", "haiku", "flash", "luna", "astra", "argon")
+
+
+def family_names(models: Sequence[ModelRef]) -> dict[str, JsonValue]:
+    """Each family word that names an allowed model, mapped to the one it means (the
+    newest in that family, as `fleet_model` resolves it)."""
+    named: dict[str, JsonValue] = {}
+    for word in _FAMILIES:
+        try:
+            named[word] = fleet_model(word, models)
+        except ToolError:
+            continue
+    return named
+
+
 _REASONS = {
     "not_subset": "is outside what this fleet allows",
     "unsupported": "isn't supported for this worker",
@@ -636,6 +652,9 @@ class HostFleetToolService:
                 {"name": model_name(model), "id": model.id, "provider": model.provider}
                 for model in models
             ],
+            # What a family name alone means here: its newest allowed model, exactly as
+            # fleet_spawn resolves it (J10b: "haiku" drew a question about 4.5 vs 5.5).
+            "family_names": family_names(models),
         }
 
 
@@ -825,8 +844,10 @@ def register_fleet_tools(
         for your own model) and planned_models (the model of every worker you
         are starting, e.g. ["opus 5.5", "astra", "argon"], the same list on
         every call), plus origin_context_id from your turn controls.
-        fleet_agents lists the allowed models by name. A name that matches
-        none, or several, is refused with the allowed list.
+        fleet_agents lists the allowed models by name. A family name alone
+        ("haiku") means its newest model (Claude Haiku 5.5): never ask which
+        version, just name the model you started. A name that matches none, or
+        several families, is refused with the allowed list.
         If the person names a model that isn't on that list (e.g. "Gemini
         Pro" when only Flash and Argon are allowed), don't start a worker:
         tell them it isn't available here, offer the closest allowed model,
@@ -997,6 +1018,11 @@ def register_fleet_tools(
         Every spawn checks again, so both lists are advice. A model the
         person asked for that isn't listed here isn't available: say so and
         ask which listed model to use, rather than picking one for them.
+        "family_names": a family name alone ("haiku", "sonnet", "luna",
+        "flash") means the newest model of that family, e.g. haiku ->
+        claude-haiku-5-5. Pass it as said and name the exact model in your
+        reply; never ask which version. Ask only when the name matches no
+        listed model, or models of different families.
         """
         return dict(await owner().agents(await _auth(ctx), origin_context_id=origin_context_id))
 
