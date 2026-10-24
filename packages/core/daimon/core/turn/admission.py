@@ -79,10 +79,11 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
+from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores import agent_backends, mux_state
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
@@ -112,7 +113,7 @@ from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
-from mux.contracts.ids import Provider, Scope, ThreadRef
+from mux.contracts.ids import ChannelRef, Provider, Scope, ThreadRef
 from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 from mux.profiles.selfhosted import LOOP
@@ -997,14 +998,14 @@ async def admit_impl(
                     raise AdmissionDenied(
                         reason="backend_unsupported", cause="agent_backend"
                     ) from error
-                async with deps.sessionmaker() as selection_session:
-                    source: Literal["channel", "agent", "default"] = "agent"
-                    try:
-                        (
-                            backend_revision,
-                            backend_ever_shared,
-                            source,
-                        ) = await channel_backend.resolve_turn_backend(
+
+                async def select(
+                    channel: ChannelRef = channel,
+                ) -> tuple[ConfigRevision | None, bool, Literal["channel", "agent", "default"]]:
+                    # Its own session per attempt: a missed policy fence rolls it back
+                    # (retry_fences), so nothing is held while waiting for a writer.
+                    async with deps.sessionmaker() as selection_session:
+                        selected = await channel_backend.resolve_turn_backend(
                             selection_session,
                             channel,
                             source_agent,
@@ -1013,21 +1014,29 @@ async def admit_impl(
                                 verify_origin if deps.agent_backends else _require_backend_origin
                             ),
                         )
-                        backend = (
-                            check_backend(
-                                backend_revision, enabled_backends=policy.enabled_backends
-                            )
-                            if backend_revision is not None
-                            else None
-                        )
-                    except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
-                        _log_backend_unsupported("agent_preference", error)
-                        raise _backend_refusal(
-                            backend_revision, source, policy.enabled_backends, error
-                        ) from error
-                    # Preparation uses another transaction. Publish the immutable
-                    # effective revision and its origin before that transaction.
-                    await selection_session.commit()
+                        # Preparation uses another transaction. Publish the immutable
+                        # effective revision and its origin before that transaction.
+                        await selection_session.commit()
+                        return selected
+
+                source: Literal["channel", "agent", "default"] = "agent"
+                try:
+                    # The shared policy fence is a try-lock: a turn admitted while an
+                    # admin's policy write holds it waits (bounded) instead of failing
+                    # with an error nobody can act on (smoke 0eee1b8e J7, Ref 8V6AW4).
+                    backend_revision, backend_ever_shared, source = await retry_fences(
+                        select, busy_error=PolicyBusyError
+                    )
+                    backend = (
+                        check_backend(backend_revision, enabled_backends=policy.enabled_backends)
+                        if backend_revision is not None
+                        else None
+                    )
+                except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
+                    _log_backend_unsupported("agent_preference", error)
+                    raise _backend_refusal(
+                        backend_revision, source, policy.enabled_backends, error
+                    ) from error
                 backend_revision_origin = source if source != "default" else None
                 if backend_revision is not None:
                     backend_footer_profile = backend_revision.profile
