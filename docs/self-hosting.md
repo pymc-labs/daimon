@@ -1591,6 +1591,12 @@ lease. A holder that loses its owner connection and cannot retake the lease stop
 The first process to take the lease with no earlier holder recorded also waits for any Discord process from before the lease to exit, so the first deploy of this change still replaces the container stop-first. The deploy script falls back to stop-first for an image that lacks the lease, so a rollback to an older image behaves as it did before. To use the same pattern with your own deploy scripts, start the new Discord
 container before stopping the old one and give it the same database.
 
+Selfhosted Azure metering requires explicit deployment-to-model mappings and
+operator-verified model tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
+`DAIMON_BILLING__SELFHOSTED__MODELS`. See [selfhosted Azure usage](billing.md#selfhosted-azure-usage)
+for tariff histories, the runtime admission gate and durable snapshot, explicit
+compute-cost attribution, and paginated pending-usage reconciliation.
+
 ## Discord membership checks
 
 Role-based admission uses the existing `DAIMON_DISCORD__BOT_TOKEN`. Set it
@@ -1879,12 +1885,6 @@ then start the upgraded processes. An old producer left running could repopulate
 private data after the purge. Upgraded readers restrict these rows' previews and
 diagnostics to the identified owner, including when an administrator manages the
 routine. The same owner restriction applies to explicit DM results.
-
-Selfhosted Azure metering requires explicit deployment-to-model mappings and
-operator-verified model tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
-`DAIMON_BILLING__SELFHOSTED__MODELS`. See [selfhosted Azure usage](billing.md#selfhosted-azure-usage)
-for tariff histories, the runtime admission gate and durable snapshot, explicit
-compute-cost attribution, and paginated pending-usage reconciliation.
 
 Harness process cleanup enumerates present `/proc` PIDs, including after PID wrap.
 If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;

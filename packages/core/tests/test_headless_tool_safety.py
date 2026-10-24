@@ -460,8 +460,7 @@ def test_no_production_signature_defaults_the_policy() -> None:
 
 async def test_run_turn_without_a_policy_is_a_type_error() -> None:
     with pytest.raises(TypeError, match="tool_safety"):
-        await run_turn(
-            # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+        await run_turn(  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
             anthropic=build_fake_anthropic(MARouter().dispatch),
             agent_id="ag",
             environment_id="env",
