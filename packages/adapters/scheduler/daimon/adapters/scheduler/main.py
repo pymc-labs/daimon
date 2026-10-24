@@ -631,6 +631,17 @@ async def _sweep_fleet_deadlines(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.fleet_deadline_sweep.failed")
 
 
+async def _drain_pending_usage(sm: async_sessionmaker[AsyncSession], *, markup: Decimal) -> None:
+    """Settle pending usage of profiles with no infrastructure charge; failures retry on
+    the next scheduler tick (an applied row is never applied twice)."""
+    from daimon.core.usage_outbox_drain import drain_pending_usage
+
+    try:
+        await drain_pending_usage(sm, markup=markup)
+    except Exception:
+        log.exception("scheduler.pending_usage_drain.failed")
+
+
 async def _sweep_pending_files(
     client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -1393,6 +1404,7 @@ async def run(
                 wait_for_completion=True,
             )
             await _sweep_fleet_deadlines(sm)
+            await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
             await _usage_sweep_once(
@@ -1434,6 +1446,7 @@ async def run(
                 dispatcher=dispatcher,
             )
             await _sweep_fleet_deadlines(sm)
+            await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)

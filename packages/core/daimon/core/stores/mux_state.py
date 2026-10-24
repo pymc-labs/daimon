@@ -26,6 +26,7 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Collection,
     Iterable,
     Iterator,
     Mapping,
@@ -1107,6 +1108,44 @@ async def pending_outbox(session: AsyncSession, *, limit: int = 100) -> list[Out
         .limit(limit)
     )
     return [OutboxRow.model_validate(body) for body in bodies]
+
+
+async def pending_outbox_for_profiles(
+    session: AsyncSession, profiles: Collection[str], *, limit: int
+) -> list[tuple[OutboxRow, uuid.UUID, BindingContract]]:
+    """Unapplied outbox rows whose binding's current generation has one of `profiles`.
+
+    Oldest first, an observation's newest revision before its older ones. Each comes
+    with its tenant and that binding.
+    """
+    latest = (
+        select(ProviderBinding.binding_id, func.max(ProviderBinding.generation).label("generation"))
+        .group_by(ProviderBinding.binding_id)
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(AccountingOutbox.row, AccountingOutbox.tenant_id, ProviderBinding.binding)
+            .join(latest, latest.c.binding_id == AccountingOutbox.binding_id)
+            .join(
+                ProviderBinding,
+                (ProviderBinding.binding_id == latest.c.binding_id)
+                & (ProviderBinding.generation == latest.c.generation),
+            )
+            .where(AccountingOutbox.applied_at.is_(None), ProviderBinding.profile.in_(profiles))
+            .order_by(
+                AccountingOutbox.created_at,
+                AccountingOutbox.binding_id,
+                AccountingOutbox.observation_id,
+                AccountingOutbox.revision.desc(),
+            )
+            .limit(limit)
+        )
+    ).all()
+    return [
+        (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
+        for row, tenant_id, binding in rows
+    ]
 
 
 async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:

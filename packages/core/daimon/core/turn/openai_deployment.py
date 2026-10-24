@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -18,6 +19,7 @@ from uuid import UUID
 import structlog
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.pricing import provider_prices
@@ -49,6 +51,7 @@ from daimon.core.turn.runtime_manifest import (
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import SessionControls, Transport
 from mux.drivers.openai.mcp_auth import KEY as MCP_METADATA_KEY
 from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
@@ -69,6 +72,11 @@ log = structlog.get_logger(__name__)
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 _MANIFEST = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_MANIFEST_BYTES = 1_048_576
+
+
+async def _no_infrastructure(observation: UsageObservation) -> Decimal:
+    """A profile with no sandbox or container has no infrastructure charge."""
+    return Decimal(0)
 
 
 class OpenAIDeployment(BaseModel):
@@ -710,6 +718,13 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,
         price=provider_prices(deployment.profile).get((revision.backend, revision.model)),
+        # A conversation-only session runs no container: its usage settles at $0
+        # infrastructure. A persistent workspace's container cost stays unknown.
+        **(
+            {"infrastructure": _no_infrastructure}
+            if known_infrastructure_usd(deployment.profile) is not None
+            else {}
+        ),
         session_plan=plan,
         authorization=authorize,
         mcp_secrets=resolve_mcp
