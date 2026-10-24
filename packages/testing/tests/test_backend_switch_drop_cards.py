@@ -736,6 +736,36 @@ async def test_a_denied_re_previewed_card_never_applies(chat: Chat, card: Card) 
     assert current is None and await chat.audit() == []
 
 
+async def test_a_confirm_after_the_card_was_denied_never_applies(chat: Chat, card: Card) -> None:
+    """Deny, then Confirm on the same re-previewed card: the Confirm passes the click
+    check but the card is already answered, so what the check approved is undone."""
+    preview = await chat.tool(TARGET)
+    data = tool_call(TARGET, preview, list(preview.declared_drops))
+    _web_search_off(chat)
+    await card.post(prompt_for(chat, data))
+    assert await card.click(REQUESTER[chat.platform], deny=True) is None
+    # Refused (or, where a settled card is gone, never reaching the check).
+    await card.click(REQUESTER[chat.platform])
+    with pytest.raises(Exception, match="(?i)preview again"):
+        await apply(chat, data)
+    _, current = await chat.current()
+    assert current is None and await chat.audit() == []
+
+
+async def test_someone_elses_click_never_undoes_the_requesters_confirm(
+    chat: Chat, card: Card
+) -> None:
+    preview = await chat.tool(TARGET)
+    data = tool_call(TARGET, preview, list(preview.declared_drops))
+    _web_search_off(chat)
+    await card.post(prompt_for(chat, data))
+    assert await card.click(REQUESTER[chat.platform]) is None
+    card.admins.add(STRANGER[chat.platform])
+    await card.click(STRANGER[chat.platform])
+    changed = await apply(chat, data)
+    assert changed.status == "changed"
+
+
 async def test_a_refresh_is_spent_only_once_by_its_own_confirmed_card(chat: Chat) -> None:
     """Card Y re-previewed to F2 and denied; card X re-previewed to F1 and confirmed. The
     agent is back at F2 when X's call runs: Y's refresh was never confirmed, X's shows
@@ -785,6 +815,44 @@ async def test_a_refresh_is_spent_only_once_by_its_own_confirmed_card(chat: Chat
         assert not await cards.consume_refresh(db, **other_agent, fresh_digest="1" * 64)
         assert await cards.consume_refresh(db, **spend, fresh_digest="1" * 64)
         assert not await cards.consume_refresh(db, **spend, fresh_digest="1" * 64)
+    # Every expired, unspent refresh is swept when a new one is recorded, whoever's.
+    from daimon.core._models import BackendSwitchCard
+    from sqlalchemy import func, select
+
+    async with chat.runtime.session_factory.begin() as db:
+        for owner, expires in ((account, now - timedelta(minutes=1)), (account, now)):
+            await cards.record_refresh(
+                db,
+                tenant_id=tenant,
+                account_id=owner,
+                platform="discord",
+                channel_id="channel",
+                thread_id="thread",
+                requester_platform_user_id=REQUESTER["discord"],
+                agent_name="Researcher",
+                stale_digest="e" * 64,
+                fresh=fresh("3" * 64),
+                expires_at=expires,
+            )
+        await cards.record_refresh(
+            db,
+            tenant_id=tenant,
+            account_id=uuid.uuid4(),
+            platform="discord",
+            channel_id="channel",
+            thread_id="thread",
+            requester_platform_user_id="someone",
+            agent_name="Researcher",
+            stale_digest="f" * 64,
+            fresh=fresh("4" * 64),
+            expires_at=now + timedelta(minutes=10),
+        )
+        left = await db.scalar(
+            select(func.count())
+            .select_from(BackendSwitchCard)
+            .where(BackendSwitchCard.reference["refresh"]["of"].astext == "e" * 64)
+        )
+    assert left == 0
 
 
 async def test_a_stale_preview_whose_re_preview_is_refused_asks_to_preview_again(

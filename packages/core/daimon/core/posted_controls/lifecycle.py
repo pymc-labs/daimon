@@ -149,6 +149,30 @@ async def check_confirmation_admin(
         return refusal
 
 
+async def undo_confirmation_admin(
+    prompt: ConfirmationPrompt,
+    clicker: str | None,
+    answer: ConfirmationAnswer,
+    check: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None,
+) -> None:
+    """A Confirm passed `check_confirmation_admin`, then the card's settle refused it
+    (already answered, or expired): undo what the check recorded for it (J5). Only
+    the click the check actually ran for: someone else's click never undoes it."""
+    undo = getattr(check, "undo", None)
+    if (
+        answer != "approved"
+        or not prompt.admin
+        or clicker is None
+        or clicker != prompt.requester_platform_user_id
+        or undo is None
+    ):
+        return
+    try:
+        await undo(prompt)
+    except Exception:
+        _log.warning("tool_confirmation.admin_undo_failed")
+
+
 def settle_confirmation(
     prompt: ConfirmationPrompt,
     clicker: str | None,

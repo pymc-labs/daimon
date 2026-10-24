@@ -1265,7 +1265,44 @@ def backend_switch_callbacks(
             return "This preview or your permission changed. Preview and confirm again."
         return None
 
-    return prepare, check
+    async def undo(prompt: ConfirmationPrompt) -> None:
+        """The Confirm passed `check`, but the card's settle refused it (already
+        answered, or expired): the refresh `check` approved is cancelled."""
+        from daimon.core.stores import backend_switch_cards as cards
+
+        reference: BackendSwitchReference | ConfigurationReference | None = (
+            prompt.configuration or prompt.backend_switch
+        )
+        if reference is None or reference.refreshed_from is None:
+            return
+        operation = (
+            reference.operation if isinstance(reference, ConfigurationReference) else "switch"
+        )
+        async with sessionmaker.begin() as session:
+            await cards.cancel_refresh(
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                stale_digest=reference.refreshed_from,
+                fresh_digest=reference.preview_digest,
+                fresh_revision=reference.expected_revision,
+                now=datetime.now(UTC),
+                operation=operation,
+            )
+
+    return prepare, AdminCheck(check, undo)
+
+
+@dataclass(frozen=True)
+class AdminCheck:
+    """A card's click check (`check_confirmation_admin`), and the undo for a Confirm
+    that passed it but whose card's settle then refused (`undo_confirmation_admin`)."""
+
+    run: Callable[[ConfirmationPrompt, str], Awaitable[str | None]]
+    undo: Callable[[ConfirmationPrompt], Awaitable[None]]
+
+    async def __call__(self, prompt: ConfirmationPrompt, clicker: str) -> str | None:
+        return await self.run(prompt, clicker)
 
 
 class PendingConfirmations:

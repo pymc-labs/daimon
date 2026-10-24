@@ -48,6 +48,7 @@ from daimon.core.posted_controls.lifecycle import (
     check_confirmation_admin,
     edit_card_within,
     queue_card_edit,
+    undo_confirmation_admin,
 )
 from daimon.core.posted_controls.tool_rule_confirmation import (
     ASK_ADMIN_MESSAGE,
@@ -432,6 +433,7 @@ class TeamsConfirmationCards:
         if refusal is not None:
             return toast(refusal)
         if refusal := self._controls.claim(token, clicker, answer):
+            await undo_confirmation_admin(posted.prompt, clicker, answer, posted.check_admin)
             if refusal == NOT_YOURS_MESSAGE:
                 refusal = refusal.format(
                     requester=posted.prompt.requester_display_name or "requester"
