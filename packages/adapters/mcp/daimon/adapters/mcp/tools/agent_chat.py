@@ -504,6 +504,32 @@ async def _describe_agent_impl(
     )
 
 
+async def _refuse_another_provider(
+    runtime: McpRuntime, auth: AuthIdentity, ma_agent: BetaManagedAgentsAgent
+) -> None:
+    """Agent keys and the hub open Managed Agents sessions, so an agent whose backend
+    is another provider is refused plainly here, never answered (and billed) on the
+    Claude record its definition is saved with."""
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.stores import agent_backends
+    from daimon.core.turn.notices import provider_name
+    from mux.contracts.config import DEFAULT_BACKEND
+
+    async with runtime.session_factory() as session:
+        revision = await agent_backends.current(
+            session,
+            auth.tenant_id,
+            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent.id),
+        )
+    backend = revision.backend if revision is not None else None
+    if backend is not None and backend != DEFAULT_BACKEND:
+        name = ma_agent.metadata.get(MA_METADATA_KEY_NAME) or ma_agent.name
+        raise ToolError(
+            f"{name} runs on {provider_name(backend)}; agent keys and the hub can only "
+            "talk to agents on Claude for now. Ask it in chat instead. Nothing was started."
+        )
+
+
 @observed_agent_turn
 async def _start_turn_impl(
     runtime: McpRuntime,
@@ -567,6 +593,7 @@ async def _start_turn_impl(
     """
     require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
+    await _refuse_another_provider(runtime, auth, ma_agent)
     billing_exempt: ExemptReason | None = (
         "mcp-internal-caller" if auth.platform_user_id is None else None
     )

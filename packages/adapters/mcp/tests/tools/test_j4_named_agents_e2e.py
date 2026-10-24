@@ -166,8 +166,18 @@ async def _settled_within(ports, root, count, seconds):
             await asyncio.sleep(0.05)
 
 
-async def _run_named_fleet(j10_root, monkeypatch, *, tenant_cap: int = 4, settle_s: float = 30):
-    """Spawn the three named agents as one member's fleet and run it to the collected card."""
+async def _run_named_fleet(
+    j10_root,
+    monkeypatch,
+    *,
+    tenant_cap: int = 4,
+    settle_s: float = 30,
+    names=tuple(NAMED),
+    save=None,
+):
+    """Spawn the named agents as one member's fleet and run it to the collected card.
+
+    `save(j10_root, origin)` makes the agents first (default: the three saved ones)."""
     import mux.drivers.gemini as gemini_sdk
     import mux.drivers.openai as openai_sdk
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
@@ -179,7 +189,8 @@ async def _run_named_fleet(j10_root, monkeypatch, *, tenant_cap: int = 4, settle
     deps, prepared, _, _, seed, scope, _, transport = j10_root
     for provider in ("openai", "gemini"):
         monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
-    await _save_named_agents(j10_root)
+    if save is None:
+        await _save_named_agents(j10_root)
     wire = AstraWire()
     wire.session_id = f"native-openai-session-{uuid4().hex[:8]}"
     wire.session_bodies = []
@@ -222,6 +233,8 @@ async def _run_named_fleet(j10_root, monkeypatch, *, tenant_cap: int = 4, settle
             monkeypatch.setattr(
                 openai_sdk, "configured_transport", lambda **kwargs: SDKTransport(sdk)
             )
+            if save is not None:
+                await save(j10_root, origin)
             await run_root_input((*j10_root[:4], origin, *j10_root[5:]))
             root, policy = await read_frozen_root(
                 deps, scope, origin_id=origin.id, now=datetime.now(UTC)
@@ -251,7 +264,7 @@ async def _run_named_fleet(j10_root, monkeypatch, *, tenant_cap: int = 4, settle
             )
             try:
                 replies = []
-                for index, name in enumerate(NAMED, start=1):
+                for index, name in enumerate(names, start=1):
                     replies.append(
                         dict(
                             await bridge.spawn(

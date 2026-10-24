@@ -98,12 +98,39 @@ def _aliases(model: ModelRef) -> set[str]:
     }
 
 
+#: A request for the cheapest Claude by price, not by a family name. "Claude"
+#: must be present: bare "cheapest" could mean another provider.
+_CHEAPEST_CLAUDE = {"cheapest claude", "cheap claude", "cheapest anthropic", "cheap anthropic"}
+
+
 def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) -> ModelRef:
     """Resolve names, preserving ambiguity; never silently choose a different provider."""
     models = (
         tuple(entry.model for entry in agent_catalog()) if available is None else tuple(available)
     )
     key = _key(value)
+    if key in _CHEAPEST_CLAUDE:
+        # Price, then generation: "cheapest Claude" must be the current Haiku,
+        # never the older, pricier 4.5 row the model used to guess (SMOKE J5).
+        claude = [
+            model
+            for model in models
+            if model.provider == MANAGED_AGENTS.provider and "fast" not in _key(model.id).split()
+        ]
+        priced = [
+            (AGENT_MODEL_PRICING[model.id], model)
+            for model in claude
+            if model.id in AGENT_MODEL_PRICING
+        ]
+        if priced:
+            return min(
+                priced,
+                key=lambda pair: (
+                    pair[0].input,
+                    pair[0].output,
+                    tuple(-int(part) for part in re.findall(r"\d+", pair[1].id)),
+                ),
+            )[1]
     exact = [model for model in models if key in _aliases(model)]
     if len(exact) == 1:
         return exact[0]
