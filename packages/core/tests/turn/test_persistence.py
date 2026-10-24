@@ -24,7 +24,7 @@ from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import SendReceipt
 from mux.contracts.resources import ProviderBinding
 from mux.errors import OperationConflict, ScopeViolation
-from mux.state.lease import LeaseBusy, StaleFence
+from mux.state.lease import Lease, LeaseBusy, StaleFence
 from mux.state.memory import MemoryStateStore, SimulatedCrash
 from mux.state.store import StateStore, binding_slot
 from mux.testing.drivers.anthropic.ma import list_response, send_events_response
@@ -1126,3 +1126,47 @@ async def test_worker_allocation_does_not_change_key_after_a_definite_native_ref
     assert len(traffic.requests) == 1
     assert (await store.get_operation(SCOPE, "worker:agent_create:0")).operation.status == "failed"
     assert await store.get_operation(SCOPE, "worker:agent_create:1") is None
+
+
+@pytest.mark.parametrize("phase", ["pump", "release"])
+async def test_repeated_cancellation_finishes_cleanup(
+    phase: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = context(store)
+    entered, cleaning, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release = store.release_lease
+
+    async def release_lease(lease: Lease) -> None:
+        if phase == "release":
+            cleaning.set()
+            await finish.wait()
+        await release(lease)
+
+    monkeypatch.setattr(store, "release_lease", release_lease)
+
+    async def pump() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if phase == "pump":
+                cleaning.set()
+                await finish.wait()
+
+    task = asyncio.create_task(persistence.run(pump))
+    try:
+        async with asyncio.timeout(5):
+            await entered.wait()
+            task.cancel()
+            await cleaning.wait()
+            task.cancel()
+            finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert next(iter(store.data.leases.values())).active is None
+    finally:
+        finish.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

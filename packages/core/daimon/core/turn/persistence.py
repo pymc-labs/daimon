@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
+from daimon.core.stores.gemini_runtime_state import complete
 from daimon.core.stores.mux_state import BeforeClaim, PostgresStateStore
 from daimon.core.turn.mutation_gate import recheck_retry
 from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
@@ -323,16 +324,20 @@ class TurnPersistence:
                 await renew  # A renewal failure owns the exit, even if the pump also finished.
             return await work
         finally:
-            tasks = [task for task in (work, renew) if task is not None]
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(
-                *(cast(Awaitable[object], task) for task in tasks), return_exceptions=True
-            )
-            with contextlib.suppress(StaleFence):
-                await self.store.release_lease(self._fence())
-            self._lease = None
+
+            async def cleanup() -> None:
+                tasks = [task for task in (work, renew) if task is not None]
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    *(cast(Awaitable[object], task) for task in tasks), return_exceptions=True
+                )
+                with contextlib.suppress(StaleFence):
+                    await self.store.release_lease(self._fence())
+                self._lease = None
+
+            await complete(cleanup())
 
     async def mutate[M: BaseModel](
         self,

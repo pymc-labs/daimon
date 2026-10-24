@@ -51,6 +51,7 @@ from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import lock_preparation
 from daimon.core.stores.domain import TaskContinuationRow, TransferKind
+from daimon.core.stores.gemini_runtime_state import complete
 from daimon.core.stores.thread_session_lineage import link_replacement
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
@@ -1209,8 +1210,13 @@ async def run_prepared_turn_impl(
                 finally:
                     # Clear only this origin. If its lease was lost and a successor
                     # already bound the grant, never revoke the successor's authority.
-                    async with deps.sessionmaker.begin() as db:
-                        await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
+                    async def unbind(bound_origin_id: uuid.UUID) -> None:
+                        async with deps.sessionmaker.begin() as db:
+                            await bind_origin_session(
+                                db, origin_id=bound_origin_id, chat_session_id=None
+                            )
+
+                    await complete(unbind(origin_id))
 
         # Preparation/queueing cannot borrow an ambient parent execution.
         with execution_origin(None):

@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep completed routine replies deliverable when generated-file collection fails, with a note that files could not be attached.
 - Record routine failures and queue channel/thread failure notices after the scheduler heals a stale agent ID.
 - Correct the routines documentation: owner-DM execution failures and busy-owner skips record an error without sending a notice.
+- Finish origin grant revocation and turn lease release even when a turn is cancelled repeatedly.
+- Stop the watch sidecar on polling configuration or programming errors; retry transient database and transport failures without logging sensitive exception details.
 
 ### Removed
 

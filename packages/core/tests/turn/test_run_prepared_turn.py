@@ -4029,6 +4029,7 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
     assert not [r for r in requests if r.startswith("POST")], requests
 
 
+@pytest.mark.parametrize("cancel_during_cleanup", [False, True])
 @pytest.mark.parametrize(
     "kind,origin_attended,caller_attended",
     [("chat", True, True), ("chat", True, False), ("chat", False, True), ("worker", True, False)],
@@ -4038,6 +4039,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     path: str,
+    cancel_during_cleanup: bool,
+    monkeypatch: pytest.MonkeyPatch,
     kind: str,
     origin_attended: bool,
     caller_attended: bool,
@@ -4122,6 +4125,16 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         session_account_id=account.id,
     )
     seen = []
+    entered, cleaning, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_bind = run_module.bind_origin_session
+
+    async def bind(db: AsyncSession, **kwargs: Any) -> None:
+        if cancel_during_cleanup and kwargs["chat_session_id"] is None:
+            cleaning.set()
+            await finish.wait()
+        await original_bind(db, **kwargs)
+
+    monkeypatch.setattr(run_module, "bind_origin_session", bind)
     async with turn_origin(
         db_session_factory,
         tenant_id=tenant.id,
@@ -4168,8 +4181,11 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             assert previous is not None
             assert previous.chat_session_id == (grant if kind == "worker" else None)
             seen.append(bound.id)
+            if cancel_during_cleanup:
+                entered.set()
+                await asyncio.Event().wait()
 
-        outcome = await run_prepared_turn(
+        invocation = run_prepared_turn(
             deps,
             prepared,
             tenant_id=tenant.id,
@@ -4186,7 +4202,25 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             render_interval_s=0.001,
             before_send=before_send,
         )
-        assert outcome.state.error is None
+        if cancel_during_cleanup:
+            task = asyncio.create_task(invocation)
+            try:
+                async with asyncio.timeout(5):
+                    await entered.wait()
+                    task.cancel()
+                    if kind != "worker":
+                        await cleaning.wait()
+                        task.cancel()
+                    finish.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+            finally:
+                finish.set()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        else:
+            outcome = await invocation
+            assert outcome.state.error is None
         released = await read_origin()
         assert released is not None and released.chat_session_id is None
     assert seen == [origin.id]
