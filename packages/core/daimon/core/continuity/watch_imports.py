@@ -38,14 +38,16 @@ def map_poll_source(name: str, arguments: dict[str, JsonValue]) -> tuple[str, di
     if name == "discord_read_messages":
         if set(arguments) - {"channel_or_thread_id", "limit"}:
             raise ValueError("Unsupported imported message-read arguments")
+        limit = arguments.get("limit", 20)
+        if type(limit) is not int:
+            raise ValueError("Imported message-read limit must be an integer")
         name = "read_thread"
         arguments = {
             "thread_id": arguments.get("channel_or_thread_id"),
-            # Internal defaults to 50; do not silently narrow its message window.
-            "limit": arguments.get("limit", 50),
+            "limit": min(limit, 20),
         }
     elif name == "discord_read_channel_since":
-        if set(arguments) - {"channel_id", "since", "limit"}:
+        if set(arguments) - {"channel_id", "since"}:
             raise ValueError("Unsupported imported channel-history arguments (including paging)")
         name = "read_channel"
         # Native polling diffs its saved baseline; since is not a live-read filter.

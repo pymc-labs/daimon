@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On the mux turn path, a turn that reaches a thread whose lease another running turn holds now waits for that turn instead of failing with `LeaseBusy`. The wait ends at the turn's own ceiling, honors Stop, and a holder that dies frees the thread when its lease expires. A turn whose session the holder replaced adopts the replacement.
 
-- Map supported internal Discord watches to owner-authorized Daimon poll watches; keep unsupported imports paused with a reason. Mapped channel watches use live result differences instead of `since` and see live channel messages only, excluding archived history and messages inside child threads. Refuse page-event watch creation until a page-event producer exists.
+- Map supported internal Discord watches to owner-authorized Daimon poll watches (message reads require thread IDs, default/cap integer limits at 20, and warn before CLI confirmation); keep unsupported imports paused with a reason printed by the CLI, without page-data notices for Discord mapping failures. Mapped channel watches use live result differences instead of `since` and see live channel messages only, excluding archived history and messages inside child threads. Refuse page-event watch creation until a page-event producer exists.
 
 - Reject crossed known Azure model/deployment aliases regardless of letter case.
 

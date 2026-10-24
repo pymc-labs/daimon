@@ -1847,15 +1847,20 @@ days; permanent definitions need an explicit finite OS lifetime. Requested daily
 caps above 24 are retained for review but the effective v1 cap is 24.
 
 Supported internal Discord polls map during import: `discord_read_messages`
-becomes `read_thread` with `channel_or_thread_id` renamed to `thread_id`;
+becomes `read_thread` with `channel_or_thread_id` renamed to `thread_id`.
+Only thread IDs work for this mapping; channel and DM IDs are unsupported.
+The CLI warns before confirmation; use `read_channel` for channel sources.
+Message limits default to 20 and larger integer limits are capped at 20;
+legacy baselines reset without firing, and each poll reads the newest messages.
+
 `discord_read_channel_since` becomes `read_channel`. Channel imports drop `since`
 because native polling detects changes against its saved baseline. They see live
 channel messages only, excluding archived history and messages inside child
 threads. Bare channel IDs and `discord_channel:<id>` pointers are supported.
 Missing IDs, paging filters (`before`, `after`, `before_message_id`), unsupported
-arguments and limits outside 1–20 leave the import paused with `source_unmapped`
-and a `mapping_error`. The internal message-read default of 50 cannot map unless
-the exported definition explicitly supplies a supported limit.
+arguments, non-integer limits and limits below 1 leave the import paused with
+`source_unmapped` and a `mapping_error`, printed by the import CLI. These mapping
+errors do not send the page-data migration notice.
 
 All imports start PAUSED and unconfirmed; rerunning the same tenant/legacy ID is
 idempotent. Unknown poll tools import with `source_unmapped`, cannot resume, and

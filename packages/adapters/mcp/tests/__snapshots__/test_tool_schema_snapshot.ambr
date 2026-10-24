@@ -2311,17 +2311,6 @@
           'origin_context_id': dict({
             'type': 'string',
           }),
-          'page_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
           'projection': dict({
             'default': '.',
             'type': 'string',
@@ -2336,10 +2325,7 @@
             'type': 'string',
           }),
           'source': dict({
-            'enum': list([
-              'page_event',
-              'poll',
-            ]),
+            'const': 'poll',
             'type': 'string',
           }),
           'tool': dict({

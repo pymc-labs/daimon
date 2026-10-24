@@ -254,7 +254,6 @@ async def test_create_page_event_watch_is_refused(attended_owner, monkeypatch):
             auth,
             origin_context_id=origin,
             source="page_event",
-            page_id=str(uuid.uuid4()),
             instructions="report",
         )
     register.assert_not_awaited()

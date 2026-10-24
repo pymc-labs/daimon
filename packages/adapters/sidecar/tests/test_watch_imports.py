@@ -123,11 +123,11 @@ async def test_import_is_idempotent_and_never_copies_a_signing_key(db_session_fa
         ImportedWatch.model_validate(payload)
 
 
-async def test_mapped_import_requires_explicit_exact_binding_confirmation(
+async def test_mapped_import_requires_exact_confirmation_before_poll_claim(
     db_session_factory, definition
 ):
     mapped = definition.model_copy(
-        update={"tool": "read_thread", "arguments": {"thread_id": "4343"}}
+        update={"tool": "discord_read_messages", "arguments": {"channel_or_thread_id": "4343"}}
     )
     async with db_session_factory.begin() as db:
         row = await watches.import_watch(db, mapped, now=datetime.now(UTC))
@@ -154,6 +154,10 @@ async def test_mapped_import_requires_explicit_exact_binding_confirmation(
             now=datetime.now(UTC),
         )
         assert row.status == "active" and row.source_state["confirmed"] is True
+        assert row.source_state["arguments"] == {"thread_id": "4343", "limit": 20}
+        await watches.set_watch_control(db, scope="global", enabled=True)
+        claimed = await watches.claim_poll_watches(db)
+        assert len(claimed) == 1 and claimed[0]["watch_id"] == str(row.id)
 
 
 async def test_failed_private_notice_is_retried_without_changing_status(
@@ -281,6 +285,36 @@ async def test_import_confirmation_cannot_activate_self_reporting_source(
             None,
         ),
         (
+            "discord_read_messages",
+            {"channel_or_thread_id": "4343"},
+            ("read_thread", {"thread_id": "4343", "limit": 20}),
+            None,
+        ),
+        (
+            "discord_read_messages",
+            {"channel_or_thread_id": "4343", "limit": 50},
+            ("read_thread", {"thread_id": "4343", "limit": 20}),
+            None,
+        ),
+        (
+            "discord_read_messages",
+            {"channel_or_thread_id": "4343", "limit": True},
+            None,
+            "limit must be an integer",
+        ),
+        (
+            "discord_read_messages",
+            {"channel_or_thread_id": "4343", "limit": 0},
+            None,
+            "Poll read limit must be 1 to 20",
+        ),
+        (
+            "discord_read_channel_since",
+            {"channel_id": "4343", "since": "2026-10-01", "limit": 10},
+            None,
+            "Unsupported imported channel-history arguments",
+        ),
+        (
             "discord_read_channel_since",
             {"channel_id": "4343", "since": "2026-10-01T00:00:00Z"},
             ("read_channel", {"channel_id": "4343"}),
@@ -364,6 +398,8 @@ async def test_internal_discord_manifest_import(
         row = await watches.import_watch(db, imported, now=datetime.now(UTC))
         assert row.status == "paused"
         assert row.source_state["confirmed"] is False
+        assert row.source_state["notice_pending"] is False
+        assert await watches.claim_import_notice(db, now=datetime.now(UTC)) is None
         assert await watches.claim_poll_watches(db) == []
         if expected:
             assert row.source_state["reason"] == "awaiting_confirmation"

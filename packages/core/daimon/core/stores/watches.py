@@ -814,7 +814,14 @@ async def import_watch(
                 "mapping_error": mapping_error,
                 "interval": definition.interval,
                 "requested_daily_cap": definition.max_turns_per_day,
-                "notice_pending": reason == "source_unmapped",
+                "notice_pending": reason == "source_unmapped"
+                and definition.tool
+                not in {
+                    "discord_read_messages",
+                    "discord_read_channel_since",
+                    "read_thread",
+                    "read_channel",
+                },
             },
         )
     )
