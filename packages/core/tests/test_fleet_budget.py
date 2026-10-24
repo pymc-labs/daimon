@@ -3318,6 +3318,11 @@ async def test_a_ledger_insert_before_a_funds_check_in_one_transaction_is_refuse
             )
         async with db.begin():
             await tenant_ledger.lock_funds(db, tenant_id=tenant)
+    # A funds check as a session's first statement (its transaction not begun yet)
+    # has inserted nothing: never "None is None" refused.
+    async with sm() as db:
+        await tenant_ledger.lock_funds(db, tenant_id=tenant)
+        await db.rollback()
 
 
 async def test_every_ledger_insert_takes_the_tenant_share_lock_first(sm):
@@ -3352,17 +3357,38 @@ async def test_every_ledger_insert_takes_the_tenant_share_lock_first(sm):
     )
     assert share < insert
     files = subprocess.run(
-        ["git", "ls-files", "packages"], capture_output=True, text=True, check=True
+        ["git", "ls-files", "packages", "scripts"], capture_output=True, text=True, check=True
     ).stdout.split()
+    # Any way to write a row: Core insert/update/delete, an ORM object (session.add,
+    # add_all, merge), bulk helpers, the mapped table itself, or raw SQL in any case.
+    write = re.compile(
+        r"\b(insert|update|delete)\(\s*TenantLedger\b"
+        r"|\bTenantLedger\s*\("
+        r"|\bTenantLedger\.__table__"
+        r"|\bbulk_\w+\(\s*TenantLedger\b"
+        r"|(?i:\b(insert\s+into|update|delete\s+from|copy)\s+\"?(\w+\"?\.\"?)?tenant_ledger\b)"
+    )
     writers = sorted(
         name
         for name in files
         if name.endswith(".py")
         and "/tests/" not in name
-        and name != "packages/core/daimon/core/stores/tenant_ledger.py"
-        and re.search(
-            r"(insert|update|delete)\(\s*TenantLedger\b|(INSERT INTO|UPDATE|DELETE FROM)\s+tenant_ledger",
-            pathlib.Path(name).read_text(),
+        and name
+        not in (
+            "packages/core/daimon/core/stores/tenant_ledger.py",
+            # The model's own definition (class TenantLedger(Base)).
+            "packages/core/daimon/core/_models.py",
         )
+        and write.search(pathlib.Path(name).read_text())
     )
     assert writers == [], writers
+    # The scan itself catches each write shape (a scan that matches nothing proves nothing).
+    for shape in (
+        "session.add(TenantLedger(tenant_id=t))",
+        "await db.execute(insert(TenantLedger).values())",
+        "conn.execute(TenantLedger.__table__.insert())",
+        "session.bulk_insert_mappings(TenantLedger, rows)",
+        "text('insert into tenant_ledger (delta_usd) values (1)')",
+        'text(\'DELETE FROM "public"."tenant_ledger"\')',
+    ):
+        assert write.search(shape), shape
