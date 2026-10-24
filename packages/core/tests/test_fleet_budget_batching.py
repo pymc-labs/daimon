@@ -334,17 +334,12 @@ async def _reference_save_budget(
     exposures,
     debits,
     zero_spend: frozenset[UUID] = frozenset(),
-    settled=None,
 ) -> fleet.BudgetGraph:
     """`save_budget` before batching: a SUM per run, then every run re-read."""
     for run, workers in graph:
         for worker in workers:
             amount = fleet._amount(exposures[worker.id])
-            if (
-                amount < worker.reserved_usd
-                and worker.id not in zero_spend
-                and (settled is None or settled.get(worker.id) != amount)
-            ):
+            if amount < worker.reserved_usd and worker.id not in zero_spend:
                 raise FleetConflict("unknown worker exposure cannot be released")
             if amount == worker.reserved_usd:
                 continue
