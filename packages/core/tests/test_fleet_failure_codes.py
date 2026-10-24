@@ -371,7 +371,7 @@ def test_refusal_causes_name_our_capabilities_and_redact_user_names():
 
 def test_every_capability_our_code_raises_is_on_the_log_allowlist():
     """A new UnsupportedCapability name must be added deliberately, never redacted by
-    accident (Carlos's Opus worker: native_worker_resource_projection was hidden)."""
+    accident (Carlos's Opus worker: its native_worker_resource_projection refusal was hidden)."""
     import pathlib
     import re
     import subprocess
@@ -390,8 +390,19 @@ def test_every_capability_our_code_raises_is_on_the_log_allowlist():
             r'UnsupportedCapability\(\s*\(\s*((?:"[^"]+"\s*,?\s*)+)\)', source
         ):
             names.update(re.findall(r'"([^"]+)"', match.group(1)))
-    plain = sorted(n for n in names if ":" not in n and n != "x")
-    assert "native_worker_resource_projection" in plain
+    # The worker resource refusals are raised through one variable (sessions.py), so
+    # they're listed here: each names its condition (Carlos's Opus worker f95639c4).
+    plain = sorted(
+        {n for n in names if ":" not in n and n != "x"}
+        | {
+            "worker_memory_store_absent",
+            "worker_sandbox_drop",
+            "worker_resource_requirements",
+            "worker_repository_sources",
+            "worker_repository_undeclared",
+            "worker_extra_resources",
+        }
+    )
     (cause,) = backend_refusal_causes(
         UnsupportedCapability(tuple(plain), "anthropic.managed_agents")
     )
