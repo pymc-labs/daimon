@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerPermissions
     from daimon.core.session_preparation_stages import WorkspaceTransfer
     from daimon.core.stores.neutral_catalog import AgentRevision
+    from mux.contracts.config import ConfigRevision
 
 log = structlog.get_logger(__name__)
 
@@ -309,7 +310,8 @@ class ProviderPreparationRequest:
         """Derive a bounded worker request from the original grant and pinned source."""
         from daimon.core.channel_backend import resolve_turn_backend
         from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
-        from daimon.core.stores.access_policy import load_access_policy
+        from daimon.core.session_fence_retry import retry_fences
+        from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
         from mux.contracts.config import BackendConfig
 
         bound = min(self.deadline, parent.limits.deadline, worker.limits.deadline)
@@ -323,37 +325,47 @@ class ProviderPreparationRequest:
             )
             # The digest check below proves the result is still the admitted worker.
             overrides = clone_overrides(worker.spec) if worker.source_agent else None
-            async with self.deps.sessionmaker.begin() as db:
 
-                async def validate_origin(*_args: object) -> None:
-                    remaining_s(bound, now=self.now(), refuse_expired=True)
-                    policy = await load_access_policy(db, tenant_id=self.tenant_id)
-                    normalized = resolve_worker_spec(
-                        parent,
-                        definition,
-                        overrides=overrides,
-                        policy=policy,
-                        now=self.now(),
-                        backend=BackendConfig.model_validate(
-                            worker.backend.model_dump(include=set(BackendConfig.model_fields))
-                        ),
-                        resources=worker.resources,
-                        environment=worker.environment,
-                        limits=worker.limits,
-                        captured_source=source,
+            # resolve_turn_backend takes the tenant's shared policy fence with one
+            # try-lock: retry it like a turn does, or any concurrent policy writer
+            # (a copy, a rule, tidy) fails the worker as a setup error (J10 6930b189).
+            # Each attempt only reads, so a miss rolls back and re-validates.
+            async def attempt() -> tuple[
+                ConfigRevision | None, bool, Literal["channel", "agent", "default"]
+            ]:
+                async with self.deps.sessionmaker.begin() as db:
+
+                    async def validate_origin(*_args: object) -> None:
+                        remaining_s(bound, now=self.now(), refuse_expired=True)
+                        policy = await load_access_policy(db, tenant_id=self.tenant_id)
+                        normalized = resolve_worker_spec(
+                            parent,
+                            definition,
+                            overrides=overrides,
+                            policy=policy,
+                            now=self.now(),
+                            backend=BackendConfig.model_validate(
+                                worker.backend.model_dump(include=set(BackendConfig.model_fields))
+                            ),
+                            resources=worker.resources,
+                            environment=worker.environment,
+                            limits=worker.limits,
+                            captured_source=source,
+                        )
+                        if normalized.digest != worker.digest:
+                            raise WorkerSpecRefused("scope", "stale")
+
+                    await validate_origin()
+                    return await resolve_turn_backend(
+                        db,
+                        parent.fleet.root.channel,
+                        source,
+                        enabled=True,
+                        worker=worker,
+                        validate_origin=validate_origin,
                     )
-                    if normalized.digest != worker.digest:
-                        raise WorkerSpecRefused("scope", "stale")
 
-                await validate_origin()
-                revision, _, origin = await resolve_turn_backend(
-                    db,
-                    parent.fleet.root.channel,
-                    source,
-                    enabled=True,
-                    worker=worker,
-                    validate_origin=validate_origin,
-                )
+            revision, _, origin = await retry_fences(attempt, busy_error=PolicyBusyError)
             remaining_s(bound, now=self.now(), refuse_expired=True)
             if revision is None or origin != "agent":
                 raise WorkerSpecRefused("backend", "unsupported")

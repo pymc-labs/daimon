@@ -272,10 +272,16 @@ def worker_failure_code(
     from daimon.core.errors import DaimonError
     from daimon.core.fleet import FleetConflict
     from daimon.core.neutral_resources import WorkerSpecRefused
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.stores.access_policy import PolicyBusyError
     from mux.errors import MuxError
 
     if isinstance(error, FleetConflict) and error.reason == "worker_setup_busy":
         # Our own setup or a busy fleet lock, in either phase: never the model's fault.
+        return "preparation_deadline_exceeded"
+    if any(isinstance(current, (PolicyBusyError, FenceUnavailable)) for current in _chain(error)):
+        # A policy write outlasted the worker's fence budget (J10 6930b189): Daimon
+        # was busy, so "try again", never a refusal or a setup error with a reference.
         return "preparation_deadline_exceeded"
     refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
     if (quota := _quota_cause(error)) is not None:
