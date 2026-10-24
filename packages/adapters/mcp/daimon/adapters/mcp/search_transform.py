@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Annotated, Any
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.tool_safety import APPROVAL_TOOLS, NATIVE_FLEET_TOOLS, proxy_refusal
+from daimon.core.tool_safety import APPROVAL_TOOLS, proxy_refusal
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import get_context
@@ -49,9 +49,7 @@ class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
 
     Narrowed agent and operator sessions list their tools directly; every
     other session gets the normal search interface, with `APPROVAL_TOOLS`
-    pinned beside it and refused through ``call_tool``. A GPT or Gemini turn
-    (no confirmation surface) also sees `NATIVE_FLEET_TOOLS` by name: its
-    native tool allowlist is built from this list (M07).
+    pinned beside it and refused through ``call_tool``.
     """
 
     def __init__(
@@ -112,12 +110,4 @@ class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
             # Narrowed agent or operator session: skip the search collapse so
             # the visibility filter can surface the tools it was narrowed to.
             return tools
-        collapsed = await super().transform_tools(tools)
-        if isinstance(auth, AuthIdentity) and auth.no_confirmation_surface:
-            # A GPT/Gemini turn: its provider allowlists only what this list names.
-            listed = {tool.name for tool in collapsed}
-            return [
-                *collapsed,
-                *(t for t in tools if t.name in NATIVE_FLEET_TOOLS and t.name not in listed),
-            ]
-        return collapsed
+        return await super().transform_tools(tools)
