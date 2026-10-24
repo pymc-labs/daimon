@@ -61,5 +61,3 @@ async def test_call_tool_still_runs_other_tools() -> None:
     async with Client(mcp) as client:
         await client.call_tool("call_tool", {"name": "list_agents", "arguments": {}})
     assert mcp.calls == ["list_agents"]  # pyright: ignore[reportAttributeAccessIssue]
-
-
