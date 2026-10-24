@@ -77,8 +77,8 @@ async def test_archived_tenant_notice_does_not_stop_batch(
     "age,expected",
     [
         (timedelta(minutes=5), True),
-        (timedelta(hours=1), True),
-        (timedelta(hours=1, microseconds=1), False),
+        (timedelta(hours=24), True),
+        (timedelta(hours=24, microseconds=1), False),
         (timedelta(days=30), False),
     ],
 )

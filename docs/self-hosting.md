@@ -1866,9 +1866,11 @@ All imports start PAUSED and unconfirmed; rerunning the same tenant/legacy ID is
 idempotent. Unknown poll tools import with `source_unmapped`, cannot resume, and
 queue this owner DM through the existing Discord notice path:
 `this watch is paused until page data moves to Daimon OS`. Archived workspaces
-are excluded from notice batches. Expiry notices cover only watches that expired
-within the last hour (the sidecar cleanup sweep interval). Sending the notice never
-resumes the watch. Notebook/report hosts have no queryable page collection store;
+are excluded from notice batches. Watches whose expiry is older than 24 hours
+stay silent so historical rows are not back-notified. Failed deliveries retry
+every five minutes until that cutoff, allowing for sidecar outages, deploys and
+Discord delivery failures. Sending the notice never resumes the watch.
+Notebook/report hosts have no queryable page collection store;
 `artifact_db_query` has no OS mapping in this release. No page store is created.
 
 Unsupported callback projections import with `projection_unmapped` and cannot be
