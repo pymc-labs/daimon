@@ -270,7 +270,7 @@ def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
 def render_turn_origin(
     origin: TurnOriginRow,
     *,
-    effective_is_admin: bool | None = None,
+    effective_is_admin: bool,
     responder_handle: str | None = None,
     responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
@@ -335,9 +335,7 @@ def render_turn_origin(
     words = _words_for_origin(origin)
     if words is not None:
         controls["words"] = words
-    controls["effective_role"] = (
-        origin.role if effective_is_admin is None else ("admin" if effective_is_admin else "user")
-    )
+    controls["effective_role"] = "admin" if effective_is_admin else "user"
     if session_state is not None:
         controls["session_state"] = {
             "state": session_state.state,

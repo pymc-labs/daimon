@@ -17,12 +17,10 @@ if TYPE_CHECKING:
     from daimon.adapters.slack.app import SlackApp
 
 import structlog
-from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from slack_sdk.errors import SlackApiError
@@ -123,15 +121,7 @@ async def handle_hand_over_click(
         parent_channel_id=channel_id,
         thread_id=thread_ts,
         ma_agent_id=agent_id,
-        caller=await admin_caller(
-            runtime,
-            client,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            is_admin=await resolve_is_admin(
-                client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTING
-            ),
-        ),
+        caller=await admin_caller(client, user_id=user_id),
         default=runtime.deployment_default,
         channel=f"<#{channel_id}>",
         now=datetime.now(UTC),

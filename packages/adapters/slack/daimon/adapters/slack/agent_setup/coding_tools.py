@@ -202,9 +202,7 @@ async def handle_coding_tools_click(
             tenant_id=tenant_id,
             channel_id=channel_id or None,
             target=target,
-            caller=await admin_caller(
-                runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-            ),
+            caller=await admin_caller(client, user_id=user_id),
         )
     except AccessPolicyUnreadable:
         await post_ephemeral(

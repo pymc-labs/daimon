@@ -557,9 +557,7 @@ class TeamsCredentialRequests:
                 # Only the requester may submit, so they are the caller.
                 caller=await admin_caller(
                     self._runtime,
-                    tenant_id=row.tenant_id,
                     user_id=row.requester_platform_user_id,
-                    is_admin=is_admin,
                 ),
                 is_daimon_managed=managed,
                 # Slack leaves the caller's own sessions out of a skill import's
@@ -1006,9 +1004,7 @@ class TeamsCredentialRequests:
             # Only the requester may submit, so they are the caller.
             caller=await admin_caller(
                 self._runtime,
-                tenant_id=row.tenant_id,
                 user_id=row.requester_platform_user_id,
-                is_admin=is_admin,
             ),
             default=self._runtime.deployment_default,
             shares_token=True,

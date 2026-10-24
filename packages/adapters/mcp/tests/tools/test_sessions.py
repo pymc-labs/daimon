@@ -522,7 +522,7 @@ async def test_list_session_events_never_returns_a_turn_origin_id() -> None:
     session's prompt and tool calls proves a call comes from that turn, so it is redacted."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
-    controls = render_turn_origin(_origin_row())
+    controls = render_turn_origin(_origin_row(), effective_is_admin=False)
     assert ORIGIN_ID in controls, "the turn's own prompt keeps the id"
     user_event = {
         "id": "sevt_1",

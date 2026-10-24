@@ -216,8 +216,7 @@ async def _github_connect_impl(
         if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = await current_admin(session, auth)
-        manages = is_admin
-        if not manages:
+        if not is_admin:
             await record_connect_request(
                 session,
                 tenant_id=auth.tenant_id,
@@ -332,7 +331,7 @@ async def _github_connect_impl(
                 agent_id=agent_id,
                 agent_name=agent.name,
                 agent_ma_id=str(agent.id),
-                agent_manager_verified=manages,
+                agent_manager_verified=is_admin,
                 origin_platform=auth.platform,
                 origin_parent_channel_id=origin.parent_channel_id,
                 origin_thread_id=origin.thread_id,

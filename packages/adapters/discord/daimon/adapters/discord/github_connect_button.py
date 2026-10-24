@@ -17,7 +17,6 @@ from daimon.adapters.discord.checks import (
     refuse_if_not_platform_admin,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import (
     CONNECT_GITHUB_EMOJI,
     ask_manager_line,
@@ -190,9 +189,5 @@ async def _manager_refusal(
             tenant_id=tenant_id,
             platform="discord",
             caller=admin_caller(member),
-            agent_names=(agent_name, live.name),
-            ma_agent_id=ma_agent_id,
-            is_daimon_managed=live.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            default=bot.runtime.deployment_default,
         )
     return None if manages else ask_manager_line(agent_name)

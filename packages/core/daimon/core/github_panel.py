@@ -7,8 +7,7 @@ from datetime import datetime
 
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
-from daimon.core.native_admins import AdminCaller, load_live_subject, read_stored_admin
-from daimon.core.scope import DeploymentDefault
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.stores.github_access import (
     SERVER_WIDE_GRANT_MESSAGE,
     InstallationLimitError,
@@ -48,7 +47,6 @@ __all__ = [
     "sync_connect_admin",
     "pending_connect_link",
     "can_manage_agent_github",
-    "requester_manages_agent",
 ]
 
 CONNECT_COPY = "Choose repos on GitHub. If someone else has access to them, send them this link."
@@ -60,41 +58,11 @@ async def can_manage_agent_github(
     tenant_id: uuid.UUID,
     platform: str,
     caller: AdminCaller,
-    agent_names: tuple[str | None, ...],
-    ma_agent_id: str,
-    is_daimon_managed: bool,
-    default: DeploymentDefault,
 ) -> bool:
     """Only a platform admin can connect, grant and remove repos for an agent."""
     return (
         await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
     ).is_admin
-
-
-async def requester_manages_agent(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    platform: str | None,
-    platform_user_id: str | None,
-    agent_name: str | None,
-    ma_agent_id: str | None,
-    default: DeploymentDefault,
-    is_daimon_managed: bool | None,
-    other_names: tuple[str | None, ...] = (),
-) -> bool:
-    """Use the bound aggregate admin snapshot for an out-of-turn GitHub save."""
-    if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
-        return False
-    stored = await read_stored_admin(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        account_id=account_id,
-        platform_user_id=platform_user_id,
-    )
-    return stored.is_admin
 
 
 async def sync_connect_admin(

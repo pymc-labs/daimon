@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 from daimon.adapters.teams.deployment_admins import admin_team_owners, is_platform_admin
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.native_admins import AdminCaller
@@ -12,10 +10,7 @@ from daimon.core.native_admins import AdminCaller
 async def admin_caller(
     runtime: TeamsRuntime,
     *,
-    tenant_id: uuid.UUID,
     user_id: str,
-    is_admin: bool,
-    fresh: bool = False,
 ) -> AdminCaller:
     settings = runtime.settings.teams
     native = settings is not None and await is_platform_admin(

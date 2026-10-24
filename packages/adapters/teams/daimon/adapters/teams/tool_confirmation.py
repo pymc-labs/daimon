@@ -322,9 +322,10 @@ class TeamsConfirmationCards:
 
             if runtime is None or tenant_id is None:
                 return Subject()
-            admin = await _is_admin_now(runtime, clicker)
+            await _is_admin_now(runtime, clicker)
             caller = await admin_caller(
-                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin
+                runtime,
+                user_id=clicker,
             )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(

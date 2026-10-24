@@ -70,8 +70,7 @@ async def remove_repo_impl(
         if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = await current_admin(session, auth)
-        manages = is_admin
-        if not manages:
+        if not is_admin:
             raise ToolError(f"Ask {admin_noun(auth.platform)}.")
         repo_id = await repo_id_for_agent_removal(
             session, tenant_id=auth.tenant_id, agent_id=agent_id, repo_name=requested

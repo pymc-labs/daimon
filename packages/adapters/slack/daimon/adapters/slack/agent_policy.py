@@ -214,9 +214,7 @@ async def refuse_unless_allowed(
         agent_names=agent_pin_names(agent.name, agent.metadata),
         ma_agent_id=str(agent.id),
         is_daimon_managed=_is_daimon_managed(agent),
-        caller=await admin_caller(
-            runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-        ),
+        caller=await admin_caller(client, user_id=user_id),
         caller_account_id=caller_account_id,
     )
     return await _render_outcome(
@@ -288,9 +286,7 @@ async def refuse_unless_allowed_for_agent_name(
         else (agent_name, *agent_pin_names(agent.name, agent.metadata)),
         ma_agent_id=None if agent is None else str(agent.id),
         is_daimon_managed=agent is not None and _is_daimon_managed(agent),
-        caller=await admin_caller(
-            runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-        ),
+        caller=await admin_caller(client, user_id=user_id),
         caller_account_id=caller_account_id,
     )
     return await _render_outcome(
@@ -320,9 +316,7 @@ async def refuse_unless_pin_allows(
     A server admin may write from anywhere. Without `agent` the name is
     looked up, and only under a pin. Returns True when refused (posted).
     """
-    caller = await admin_caller(
-        runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-    )
+    caller = await admin_caller(client, user_id=user_id)
 
     async def target() -> BetaManagedAgentsAgent | None:
         if agent is not None:

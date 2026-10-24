@@ -57,12 +57,9 @@ async def load_picker_subject(
     *,
     tenant_id: uuid.UUID,
     user_id: str,
-    is_admin: bool,
 ) -> Subject:
-    """The caller as `authorize` sees them. `is_admin` is resolved live."""
-    caller = await admin_caller(
-        runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-    )
+    """The caller as `authorize` sees them, using live native admin authority."""
+    caller = await admin_caller(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         return await load_live_subject(
             session,
@@ -106,7 +103,7 @@ async def load_environment_picker(
             tenant_id=tenant_id,
             channel_id=channel_id,
             subject=await load_picker_subject(
-                runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=False
+                runtime, client, tenant_id=tenant_id, user_id=user_id
             ),
         )
     ):
