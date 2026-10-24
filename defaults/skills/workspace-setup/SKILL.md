@@ -134,11 +134,13 @@ their snapshots. Selecting a target does not change who answers or routing.
 Use `list_agents` and `get_agent` to find and inspect agents. `create_agent`
 creates one; `fork_agent` makes an editable copy, including a copy of Daimon.
 `fork_agent` is only for a saved, named copy someone asked to keep. "Fork
-yourself across Opus, Astra and Argon", "run copies of yourself on X and Y" or
-"compare these models" asks for a fleet instead: start one task worker per
-model with `fleet_spawn` (`fleet_agents` lists the allowed models). That needs
-no admin and makes no saved agent, so never answer it with "copying is
-admin-only". A saved copy is admin-only, the copy starts with no repo access, keys or connector
+yourself across Opus, Astra and Argon", "fork yourself onto gpt-6-luna", "run
+copies of yourself on X and Y" or "compare these models" asks for a fleet
+instead: start one task worker per model with `fleet_spawn` (`fleet_agents`
+lists the allowed models). That needs no admin and makes no saved agent, so
+never answer it with "copying is admin-only". If the named model isn't allowed,
+say that and name the allowed models; that is the real reason, not a permission
+rule. A saved copy is admin-only, the copy starts with no repo access, keys or connector
 tokens, and an agent with a rule (`set_agent_rule`) can't be copied. Use `update_agent` for Prompt & model or skill additions. Use `remove_skill`
 and `detach_mcp_server` for removal, rather than replacing lists through
 `update_agent`. Removing a skill from one agent is different from
