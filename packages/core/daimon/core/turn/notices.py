@@ -268,6 +268,16 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{agent}'s model-provider switch needs to be confirmed again.",
         "Ask again to preview the switch to {provider}, then Confirm on the new card.",
     ),
+    # Nothing is missing: say so, and that the same message works shortly.
+    "preparation_busy": _Copy(
+        "Daimon is busy right now and couldn't get {agent} ready on {provider}.",
+        "Try again in a minute.",
+    ),
+    # The cause is unknown, so never claim the provider isn't set up.
+    "preparation_failed": _Copy(
+        "Daimon couldn't get {agent} ready on {provider}.",
+        "Try again; if it keeps happening, give {who} the reference.",
+    ),
 }
 _PROVIDER_NAMES = {
     MANAGED_AGENTS.provider: "Anthropic",

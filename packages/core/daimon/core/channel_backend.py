@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -595,6 +596,156 @@ def _raised_capability(item: str) -> bool:
     )
 
 
+_SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
+#: SQLSTATE classes and codes a retry can clear: connection loss (08), a
+#: serialization failure or deadlock (40001, 40P01), a lock not granted (55P03),
+#: a statement cancelled by its timeout (57014), too many connections (53300), the
+#: server shutting down or not yet up (57P01-57P03), an idle transaction timed out
+#: (25P03).
+_TRANSIENT_SQLSTATES = frozenset(
+    {"40001", "40P01", "55P03", "57014", "53300", "57P01", "57P02", "57P03", "25P03"}
+)
+
+
+def exception_labels(error: BaseException) -> dict[str, object]:
+    """Fixed, code-defined labels for any exception: never its message or args.
+
+    `class` is the exception's module and qualified name (only for a class defined
+    in code by that name); `frame` the innermost
+    traceback frame in Daimon's or mux's own code (`module:function:line`);
+    `sqlstate` a database error's five-character code, when it carries one.
+    """
+    kind = type(error)
+    labels: dict[str, object] = {}
+    # A class made at run time (or by a test) could carry any text in its name.
+    if _importable_class(kind):
+        labels["class"] = f"{kind.__module__}.{kind.__qualname__}"
+    frame: str | None = None
+    tb = error.__traceback__
+    while tb is not None:
+        module = tb.tb_frame.f_globals.get("__name__")
+        if isinstance(module, str) and module.split(".", 1)[0] in ("daimon", "mux"):
+            frame = f"{module}:{tb.tb_frame.f_code.co_name}:{tb.tb_lineno}"
+        tb = tb.tb_next
+    if frame is not None:
+        labels["frame"] = frame
+    sqlstate = _sqlstate(error)
+    if sqlstate is not None:
+        labels["sqlstate"] = sqlstate
+    return labels
+
+
+def _importable_class(kind: type[BaseException]) -> bool:
+    """Whether a class is defined in code by that name: its module, read by its
+    qualified name, gives this very class. A class made at run time (whose name
+    could be any text) or one from a test module is not."""
+    import sys
+
+    module = sys.modules.get(kind.__module__)
+    if module is None or "tests" in kind.__module__.split(".") or "<" in kind.__qualname__:
+        return False
+    found: object = module
+    for part in kind.__qualname__.split("."):
+        found = getattr(found, part, None)
+    return found is kind
+
+
+def _sqlstate(error: BaseException) -> str | None:
+    """A database error's SQLSTATE, read off the driver error SQLAlchemy wraps."""
+    from sqlalchemy.exc import DBAPIError
+
+    if not isinstance(error, DBAPIError):
+        return None
+    orig = error.orig
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        for attribute in ("sqlstate", "pgcode"):
+            code = getattr(candidate, attribute, None)
+            if isinstance(code, str) and _SQLSTATE.match(code):
+                return code
+    return None
+
+
+def _upstream_transient(error: BaseException) -> bool:
+    """Whether a provider failure is one a retry can clear: a timeout or a lost
+    connection, a 5xx or a 429, or a normalized provider error marked retryable.
+    A 401/403/404 (a bad key, a missing resource) is not: retrying never fixes it,
+    so its turn gives the reference instead of "busy, try again" forever."""
+    import httpx
+    from mux.errors import ProviderError
+
+    pending: list[object] = [getattr(error, "cause", None), error.__cause__, error.__context__]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError, httpx.TransportError)):
+            return True
+        if isinstance(current, ProviderError) and current.retryable:
+            return True
+        status = getattr(current, "status_code", None)
+        if isinstance(status, int) and (status >= 500 or status == 429):
+            return True
+        if isinstance(current, BaseException):
+            pending.extend((current.__cause__, current.__context__))
+    return False
+
+
+def transient_failure(error: BaseException | None) -> bool:
+    """Whether a failure, or any exception in its chain, is one a retry can clear:
+    a timeout, a database pool timeout, a lost connection or server restart, a
+    lock/serialization conflict, a busy session or policy write, or a provider
+    connection lost mid-way. Its turn says "busy, try again", never "not set up".
+
+    The chain is the one a traceback shows: an explicit `__cause__`, else the
+    implicit `__context__` unless `raise ... from None` suppressed it.
+    """
+    from daimon.core.errors import TurnError
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.stores.access_policy import PolicyBusyError
+    from daimon.core.turn.errors import SessionBusyError
+    from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+    from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(
+            error,
+            (
+                TimeoutError,
+                PoolTimeoutError,
+                InterfaceError,
+                SessionBusyError,
+                PolicyBusyError,
+                FenceUnavailable,
+            ),
+        ):
+            return True
+        if isinstance(error, TurnError) and (
+            error.kind == "connection_lost"
+            or (error.kind == "upstream" and _upstream_transient(error))
+        ):
+            return True
+        if isinstance(error, DBAPIError):
+            sqlstate = _sqlstate(error)
+            if sqlstate is not None and (
+                sqlstate in _TRANSIENT_SQLSTATES or sqlstate.startswith("08")
+            ):
+                return True
+            if sqlstate is None and isinstance(error, OperationalError):
+                return True
+        error = (
+            error.__cause__
+            if error.__cause__ is not None
+            else None
+            if error.__suppress_context__
+            else error.__context__
+        )
+    return False
+
+
 def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object]]:
     """One closed-label sanitizer for turn and background worker refusals."""
     # Delay this import: the turn package itself imports channel_backend.
@@ -673,7 +824,13 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
     seen: set[int] = set()
     while error is not None and id(error) not in seen and len(causes) < 8:
         seen.add(id(error))
-        cause: dict[str, object] = {"type": safe_types.get(type(error), "redacted")}
+        cause: dict[str, object] = {"type": safe_types.get(type(error), "unlisted")}
+        if type(error) not in safe_types:
+            # An unlisted type is still named by code-defined labels, never text.
+            cause.update(exception_labels(error))
+        elif isinstance(error, (RuntimeError, ValueError, LookupError)):
+            # A generic type says little on its own: add where it was raised.
+            cause.update({k: v for k, v in exception_labels(error).items() if k != "class"})
         if isinstance(error, (AgentBackendRefused, AdmissionDenied)):
             cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
         if isinstance(error, AdmissionDenied) and error.site is not None:

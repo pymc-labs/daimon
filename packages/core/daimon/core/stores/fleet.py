@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, localcontext
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 import structlog
 from daimon.core._models import Account, Tenant
@@ -51,7 +51,18 @@ from daimon.core.stores import (
     tenant_ledger,
 )
 from pydantic import JsonValue
-from sqlalchemy import ColumnElement, Row, case, func, or_, select, text, update
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    Row,
+    case,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -551,7 +562,7 @@ async def _claim_locked(
                     FleetWorkerRow.status == "pending",
                     or_(
                         FleetWorkerRow.error_code.is_(None),
-                        FleetWorkerRow.error_code != "stop_requested",
+                        FleetWorkerRow.error_code.not_in(("stop_requested", *RECORDED_CAUSES)),
                     ),
                     *([FleetWorkerRow.id == worker_id] if worker_id is not None else []),
                     FleetWorkerRow.deadline_at > func.now(),
@@ -754,14 +765,79 @@ async def finish(
     """End a worker without a result: failed, cancelled, timed out or over budget."""
     if status not in TERMINAL or status == "succeeded":
         raise FleetConflict(f"{status} is not an unsuccessful end")
+    # The first terminal decision wins: a cause recorded before the worker ended
+    # (the budget watch's) is kept over whatever ends it later (its own failure,
+    # the deadline sweep). A person's stop is still recorded as a stop.
+    kept = (
+        error_code
+        if error_code == "stop_requested"
+        else case(
+            (FleetWorkerRow.error_code.in_(RECORDED_CAUSES), FleetWorkerRow.error_code),
+            else_=literal(error_code),
+        )
+    )
     return await _move_worker(
         sessionmaker,
         tenant_id=tenant_id,
         worker_id=worker_id,
         expected_version=expected_version,
         target=status,
-        values={"error_code": error_code, "finished_at": func.now()},
+        values={"error_code": kept, "finished_at": func.now()},
     )
+
+
+#: Causes recorded on a worker before it ends, by whoever decided it must end.
+RECORDED_CAUSES: Final[frozenset[str]] = frozenset({"usage_unavailable"})
+
+
+async def record_cancel_cause(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    worker_ids: Collection[uuid.UUID],
+    error_code: str,
+) -> int:
+    """Durably record why workers were cancelled, before they end (J10b).
+
+    The budget watch cancels workers when it can't read usage; their own failure
+    records can be deferred by the very contention that blinded it, and the
+    deadline sweep then ended them as `deadline_expired`, losing the real cause.
+    One short transaction of its own, outside the fleet lock, bounded by a lock
+    timeout (which bounds lock waits, not the pool's); only rows not yet ended and
+    with no cause yet, locked in id order. Returns rows marked.
+    """
+    if error_code not in RECORDED_CAUSES:
+        raise FleetConflict(f"{error_code} is not a recorded cancel cause")
+    if not worker_ids:
+        return 0
+    async with sessionmaker.begin() as session:
+        await session.execute(text("SET LOCAL lock_timeout = '2s'"))
+        # Lock in id order, as the budget lock does, so the two never deadlock.
+        locked = (
+            await session.scalars(
+                select(FleetWorkerRow.id)
+                .where(
+                    FleetWorkerRow.tenant_id == tenant_id,
+                    FleetWorkerRow.id.in_(list(worker_ids)),
+                    FleetWorkerRow.status.in_(("pending", "starting", "running")),
+                    FleetWorkerRow.error_code.is_(None),
+                )
+                .order_by(FleetWorkerRow.id)
+                .with_for_update()
+            )
+        ).all()
+        if not locked:
+            return 0
+        result = await session.execute(
+            update(FleetWorkerRow)
+            .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.id.in_(locked))
+            .values(
+                error_code=error_code,
+                version=FleetWorkerRow.version + 1,
+                updated_at=func.now(),
+            )
+        )
+        return cast(CursorResult[Any], result).rowcount
 
 
 async def requeue(

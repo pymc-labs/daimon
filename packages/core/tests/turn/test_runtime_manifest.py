@@ -252,6 +252,12 @@ async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch)
     with capture_logs() as logs, pytest.raises(AdmissionDenied) as refused:
         await runtime_manifest.read_preparation_counterpart(request)  # type: ignore[arg-type]
     assert refused.value.reason == "backend_unsupported"
+    # Not proven missing setup: never "isn't set up here yet".
+    assert refused.value.cause == "preparation_failed"
     (named,) = [e for e in logs if e["event"] == "turn.preparation_counterpart_error"]
-    assert named["error_class"] == "RuntimeError" and named["profile"] == "gemini.inline_reuse"
-    assert "catalogue read failed" in named["error"]
+    assert named["profile"] == "gemini.inline_reuse" and named["transient"] is False
+    (cause,) = named["causes"]
+    assert cause["type"] == "RuntimeError"
+    assert cause["frame"].startswith("daimon.core.turn.runtime_manifest:")
+    # Fixed labels only: the exception's own text never reaches the log.
+    assert "catalogue read failed" not in json.dumps(logs)

@@ -130,16 +130,17 @@ def test_unregistered_profile_is_redacted_before_and_after_production_scrubbing(
         assert str(refused.value) == str(refused.value.__cause__)
 
 
-def test_private_exception_class_is_redacted_and_the_original_chain_is_preserved():
+def test_private_exception_class_is_not_named_and_the_original_chain_is_preserved():
     private = "PRIVATE_EXCEPTION_CLASS"
     error = type(private, (RuntimeError,), {})("private message")
     parent = AdmissionDenied(reason="backend_unsupported")
     parent.__context__ = error
     with capture_logs() as logs:
         _log_backend_unsupported("preparation_counterpart", parent)
+    # Unlisted, and its class (made at run time, here by the test) is not named.
     assert logs[0]["causes"] == [
         {"type": "AdmissionDenied", "reason": "backend_unsupported"},
-        {"type": "redacted"},
+        {"type": "unlisted"},
     ]
     assert private not in json.dumps(logs)
     assert parent.__context__ is error
@@ -217,3 +218,63 @@ def test_worker_refusal_operation_is_closed_and_private_data_stays_redacted():
     ]
     assert error.missing == ("native_worker_resource_drop", secret)
     assert secret not in json.dumps(backend_refusal_causes(error))
+
+
+@pytest.mark.parametrize(
+    ("sqlstate", "busy"),
+    [
+        ("55P03", True),  # lock not available
+        ("40001", True),  # serialization failure
+        ("40P01", True),  # deadlock
+        ("57014", True),  # statement timeout
+        ("08006", True),  # connection failure
+        ("23505", False),  # a unique violation is a bug, not "busy"
+    ],
+)
+def test_a_database_failure_is_named_by_class_and_sqlstate_and_busy_only_when_transient(
+    sqlstate, busy
+):
+    from daimon.core.channel_backend import backend_refusal_causes, transient_failure
+    from sqlalchemy.exc import DBAPIError
+
+    private = "PRIVATE row value"
+    driver = type("DriverError", (Exception,), {"sqlstate": sqlstate})(private)
+    error = DBAPIError(f"UPDATE ... {private}", None, driver)
+    (cause,) = backend_refusal_causes(error)
+    assert cause == {"type": "unlisted", "class": "sqlalchemy.exc.DBAPIError", "sqlstate": sqlstate}
+    assert transient_failure(error) is busy
+    assert private not in json.dumps(cause)
+
+
+class _Status(Exception):
+    """An SDK status error, as its `status_code` shows it."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("PRIVATE body")
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize(
+    ("cause", "busy"),
+    [
+        (_Status(503), True),
+        (_Status(429), True),
+        (TimeoutError(), True),
+        (ConnectionResetError(), True),
+        (_Status(401), False),  # a bad key: retrying never fixes it
+        (_Status(403), False),
+        (_Status(404), False),  # a missing resource
+        (None, False),
+    ],
+)
+def test_an_upstream_failure_is_busy_only_when_a_retry_can_clear_it(cause, busy):
+    """#1558 review: a provider 401/403/404 must give the reference, not "busy, try
+    again" forever; a 5xx, 429, timeout or lost connection is busy."""
+    from daimon.core.channel_backend import transient_failure
+    from daimon.core.errors import TurnError
+
+    as_attribute = TurnError(kind="upstream", message="upstream", cause=cause)
+    assert transient_failure(as_attribute) is busy
+    raised = TurnError(kind="upstream", message="upstream")
+    raised.__cause__ = cause
+    assert transient_failure(raised) is busy

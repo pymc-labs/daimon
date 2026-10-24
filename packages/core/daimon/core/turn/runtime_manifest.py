@@ -33,7 +33,7 @@ from daimon.core.caller_resources import (
     CALLER_RESOURCES_ID,
     CALLER_VAULT_PREFIX,
 )
-from daimon.core.errors import DaimonError, TurnError
+from daimon.core.errors import DaimonError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
     WorkerPermissions,
@@ -3214,18 +3214,20 @@ async def read_preparation_counterpart(
         if error.reason == "re_confirm":
             raise AdmissionDenied(reason="backend_unsupported", cause="re_confirm") from error
         raise AdmissionDenied(reason="backend_unsupported") from error
-    except (UnsupportedCapability, TimeoutError, TurnError) as error:
+    except UnsupportedCapability as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception as error:
-        from daimon.core.observability import redact_text
+        from daimon.core.channel_backend import backend_refusal_causes, transient_failure
 
-        # Anything else becomes the generic refusal; name it once so the cause of
-        # a counterpart that wouldn't prepare is never lost (smoke a1d991fb: Gemini
-        # copies and a Flash worker refused here with nothing logged).
+        # Anything else (a timeout included) is not proven missing setup. Name it
+        # with fixed labels only (class, our frame, SQLSTATE; never its text) so
+        # its real cause is never lost (smoke dce44708 J2: four inner causes logged
+        # as "redacted"), and say busy when a retry can clear it.
+        busy = transient_failure(error)
         log.warning(
             "turn.preparation_counterpart_error",
-            error_class=type(error).__name__,
-            error=redact_text(str(error))[:300],
+            causes=backend_refusal_causes(error),
+            transient=busy,
             profile=(
                 request.admission.backend_revision.profile
                 if request.admission.backend_revision is not None
@@ -3233,7 +3235,10 @@ async def read_preparation_counterpart(
             ),
             worker=request.worker is not None,
         )
-        raise AdmissionDenied(reason="backend_unsupported") from None
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            cause="preparation_busy" if busy else "preparation_failed",
+        ) from error
 
 
 class CounterpartPlan(Protocol):
