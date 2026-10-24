@@ -260,3 +260,22 @@ async def test_create_environment_exposes_nested_pip_package_list(
     assert items.get("type") == "string", (
         f"hop 5 (spec.config.packages.pip.items): expected type 'string', got {items}"
     )
+
+
+async def test_the_tools_for_forking_onto_a_model_name_the_real_reason(sessionmaker) -> None:
+    """J7: "fork yourself onto gpt-3.5-turbo" must never read as an admin/owner rule.
+
+    The model only knows what these descriptions say. A copy can name the model the
+    person asked for, so an unavailable one is refused as unavailable; the fleet tool
+    is what actually runs a copy on another model.
+    """
+    app = create_mcp_app(
+        settings=_fully_configured_settings(),
+        sessionmaker=sessionmaker,
+        auth=StaticTokenVerifier(tokens={}),
+        anthropic=build_stub_anthropic(),
+    )
+    tools = {tool.name: tool for tool in await app.state.mcp.local_provider.list_tools()}
+    fork = tools["fork_agent"].description or ""
+    assert "pass it as ``model``" in fork, fork
+    assert "admin/owner rule" in fork, fork

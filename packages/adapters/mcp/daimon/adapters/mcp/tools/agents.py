@@ -107,7 +107,7 @@ from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND, ThreadMode
-from mux.contracts.ids import Provider
+from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.profile import Capability
 from mux.profiles import selectable_models
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
@@ -1501,6 +1501,25 @@ async def _require_member_copy_room(runtime: McpRuntime, auth: AuthIdentity) -> 
         )
 
 
+async def _runs_on_model(
+    runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
+) -> str:
+    """The model `agent` runs on: its backend revision's, else its own Managed Agents
+    model (an agent made on another provider is saved on a Claude record)."""
+    from daimon.core.stores import agent_backends
+    from mux.profiles import backend_selection
+
+    async with runtime.session_factory() as session:
+        revision = await agent_backends.current(
+            session,
+            auth.tenant_id,
+            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
+        )
+    if revision is not None and revision.backend not in (None, DEFAULT_BACKEND):
+        return revision.model or backend_selection(revision.backend).model or ""
+    return model_choice_id(agent.model)
+
+
 async def _fork_agent_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1509,6 +1528,7 @@ async def _fork_agent_impl(
     expected_ma_agent_id: str | None = None,
     new_copy_if_taken: bool = False,
     origin_context_id: str | None = None,
+    model: str | None = None,
 ) -> AgentInfo:
     from daimon.adapters.mcp.tools.task_continuity import forked_in_value
     from daimon.core.defaults.metadata import (
@@ -1516,6 +1536,16 @@ async def _fork_agent_impl(
         MA_METADATA_KEY_FORKED_IN,
     )
 
+    # A model named for the copy is checked before any permission gate: an unavailable
+    # model must read as unavailable, never as "an admin has to do this" (J7).
+    requested: ModelRef | None = None
+    if model is not None:
+        from daimon.core.agent_model_names import resolve_model
+
+        try:
+            requested = resolve_model(model)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
     # Forking another agent is an admin's call: a fork routes nowhere and has no
     # channel pin of its own, so it is free to run anywhere the source can't. Anyone
     # may copy the agent answering their own chat turn (it is theirs to own; TARGET-V2
@@ -1543,6 +1573,14 @@ async def _fork_agent_impl(
         source = await resolve_setup_agent(
             runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
         )
+        if requested is not None and requested.id != await _runs_on_model(runtime, auth, source):
+            from daimon.core.agent_model_names import model_name
+
+            raise ToolError(
+                f"A saved copy keeps {source_name}'s model; it can't become "
+                f"{model_name(requested)}. To run a copy of {source_name} on it, start a "
+                "fleet task worker with fleet_spawn (model=...). Nothing was created."
+            )
         # From the turn's credential, never a model-supplied id.
         answering = (
             auth.chat_agent_id is not None
@@ -2547,6 +2585,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
         new_copy_if_taken: bool = False,
         origin_context_id: str | None = None,
+        model: str | None = None,
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
         Anyone may copy you (the agent answering them), and owns that copy; copying
@@ -2572,8 +2611,14 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
         is the copy's: name the copy by it, not ``new_name``. Pass true for "make a
         copy of yourself" asks, where the person named no copy; when the person
-        names the copy, leave this false. Pass this active turn's
-        ``origin_context_id``."""
+        names the copy, leave this false.
+
+        If the person names a model for the copy ("fork yourself onto
+        gpt-3.5-turbo"), pass it as ``model``. A saved copy keeps its source's
+        model: an unavailable model is refused as unavailable, and a different
+        available one points at ``fleet_spawn``. Never answer such an ask with an
+        admin/owner rule; "fork yourself onto <model>" is a fleet task worker, not
+        a saved copy. Pass this active turn's ``origin_context_id``."""
         return await _fork_agent_impl(
             runtime,
             await _auth(ctx),
@@ -2582,6 +2627,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             expected_ma_agent_id=expected_ma_agent_id,
             new_copy_if_taken=new_copy_if_taken,
             origin_context_id=origin_context_id,
+            model=model,
         )
 
     @mcp.tool(tags={"admin"})
@@ -2626,7 +2672,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
             Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
-            or Gemini,
+            or Gemini. A member's "fork yourself onto <model>" is a fleet task worker
+            (fleet_spawn) or a copy of themselves they own, then a switch of that copy;
+            it never needs an admin/owner for the shared agent. If the named model isn't
+            available, say that with the allowed list, never an admin/owner rule.
             optionally naming a model naturally: "switch Researcher to argon" or
             "switch Researcher to luna". For an Anthropic model change such as
             "set Writer to opus 5.5", use update_agent with that natural model name.

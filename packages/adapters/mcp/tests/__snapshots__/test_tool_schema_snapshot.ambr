@@ -2605,13 +2605,30 @@
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
         is the copy's: name the copy by it, not ``new_name``. Pass true for "make a
         copy of yourself" asks, where the person named no copy; when the person
-        names the copy, leave this false. Pass this active turn's
-        ``origin_context_id``.
+        names the copy, leave this false.
+        <blank line>
+        If the person names a model for the copy ("fork yourself onto
+        gpt-3.5-turbo"), pass it as ``model``. A saved copy keeps its source's
+        model: an unavailable model is refused as unavailable, and a different
+        available one points at ``fleet_spawn``. Never answer such an ask with an
+        admin/owner rule; "fork yourself onto <model>" is a fleet task worker, not
+        a saved copy. Pass this active turn's ``origin_context_id``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'model': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
