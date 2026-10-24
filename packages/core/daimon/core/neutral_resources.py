@@ -1728,6 +1728,19 @@ def fleet_root_permissions(
             # Its skills are the Claude source's; the counterpart runs its provider's own
             # (or none), so the root and its workers declare them lost, never claim them.
             losses.add("skills")
+        # Its memory store is the Claude source's, mounted only by Claude sessions; the
+        # counterpart never mounts it, so neither can its workers. Declared lost rather
+        # than refusing the freeze (smoke 4acca048: field=files, fleet off).
+        foreign_memory = tuple(
+            binding
+            for binding in resources
+            if binding.resource is not None
+            and binding.resource.kind == "memory_store"
+            and binding.resource.provider != execution_model.provider
+        )
+        if foreign_memory:
+            losses.add("memory")
+            resources = tuple(binding for binding in resources if binding not in foreign_memory)
         spec = spec.model_copy(
             update={
                 "model": execution_model,
