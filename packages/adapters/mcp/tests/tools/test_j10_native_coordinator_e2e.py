@@ -139,6 +139,13 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
     # control's copy is a Haiku agent.
     model_id = source["model"]["id"] if isinstance(source["model"], dict) else source["model"]
     source["model"] = {"id": HAIKU if backend is None else model_id, "speed": "fast"}
+    import os
+
+    if os.environ.get("NCF_SKILLS"):
+        source["skills"] = [
+            {"type": "anthropic", "skill_id": name, "version": "latest"}
+            for name in ("xlsx", "pptx", "docx", "pdf")
+        ]
     copy = await _fork_agent_impl(
         chat.runtime,
         chat.auth,

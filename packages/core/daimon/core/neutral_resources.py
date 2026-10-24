@@ -1721,15 +1721,19 @@ def fleet_root_permissions(
             if extension.namespace != MODEL_CONFIG_NAMESPACE
         )
         dropped = len(kept) != len(spec.extensions or ())
+        losses = {*spec.declared_drops}
+        if dropped:
+            losses.add("model_controls")
+        if spec.skills:
+            # Its skills are the Claude source's; the counterpart runs its provider's own
+            # (or none), so the root and its workers declare them lost, never claim them.
+            losses.add("skills")
         spec = spec.model_copy(
             update={
                 "model": execution_model,
                 "extensions": kept or None,
-                "declared_drops": tuple(
-                    sorted({*spec.declared_drops, "model_controls"})
-                    if dropped
-                    else spec.declared_drops
-                ),
+                "skills": () if spec.skills else spec.skills,
+                "declared_drops": tuple(sorted(losses)),
             }
         )
     read_only = source.memory_read_only is not False
