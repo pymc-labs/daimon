@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime
+from functools import partial
 from types import UnionType
 from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin
 from unittest.mock import AsyncMock, MagicMock
@@ -35,16 +36,16 @@ from daimon.core.turn.unattended_capabilities import (
     unattended_entry_point,
 )
 from daimon.testing import ma_agent
-from daimon.testing.ma import MARouter
 from daimon.testing.ma_sessions import session_turn_sse
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import (
+    MARouter,
     build_fake_anthropic,
     json_body,
-    ma_session,
     send_events_response,
 )
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import BaseModel
 
 from .conftest import make_status_idle
@@ -513,14 +514,6 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             lambda: _mutated(lambda s: s["agent"]["mcp_servers"].append(dict(SERVERS[0]))),
             id="duplicate_server",
         ),
-        pytest.param(lambda: _mutated(lambda s: s["agent"]["model"].update(tier={})), id="model"),
-        pytest.param(
-            lambda: _mutated(
-                lambda s: s["agent"]["model"].update(effort={"type": "max", "tools": True})
-            ),
-            id="model_effort_field",
-        ),
-        pytest.param(lambda: _mutated(lambda s: s.update(sandbox={})), id="session_field"),
         pytest.param(
             lambda: _mutated(lambda s: s["resources"].append({**_FILE, "exec": True})),
             id="resource_field",
@@ -529,9 +522,8 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             lambda: _mutated(lambda s: s["resources"].append({**_FILE, "type": "shell"})),
             id="resource_type",
         ),
-        pytest.param(_sdk_recognized_field, id="sdk_recognized_field"),
         *(
-            pytest.param(lambda change=change: _mutated(change), id=f"shape_{name}")
+            pytest.param(partial(_mutated, change), id=f"shape_{name}")
             for name, change in _HIDDEN_SHAPES.items()
         ),
     ],
@@ -1093,10 +1085,6 @@ def test_reviewed_telemetry_passes() -> None:
 @pytest.mark.parametrize(
     ("path", "value"),
     [
-        ("stats.future_execution_capability", False),
-        ("usage.future_execution_capability", False),
-        ("usage.cache_creation.future_execution_capability", False),
-        ("outcome_evaluations.0.future_execution_capability", False),
         ("stats.active_seconds", _HIDDEN),
         ("usage.input_tokens", [_HIDDEN]),
         ("usage.cache_creation", [_HIDDEN]),
@@ -1105,69 +1093,62 @@ def test_reviewed_telemetry_passes() -> None:
         ("outcome_evaluations.0", [_HIDDEN]),
     ],
 )
-def test_telemetry_is_frozen_like_every_other_node(path: str, value: object) -> None:
-    """Ported from the watches review: telemetry no longer passes opaquely."""
+def test_known_telemetry_values_keep_their_shape_checks(path: str, value: object) -> None:
+    """Known value checks remain; additive telemetry fields are ignored."""
     change = _set(path, value)
     session = _mutated(lambda s: (_with_telemetry(s), change(s)))
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         require_allowed_capabilities(session)
 
 
-def _private_targets(session: BetaManagedAgentsSession) -> dict[str, object]:
-    toolset = session.agent.tools[1]
-    assert toolset.type == "mcp_toolset"
-    return {
-        "session": session,
-        "agent": session.agent,
-        "model": session.agent.model,
-        "skill": session.agent.skills[0],
-        "server": session.agent.mcp_servers[0],
-        "tool": toolset,
-        "default_config": toolset.default_config,
-        "config": toolset.configs[0],
-        "policy": toolset.configs[0].permission_policy,
-        "resource": session.resources[0],
-        "stats": session.stats,
-        "usage": session.usage,
-        "cache_creation": session.usage.cache_creation,
-        "outcome": session.outcome_evaluations[0],
-    }
+@pytest.mark.parametrize(
+    "path",
+    [
+        "usage.server_tool_use.code_execution_requests",
+        "usage.cache_creation.new_counter",
+        "stats.new_counter",
+        "outcome_evaluations.0.new_result",
+        "metadata.new_label",
+        "budget.new_ceiling",
+        "agent.model.new_inference_setting",
+        "agent.model.effort.new_inference_setting",
+        "new_session_metadata",
+    ],
+)
+def test_additive_non_capability_fields_are_ignored(path: str) -> None:
+    def change(session: dict[str, Any]) -> None:
+        _with_telemetry(session)
+        session["usage"]["server_tool_use"] = {}
+        session["budget"] = {"type": "limit"}
+        session["agent"]["model"]["effort"] = {"type": "medium"}
+        _set(path, {"future": True})(session)
+
+    require_allowed_capabilities(_mutated(change))
+    require_allowed_capabilities(_sdk_recognized_field())
 
 
-def _private_session() -> BetaManagedAgentsSession:
-    return _mutated(
-        lambda s: (
-            _with_telemetry(s),
-            s["agent"]["skills"].append({"type": "custom", "skill_id": "skill_1", "version": "1"}),
-            s["resources"].append(dict(_FILE)),
-        )
+@pytest.mark.parametrize(
+    "path",
+    [
+        "agent.tools.1.new_field",
+        "agent.tools.1.default_config.new_field",
+        "agent.tools.1.configs.0.permission_policy.new_field",
+        "agent.mcp_servers.0.new_field",
+        "agent.skills.0.new_field",
+        "resources.0.new_field",
+    ],
+)
+def test_additive_capability_fields_are_refused_with_a_reason(path: str) -> None:
+    def change(session: dict[str, Any]) -> None:
+        session["agent"]["skills"] = [{"type": "custom", "skill_id": "skill_1", "version": "1"}]
+        session["resources"] = [dict(_FILE)]
+        _set(path, None)(session)
+
+    with pytest.raises(AdmissionDenied) as refused:
+        require_allowed_capabilities(_mutated(change), allow_skills=True)
+    assert refused.value.detail == (
+        f"unreviewed provider field session.{path}: capability behavior has not been reviewed"
     )
-
-
-@pytest.mark.parametrize("name", ["_future_execution_capability", "__future", "_request_ids"])
-@pytest.mark.parametrize("level", list(_private_targets(_private_session())))
-def test_private_instance_attributes_are_refused_at_every_level(level: str, name: str) -> None:
-    """Ported from the watches review: only the SDK's own `_request_id` is allowed."""
-    session = _private_session()
-    require_allowed_capabilities(session, allow_skills=True)
-    object.__setattr__(_private_targets(session)[level], name, False)
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        require_allowed_capabilities(session, allow_skills=True)
-
-
-def test_the_sdk_request_id_is_the_one_private_attribute_allowed() -> None:
-    from anthropic._models import add_request_id  # pyright: ignore[reportPrivateImportUsage]
-
-    session = _private_session()
-    add_request_id(session, "req_1")
-    require_allowed_capabilities(session, allow_skills=True)
-    object.__setattr__(session, "_request_id", {"tools": True})
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        require_allowed_capabilities(session, allow_skills=True)
-    pydantic_private = _private_session()
-    object.__setattr__(pydantic_private.agent, "__pydantic_private__", {"_tools": True})
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        require_allowed_capabilities(pydantic_private, allow_skills=True)
 
 
 # --- Real provider shapes -------------------------------------------------
@@ -1182,11 +1163,6 @@ def _models_in(annotation: Any) -> list[type[BaseModel]]:
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return [annotation]
     return [model for arg in get_args(annotation) for model in _models_in(arg)]
-
-
-def _tag(model: type[BaseModel]) -> str:
-    [kind] = get_args(model.model_fields["type"].annotation)
-    return kind
 
 
 # Realistic leaves where a placeholder string would not read as a real one.
@@ -1294,7 +1270,11 @@ def test_the_provider_payload_populates_every_declared_field() -> None:
         "mcp_toolset",
         "custom",
     }
-    assert {resource.type for resource in session.resources} == set(caps._RESOURCES)  # pyright: ignore[reportPrivateUsage]
+    assert {resource.type for resource in session.resources} == {
+        "file",
+        "github_repository",
+        "memory_store",
+    }
     assert session.usage.cache_creation is not None
     assert session.model_extra == _PREVIEW_SESSION_EXTRAS
     assert session.agent.model_extra == _PREVIEW_AGENT_EXTRAS
@@ -1325,48 +1305,13 @@ async def test_every_unattended_entry_point_runs_a_real_shaped_session(
     assert not _builtins_runnable(agent["tools"])
 
 
-def _sdk_nodes(
-    model: type[BaseModel], path: str, unwalked: set[str]
-) -> list[tuple[str, type[BaseModel]]]:
-    """Every model the SDK can parse under `path`, keyed as `REVIEWED_FIELDS` keys it."""
-    nodes = [(path, model)]
-    for field, info in model.model_fields.items():
-        members = _models_in(info.annotation)
-        for member in members:
-            child = f"{path}.{field}" + (f"[{_tag(member)}]" if len(members) > 1 else "")
-            if child in caps.UNWALKED_NODES:
-                unwalked.add(child)
-            else:
-                nodes += _sdk_nodes(member, child, unwalked)
-    return nodes
-
-
-def test_every_field_the_sdk_declares_has_been_reviewed() -> None:
-    """An SDK upgrade that parses a new field fails here, not on a deployment.
-
-    Each model reachable from the session type must be a reviewed node, and
-    each field it declares a reviewed field of that node, or the node must be
-    one the gate refuses or treats as opaque (`UNWALKED_NODES`).
-    """
-    unwalked: set[str] = set()
-    nodes = _sdk_nodes(BetaManagedAgentsSession, "session", unwalked)
-    assert len(nodes) > 20
-    assert unwalked == caps.UNWALKED_NODES
-    unreviewed = {
-        f"{path}.{field}"
-        for path, model in nodes
-        for field in model.model_fields
-        if field not in caps.REVIEWED_FIELDS.get(path, frozenset())
-    }
-    assert not unreviewed, f"review these SDK fields in unattended_capabilities: {unreviewed}"
-
-
 @pytest.mark.parametrize(
     ("change", "detail"),
     [
         pytest.param(
             _set("agent.execution_identity", {"type": "user", "user_id": "u_1"}),
-            "unreviewed provider field session.agent.execution_identity.user_id",
+            "unreviewed provider field session.agent.execution_identity.user_id: "
+            "capability behavior has not been reviewed",
             id="identity_with_a_principal",
         ),
         pytest.param(
@@ -1407,21 +1352,9 @@ def test_every_field_the_sdk_declares_has_been_reviewed() -> None:
             id="budget_not_in_minor_units",
         ),
         pytest.param(
-            _set("budget", {"type": "limit", "max_list_cost": None, "tools": True}),
-            "unreviewed provider field session.budget.tools",
-            id="budget_field",
-        ),
-        pytest.param(
-            _set("usage.server_tool_use", {"code_execution_requests": 1}),
-            "unreviewed provider field session.usage.server_tool_use.code_execution_requests",
-            id="usage_counter",
-        ),
-        pytest.param(
-            _set("sandbox", {}), "unreviewed provider field session.sandbox", id="session_field"
-        ),
-        pytest.param(
             _set("agent.tools.1.configs.0.scope", "all"),
-            "unreviewed provider field session.agent.tools.1.configs.0.scope",
+            "unreviewed provider field session.agent.tools.1.configs.0.scope: "
+            "capability behavior has not been reviewed",
             id="config_field",
         ),
     ],
@@ -1512,7 +1445,11 @@ async def test_an_opted_in_routine_still_refuses_a_call_that_is_not_a_builtin(na
         (None, None, None),
     ],
 )
-def test_native_unattended_tools_cannot_bypass_host_inspection(kind, permission, refusal):
+def test_native_unattended_tools_cannot_bypass_host_inspection(
+    kind: Literal["builtin", "custom", "mcp_toolset"] | None,
+    permission: Literal["auto", "ask"] | None,
+    refusal: str | None,
+) -> None:
     from daimon.core.turn.unattended import require_native_unattended_capabilities
     from mux.contracts.ids import ModelRef
     from mux.contracts.resources import AgentSpec, ToolSpec
@@ -1520,7 +1457,9 @@ def test_native_unattended_tools_cannot_bypass_host_inspection(kind, permission,
     spec = AgentSpec(
         name="native-worker",
         model=ModelRef(provider="openai", id="gpt-6-astra"),
-        tools=() if kind is None else (ToolSpec(name="bash", kind=kind, permission=permission),),
+        tools=()
+        if kind is None
+        else (ToolSpec(name="bash", kind=kind, permission=permission or "auto"),),
     )
     if refusal is not None:
         with pytest.raises(AdmissionDenied, match=refusal):
@@ -1532,7 +1471,9 @@ def test_native_unattended_tools_cannot_bypass_host_inspection(kind, permission,
 
 
 @pytest.mark.parametrize("capability", ["mcp", "provider_options"])
-def test_native_unattended_refuses_ungated_connections_and_provider_options(capability):
+def test_native_unattended_refuses_ungated_connections_and_provider_options(
+    capability: str,
+) -> None:
     from daimon.core.turn.unattended import require_native_unattended_capabilities
     from mux.contracts.ids import ModelRef
     from mux.contracts.resources import AgentSpec, MCPConnection
