@@ -1754,7 +1754,7 @@ A thread can move to another agent without a new thread. Two triggers:
 - When a channel's agent changes, a thread whose session belongs to the old
   agent can't run a turn, and its next mention gets a notice instead. On
   Discord, Slack and Teams the notice has a Switch to agent button that moves the
-  thread to the channel's agent for whoever clicks it.
+  thread to the channel's agent and re-sends the clicker's latest message to it.
 
 Asking the agent is the default because it is how every other thread change
 works (keys, repo, fresh start). The button exists because no agent can answer
@@ -1770,8 +1770,20 @@ gives the order against every other lock holder. A Hand over click by an admin,
 or one `authorize` refuses, records a `panel:handoff` audit row, as
 `hand_off_task`'s refusals are audited.
 
-The switch writes only the binding. On the caller's next message the bind
-replaces the old session with one for the new agent: the old session's
+The button's switch writes only the binding. On a successful click, the adapter
+re-sends the clicker's latest readable message before the notice through its
+normal mention ingress, sanitized and bounded, or uses a fixed prompt when
+history is unavailable. The synthetic input belongs to the clicker, is addressed
+to the new agent, and bypasses command/participation rerouting. A busy thread
+queues it with the usual hourglass. It stays a separate request when a later
+mention arrives, including another mention from the same person. The normal
+admission, billing, interactive approvals, drain and cleanup apply; no button
+continuation or separate ownership mechanism is created. A refused or unchanged
+switch sends no input. Provider selection also remains with normal admission;
+the button does not implement a provider switch or release a retained slot.
+
+For a handoff that keeps its provider, the bind on that first turn replaces the
+old session with one for the new agent: the old session's
 transcript and files are carried across by the workspace transfer, the
 successor is stamped with the old session's recorded ids, memory is read-only
 when the thread's readers are limited (or a DM with `dm_memory_read_only`), and

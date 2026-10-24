@@ -584,3 +584,49 @@ async def test_selfhosted_handover_click_refuses_before_anthropic(
     )
     assert not result.switched
     assert "self-hosted" in result.text and "Nothing was changed" in result.text
+
+
+@pytest.mark.parametrize("seed", [None, "yes", " research-bot ", "x" * 600])
+def test_button_seed_is_sanitized_and_bounded(seed: str | None) -> None:
+    from daimon.core.thread_handoff import handover_seed
+
+    assert handover_seed(seed, agent_name="research-bot") == (
+        "x" * 500 if seed and len(seed) > 500 else "Pick up this conversation where it left off."
+    )
+
+
+async def test_racing_button_clickers_switch_once_and_queue_no_continuation(
+    db_session: AsyncSession, race_engine: AsyncEngine
+) -> None:
+    from daimon.core.stores.task_continuations import list_pending_continuations
+
+    tenant = await _seed(db_session)
+    factory = async_sessionmaker(race_engine, expire_on_commit=False)
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    client = build_fake_anthropic(router.dispatch)
+
+    async def click(user: str) -> bool:
+        outcome = await switch_thread_on_request(
+            client,
+            factory,
+            tenant_id=tenant.id,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="T1",
+            ma_agent_id="agt_research",
+            caller=AdminCaller(platform_user_id=user, is_server_admin=True),
+            default=_DEFAULT,
+            channel="#c1",
+            now=_NOW,
+        )
+        return outcome.switched
+
+    assert sum(await asyncio.gather(click("U1"), click("U2"))) == 1
+    async with factory() as session:
+        assert (
+            await list_pending_continuations(
+                session, tenant_id=tenant.id, platform="slack", thread_id="T1"
+            )
+            == []
+        )

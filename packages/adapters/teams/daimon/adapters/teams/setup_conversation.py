@@ -43,7 +43,7 @@ async def route_to_setup(
     sessionmaker: async_sessionmaker[AsyncSession], inbound: TeamsInbound, tenant_id: uuid.UUID
 ) -> TeamsInbound:
     """A 1:1 message, keyed to the chat's live setup conversation, or to the chat if none."""
-    if inbound.kind != "dm":
+    if inbound.kind != "dm" or inbound.handover_agent_id is not None:
         return inbound
     async with sessionmaker() as session:
         live = await list_active_bindings(

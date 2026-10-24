@@ -1882,3 +1882,26 @@ class TestReplyTargets:
 
         assert "reply_to" in result.split("<user_query")[0]
         assert "not the latest one" in result.split("<user_query")[0]
+
+
+async def test_hand_over_input_renders_the_clicker_without_mutating_the_notice() -> None:
+    from daimon.adapters.discord.button_message import ButtonMessage
+
+    notice = _make_message(msg_id=9, content="Switch to research-bot", is_bot=True)
+    clicker = _make_message(author_id=42, author_name="Clicker").author
+    thread = _make_thread([notice])
+    notice.channel = thread
+    trigger = ButtonMessage(
+        notice,
+        author=clicker,
+        click_id=discord.utils.time_snowflake(datetime.now(UTC)),
+        text="Please finish the analysis.",
+    )
+    result, _ = await build_context_xml(thread, trigger)
+    query = result.split("<user_query", 1)[1]
+    assert 'user_id="42"' in query
+    assert "Please finish the analysis." in query
+    assert notice.author.bot and notice.content == "Switch to research-bot"
+    assert trigger.jump_url == notice.jump_url
+    await trigger.add_reaction("⌛")
+    notice.add_reaction.assert_awaited_once_with("⌛")

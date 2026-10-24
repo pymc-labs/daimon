@@ -307,7 +307,9 @@ def _as_mention(inbound: TeamsInbound) -> TeamsInbound:
 
 
 def _by_author(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
-    return group_by_author(queued, lambda item: item.user_id)
+    return group_by_author(
+        queued, lambda item: item.user_id, separate=lambda item: item.handover_agent_id is not None
+    )
 
 
 def _compose(items: list[TeamsInbound]) -> TeamsInbound:
@@ -1203,7 +1205,9 @@ class TeamsApp:
             )
             capture_exception_with_scope(exc)
             if await self._finish([inbound]):  # unfinished, it replays: say nothing
-                command = self._private.command(inbound) is not None  # its sender's alone
+                command = (
+                    inbound.handover_agent_id is None and self._private.command(inbound) is not None
+                )
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
                     await self._say(inbound, _FAILED, sender_only=command)
 
@@ -1215,7 +1219,7 @@ class TeamsApp:
             if await self._finish([inbound]):
                 await self._say(inbound, DENIED, sender_only=True)
             return
-        command = self._private.command(inbound)
+        command = None if inbound.handover_agent_id is not None else self._private.command(inbound)
         if command is None and not inbound.is_targeted:
             await self._orchestrate(inbound, tenant_id)
         elif await self._finish([inbound]):

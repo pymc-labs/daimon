@@ -5,8 +5,9 @@ agent can't take a turn: its session belongs to the previous agent, so every
 mention is answered with a notice instead (`SessionAgentMismatch`). The notice
 carries this button. A click hands the thread to the agent named in the
 custom_id, for the person who clicked, through the same locked decision the
-`hand_off_task` tool uses (`daimon.core.thread_handoff`). The next message in
-the thread then runs as that agent, with the work carried across.
+`hand_off_task` tool uses (`daimon.core.thread_handoff`). The click re-sends
+the clicker’s latest words through normal mention ingress, with the work
+carried across.
 
 The custom_id names the agent only; it is a request, not a grant. The click is
 decided for the clicker's live role and grants in the thread they clicked in,
@@ -25,10 +26,11 @@ from typing import Any, Final, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.thread_handoff import switch_thread_on_request
+from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 
 import discord
 from discord.ext import commands
@@ -82,8 +84,8 @@ class HandOverButton(
                 await interaction.response.send_message(_FAILED, ephemeral=True)
 
     async def _hand_over(self, interaction: discord.Interaction[commands.Bot]) -> None:
-        thread = interaction.channel
-        if interaction.guild_id is None or not isinstance(thread, discord.Thread):
+        thread, notice = interaction.channel, interaction.message
+        if interaction.guild_id is None or not isinstance(thread, discord.Thread) or notice is None:
             await interaction.response.send_message(
                 "This button only works in a conversation thread.", ephemeral=True
             )
@@ -92,6 +94,14 @@ class HandOverButton(
         bot = cast(DaimonBot, interaction.client)
         runtime = bot.runtime
         guild_id = str(interaction.guild_id)
+        seed: str | None = None
+        try:
+            async for message in thread.history(limit=100, before=interaction.message):
+                if message.author.id == interaction.user.id and not message.author.bot:
+                    seed = message.content
+                    break
+        except discord.HTTPException:
+            _log.warning("thread_handoff.seed_unreadable", thread_id=thread.id)
         outcome = await switch_thread_on_request(
             runtime.anthropic,
             runtime.sessionmaker,
@@ -114,20 +124,26 @@ class HandOverButton(
         if not outcome.switched:
             await interaction.followup.send(outcome.text, ephemeral=True)
             return
+        message = ButtonMessage(
+            notice,
+            author=interaction.user,
+            click_id=interaction.id,
+            text=handover_seed(seed, agent_name=outcome.destination_name or ""),
+        )
+        bot._spawn(bot.on_message(message))  # pyright: ignore[reportPrivateUsage]  # normal mention ingress outlives the click
         await thread.send(
             f"{interaction.user.mention} handed this conversation over. {outcome.text}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        if interaction.message is not None:
-            # The notice's button has done its job.
-            transport = DiscordPostTransport(
-                bot,
-                thread,
-                name=interaction.message.author.name,
-                avatar_url=None,
-                builtin=False,
-            )
-            await transport.edit(interaction.message, view=None)
+        # The notice's button has done its job.
+        transport = DiscordPostTransport(
+            bot,
+            thread,
+            name=notice.author.name,
+            avatar_url=None,
+            builtin=False,
+        )
+        await transport.edit(notice, view=None)
         # The public post above is the answer; drop the private "thinking".
         await interaction.delete_original_response()
 

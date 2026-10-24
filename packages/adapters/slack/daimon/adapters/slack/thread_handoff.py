@@ -11,7 +11,10 @@ dropped.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from daimon.adapters.slack.app import SlackApp
 
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
@@ -20,7 +23,7 @@ from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.thread_handoff import switch_thread_on_request
+from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from slack_sdk.errors import SlackApiError
 
 __all__ = ["HAND_OVER_ACTION_ID", "build_hand_over_blocks", "handle_hand_over_click"]
@@ -53,8 +56,11 @@ def build_hand_over_blocks(*, text: str, agent_id: str, agent_name: str) -> list
     ]
 
 
-async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+async def handle_hand_over_click(
+    runtime: SlackRuntime, payload: dict[str, Any], *, app: SlackApp
+) -> None:
     """Switch the clicked thread to the button's agent, or say privately why not."""
+    clicked_at = datetime.now(UTC)
     if is_external_interactive(payload):
         log.info("thread_handoff.external_click_rejected")
         return
@@ -76,6 +82,38 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
     if client is None:
         return
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    seed: str | None = None
+    try:
+        cursor: str | None = None
+        for _ in range(20):
+            response = await client.conversations_replies(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk kwargs
+                channel=channel_id,
+                ts=thread_ts,
+                latest=notice_ts or None,
+                inclusive=False,
+                limit=100,
+                cursor=cursor,
+            )
+            messages: list[dict[str, Any]] = response.get("messages", [])
+            latest = next(
+                (
+                    str(m.get("text") or "")
+                    for m in reversed(messages)
+                    if m.get("user") == user_id and not m.get("bot_id")
+                ),
+                None,
+            )
+            if latest is not None:
+                seed = latest
+            metadata: dict[str, Any] = response.get("response_metadata") or {}
+            cursor = str(metadata.get("next_cursor") or "") or None
+            if not cursor:
+                break
+        else:
+            seed = None  # An incomplete read cannot identify the clicker's newest message.
+    except SlackApiError:
+        seed = None
+        log.warning("thread_handoff.seed_unreadable", thread_id=thread_ts)
     outcome = await switch_thread_on_request(
         runtime.anthropic,
         runtime.sessionmaker,
@@ -98,6 +136,21 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
     log.info(
         "thread_handoff.clicked", platform="slack", switched=outcome.switched, agent_id=agent_id
     )
+    if outcome.switched:
+        click_ts = str(actions[0].get("action_ts") or f"{clicked_at.timestamp():.6f}")
+        event = {
+            "type": "app_mention",
+            "user": user_id,
+            "user_team": team_id,
+            "channel": channel_id,
+            "thread_ts": thread_ts,
+            "ts": click_ts,
+            "event_ts": click_ts,
+            "text": handover_seed(seed, agent_name=outcome.destination_name or ""),
+            "_handover_agent_id": agent_id,
+            "_reaction_ts": notice_ts,
+        }
+        app._spawn(app._handle_app_mention(event, team_id=team_id))  # pyright: ignore[reportPrivateUsage]  # normal mention ingress outlives the click
     try:
         if not outcome.switched:
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown

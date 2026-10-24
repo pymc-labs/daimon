@@ -62,17 +62,30 @@ class HeldThreads[Key: Hashable](set[Key]):
 
 
 def group_by_author[Message, Author: Hashable](
-    queued: list[Message], author: Callable[[Message], Author | None]
+    queued: list[Message],
+    author: Callable[[Message], Author | None],
+    *,
+    separate: Callable[[Message], bool] = lambda _: False,
 ) -> list[list[Message]]:
     """Keep first-seen author order and arrival order within each author.
 
     A port can return None after reporting an authorless message to skip it.
+    `separate` keeps a button request as its own turn, flushing ordinary groups
+    on either side so a later mention cannot be folded ahead of that request.
     """
+    result: list[list[Message]] = []
     groups: dict[Author, list[Message]] = {}
     for message in queued:
-        if (key := author(message)) is not None:
+        if separate(message):
+            # Button input is a distinct request, even when the same person
+            # sends ordinary mentions on either side of it.
+            result.extend(groups.values())
+            groups.clear()
+            result.append([message])
+        elif (key := author(message)) is not None:
             groups.setdefault(key, []).append(message)
-    return list(groups.values())
+    result.extend(groups.values())
+    return result
 
 
 class ThreadQueue[Key: Hashable, Message]:
