@@ -41,7 +41,7 @@ HANDOFF_TOOLS = ("fork_agent", "hand_off_task")
 
 
 @asynccontextmanager
-async def handoff_mcp(request) -> AsyncIterator[object]:
+async def handoff_mcp(request, extra=None) -> AsyncIterator[object]:
     """The real verifier, identity middleware and agent-chat search at the HTTP edge.
 
     The tools are offline stubs under their production names: what is checked
@@ -83,6 +83,8 @@ async def handoff_mcp(request) -> AsyncIterator[object]:
             return "offline"
 
         mcp.tool(stub, name=name, description=f"{name} offline", tags={"agent-chat"})
+    if extra is not None:
+        extra(mcp)  # real tools beside the stubs, e.g. skill_list/skill_read
     mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
     try:
         yield mcp.http_app()
@@ -284,7 +286,9 @@ async def _revoked(request, token: str) -> bool:
 async def test_consent_keeps_daimon_tools_and_drops_only_what_the_template_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert {"memory", "skills"} <= set(quote.declared_drops)
+    assert "memory" in quote.declared_drops
+    # J6b: its skills come along through call_tool -> skill_list/skill_read.
+    assert "skills" not in quote.declared_drops
     # J6b: its execution tools map to bash in the hosted environment; only web tools
     # (none on this source) would be named losses.
     assert "tools" not in quote.declared_drops
@@ -308,6 +312,10 @@ async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revoke
     assert mcp["transport"]["server_url"] == "https://mcp.invalid/mcp"
     first = bearer(wire.vault_credential["auth"])
     assert first not in json.dumps(body) and "Bearer" not in json.dumps(wire.agent)
+    # J6b: its skills come along, and its instructions say how to reach them.
+    from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
+
+    assert SKILL_READ_INSTRUCTION in wire.agent["instructions"]
     assert await _revoked(request, first), "the turn's end revoked its credential"
 
     await _turn(request, 1)
@@ -469,3 +477,83 @@ async def test_a_preparation_that_fails_after_minting_revokes_the_credential(tem
         await _turn(request, 0)
     (token,) = minted
     assert await _revoked(request, token)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_turns_own_credential_reads_its_skill_through_call_tool(template):
+    """J6 b, through the real token path: the credential a GPT turn mints, verified by
+    the real verifier and identity middleware, reaches skill_read via call_tool and
+    reads its agent's own skill; the bytes are counted on that turn's credential."""
+    import io
+    import zipfile
+    from unittest.mock import MagicMock
+
+    import httpx
+    from anthropic.types.beta import SkillListResponse
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools.skill_reads import register_skill_read_tools
+    from daimon.core.defaults.metadata import tenant_scoped_display_title
+    from daimon.core.mcp_auth import token_jti
+    from daimon.core.scope import DeploymentDefault
+    from daimon.testing.asgi import mcp_session
+    from mux.testing.drivers.anthropic.ma import NotHandled, build_fake_anthropic, list_response
+    from sqlalchemy import text
+
+    request, *_ = template
+    tenant = request.tenant_id
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "notes/SKILL.md", "---\nname: notes\ndescription: Notes.\n---\nTake notes.\n"
+        )
+    agent = request.admission.agent.model_dump(mode="json")
+    agent["skills"] = [{"type": "custom", "skill_id": "sk_notes", "version": "1"}]
+    agent["metadata"] = {**(agent.get("metadata") or {}), "daimon_tenant": str(tenant)}
+    row = SkillListResponse(
+        id="sk_notes",
+        type="custom",
+        display_title=tenant_scoped_display_title(tenant_id=tenant, name="notes"),
+        latest_version="1",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        source="custom",
+    ).model_dump(mode="json")
+
+    def handler(call: httpx.Request) -> httpx.Response:
+        path = call.url.path
+        if path == "/v1/agents":
+            return list_response([agent])
+        if path == "/v1/skills":
+            return list_response([row])
+        if path == "/v1/skills/sk_notes/versions":
+            return list_response([{"id": "sk_notes_v1", "version": "1"}])
+        if path.startswith("/v1/skills/sk_notes/") and path.endswith("/content"):
+            return httpx.Response(200, content=buffer.getvalue())
+        raise NotHandled
+
+    runtime = McpRuntime(
+        request.deps.sessionmaker, build_fake_anthropic(handler), MagicMock(), DeploymentDefault()
+    )
+    live = await live_token(request)
+    async with handoff_mcp(
+        request, extra=lambda mcp: register_skill_read_tools(mcp, runtime)
+    ) as app:
+        read = await mcp_session(
+            app,
+            token=live,
+            method="tools/call",
+            params={
+                "name": "call_tool",
+                "arguments": {"name": "skill_read", "arguments": {"name": "notes"}},
+            },
+        )
+    assert not read["result"].get("isError", False), read
+    assert "Take notes." in json.dumps(read)
+    async with request.deps.sessionmaker() as db:
+        counted = (
+            await db.execute(
+                text("SELECT skill_calls, skill_bytes_read FROM mcp_tokens WHERE jti = :jti"),
+                {"jti": token_jti(live)},
+            )
+        ).one()
+    assert counted[0] == 1 and counted[1] > 0

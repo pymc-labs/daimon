@@ -242,6 +242,10 @@ NATIVE_FLEET_TOOLS: Final[frozenset[str]] = frozenset(
     {"fleet_spawn", "fleet_collect", "fleet_status", "fleet_agents"}
 )
 
+#: The proxy a GPT or Gemini turn reaches Daimon MCP's skill_list/skill_read through
+#: (J6 b): its catalogue lists `call_tool`, never every tool.
+SKILL_READ_PROXY: Final = "call_tool"
+
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
 # be anything) stays out, so it falls to the fail-closed `write` default.

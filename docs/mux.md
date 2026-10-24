@@ -3671,3 +3671,12 @@ normal chat-agent backend selection consent. The target instructions disclose
 that loss. The source remains unchanged, and the declaration does not waive any
 sibling capability. Hosted bash is not claimed to emulate the provider's native
 URL-fetch behavior; its existing execution and network authority are unchanged.
+
+An agent template (a GPT or Gemini copy on the code defaults) maps the source's
+file/shell tools the same way (OpenAI bash in its hosted environment, Gemini
+`code_execution`), but carries no web tool: preview names
+`builtin_tool:web_search` and `builtin_tool:web_fetch` as losses (OpenAI's web
+search is unpriced and uncounted; Gemini's grounding is off). A toolset it can't
+map drops whole as `tools`. Its custom skills come along as Daimon MCP's
+`skill_list`/`skill_read` when both are in its executable catalogue, with one
+line in its instructions saying so; otherwise `skills` is a named loss.

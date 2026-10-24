@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 138 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 140 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -399,6 +399,15 @@ Authenticated turn origins and identity-pinned configuration targets.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_setup_target` | all callers | Switch this setup conversation to an explicitly selected MA agent identity. |
+
+## `skill_reads`
+
+A GPT or Gemini turn's own skills, read through Daimon MCP (J6 b).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `skill_list` | all callers | List your own skills by name. |
+| `skill_read` | all callers | Read one of your own skills (from skill_list): its SKILL.md, or another of its files by path. |
 
 ## `skill_uploads`
 

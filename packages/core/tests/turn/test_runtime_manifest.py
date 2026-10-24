@@ -177,3 +177,71 @@ def test_absent_manifest_retains_deferred_selection_refusal(
 def test_existing_environment_identifier_validation_remains(key: str) -> None:
     with pytest.raises(ValidationError):
         TypeAdapter(ApiKeyEnvironment).validate_python(key)
+
+
+def _consent_for(target):
+    from daimon.core.stores.domain import _BackendDropConsent  # pyright: ignore[reportPrivateUsage]
+    from mux.state.operations import request_digest
+
+    return _BackendDropConsent(
+        declared_drops=target.declared_drops,
+        source_pin="0" * 64,
+        target_digest=request_digest(target.model_dump(mode="json")),
+    )
+
+
+def _template_target(system, drops, allowed, *, skill_line=False):
+    from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, MCPConnection
+
+    drops = sorted(drops)
+    paragraphs = [p for p in (system, SKILL_READ_INSTRUCTION if skill_line else None) if p]
+    if drops:
+        paragraphs.append("Unavailable capabilities: " + ", ".join(drops) + ".")
+    return AgentSpec(
+        name="copy",
+        model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+        system="\n\n".join(paragraphs) or None,
+        mcp_servers=(
+            MCPConnection(
+                name="daimon-mcp",
+                url="https://mcp.invalid/mcp",
+                tool_policy={"allowed_tools": list(allowed)},
+            ),
+        ),
+        declared_drops=tuple(sorted(drops)),
+    )
+
+
+SWITCH = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+
+
+@pytest.mark.parametrize("instructions", [None, "Source instructions"])
+def test_an_agent_with_or_without_its_own_instructions_matches_its_pre_switch_tool_consent(
+    instructions,
+):
+    """#1484 delta review: an agent with no instructions of its own has the losses
+    line alone; the switch-tool rebuild must not repeat it."""
+    from daimon.core.turn.runtime_manifest import (
+        _consented_before,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    today = _template_target(
+        instructions, ["memory"], ["call_tool", "request_agent_backend_switch"]
+    )
+    old = _template_target(instructions, ["memory", SWITCH], ["call_tool"])
+    assert _consented_before(today, instructions, _consent_for(old))
+
+
+def test_skills_plus_any_other_difference_still_needs_a_new_confirmation():
+    from daimon.core.turn.runtime_manifest import (
+        _consented_before,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    today = _template_target("Source", ["memory"], ["call_tool"], skill_line=True)
+    old_skills_only = _template_target("Source", ["memory", "skills"], ["call_tool"])
+    assert _consented_before(today, "Source", _consent_for(old_skills_only))
+    # The same old consent, plus one more loss nothing explains: a fresh card.
+    old_and_more = _template_target("Source", ["memory", "sandbox", "skills"], ["call_tool"])
+    assert not _consented_before(today, "Source", _consent_for(old_and_more))

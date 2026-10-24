@@ -37,13 +37,12 @@ def _gap(reason: str):
     return pytest.mark.xfail(strict=True, reason=reason)
 
 
-J6B = "J6 (b) skills/built-in tools off Anthropic: scope waits on ROOT/Carlos (J6-OPTIONS.md)"
 LEGS = [
     pytest.param("openai", "mcp"),  # #1441: GPT roots keep Daimon MCP
-    pytest.param("openai", "skill", marks=_gap(J6B)),
+    pytest.param("openai", "skill"),  # J6b PR2: skill_list/skill_read
     pytest.param("openai", "builtin"),  # J6b PR1: bash in its hosted environment
     pytest.param("gemini", "mcp"),
-    pytest.param("gemini", "skill", marks=_gap(J6B)),
+    pytest.param("gemini", "skill"),  # J6b PR2: skill_list/skill_read
     pytest.param("gemini", "builtin"),  # J6b PR1: code_execution
 ]
 
@@ -76,7 +75,16 @@ async def chat(fresh_chat, monkeypatch):
     )
 
     async def listed(_url: str, _token: str) -> frozenset[str]:
-        return frozenset({"describe_agent", "hand_off_task", "request_agent_backend_switch"})
+        return frozenset(
+            {
+                "describe_agent",
+                "hand_off_task",
+                "request_agent_backend_switch",
+                # Everything else, skill_list/skill_read included, through the proxy.
+                "search_tools",
+                "call_tool",
+            }
+        )
 
     # Daimon's MCP catalogue as the template capture reads it live.
     monkeypatch.setattr(discovery, "list_mcp_tools", listed)

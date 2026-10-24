@@ -663,7 +663,9 @@ def reference_settings(reference: BackendSwitchReference) -> AgentSettings | Non
 _DROP_WORDS: Mapping[str, str] = {
     "credentials": "its saved keys",
     "memory": "its memory",
-    "sandbox": "its sandbox",
+    # A GPT or Gemini copy runs in a fresh sandbox (bash or code_execution): what
+    # it leaves behind is what was set up in this one.
+    "sandbox": "its sandbox's files and packages",
     "skills": "its skills",
     "mcp": "its connected tools",
     "tools": "its tools",
@@ -676,7 +678,10 @@ _DROP_WORDS: Mapping[str, str] = {
 
 
 def drop_words(drops: Sequence[str]) -> str:
-    """'its saved keys, its memory and its sandbox': saved keys first, as the costliest."""
+    """'its saved keys, its memory and its sandbox's files and packages'.
+
+    Saved keys first, as the costliest.
+    """
     words: list[str] = []
     for drop in sorted(drops, key=lambda item: (item != "credentials", item)):
         if drop.startswith("mcp_tool:"):

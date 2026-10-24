@@ -40,7 +40,7 @@ from daimon.core.neutral_resources import (
     WorkerSpecRefused,
     resolve_worker_spec,
 )
-from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, SKILL_READ_PROXY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
@@ -95,6 +95,10 @@ _WILDCARD = "*"
 #: Built-in web tools an agent template never carries off Anthropic: they are named
 #: losses (OpenAI's web_search is unpriced and uncounted; Gemini's grounding is off).
 _WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+SKILL_READ_INSTRUCTION = (
+    "Your skills don't load by themselves here: use call_tool to call skill_list "
+    "and see them, then skill_read the one that fits before you start a task it covers."
+)
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -1963,6 +1967,7 @@ async def _capture_source_capabilities(
             )
             own_tools = tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             template_losses: tuple[str, ...] = ()
+            skills_by_tools = False
             if template:
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
@@ -1988,7 +1993,19 @@ async def _capture_source_capabilities(
                     # Tools it can't map (custom tools, a partial toolset) go whole.
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
-                if any(s.source in (None, "custom") for s in spec.skills or ()):
+                # Its custom skills come along as Daimon MCP's skill_list/skill_read
+                # (J6 b), which a GPT/Gemini turn reaches through the call_tool
+                # proxy its catalogue carries; without that proxy they are a whole
+                # loss its consent must name. The catalogue itself is unchanged, so
+                # a template captured before keeps matching it.
+                skills_by_tools = (
+                    any(s.source in (None, "custom") for s in spec.skills or ())
+                    and permissions.get(SKILL_READ_PROXY) == "auto"
+                )
+                if (
+                    any(s.source in (None, "custom") for s in spec.skills or ())
+                    and not skills_by_tools
+                ):
                     template_losses = ("skills", *template_losses)
             else:
                 mapped_tools = represented_execution_tools(
@@ -2134,7 +2151,11 @@ async def _capture_source_capabilities(
                 name=spec.name,
                 description=spec.description,
                 model=inputs.model,
-                system=spec.system,
+                system=(
+                    compose_source_instructions(spec.system, SKILL_READ_INSTRUCTION)
+                    if skills_by_tools
+                    else spec.system
+                ),
                 metadata=spec.metadata,
                 tools=mapped_tools,
                 skills=tuple(item.target for item in inputs.skills),
@@ -2815,8 +2836,10 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     if target.declared_drops:
         target = target.model_copy(
             update={
+                # The target's own text (the source's, plus any representation
+                # paragraph such as the skill tools line), then the losses.
                 "system": compose_source_instructions(
-                    spec.system,
+                    target.system,
                     "Unavailable capabilities: " + ", ".join(target.declared_drops) + ".",
                 )
             }
@@ -2876,6 +2899,61 @@ def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> A
             ),
         }
     )
+
+
+def _with_skills_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+    """`target` as a consent recorded before skills came along through Daimon MCP names it.
+
+    That consent declared `skills` a loss and its instructions had no skill line
+    (J6 b). Only that one difference is rebuilt, as `_with_switch_tool_dropped`
+    does for the switch tool; the copy then runs with its skills from now on.
+    """
+    if "skills" in target.declared_drops or SKILL_READ_INSTRUCTION not in (target.system or ""):
+        return None
+    drops = tuple(sorted((*target.declared_drops, "skills")))
+    return target.model_copy(
+        update={
+            "declared_drops": drops,
+            "system": compose_source_instructions(
+                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
+            ),
+        }
+    )
+
+
+def _consented_before(
+    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+) -> bool:
+    """A consent recorded before the switch tool or the skill tools were offered.
+
+    Either difference alone, or both, is rebuilt; anything else still needs a
+    fresh confirmation.
+    """
+    without_skills = _with_skills_dropped(target, source_system)
+    candidates = (
+        _with_switch_tool_dropped(target, _without_losses_line(target, source_system)),
+        without_skills,
+        _with_switch_tool_dropped(without_skills, source_system) if without_skills else None,
+    )
+    return any(_consented(candidate, consent) for candidate in candidates)
+
+
+def _without_losses_line(target: AgentSpec, source_system: str | None) -> str | None:
+    """The target's instructions before its "Unavailable capabilities" line: the
+    source's own plus any representation paragraph (the skill tools line).
+
+    An agent with no instructions of its own has the losses line alone, with no
+    paragraph before it: that is the source's (absent) instructions.
+    """
+    line = "Unavailable capabilities: "
+    system = target.system
+    if system is None:
+        return system
+    if "\n\n" + line in system:
+        return system[: system.rindex("\n\n" + line)]
+    if system.startswith(line):
+        return source_system
+    return system
 
 
 def source_preservation_pin(source: BackendAgent) -> str:
@@ -3049,9 +3127,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not _consented(target, consent) and not _consented(
-            _with_switch_tool_dropped(target, spec.system), consent
-        ):
+        if not _consented(target, consent) and not _consented_before(target, spec.system, consent):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
         worker is None
