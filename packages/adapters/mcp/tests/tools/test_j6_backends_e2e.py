@@ -237,3 +237,31 @@ async def test_j6_a_copy_made_here_keeps_daimon_mcp_in_j1_order(chat, backend):
         origin_context_id=str(chat.origin.id),
     )
     assert "mcp" not in preview.declared_drops, preview.declared_drops
+
+
+@pytest.mark.parametrize("fresh_chat", ["member"], indirect=True)
+async def test_j6_a_member_never_sees_the_connectors_of_an_agent_they_dont_own(chat):
+    """Only Daimon's own connection is named to a member; an admin's private one is not."""
+    from daimon.adapters.mcp.tools.agents import (
+        _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    # The built-in Daimon (an admin's agent) also has a private connector.
+    chat.ma.agents["agent_daimon"]["mcp_servers"] = [
+        *chat.ma.agents["agent_daimon"]["mcp_servers"],
+        {"name": "finance-crm", "type": "url", "url": "https://crm.invalid/mcp"},
+    ]
+    seen = await _get_agent_impl(
+        chat.runtime,
+        chat.auth,
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        origin_context_id=str(chat.origin.id),
+    )
+    assert seen.mcp_servers is None
+    assert seen.mcp_server_names in ([], ["daimon-mcp"])
+    listed = await _list_agents_impl(
+        chat.runtime, chat.auth, None, origin_context_id=str(chat.origin.id)
+    )
+    for info in listed:
+        assert "finance-crm" not in info.mcp_server_names, info.name

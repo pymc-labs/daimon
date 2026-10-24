@@ -161,6 +161,8 @@ def test_capture_sees_both_agent_templates_before_any_environment(
     """
     from daimon.core.turn.runtime_defaults import capture_template_rows, default_rows
 
+    for name in ("DAIMON_CHANNEL_OPENAI_KEY", "DAIMON_CHANNEL_GEMINI_KEY"):
+        monkeypatch.delenv(name, raising=False)
     rows = capture_template_rows(str(TENANT))
     assert {row["profile"] for row in rows} == {
         "gemini.inline_reuse",

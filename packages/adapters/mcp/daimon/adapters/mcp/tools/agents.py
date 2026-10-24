@@ -213,10 +213,19 @@ class AgentInfo(BaseModel):
         Name, description, model, skills and the agent id stay. The id is the
         identity chat callers pass back as ``expected_ma_agent_id``; the rest
         (attached MCP servers and their URLs, creation date, sync warnings) is
-        how the agent was set up, which is for admins.
+        how the agent was set up, which is for admins. Only Daimon's own built-in
+        connection keeps its name: whether it is there is a capability (J6), and
+        no other connector of anyone's agent is named to a member.
         """
         return self.model_copy(
-            update={"created_at": None, "mcp_servers": None, "sync_warnings": None}
+            update={
+                "created_at": None,
+                "mcp_servers": None,
+                "sync_warnings": None,
+                "mcp_server_names": [
+                    name for name in self.mcp_server_names if name == DAIMON_MCP_SERVER_NAME
+                ],
+            }
         )
 
 
