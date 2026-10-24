@@ -110,7 +110,13 @@ async def _chat_catalogue(*, native: bool) -> frozenset[str]:
 
 
 async def _coordinator_turn(
-    chat, monkeypatch, backend: str | None, *, explicit: bool = False, source_skills: bool = False
+    chat,
+    monkeypatch,
+    backend: str | None,
+    *,
+    explicit: bool = False,
+    source_skills: bool = False,
+    memory: bool = False,
 ):
     """The copy (switched to `backend`, or left on Claude) answers one message with fleet
     on. Returns (retained fleet_root operation keys, remembered refusal)."""
@@ -156,6 +162,18 @@ async def _coordinator_turn(
         new_copy_if_taken=True,
         origin_context_id=str(chat.origin.id),
     )
+    if memory:
+        # As live Daimon copies have: the copy owns a memory store.
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.stores import agent_memory_stores
+
+        async with chat.runtime.session_factory.begin() as db:
+            await agent_memory_stores.insert_memory_store(
+                db,
+                tenant_id=chat.auth.tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=chat.auth.tenant_id, ma_agent_id=copy.id),
+                memory_store_id=f"memstore-{copy.id}",
+            )
     if backend is None:
         # The Claude copy takes this thread the way a person hands it over.
         from daimon.adapters.mcp.tools.task_continuity import (
@@ -548,7 +566,7 @@ async def test_a_native_agent_coordinates_a_fleet(fresh_chat, monkeypatch, backe
         assert (frozen.spec.model.provider, frozen.spec.model.id) == ("anthropic", HAIKU)
 
 
-async def _fleet_from_root(chat, monkeypatch, deps, origin, root):
+async def _fleet_from_root(chat, monkeypatch, deps, origin, root, *, model=None):
     """The native root dispatches one worker that names no model, through the same
     fleet tool service its turn calls, and collects it. Returns (rows, collected)."""
     import mux.drivers.gemini as gemini_sdk
@@ -635,6 +653,7 @@ async def _fleet_from_root(chat, monkeypatch, deps, origin, root):
                 result_contract=None,
                 reviewer_of=None,
                 task="Compare X from your point of view.",
+                model=model,
             )
         )
         assert reply["status"] == "pending", reply
@@ -689,3 +708,44 @@ async def test_a_native_root_declares_its_claude_sources_skills_lost(
     assert keys
     assert (frozen.spec.model.provider, frozen.spec.model.id) == (backend, NATIVE[backend])
     assert not frozen.spec.skills and "skills" in frozen.spec.declared_drops
+
+
+async def test_a_gpt_root_dispatches_a_gemini_flash_worker(fresh_chat, monkeypatch):
+    """J10b (smoke cbfc6032): a GPT copy coordinating a fleet names a Gemini Flash
+    worker; it ran Haiku and Luna but the Flash worker failed `dispatch_refused`."""
+    keys, refusal, _, frozen, deps, origin, _ = await _coordinator_turn(
+        fresh_chat, monkeypatch, "openai"
+    )
+    assert refusal is None and keys
+    rows, collected, gemini_wire, _ = await _fleet_from_root(
+        fresh_chat, monkeypatch, deps, origin, frozen, model=NATIVE["gemini"]
+    )
+    ((row,),) = (rows,)
+    assert (row.backend, row.model, row.status) == ("gemini", NATIVE["gemini"], "succeeded"), (
+        row.status,
+        row.failure_code,
+    )
+    assert collected["status"] == "ready" and len(collected["results"]) == 1
+    (sent,) = gemini_wire.requests
+    assert "Compare X from your point of view." in str(sent["system_instruction"])
+
+
+@pytest.mark.parametrize("backend", ["openai", "gemini"])
+async def test_a_native_root_declares_its_claude_sources_memory_lost(
+    fresh_chat, monkeypatch, backend
+):
+    """Smoke 4acca048 (latent): a copy used on Claude first owns a memory store; switched
+    to GPT/Gemini, its root freeze was refused (field=files) and fleet was off. The root
+    runs on its counterpart, which never mounts the source's memory store: it declares
+    memory lost, and its workers run and are collected."""
+    keys, refusal, _, frozen, deps, origin, _ = await _coordinator_turn(
+        fresh_chat, monkeypatch, backend, memory=True
+    )
+    assert refusal is None, refusal
+    assert keys
+    assert not any(r.resource and r.resource.kind == "memory_store" for r in frozen.resources)
+    assert "memory" in frozen.spec.declared_drops
+    rows, collected, *_ = await _fleet_from_root(fresh_chat, monkeypatch, deps, origin, frozen)
+    ((row,),) = (rows,)
+    assert (row.backend, row.status) == (backend, "succeeded"), row.failure_code
+    assert collected["status"] == "ready" and len(collected["results"]) == 1
