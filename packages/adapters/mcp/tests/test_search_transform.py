@@ -61,3 +61,51 @@ async def test_call_tool_still_runs_other_tools() -> None:
     async with Client(mcp) as client:
         await client.call_tool("call_tool", {"name": "list_agents", "arguments": {}})
     assert mcp.calls == ["list_agents"]  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def _fleet_server(auth) -> FastMCP:
+    from typing import Any
+
+    from fastmcp.server.middleware import Middleware, MiddlewareContext
+
+    class Identity(Middleware):
+        async def on_list_tools(self, context: MiddlewareContext[Any], call_next: Any) -> Any:
+            await context.fastmcp_context.set_state("auth", auth, serializable=False)
+            return await call_next(context)
+
+    mcp = FastMCP("test")
+    for name in ("fleet_spawn", "fleet_collect", "fleet_status", "fleet_agents", "fleet_kill"):
+
+        def tool(name: str = name) -> str:
+            return name
+
+        mcp.tool(tool, name=name)
+    mcp.add_middleware(Identity())
+    mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
+    return mcp
+
+
+@pytest.mark.parametrize("native", [True, False])
+async def test_a_gpt_or_gemini_turn_sees_the_fleet_tools_by_name(native: bool) -> None:
+    """M07 (diagnosis credit: dsh): a GPT/Gemini copy's native tool allowlist is built
+    from this list, and with fleet tools only behind search_tools it reached for saved
+    copies instead. A provider turn with no confirmation surface lists the tools that
+    start and read a fleet; a Claude turn's list is unchanged (it searches)."""
+    import uuid
+
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.core.stores.domain import Role
+
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.USER,
+        no_confirmation_surface=native,
+    )
+    async with Client(_fleet_server(auth)) as client:
+        names = {tool.name for tool in await client.list_tools()}
+        found = await client.call_tool("search_tools", {"query": "fleet kill worker"})
+    pinned = {"fleet_spawn", "fleet_collect", "fleet_status", "fleet_agents"}
+    assert names == {"search_tools", "call_tool", *(pinned if native else ())}
+    # The rest stays reachable through search either way.
+    assert "fleet_kill" in str(found.content)

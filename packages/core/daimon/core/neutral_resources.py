@@ -1709,7 +1709,29 @@ def fleet_root_permissions(
         raise WorkerSpecRefused("origin", "unbound")
     spec, resources = _root_ceiling(source, account_id=fleet.scope.account_id)
     if execution_model is not None:
-        spec = spec.model_copy(update={"model": execution_model})
+        # The Claude source's model config describes a model this root doesn't run on:
+        # its counterpart runs at its own model's defaults, so the root (and every
+        # worker under it) declares those controls lost, never carries them onto a GPT or
+        # Gemini model (M07, smoke 857a82bb: every native freeze refused `extensions`).
+        from mux.profiles.anthropic import MODEL_CONFIG_NAMESPACE
+
+        kept = tuple(
+            extension
+            for extension in spec.extensions or ()
+            if extension.namespace != MODEL_CONFIG_NAMESPACE
+        )
+        dropped = len(kept) != len(spec.extensions or ())
+        spec = spec.model_copy(
+            update={
+                "model": execution_model,
+                "extensions": kept or None,
+                "declared_drops": tuple(
+                    sorted({*spec.declared_drops, "model_controls"})
+                    if dropped
+                    else spec.declared_drops
+                ),
+            }
+        )
     read_only = source.memory_read_only is not False
     # The run gets its own time; each worker is capped at spawn (`worker_runtime_ceiling`).
     duration = min(grant.max_run_seconds, TURN_CEILING_S)
