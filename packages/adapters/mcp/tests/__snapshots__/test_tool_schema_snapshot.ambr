@@ -6053,41 +6053,6 @@
         'type': 'object',
       }),
     }),
-    'skill_list': dict({
-      'description': '''
-        List your own skills by name. On GPT or Gemini, call this first; then
-        skill_read the one that fits before you start.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
-    'skill_read': dict({
-      'description': '''
-        Read one of your own skills (from skill_list): its SKILL.md, or another
-        of its files by path. Follow its instructions. Each read returns at most
-        64 KB, and one reply's reads at most 512 KB together.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'name': dict({
-            'type': 'string',
-          }),
-          'path': dict({
-            'default': 'SKILL.md',
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'name',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'start_fresh_task': dict({
       'description': '''
         Start this conversation's work over with an empty workspace: "let's start fresh", "start over", "clear the workspace and begin a new task".

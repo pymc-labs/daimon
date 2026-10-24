@@ -232,9 +232,6 @@ PUBLISH_TOOLS: Final[frozenset[str]] = frozenset(
 #: Daimon's tools a session can hold on `always_ask` by their own name.
 APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS})
 
-#: The proxy a GPT or Gemini turn reaches Daimon MCP's skill_list/skill_read through
-#: (J6 b): its catalogue lists `call_tool`, never every tool.
-SKILL_READ_PROXY: Final = "call_tool"
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can

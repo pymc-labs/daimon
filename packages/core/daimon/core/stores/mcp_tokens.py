@@ -10,8 +10,6 @@ No try/except — exceptions propagate (guideline:architecture).
 - list_mcp_tokens: operator listing, live tokens only unless asked.
 - lock_mcp_token / add_issued_usd: the per-token promo issuing ceiling.
 - update_mcp_token_scopes: replace a live operator token's scopes.
-- begin_skill_call / charge_skill_bytes: a turn-lived credential's skill calls and
-  bytes, checked and counted atomically.
 
 Injected `now` follows guideline:architecture — no datetime.now() calls
 inside core logic.
@@ -21,7 +19,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
 
@@ -117,81 +115,6 @@ async def revoke_mcp_token(
     if orm is None:
         return None
     return McpTokenRow.model_validate(orm)
-
-
-def _turn_lived(jti: uuid.UUID, tenant_id: uuid.UUID, now: datetime) -> tuple[Any, ...]:
-    """A live provider-turn credential of this tenant that lives for one turn only.
-
-    An agent template's turn mints its own and revokes it at the end (at most 15
-    minutes); an operator row's long-lived file credential never qualifies, so
-    a skill budget kept on the row is always one turn's.
-    """
-    return (
-        McpToken.jti == jti,
-        McpToken.tenant_id == tenant_id,
-        McpToken.surface == "provider_turn",
-        McpToken.revoked_at.is_(None),
-        McpToken.expires_at.is_not(None),
-        McpToken.expires_at > now,
-        McpToken.expires_at - McpToken.created_at <= TURN_LIVED_MAX,
-    )
-
-
-#: The longest a credential may live and still count as one turn's.
-TURN_LIVED_MAX = timedelta(hours=1)
-
-
-async def begin_skill_call(
-    session: AsyncSession,
-    *,
-    jti: uuid.UUID,
-    tenant_id: uuid.UUID,
-    now: datetime,
-    max_calls: int,
-    budget: int,
-) -> int | None:
-    """Count one skill call on a turn-lived credential, before any download.
-
-    Returns the bytes the turn may still read, or None when the credential isn't
-    one turn's, or the turn is out of calls or bytes. One atomic UPDATE checks
-    and counts, on every instance.
-    """
-    stmt = (
-        update(McpToken)
-        .where(
-            *_turn_lived(jti, tenant_id, now),
-            McpToken.skill_calls < max_calls,
-            McpToken.skill_bytes_read < budget,
-        )
-        .values(skill_calls=McpToken.skill_calls + 1)
-        .returning(McpToken.skill_bytes_read)
-    )
-    read = (await session.execute(stmt)).scalar_one_or_none()
-    return None if read is None else budget - int(read)
-
-
-async def charge_skill_bytes(
-    session: AsyncSession,
-    *,
-    jti: uuid.UUID,
-    tenant_id: uuid.UUID,
-    now: datetime,
-    size: int,
-    budget: int,
-) -> bool:
-    """Add `size` to a turn-lived credential's skill bytes if it stays within `budget`.
-
-    False when it would, or the credential isn't one turn's.
-    """
-    if size < 0:
-        raise ValueError("size must be non-negative")
-    stmt = (
-        update(McpToken)
-        .where(*_turn_lived(jti, tenant_id, now), McpToken.skill_bytes_read + size <= budget)
-        .values(skill_bytes_read=McpToken.skill_bytes_read + size)
-        .returning(McpToken.jti)
-    )
-    return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
 async def list_live_tokens_by_label(
