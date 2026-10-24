@@ -139,6 +139,10 @@ class AgentInfo(BaseModel):
     mcp_servers: list[AgentMcpServerInfo] | None
     """Attached server names and URLs. ``None`` means withheld from a non-admin
     caller; ``[]`` means the agent has none."""
+    mcp_server_names: list[str] = Field(default_factory=list)
+    """Every attached server's name, kept for a caller who may not see the URLs.
+    A member's own copy withholds ``mcp_servers`` but not this: whether Daimon's
+    built-in connection is there is a capability, not setup detail (J6)."""
     skills: list[AgentSkillInfo]
     sync_warnings: list[SyncRepoFailure] | None = None
     system: str | None = None
@@ -190,6 +194,7 @@ class AgentInfo(BaseModel):
             model=model_choice_id(agent.model),
             created_at=agent.created_at,
             mcp_servers=[AgentMcpServerInfo(name=s.name, url=s.url) for s in agent.mcp_servers],
+            mcp_server_names=[s.name for s in agent.mcp_servers],
             skills=[
                 AgentSkillInfo(
                     type=sk.type,

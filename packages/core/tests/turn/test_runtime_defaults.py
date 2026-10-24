@@ -154,17 +154,19 @@ def test_an_openai_agent_turn_waits_for_its_tenants_environment(
 def test_capture_sees_both_agent_templates_before_any_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Source capture reads template capabilities only, for every keyed provider."""
-    from daimon.core.turn.runtime_defaults import capture_template_rows
+    """Source capture reads template capabilities without needing a provider key.
 
-    assert capture_template_rows(str(TENANT)) == []
-    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
-    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
+    Capture runs in the MCP server, which may not carry the key the chat host has;
+    its preview must still see the template that keeps MCP (smoke 0eee1b8e J6).
+    """
+    from daimon.core.turn.runtime_defaults import capture_template_rows, default_rows
+
     rows = capture_template_rows(str(TENANT))
     assert {row["profile"] for row in rows} == {
         "gemini.inline_reuse",
         "openai.persistent_workspace",
-    }
+    }, "an unkeyed capture process still sees both agent templates"
+    assert default_rows(str(TENANT)) == [], "a turn still refuses without a key"
     assert all(row["root_materialization"] is True for row in rows)
     assert all(row["template_capabilities"] == "mcp" for row in rows)
     assert all(row["tenant_id"] == str(TENANT) for row in rows)

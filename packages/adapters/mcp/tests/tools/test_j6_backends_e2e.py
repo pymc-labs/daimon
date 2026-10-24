@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 from daimon.adapters.mcp.tools.agents import (
     _fork_agent_impl,  # pyright: ignore[reportPrivateUsage]
+    _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _request_agent_backend_switch_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.task_continuity import (
@@ -138,3 +139,101 @@ async def test_j6_a_copy_on_another_backend_keeps_it(chat, backend, capability):
         # Its shell/code execution is kept; web search is a named loss (unpriced on
         # OpenAI, grounding off on Gemini), said plainly on the card.
         assert "builtin_tool:web_search" in preview.declared_drops, preview.declared_drops
+
+
+@pytest.mark.parametrize("fresh_chat", ["member"], indirect=True)
+async def test_j6_a_members_copy_still_reports_daimon_mcp(chat):
+    """SMOKE 0eee1b8e J6o/J6g: a member's own copy said "MCP servers: None".
+
+    The copy keeps `daimon-mcp`; only its URL is setup detail a member may not
+    read. The capability name must stay visible, or the owner cannot tell a
+    working Daimon MCP from one the switch dropped.
+    """
+    copy = await _fork_agent_impl(
+        chat.runtime,
+        chat.auth,
+        "Daimon",
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id),
+    )
+    seen = await _get_agent_impl(
+        chat.runtime,
+        chat.auth,
+        copy.name,
+        expected_ma_agent_id=copy.id,
+        origin_context_id=str(chat.origin.id),
+    )
+    assert seen.mcp_servers is None, "the server URL stays setup detail for a member"
+    assert "daimon-mcp" in seen.mcp_server_names
+
+
+@pytest.mark.parametrize("backend", ["openai", "gemini"])
+@pytest.mark.parametrize("fresh_chat", ["admin"], indirect=True)
+async def test_j6_the_preview_keeps_mcp_with_no_provider_key_in_this_process(
+    chat, monkeypatch, backend
+):
+    """SMOKE 0eee1b8e J6o/J6g: the MCP server builds the preview, and it may not carry
+    the chat host's provider key. That must not turn MCP into a declared drop.
+
+    Found by dsh (nc-smoke-0eee1b8e-J5J6J7). Played in J1's order (#1463): the copy is
+    made in this conversation, and its preview runs before the card hands it over.
+    """
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.provider_keys import DEFAULT_KEY_ENV
+    from daimon.core.stores.access_policy import set_access_policy
+
+    for provider in ("openai", "gemini"):
+        monkeypatch.delenv(DEFAULT_KEY_ENV[provider], raising=False)
+    # The tenant explicitly allows the providers, as staging's does: its MCP process
+    # has no channel key, yet the switch itself is allowed.
+    async with chat.runtime.session_factory.begin() as db:
+        await set_access_policy(
+            db,
+            tenant_id=chat.auth.tenant_id,
+            policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini")),
+        )
+    copy = await _fork_agent_impl(
+        chat.runtime,
+        chat.auth,
+        "Daimon",
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id),
+    )
+    preview = await _request_agent_backend_switch_impl(
+        chat.runtime,
+        chat.auth,
+        agent_name=copy.name,
+        target_backend=backend,
+        origin_context_id=str(chat.origin.id),
+    )
+    assert "mcp" not in preview.declared_drops, preview.declared_drops
+
+
+@pytest.mark.parametrize("backend", ["openai", "gemini"])
+async def test_j6_a_copy_made_here_keeps_daimon_mcp_in_j1_order(chat, backend):
+    """J1's order (#1463): copy in this conversation, preview, then the card hands off.
+
+    The preview precedes the hand-off, so the capture must still take this place's
+    template for the new copy (smoke 0eee1b8e J6o: the GPT copy had no MCP).
+    """
+    copy = await _fork_agent_impl(
+        chat.runtime,
+        chat.auth,
+        "Daimon",
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id),
+    )
+    preview = await _request_agent_backend_switch_impl(
+        chat.runtime,
+        chat.auth,
+        agent_name=copy.name,
+        target_backend=backend,
+        origin_context_id=str(chat.origin.id),
+    )
+    assert "mcp" not in preview.declared_drops, preview.declared_drops
