@@ -748,7 +748,8 @@ async def import_watch(
     session: AsyncSession, definition: ImportedWatch, *, now: datetime
 ) -> WatchRow:
     """Operator-only offline import: all definitions are paused, keys are never imported."""
-    from daimon.core.continuity.poll_tools import require_poll_tool, validate_poll
+    from daimon.core.continuity.poll_tools import validate_poll
+    from daimon.core.continuity.watch_imports import map_poll_source
     from daimon.core.continuity.watch_projection import bounded, projection_path
 
     binding = definition.os_binding
@@ -765,19 +766,21 @@ async def import_watch(
     bounded(definition.baseline)
     bounded(definition.arguments)
     reason = "awaiting_confirmation"
+    tool, arguments = definition.tool, definition.arguments
+    mapping_error: str | None = None
     if definition.source == "poll":
         try:
-            require_poll_tool(definition.tool or "")
-        except ValueError:
-            reason = "source_unmapped"
-        if reason != "source_unmapped":
+            tool, arguments = map_poll_source(tool or "", arguments)
             validate_poll(
-                definition.tool or "",
-                definition.arguments,
+                tool,
+                arguments,
                 projection=definition.projection,
                 rule=definition.rule,
                 interval=definition.interval,
             )
+        except ValueError as exc:
+            reason = "source_unmapped"
+            mapping_error = str(exc)
     else:
         try:
             projection_path(definition.projection)
@@ -806,11 +809,19 @@ async def import_watch(
                 "legacy_id": definition.legacy_id,
                 "reason": reason,
                 "confirmed": False,
-                "tool": definition.tool,
-                "arguments": definition.arguments,
+                "tool": tool,
+                "arguments": arguments,
+                "mapping_error": mapping_error,
                 "interval": definition.interval,
                 "requested_daily_cap": definition.max_turns_per_day,
-                "notice_pending": reason == "source_unmapped",
+                "notice_pending": reason == "source_unmapped"
+                and definition.tool
+                not in {
+                    "discord_read_messages",
+                    "discord_read_channel_since",
+                    "read_thread",
+                    "read_channel",
+                },
             },
         )
     )

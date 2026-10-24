@@ -2280,8 +2280,7 @@
         expressions are refused. Polls start with a saved baseline and compare
         change, added array elements, or updated object keys every 60–86400 seconds.
         Lifetime is 1–30 days. Producers remain disabled until both operator gates
-        are enabled; page-event watches are not yet delivered. Page signing keys
-        are sent privately to the owner once and never returned here.
+        are enabled. Page-event watches are refused until a producer exists.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2312,17 +2311,6 @@
           'origin_context_id': dict({
             'type': 'string',
           }),
-          'page_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
           'projection': dict({
             'default': '.',
             'type': 'string',
@@ -2337,10 +2325,7 @@
             'type': 'string',
           }),
           'source': dict({
-            'enum': list([
-              'page_event',
-              'poll',
-            ]),
+            'const': 'poll',
             'type': 'string',
           }),
           'tool': dict({

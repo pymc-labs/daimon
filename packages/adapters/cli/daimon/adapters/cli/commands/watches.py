@@ -11,7 +11,7 @@ import typer
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.continuity.watch_imports import WatchExport
-from daimon.core.stores.watches import confirm_import, import_watch
+from daimon.core.stores.watches import confirm_import, get_watch, import_watch
 
 watches_app = typer.Typer(
     help="Import paused watches and confirm reviewed owner/destination bindings."
@@ -34,7 +34,9 @@ def import_command(export_file: Path) -> None:
                     for entry in manifest.watches
                 ]
             for row in rows:
-                typer.echo(f"{row.id} paused {row.source_state.get('reason')}")
+                detail = row.source_state.get("mapping_error")
+                suffix = f": {detail}" if detail else ""
+                typer.echo(f"{row.id} paused {row.source_state.get('reason')}{suffix}")
 
     asyncio.run(run())
 
@@ -53,6 +55,13 @@ def confirm_command(
     async def run() -> None:
         async with build_runtime(load_settings()) as runtime:
             async with runtime.sessionmaker.begin() as db:
+                current = await get_watch(db, watch_id)
+                if current is not None and current.source_state.get("tool") == "read_thread":
+                    typer.echo(
+                        "Warning: imported message reads require a thread ID. "
+                        "Channel and DM IDs are unsupported; use read_channel for channel sources.",
+                        err=True,
+                    )
                 row = await confirm_import(
                     db,
                     watch_id,

@@ -183,7 +183,6 @@ async def create_watch_impl(
     origin_context_id: str,
     instructions: str,
     source: Literal["page_event", "poll"],
-    page_id: str | None = None,
     tool: str = "read_thread",
     arguments: dict[str, object] | None = None,
     projection: str = ".",
@@ -194,6 +193,8 @@ async def create_watch_impl(
     origin = await require_attended_owner(
         runtime, auth, origin_context_id, tool_name="create_watch"
     )
+    if source == "page_event":
+        raise ToolError("Page-event watches are unavailable until a page-event producer exists")
     assert auth.platform_user_id is not None
     if not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
@@ -211,44 +212,22 @@ async def create_watch_impl(
         reason="watch_fired",
         idempotency_key=uuid.uuid4(),
     )
-    key_id, key = secrets.token_hex(12), secrets.token_urlsafe(48)
     try:
         async with runtime.session_factory.begin() as db:
-            if source == "poll":
-                watch = await watches.register_poll_watch(
-                    db,
-                    binding,
-                    instructions=instructions,
-                    tool=tool,
-                    arguments=arguments or {},
-                    projection=projection,
-                    rule=rule,
-                    interval=interval,
-                    expires_at=now + timedelta(days=lifetime_days),
-                    now=now,
-                )
-            else:
-                if page_id is None:
-                    raise ValueError("An OS page UUID is required")
-                watch = await watches.register_page_watch(
-                    db,
-                    binding,
-                    instructions=instructions,
-                    page_id=uuid.UUID(page_id),
-                    projection=projection,
-                    expires_at=now + timedelta(days=lifetime_days),
-                    now=now,
-                )
+            watch = await watches.register_poll_watch(
+                db,
+                binding,
+                instructions=instructions,
+                tool=tool,
+                arguments=arguments or {},
+                projection=projection,
+                rule=rule,
+                interval=interval,
+                expires_at=now + timedelta(days=lifetime_days),
+                now=now,
+            )
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
-            if source == "page_event":
-                # The approved create includes initial key issuance, not a second
-                # rotate tool action without its own approval.
-                await watches.rotate_signing_key(
-                    db, watch.id, key_id=key_id, key=key, expires_at=watch.expires_at
-                )
-        if source == "page_event":
-            return await deliver_rotated_key(runtime, auth, watch, key_id=key_id, key=key)
         return summary(watch)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
@@ -376,8 +355,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         origin_context_id: str,
         instructions: str,
-        source: Literal["page_event", "poll"],
-        page_id: str | None = None,
+        source: Literal["poll"],
         tool: str = "read_thread",
         arguments: dict[str, object] | None = None,
         projection: str = ".",
@@ -398,8 +376,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expressions are refused. Polls start with a saved baseline and compare
         change, added array elements, or updated object keys every 60–86400 seconds.
         Lifetime is 1–30 days. Producers remain disabled until both operator gates
-        are enabled; page-event watches are not yet delivered. Page signing keys
-        are sent privately to the owner once and never returned here.
+        are enabled. Page-event watches are refused until a producer exists.
         """
         return await create_watch_impl(
             runtime,
@@ -407,7 +384,6 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
             instructions=instructions,
             source=source,
-            page_id=page_id,
             tool=tool,
             arguments=arguments,
             projection=projection,

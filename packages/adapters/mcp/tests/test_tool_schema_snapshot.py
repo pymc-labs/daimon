@@ -153,6 +153,10 @@ async def test_rendered_tool_schema_matches_snapshot(
     missing = _MUST_CONTAIN - rendered.keys()
     assert not missing, f"expected tool group(s) missing from the rendered registry: {missing}"
 
+    create = next(tool for tool in tools if tool.name == "create_watch")
+    assert create.parameters["properties"]["source"]["const"] == "poll"
+    assert "page_id" not in create.parameters["properties"]
+
     assert rendered == snapshot, "rendered tool schema drifted from the committed snapshot"
 
 
