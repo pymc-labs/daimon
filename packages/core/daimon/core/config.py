@@ -2127,7 +2127,35 @@ class WatchesSettings(BaseModel):
     )
 
 
+class LongJobsSettings(BaseModel):
+    max_deadline_minutes: int = Field(
+        default=70,
+        gt=0,
+        description=(
+            "Operator hard ceiling for long-job deadlines in minutes. "
+            "Durations above 70 min are not yet validated on MA."
+        ),
+    )
+    max_usd: Decimal = Field(
+        default=Decimal("20"),
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Operator hard ceiling in USD per long job; tenant and agent policy may only lower it."
+        ),
+    )
+    per_tenant_running: int = Field(
+        default=3, gt=0, description="Maximum launching and running long jobs per tenant."
+    )
+    per_owner_running: int = Field(
+        default=2,
+        gt=0,
+        description="Maximum launching and running long jobs per owner within a tenant.",
+    )
+
+
 class Settings(BaseSettings):
+    long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,

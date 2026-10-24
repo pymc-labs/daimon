@@ -129,10 +129,11 @@ async def require_watch_thread_access(
     ):
         reason = "Watch paused: owner access to the reporting thread could not be verified."
     if reason is not None:
-        async with sessions.begin() as db:
-            firing = await get_firing(db, row.idempotency_key)
-            if firing is not None:
-                await pause_watch(db, firing.watch_id, reason=reason)
+        if row.reason == "watch_fired":
+            async with sessions.begin() as db:
+                firing = await get_firing(db, row.idempotency_key)
+                if firing is not None:
+                    await pause_watch(db, firing.watch_id, reason=reason)
         raise AdmissionDenied(reason="invoker_not_allowed")
     assert member is not None
     return WatchThreadAccess(member=member, category_id=category_id)

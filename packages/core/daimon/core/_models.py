@@ -2760,7 +2760,7 @@ class TaskContinuation(Base):
     __table_args__ = (
         CheckConstraint(
             "reason IN ('task_handoff', 'private_input_applied', 'timer', "
-            "'github_access_ready', 'worker_finished', 'watch_fired')",
+            "'github_access_ready', 'worker_finished', 'watch_fired', 'job_finished')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
@@ -4546,4 +4546,139 @@ class SelfHostedResourceOperation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now() + interval '7 days'")
+    )
+
+
+class LongJobPolicyRecord(Base):
+    __tablename__ = "long_job_policy"
+    __table_args__ = (
+        Index(
+            "uq_long_job_policy_scope",
+            "tenant_id",
+            "agent_id",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+        ),
+        CheckConstraint(
+            (
+                "default_deadline_minutes > 0 AND max_deadline_minutes >= "
+                "default_deadline_minutes AND max_usd > 0"
+            ),
+            name="ck_long_job_policy_limits",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    default_deadline_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_deadline_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    set_by: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LongJobPolicyHistory(Base):
+    __tablename__ = "long_job_policy_history"
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[str | None] = mapped_column(Text)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    after: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    set_by: Mapped[str] = mapped_column(Text, nullable=False)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LongJobRecord(Base):
+    __tablename__ = "long_job"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "parent_session_id", "tool_use_id", name="uq_long_job_registration"
+        ),
+        CheckConstraint(
+            (
+                "state IN "
+                "('queued','launching','running','succeeded','failed','timed_out','cancelled','lost','over_budget')"
+            ),
+            name="ck_long_job_state",
+        ),
+        CheckConstraint("deadline_minutes > 0 AND max_usd > 0", name="ck_long_job_limits"),
+        Index("ix_long_job_claim", "tenant_id", "state", "lease_expires_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_external_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    environment_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_metadata: Mapped[dict[str, str]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    initial_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tool_use_id: Mapped[str] = mapped_column(Text, nullable=False)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    deadline_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    worker_session_id: Mapped[str | None] = mapped_column(Text)
+    lease_owner: Mapped[str | None] = mapped_column(Text)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stop_state: Mapped[str | None] = mapped_column(Text)
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    interrupt_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    interrupted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    summary: Mapped[str | None] = mapped_column(Text)
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    output_files: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LongJobCancelAuditRecord(Base):
+    __tablename__ = "long_job_cancel_audit"
+
+    audit_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("long_job.id", ondelete="CASCADE"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

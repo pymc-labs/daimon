@@ -587,6 +587,21 @@ def prompt_for_tool_call(
         action, consequence, detail_lines = _microsoft_write_card(data)
         title = f"{action}?"
         denied_action = "Microsoft 365 not changed"
+
+    elif call.tool_name == "start_long_job" and server == DAIMON_SERVER_NAME:
+        action = "Start long job"
+        title = "Run this command in an isolated worker?"
+        denied_action = "Long job not started"
+        consequence = (
+            "The worker runs unattended and bills your account "
+            "until it finishes or reaches its limits."
+        )
+        detail_lines = (
+            f"Title: {data.get('title', '')}",
+            f"Deadline (minutes): {data.get('deadline_minutes') or 'configured default'}",
+            f"Dollar cap: {data.get('max_usd') or 'configured default'}",
+            f"Exact command:\n{data.get('command', '')}",
+        )
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:

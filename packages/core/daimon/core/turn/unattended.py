@@ -61,6 +61,7 @@ from daimon.core.turn.approvals import (
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.turn.unattended_capabilities import (
+    ServerTool,
     UnattendedEntryPoint,
     apply_capabilities,
     capability_policy,
@@ -146,6 +147,7 @@ async def gate_session_snapshot(
     tenant_id: uuid.UUID | None,
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
+    tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> None:
     """Make `session`'s gated calls pause under `policy`, before anything is sent.
 
@@ -170,6 +172,7 @@ async def gate_session_snapshot(
         tenant_id=tenant_id,
         allow_builtins=allowed.allow_builtins,
         allow_skills=allowed.allow_skills,
+        tool_allowlist=frozenset() if entry_point == "long_job" else tool_allowlist,
     )
     await apply_capabilities(
         client, session, constrained, scope=scope, session_factory=session_factory
@@ -217,6 +220,7 @@ def unattended_posture(
     agent_id: uuid.UUID | None = None,
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
+    tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
 
@@ -262,6 +266,7 @@ def unattended_posture(
         allow_builtins=capability_policy(
             entry_point, routine_sandbox_tools=routine_sandbox_tools
         ).allow_builtins,
+        tool_allowlist=frozenset() if entry_point == "long_job" else tool_allowlist,
     )
 
 
@@ -277,6 +282,7 @@ def session_gate(
     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None,
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
+    tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """The gate a driven unattended turn runs before each send (`unattended_sends`).
 
@@ -302,6 +308,7 @@ def session_gate(
             tenant_id=tenant_id,
             entry_point=entry_point,
             routine_sandbox_tools=routine_sandbox_tools,
+            tool_allowlist=tool_allowlist,
         )
 
     return gate

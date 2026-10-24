@@ -461,3 +461,12 @@ async def count_all(session: AsyncSession) -> int:
     code should prefer the tenant-scoped helpers above.
     """
     return int((await session.execute(select(func.count()).select_from(UsageEvent))).scalar_one())
+
+
+async def cost_for_session(
+    session: AsyncSession, *, tenant_id: uuid.UUID, session_id: str
+) -> float:
+    """Price one tenant-owned session using the same buckets as the monthly cap."""
+    return await _cost_since(
+        session, UsageEvent.tenant_id == tenant_id, UsageEvent.managed_session_id == session_id
+    )

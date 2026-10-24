@@ -49,7 +49,9 @@ from pydantic import BaseModel
 
 from .conftest import make_status_idle
 
-ENTRY_POINTS: tuple[UnattendedEntryPoint, ...] = get_args(UnattendedEntryPoint)
+ENTRY_POINTS: tuple[UnattendedEntryPoint, ...] = tuple(
+    entry for entry in get_args(UnattendedEntryPoint) if entry != "long_job"
+)
 ALLOW = {"enabled": True, "permission_policy": {"type": "always_allow"}}
 BUILTINS = ("bash", "write", "edit")
 
@@ -336,7 +338,7 @@ async def test_unattended_send_always_disables_builtins(
 
 def test_entry_point_policy_table() -> None:
     """Every unattended entry point disables the sandbox; watches also deny skills."""
-    assert set(ENTRY_POINT_POLICY) == set(ENTRY_POINTS)
+    assert set(ENTRY_POINT_POLICY) == {*ENTRY_POINTS, "long_job"}
     off = {name for name, policy in ENTRY_POINT_POLICY.items() if not policy.allow_builtins}
     assert off == set(ENTRY_POINTS)
     assert not ENTRY_POINT_POLICY["watch"].allow_skills
@@ -1558,3 +1560,82 @@ def test_native_hosted_bash_refuses_even_with_an_empty_agent_tool_readback():
     spec = AgentSpec(name="hosted", model=ModelRef(provider="openai", id="gpt-6-astra"), tools=())
     with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
         require_native_unattended_capabilities(spec, profile_id="openai.persistent_workspace")
+
+
+async def test_long_job_policy_keeps_builtins_and_removes_all_mcp():
+    session = _root_session()
+    policy = caps.capability_policy("long_job")
+    assert policy.allow_builtins and not policy.allow_skills
+    provider, result = await _drive(session, "long_job")
+    assert result.error is None
+    [sent] = provider.at_send
+    assert sent["mcp_servers"] == []
+    assert all(t.get("type") != "mcp_toolset" for t in sent["tools"])
+    assert _builtins_runnable(sent["tools"])
+    posture = unattended_posture(
+        ToolSafetyPolicy(),
+        session=session,
+        public_url=None,
+        session_factory=None,
+        tenant_id=None,
+        entry_point="long_job",
+    )
+    assert (
+        await posture.decide(ToolCall(tool_use_id="shell", server_name=None, tool_name="bash"))
+    ).allow
+    assert not (
+        await posture.decide(
+            ToolCall(tool_use_id="read", server_name="linear", tool_name="get_issue")
+        )
+    ).allow
+
+
+async def test_job_completion_posture_allows_only_get_long_job():
+    allowlist = frozenset({ServerTool("daimon-mcp", "get_long_job")})
+    posture = capability_posture(
+        PolicyApproval(decide=AsyncMock(return_value=ToolConfirmationResult(allow=True))),
+        tool_allowlist=allowlist,
+    )
+    for server, tool, expected in [
+        ("daimon-mcp", "get_long_job", True),
+        ("daimon-mcp", "start_long_job", False),
+        ("linear", "get_issue", False),
+        (None, "bash", False),
+    ]:
+        result = await posture.decide(
+            ToolCall(tool_use_id="call", server_name=server, tool_name=tool)
+        )
+        assert result.allow is expected
+
+
+async def test_completion_allowlist_keeps_verified_daimon_reader_only():
+    session = _root_session(
+        tools=[
+            *_tools(),
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": ALLOW,
+                "configs": [{"name": "start_long_job", **ALLOW}],
+            },
+        ],
+        mcp_servers=[
+            *SERVERS,
+            {"name": "daimon-mcp", "type": "url", "url": "https://daimon.example/mcp"},
+        ],
+    )
+    constrained = await caps.constrain_capabilities(
+        session,
+        ToolSafetyPolicy(),
+        public_url="https://daimon.example/mcp",
+        session_factory=None,
+        tenant_id=None,
+        allow_builtins=False,
+        allow_skills=True,
+        tool_allowlist=frozenset({ServerTool("daimon-mcp", "get_long_job")}),
+    )
+    assert [s["name"] for s in constrained.send.mcp_servers] == ["daimon-mcp"]
+    [mcp] = [t for t in constrained.send.tools if t["type"] == "mcp_toolset"]
+    assert not mcp["default_config"]["enabled"]
+    assert [c["name"] for c in mcp["configs"]] == ["get_long_job"]
+    assert not _builtins_runnable(list(constrained.send.tools))

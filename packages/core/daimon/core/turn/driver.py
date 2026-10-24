@@ -611,6 +611,7 @@ async def run_turn(
     anthropic: AsyncAnthropic,
     session_id: str,
     user_message: str,
+    resume_existing: bool = False,
     lifecycle: TurnLifecycle,
     cancel: asyncio.Event,
     render_interval_s: float = 0.05,
@@ -768,7 +769,7 @@ async def run_turn(
             interrupt_timeout_s=interrupt_timeout_s,
             stream_read_timeout_s=stream_read_timeout_s,
             now=now,
-            entry="run",
+            entry="resume" if resume_existing else "run",
             billing=billing,
             tool_confirmation=tool_confirmation,
             preset_error=unwedge_failure[0],
@@ -1136,7 +1137,9 @@ async def _pump(
                                 attempt_is_retry = True
                                 attempt_reason: ReconnectReason = eventless_reason
                             else:
-                                attempt_is_retry = not first_attempt_of_generation
+                                attempt_is_retry = (
+                                    not first_attempt_of_generation or entry == "resume"
+                                )
                                 attempt_reason = "connection_dropped"
                             await _consume_with_reconnect(
                                 io=io,

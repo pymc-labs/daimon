@@ -178,7 +178,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Signed callback ingress and bounded poll scheduling; no turns or provider credentials. |
-| `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
+| `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | Routine dispatch, long-job workers and maintenance sweeps. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
 | `mux` | `packages/mux/` | A separate namespace, not part of `daimon`: the provider-neutral managed-agent contract. Not called by Daimon yet. See [mux.md](mux.md). |
@@ -1234,8 +1234,8 @@ form is also checked against the reviewed value shapes (`_SESSION_SHAPE`): a
 scalar leaf must be that scalar or null, objects and lists are walked to the
 bottom, and only metadata and a custom tool's `input_schema` stay
 opaque, so a field cannot hide in a value that turned into an object.
-`constrain_capabilities` computes the arrays to send (built-ins disabled
-and custom tools removed for every unattended entry point; the one opt-in is
+`constrain_capabilities` computes the arrays to send (custom tools removed
+and built-ins disabled except in isolated `long_job` worker sessions; the admin opt-in is
 `Routine.sandbox_tools_enabled`, which an admin sets per routine and which
 `capability_policy` honours for the `routine` entry point only, through
 `headless_runner.run_turn(sandbox_tools=...)` from the scheduler fire;
@@ -1248,8 +1248,9 @@ session's cached tool hashes and `send_capabilities` then sends the arrays
 between them), and `restore_capabilities` puts the session's own arrays
 back, finishing through repeated cancellation. `capability_posture` makes the
 decider refuse what the session no longer carries, including every built-in
-call (unless the routine is opted in) and every custom call. Other unattended
-runs cannot generate files with sandbox tools; checkpoint turns cannot create
+call (unless the routine is opted in or this is an isolated long-job worker)
+and every custom call. Other unattended runs cannot generate files with sandbox
+tools; checkpoint turns cannot create
 sandbox archives. Prepared turns map their
 origin to an entry point (`unattended_entry_point`: `worker` is a fleet worker,
 `routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers
@@ -2786,3 +2787,20 @@ I2 (one usage outcome, preserving measured usage), I3 (one terminal with no late
 turn events), I4 (every claim has an executor or recovery), and I5 (no tool side
 effects after termination). See the harness [recovery order and invariants](https://github.com/pymc-labs/daimon/blob/main/apps/harness/README.md#recovery-order-and-invariants)
 for the complete specification.
+
+
+
+## Long-job workers
+
+`start_long_job` registers an approved command with tenant, owner and pinned
+agent/environment provenance. The scheduler owns leased isolated worker sessions and
+reattaches after restart. Completion atomically records a result and a `job_finished`
+wake. Discord verifies current owner destination access and runs that wake unattended
+with only `get_long_job`; built-ins remain off in the parent. Slack and Teams fail
+closed before completion delivery until they can prove current owner destination
+access. Owners and current tenant admins may manage jobs; source policy separately
+controls content in get/list, with restricted records redacted. Cancellation needs
+management authority only and records a content-free audit. Worker transcripts
+retain source privacy restrictions.
+A durable initial-send intent and lease fence prevent a reclaimed executor from
+sending another initial message. See [Long jobs](long-jobs.md) for policy and recovery.

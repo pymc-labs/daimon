@@ -3272,11 +3272,12 @@ async def main() -> None:
 
 asyncio.run(main())
 """
+    # Interpreter startup and shutdown also run under this outer watchdog.
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=8.0, check=False
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=30.0, check=False
     )
     assert result.returncode == 0, (
-        "a successful archive should finish within eight seconds; "
+        "a successful archive should finish within the subprocess startup allowance; "
         f"stdout={result.stdout!r}, stderr={result.stderr!r}"
     )
 
@@ -4743,3 +4744,132 @@ async def test_queued_attended_turn_cannot_borrow_or_revoke_unattended_holders_g
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_job_completion_wake_only_reads_job_and_restores_parent_tools(
+    db_session,
+    db_session_factory,
+    platform,
+):
+    from daimon.core.stores.task_continuations import record_continuation
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    agent = ma_agent(
+        id="agent_job_parent",
+        tools=[
+            {"type": "agent_toolset_20260401", "default_config": allow, "configs": []},
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": allow,
+                "configs": [{"name": "start_long_job", **allow}],
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "default_config": allow,
+                "configs": [],
+            },
+        ],
+        mcp_servers=[
+            {"type": "url", "name": "daimon-mcp", "url": "https://daimon.example/mcp"},
+            {"type": "url", "name": "linear", "url": "https://linear.example/mcp"},
+        ],
+    )
+    snapshot = ma_session(id="ses_job_parent", agent=agent)
+    state = snapshot.model_dump(mode="json")
+    original_tools, original_servers = (
+        list(state["agent"]["tools"]),
+        list(state["agent"]["mcp_servers"]),
+    )
+    mapping = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform=platform,
+        thread_id="job-thread",
+        ma_session_id=snapshot.id,
+    )
+    wake = await record_continuation(
+        db_session,
+        tenant_id=tenant.id,
+        platform=platform,
+        parent_channel_id="channel",
+        thread_id="job-thread",
+        requester_account_id=account.id,
+        requester_external_user_id="owner",
+        target_ma_agent_id=agent.id,
+        target_name=agent.name,
+        reason="job_finished",
+        idempotency_key=uuid.uuid4(),
+        requested_work="Read the completed job",
+        attended=False,
+        available_at=datetime.now(UTC),
+    )
+    await db_session.commit()
+    at_send = []
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/sessions/ses_job_parent$", lambda _r, _m: httpx.Response(200, json=state)
+    )
+    idle = make_status_idle(event_id="job_wake_done").model_dump(mode="json")
+    router.add(
+        "GET", r"/v1/sessions/ses_job_parent/events/stream$", lambda _r, _m: sse_response([idle])
+    )
+    router.add("GET", r"/v1/sessions/ses_job_parent/events$", lambda _r, _m: list_response([idle]))
+
+    def update(request, _match):
+        state["agent"].update(json.loads(request.content)["agent"])
+        return httpx.Response(200, json=state)
+
+    def send(request, _match):
+        at_send.append(json.loads(json.dumps(state["agent"])))
+        return send_events_response()
+
+    router.add("POST", r"/v1/sessions/ses_job_parent$", update)
+    router.add("POST", r"/v1/sessions/ses_job_parent/events$", send)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        public_url="https://daimon.example/mcp",
+        turn_path="legacy",
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(account_id=account.id, agent=agent, env=ma_environment()),
+        tenant_id=tenant.id,
+        external_user_id="owner",
+        ma_session_id=snapshot.id,
+        mapping_id=mapping.id,
+        session_account_id=account.id,
+    )
+    try:
+        result = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform=platform,
+            thread_id="job-thread",
+            external_user_id="owner",
+            user_message="Read and report",
+            attended=False,
+            job_row=wake,
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+        )
+        assert result.state.error is None
+        [sent] = at_send
+        assert [server["name"] for server in sent["mcp_servers"]] == ["daimon-mcp"]
+        [builtin] = [t for t in sent["tools"] if t["type"] == "agent_toolset_20260401"]
+        assert not builtin["default_config"]["enabled"]
+        [mcp] = [t for t in sent["tools"] if t["type"] == "mcp_toolset"]
+        assert [c["name"] for c in mcp["configs"] if c["enabled"]] == ["get_long_job"]
+        assert state["agent"]["tools"] == original_tools
+        assert state["agent"]["mcp_servers"] == original_servers
+    finally:
+        await deps.anthropic.close()

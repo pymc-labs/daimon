@@ -16,6 +16,7 @@ typo is silent — check the spelling here.
 ## Contents
 
 - [Core](#core)
+- [Long Jobs](#long-jobs)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -129,6 +130,35 @@ process cwd — works for in-repo dev (repo root) and the deployed container lay
 (working dir contains defaults/ at root). Single source of truth shared by the
 scheduler, Discord/Slack adapters, CLI session bootstrap, and MCP routine tools. Do NOT
 add adapter-local defaults_root fields — they invite drift.
+
+## Long Jobs
+
+Read from `daimon.core.config.LongJobsSettings`. Prefix `DAIMON_LONG_JOBS__`.
+
+### `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES`
+
+`int` · optional · default `70`
+
+Operator hard ceiling for long-job deadlines in minutes. Durations above 70 min are not
+yet validated on MA.
+
+### `DAIMON_LONG_JOBS__MAX_USD`
+
+`Decimal` · optional · default `20`
+
+Operator hard ceiling in USD per long job; tenant and agent policy may only lower it.
+
+### `DAIMON_LONG_JOBS__PER_TENANT_RUNNING`
+
+`int` · optional · default `3`
+
+Maximum launching and running long jobs per tenant.
+
+### `DAIMON_LONG_JOBS__PER_OWNER_RUNNING`
+
+`int` · optional · default `2`
+
+Maximum launching and running long jobs per owner within a tenant.
 
 ## Database
 

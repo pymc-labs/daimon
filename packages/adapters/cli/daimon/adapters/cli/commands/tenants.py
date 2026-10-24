@@ -965,3 +965,58 @@ async def tenants_dm_policy(
             "enabled": await dm_enabled(session, tenant_id=tenant_id),
             "dm_agent_name": await get_dm_agent_name(session, tenant_id=tenant_id),
         }
+
+
+@tenants_app.command("long-job-policy")
+def long_job_policy_command(
+    tenant: Annotated[uuid.UUID, typer.Argument(help="Tenant UUID.")],
+    actor_user: Annotated[
+        str, typer.Option("--actor-user", help="Current platform admin user ID.")
+    ],
+    agent: Annotated[
+        str | None, typer.Option("--agent", help="MA agent id; omit for tenant default.")
+    ] = None,
+    enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
+    default_deadline: Annotated[int, typer.Option("--default-deadline")] = 60,
+    max_deadline: Annotated[int, typer.Option("--max-deadline")] = 70,
+    max_usd: Annotated[str, typer.Option("--max-usd")] = "5",
+) -> None:
+    """Read effective policy or set a complete policy with --enabled/--disabled.
+
+    Uses a fresh platform admin attestation, like backend-policy. Every change
+    records the human account and before/after values. Omit --agent to set the
+    tenant default; an agent row replaces that default. Operator ceilings apply.
+    """
+    from daimon.core.long_job_models import LongJobPolicy
+    from daimon.core.stores import long_jobs
+
+    settings = load_settings()
+    console = Console()
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            actor = await verify_backend_actor(
+                rt.sessionmaker, tenant_id=tenant, platform_user_id=actor_user, settings=settings
+            )
+            async with rt.sessionmaker.begin() as db:
+                if enabled is not None:
+                    await long_jobs.set_policy(
+                        db,
+                        tenant_id=tenant,
+                        agent_id=agent,
+                        policy=LongJobPolicy(
+                            enabled=enabled,
+                            default_deadline_minutes=default_deadline,
+                            max_deadline_minutes=max_deadline,
+                            max_usd=Decimal(max_usd),
+                        ),
+                        ceilings=settings.long_jobs,
+                        actor=actor.subject,
+                        set_by=str(actor.account_id),
+                    )
+                effective = await long_jobs.get_policy(
+                    db, tenant_id=tenant, agent_id=agent, ceilings=settings.long_jobs
+                )
+            console.print(effective.model_dump_json(indent=2))
+
+    run_cli(run(), console=console)

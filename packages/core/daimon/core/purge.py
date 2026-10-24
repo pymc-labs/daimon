@@ -51,6 +51,11 @@ because routines reference platform users by their external id, not the
 principal UUID. The orchestrator dispatches manually rather than via a unified
 Protocol.
 
+Long-job records are erased through the accounts.id ON DELETE CASCADE; their
+cancellation audit rows cascade from the job. Worker sessions carry the same
+account/tenant stamps as other owned sessions and use the existing upstream
+session-deletion work item. No separate retained job-content exception applies.
+
 Deliberate carve-outs:
 - Shared setup conversations retain their binding and other participants' work;
   account deletion removes creator attribution through ON DELETE SET NULL.

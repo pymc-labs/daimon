@@ -275,7 +275,13 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
     assert out[1] == _tools()[1] | {
         "configs": [
             {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
-            for name in ("add_skill", "create_watch", "resume_watch", "rotate_watch_key")
+            for name in (
+                "add_skill",
+                "create_watch",
+                "resume_watch",
+                "rotate_watch_key",
+                "start_long_job",
+            )
         ]
     }, "Daimon confirms skill installation and standing watch authority"
     assert out[2]["default_config"] == {"permission_policy": {"type": "always_ask"}}
@@ -407,7 +413,13 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
     assert out is not None
     assert out[0]["configs"] == [
         {"name": name, "enabled": False, "permission_policy": {"type": "always_ask"}}
-        for name in ("add_skill", "create_watch", "resume_watch", "rotate_watch_key")
+        for name in (
+            "add_skill",
+            "create_watch",
+            "resume_watch",
+            "rotate_watch_key",
+            "start_long_job",
+        )
     ], "confirmation gates must not enable a disabled toolset"
 
 
@@ -737,6 +749,7 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
         "create_watch",
         "resume_watch",
         "rotate_watch_key",
+        "start_long_job",
     }
     assert has_confirmation_gate(out, tool_name="call_tool")
     assert not has_confirmation_gate(out, tool_name="search_tools"), "search never asks"
@@ -760,6 +773,7 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
         "publish_report",
         "resume_watch",
         "rotate_watch_key",
+        "start_long_job",
     ]
 
 
@@ -809,6 +823,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         "create_watch",
         "resume_watch",
         "rotate_watch_key",
+        "start_long_job",
     ]
     both = session_tools_for_policy(
         _RULES_ON,
@@ -824,6 +839,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         "get_session",
         "resume_watch",
         "rotate_watch_key",
+        "start_long_job",
     ]
 
 

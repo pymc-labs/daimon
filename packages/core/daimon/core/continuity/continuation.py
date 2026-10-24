@@ -495,7 +495,7 @@ async def decide_continuation(
     # A timer is the agent's own appointment: the person talking in the
     # meantime is expected, not a newer request that replaces it.
     if (
-        request.reason not in ("timer", "watch_fired")
+        request.reason not in ("timer", "watch_fired", "job_finished")
         and latest_user_message_at is not None
         and latest_user_message_at > row.created_at
     ):
@@ -527,4 +527,9 @@ async def decide_continuation(
 
 def continuation_attended(row: TaskContinuationRow) -> bool:
     """Retain trusted initiation across handoffs; a wake never grants attendance."""
-    return row.attended and row.reason not in ("timer", "worker_finished", "watch_fired")
+    return row.attended and row.reason not in (
+        "timer",
+        "worker_finished",
+        "watch_fired",
+        "job_finished",
+    )

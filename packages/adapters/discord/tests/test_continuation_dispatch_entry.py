@@ -1457,3 +1457,43 @@ async def test_a_fleet_wake_prepares_inside_its_origin_and_a_refused_wake_ends_i
     else:
         assert not any(WAKE_REFUSED_LINES[0] in text for text in shown)
         assert all(row.status == "delivered" for row in retained)
+
+
+async def test_job_wake_refuses_revoked_private_thread_before_preparation(
+    db_session_factory, monkeypatch
+):
+    """The review probe must stop before admit, card intent, bind or turn."""
+    from daimon.adapters.discord import bot as bot_module
+    from daimon.core.turn.errors import AdmissionDenied
+
+    from .watch_fixtures import WatchDiscordRest
+
+    original = make_bot
+    rests = []
+
+    def bot_with_denied_membership(runtime):
+        bot = original(runtime)
+        rest = WatchDiscordRest(bot)
+        rest.private = True
+        rest.membership_error = discord.NotFound(MagicMock(status=404, reason="gone"), "gone")
+        rests.append(rest)
+        return bot
+
+    monkeypatch.setattr(
+        __import__(__name__, fromlist=["make_bot"]), "make_bot", bot_with_denied_membership
+    )
+    admit_spy = AsyncMock(wraps=bot_module.admit)
+    card_spy = AsyncMock()
+    monkeypatch.setattr(bot_module, "admit", admit_spy)
+    monkeypatch.setattr(bot_module, "post_initial_turn_card", card_spy)
+    with pytest.raises(AdmissionDenied):
+        await _run_continuation(
+            db_session_factory,
+            workspace_id="710000099",
+            reason="job_finished",
+            attended=False,
+            guild=_make_guild(member=_make_member(admin=False)),
+        )
+    rests[0].http.get_thread_member.assert_awaited_once()
+    admit_spy.assert_not_awaited()
+    card_spy.assert_not_awaited()

@@ -74,6 +74,16 @@ _ALLOWED_FILES: dict[str, str] = {
 }
 #: Single strings that may use the terms: (file, start of the string) and why.
 _ALLOWED_TEXT: dict[tuple[str, str], str] = {
+    # The fixed shell-worker protocol is model-only; preserve its execution language.
+    ("packages/core/daimon/core/long_jobs_ma.py", "You are a dedicated shell worker."): (
+        "isolated worker instructions; never shown to people"
+    ),
+    ("packages/core/daimon/core/long_jobs_ma.py", "This is an authorized fixed shell job"): (
+        "isolated worker launch protocol; never shown to people"
+    ),
+    ("packages/core/daimon/core/long_jobs_ma.py", "\n2. Repeatedly call Bash"): (
+        "isolated worker wait protocol; never shown to people"
+    ),
     (
         "packages/adapters/discord/daimon/adapters/discord/agent_setup/mcp_access.py",
         "claude mcp add",

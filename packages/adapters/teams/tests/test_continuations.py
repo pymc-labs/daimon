@@ -574,3 +574,33 @@ async def test_handoff_dispatch_retains_attendance(db_session_factory, attended)
             make_inbound("finish the writeup"), TENANT, continuation=row, reraise=True
         )
     assert bind.await_args.kwargs["attended"] is attended
+
+
+async def test_job_completion_fails_closed_without_output(db_session_factory):
+    sender = FakeSender()
+    teams, account_id = await _app(db_session_factory, sender)
+    now = datetime.now(UTC)
+    row = TaskContinuationRow(
+        id=uuid.uuid4(),
+        tenant_id=TENANT,
+        platform="teams",
+        parent_channel_id=CHANNEL_ID,
+        thread_id=THREAD_ID,
+        requester_account_id=account_id,
+        requester_external_user_id=AAD_OBJECT_ID,
+        target_ma_agent_id=_TARGET,
+        target_name="stats-bot",
+        requested_work="read job",
+        reason="job_finished",
+        idempotency_key=uuid.uuid4(),
+        status="claimed",
+        skip_reason=None,
+        created_at=now,
+        claimed_at=now,
+        delivered_at=None,
+    )
+    with patch.object(teams, "_bind_and_run", new_callable=AsyncMock) as bind:
+        with pytest.raises(AdmissionDenied):
+            await teams._run_continuation(row, "read job", TENANT, SERVICE_URL)
+        bind.assert_not_awaited()
+    assert not sender.sent

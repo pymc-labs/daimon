@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 153 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 157 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -274,6 +274,17 @@ First-party lead intake tools; authority derives only from live server context.
 | `lead_intake_resolve` | Discord callers | Apply evidence-backed human CRM selections as a sales resolver or core-role member. |
 | `lead_intake_resume` | Discord callers | Recover lead effects and mailbox coverage without blindly retrying uncertain creates. |
 | `lead_intake_submit` | Discord callers | Verify and durably register one classified Gmail or own explicit Discord lead. |
+
+## `long_jobs`
+
+Start approved jobs, manage them as owner/admin, and read under source policy.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `cancel_long_job` | all callers | Request interrupt and archive as owner or current human tenant admin. |
+| `get_long_job` | all callers | Read an owner/admin job; return source-restricted metadata when content is private. |
+| `list_long_jobs` | all callers | List your latest 100 jobs; current human tenant admins may list all tenant jobs. |
+| `start_long_job` | all callers | Run an exact human-approved shell command in a fresh isolated Managed Agents worker. |
 
 ## `media`
 

@@ -11,9 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Staffing threads removed from Daimon OS; they stay internal-only.
 
+### Added
+
+- Human-approved long jobs in isolated Managed Agents workers, with admin tenant/agent policy, owner billing, durable restart recovery, retained source privacy and read-only completion wakes on Discord after current owner access checks. Slack and Teams completion delivery fails closed pending equivalent access proof.
+
 ### Changed
 
 - Preserve unattended sandbox restrictions across native providers: refuse workers and wakes that require automatic sandbox/custom tools or other ungated capabilities before a provider message; retain conversation-only workers, attended native execution and guarded selfhosted tools.
+
 
 - On the mux turn path, a turn that reaches a thread whose lease another running turn holds now waits for that turn instead of failing with `LeaseBusy`. The wait ends at the turn's own ceiling, honors Stop, and a holder that dies frees the thread when its lease expires. A turn whose session the holder replaced adopts the replacement.
 

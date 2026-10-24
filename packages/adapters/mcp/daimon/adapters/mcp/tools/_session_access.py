@@ -188,7 +188,11 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
     A routine's private stamp is its owner's own: no grant is needed, and no
     one else's hub read opens it.
     """
-    metadata = session.metadata or {}
+    return metadata_belongs_to_caller(session.metadata or {}, auth)
+
+
+def metadata_belongs_to_caller(metadata: Mapping[str, str], auth: AuthIdentity) -> bool:
+    """Apply the same account and private execution-grant check to retained provenance."""
     if metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
         # hub read opens it (never a private DM, never to continue).
         return _admin_may_read_other(metadata)
@@ -310,3 +314,50 @@ async def require_session_outside_seals(
         ):
             raise ToolError(_ADMIN_CONTINUE_REFUSED)
         raise ToolError(_SEALED_SESSION_MSG)
+
+
+async def source_metadata_readable(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    metadata: dict[str, str],
+    *,
+    origin_context_id: str | None = None,
+) -> bool:
+    """Source privacy only: callers establish owner/admin authority separately.
+
+    Admin status and the hub's admin transcript exception never bypass source
+    privacy here. Private contexts still require their owner's execution grant.
+    """
+    facts = session_facts(metadata, owned=True)
+    if facts.private and metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
+        return False
+    private = metadata.get(MA_METADATA_KEY_PRIVATE_DM)
+    if (
+        private is not None
+        and not is_private_routine_stamp(private)
+        and not (
+            auth.slack_turn_context_id is not None
+            and auth.agent_id is None
+            and private == str(auth.slack_turn_context_id)
+        )
+    ):
+        return False
+    if auth.agent_id is not None or auth.chat_agent_id is None:
+        origin_context_id = None
+    read = await load_read_policy(
+        runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
+    )
+    return bool(
+        authorize(
+            read.policy,
+            subject=mcp_subject(auth),
+            surface=Surface.AGENT_CHAT,
+            action=Action.READ_SESSION,
+            agent=read.agent,
+            origin_channel_ids=read.origin_channel_ids,
+            origin=read.origin_place,
+            # 'owned' discharges only READ_SESSION's ownership precondition: act
+            # was already decided by long_job_access; source/private checks remain.
+            session=facts,
+        )
+    )

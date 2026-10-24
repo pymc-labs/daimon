@@ -260,8 +260,8 @@ emit the balance alert described above.
 person's spend in the current calendar month, UTC, against their effective
 cap. Caps live in `tenant_user_caps`, one row per `(tenant, platform user)`,
 with a null-user row acting as the tenant's default. The cap is therefore
-**per person**, defaulted tenant-wide; there is no aggregate tenant cap, no
-per-session cap and no window other than the calendar month.
+**per person**, defaulted tenant-wide; this monthly cap has no aggregate tenant
+or per-session window. Long jobs add a separate per-job spend limit.
 
 **Channel budget** — `is_over_channel_budget` in
 `packages/core/daimon/core/channel_budget.py` compares a channel's spend in
@@ -1485,3 +1485,16 @@ Every provider request, including compaction, journals `model_request_started`
 before model I/O and exactly one closing outcome under the same request ID:
 measured `usage` or unknown `usage_unavailable`. Compaction usage follows the
 same accounting and reconciliation rules as ordinary requests.
+
+
+## Long jobs
+
+[Long-job workers](long-jobs.md) bill their registered owner using session metadata,
+live model-call recording and catch-up usage settlement. Admission checks tenant balance
+and owner monthly caps. Per-job dollar caps are bounded by tenant/agent policy and the
+operator ceiling, and checked against accounted session usage on each heartbeat. A
+breach interrupts and archives the worker before publishing `over_budget`. Running caps
+default to three per tenant and two per owner; these count launching and running jobs.
+
+Long-job dollar limits and reported `cost_usd` use provider-priced usage before
+billing markup, matching member monthly caps. Ledger debits include normal markup.
