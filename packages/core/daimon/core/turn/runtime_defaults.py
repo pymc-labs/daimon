@@ -182,11 +182,14 @@ def capture_template_rows(tenant_id: str) -> list[dict[str, JsonValue]]:
     Capture reads only a template's scope, grant and capabilities, before any turn.
     The OpenAI one serves a turn only once the tenant's hosted environment is known,
     so it is listed here without one; selection still requires it.
+
+    Both are listed whether or not this process has the provider's key: capture
+    runs in the MCP server, which may not carry a key the chat/worker host has.
+    Turn selection still enforces `provider_key_present`, so listing one here can
+    never serve a provider this deployment is not keyed for (smoke 0eee1b8e J6).
     """
-    keyed = {DEFAULT_KEY_ENV[p] for p in DEFAULT_KEY_ENV if provider_key_present(p)}
     common: dict[str, JsonValue] = {"api_key_env": DEFAULT_KEY_ENV[OPENAI], "project_header": False}
-    rows = [
+    return [
         *(row for row in _gemini_rows(tenant_id) if row.get("root_materialization") is True),
         _openai_root(tenant_id, common, OPENAI_SPEND_LIMIT_CENTS),
     ]
-    return [row for row in rows if row["api_key_env"] in keyed]
