@@ -27,7 +27,8 @@ the HubSpot property/value pairs required by your deployment, such as deal type
 and source channel. Set `attribution_property` to the HubSpot deal property that
 records how the enquirer heard about your organization. With this configured,
 attribution submissions need `attribution_value` and a verbatim
-`attribution_evidence` quote supporting it. Daimon checks the property's visible
+`attribution_evidence` quote supporting it. Attribution without a verbatim
+supporting quote is dropped. Daimon checks the property's visible
 HubSpot options before recording a deal creation intent; a missing property,
 hidden option or invalid value requires review. An empty `attribution_property`
 disables attribution; supplied attribution is ignored.

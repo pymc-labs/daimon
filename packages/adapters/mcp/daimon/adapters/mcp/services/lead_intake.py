@@ -528,7 +528,7 @@ class HttpIntakePorts:
                 "daimon_intake_identity": effect.key,
                 "discord_lead_thread": p["thread_url"],
             }
-        if step == "deal" and (value := p.get("attribution_value")):
+        if step == "deal" and config.attribution_property and (value := p.get("attribution_value")):
             properties[config.attribution_property] = value
         response = await self.request(
             "hubspot", "POST", f"crm/v3/objects/{kind}", {"properties": properties}

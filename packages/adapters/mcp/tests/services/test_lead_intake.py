@@ -427,6 +427,7 @@ async def test_approved_crm_selection_cannot_be_replaced_by_recovery(
         "unsupported",
         "non_verbatim",
         "disabled",
+        "adopt_disabled",
         "identity_review",
     ],
 )
@@ -439,6 +440,7 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
     store = IntakeStore(sessions, build_multifernet((Fernet.generate_key().decode(),)), tenant.id)
     settings = config().model_copy(
         update={
+            "mode": "capture" if case == "adopt_disabled" else "active",
             "deal_fields": {"dealtype": "newbusiness", "channel": "Cold in-mail"},
             "attribution_property": "" if case == "disabled" else "how_they_heard_about_pymc_labs",
         }
@@ -471,7 +473,7 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
             attribution_value="demand" if case == "invalid" else "forecasting",
             attribution_evidence=(
                 None
-                if case in {"missing_quote", "disabled"}
+                if case == "missing_quote"
                 else "Ada, Synthetic synthetic.example"
                 if case in {"unsupported", "identity_review"}
                 else "I heard forecasting elsewhere"
@@ -481,6 +483,18 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
         )
         result = await intake.submit(proposal, "7")
         assert result.submission is not None
+        if case == "adopt_disabled":
+            assert result.status == "pending"
+            assert result.submission.evidence.attribution_value == "forecasting"
+            await store.configure(
+                settings.model_copy(
+                    update={"revision": 2, "mode": "active", "attribution_property": ""}
+                ),
+                {"hubspot_access_token": "synthetic"},
+            )
+            await store.adopt(result.id, 2)
+            result = await intake.resume(result.id)
+            assert result.submission is not None
         if case == "identity_review":
             assert result.status == "review"
             assert not result.submission.evidence.identity_verified
@@ -507,9 +521,13 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
                 assert properties["how_they_heard_about_pymc_labs"] == "forecasting"
             else:
                 assert result.submission is not None
-                assert result.submission.evidence.attribution_value is None
-                assert result.submission.evidence.attribution_evidence is None
+                if case == "adopt_disabled":
+                    assert result.submission.evidence.attribution_value == "forecasting"
+                else:
+                    assert result.submission.evidence.attribution_value is None
+                    assert result.submission.evidence.attribution_evidence is None
                 assert "how_they_heard_about_pymc_labs" not in properties
+            assert "" not in properties
             assert properties["dealtype"] == "newbusiness"
             assert properties["channel"] == "Cold in-mail"
         else:
