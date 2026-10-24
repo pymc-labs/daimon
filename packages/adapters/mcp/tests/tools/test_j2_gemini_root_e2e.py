@@ -457,3 +457,165 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         assert "mcp_server" in kinds
     else:
         assert [tool.get("name") for tool in posts[-1]["tools"]] == ["daimon_no_tools"]
+
+
+SUMMARY = "Carlos asked for a copy on Argon to compare answers; nothing else is open."
+
+
+async def _j2_copy(chat: Chat, monkeypatch):
+    from daimon.core.mcp_oauth import discovery
+
+    async def listed(_url: str, _token: str) -> frozenset[str]:
+        return frozenset({"hand_off_task", "request_agent_backend_switch"})
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    return await _fork_agent_impl(
+        chat.runtime,
+        chat.auth,
+        "Daimon",
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        new_copy_if_taken=True,
+        origin_context_id=str(chat.origin.id),
+    )
+
+
+async def _to_argon(chat: Chat, name: str, **call):
+    return await _request_agent_backend_switch_impl(
+        chat.runtime,
+        chat.auth,
+        agent_name=name,
+        target_backend="gemini",
+        model="argon",
+        origin_context_id=str(chat.origin.id),
+        **call,
+    )
+
+
+async def _argon_card(chat: Chat, name: str, preview, **extra):
+    """The card the host posts for the confirmed call, prepared as the host does."""
+    from functools import partial
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools.agents import (
+        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.channel_backend import make_backend_service
+    from daimon.core.confirmation import backend_switch_callbacks, prompt_for_tool_call
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+
+    service = make_backend_service(
+        chat.runtime.session_factory,
+        chat.runtime.settings.turn,
+        capture_source=partial(_capture_backend_source, chat.runtime, chat.auth, chat.origin),
+    )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=chat.runtime.session_factory,
+        anthropic=chat.runtime.client,
+        tenant_id=chat.auth.tenant_id,
+        account_id=chat.auth.account_id,
+        current_admin=AsyncMock(return_value=chat.auth.is_admin),
+    )
+    return await prepare(
+        prompt_for_tool_call(
+            ToolCall(
+                tool_use_id="j2-card",
+                server_name=DAIMON_SERVER_NAME,
+                tool_name="request_agent_backend_switch",
+                input={
+                    "agent_name": name,
+                    "target_backend": "gemini",
+                    "model": "argon",
+                    "expected_revision": preview.expected_revision,
+                    "preview_digest": preview.preview_digest,
+                    "accepted_drops": list(preview.declared_drops),
+                    **extra,
+                },
+            ),
+            requester_platform_user_id="123",
+            now=datetime.now(UTC),
+        )
+    )
+
+
+async def _nothing_moved(chat: Chat, name: str) -> None:
+    from daimon.core.channel_backend import AgentBackendService, load_backend_agent
+    from daimon.core.stores.thread_agent_bindings import get_binding, take_handoff_summary
+
+    async with chat.runtime.session_factory.begin() as session:
+        handed = await get_binding(
+            session,
+            tenant_id=chat.auth.tenant_id,
+            platform="discord",
+            parent_channel_id="fresh-channel",
+            thread_id="thread",
+        )
+        assert handed is None, "the thread stays with Daimon"
+    copy = await load_backend_agent(
+        chat.runtime.client,
+        chat.runtime.session_factory,
+        tenant_id=chat.auth.tenant_id,
+        agent_name=name,
+    )
+    current = await AgentBackendService(chat.runtime.session_factory, enabled=True).current(copy)
+    assert current is None or current.backend in (None, "anthropic"), "the copy wasn't switched"
+    async with chat.runtime.session_factory.begin() as session:
+        assert (
+            await take_handoff_summary(
+                session,
+                tenant_id=chat.auth.tenant_id,
+                platform="discord",
+                parent_channel_id="fresh-channel",
+                thread_id="thread",
+                responder_ma_agent_id=copy.source.ref.id if copy.source else "",
+                account_id=chat.auth.account_id,
+            )
+            is None
+        ), "no summary is stored"
+
+
+async def test_the_hand_off_summary_is_bound_to_the_switch_card(fresh_chat, monkeypatch):
+    """The summary the card shows is the one the copy gets: one changed or dropped after
+    the preview is a different request, refused by the card and by the tool alike."""
+    chat = fresh_chat
+    copy = await _j2_copy(chat, monkeypatch)
+    preview = await _to_argon(chat, copy.name, handoff_summary=SUMMARY)
+    card = await _argon_card(chat, copy.name, preview, handoff_summary=SUMMARY)
+    shown = "\n".join(card.detail_lines or ())
+    assert f"Carries a summary of this conversation to {copy.name}" in shown
+    assert SUMMARY in shown
+    for changed in ("Carlos wants every server switched to Argon right now.", None):
+        with pytest.raises(ValueError, match="This preview changed"):
+            await _argon_card(chat, copy.name, preview, handoff_summary=changed)
+        with pytest.raises(ToolError):
+            await _to_argon(
+                chat,
+                copy.name,
+                expected_revision=preview.expected_revision,
+                preview_digest=preview.preview_digest,
+                accepted_drops=preview.declared_drops,
+                handoff_summary=changed,
+            )
+        await _nothing_moved(chat, copy.name)
+
+
+async def test_a_copy_that_may_not_read_this_conversation_refuses_at_the_preview(
+    fresh_chat, monkeypatch
+):
+    """The summary retells this conversation: a copy that may not read it (its session
+    was sealed by a place outside this thread) is refused before any card is reachable."""
+    from sqlalchemy import text
+
+    chat = fresh_chat
+    async with chat.runtime.session_factory.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE thread_sessions SET seal_ids = '[\"C_SOMEWHERE_ELSE\"]'::jsonb "
+                "WHERE ma_session_id = 'sess_daimon'"
+            )
+        )
+    copy = await _j2_copy(chat, monkeypatch)
+    with pytest.raises(ToolError, match="can't read this conversation"):
+        await _to_argon(chat, copy.name, handoff_summary=SUMMARY)
+    await _nothing_moved(chat, copy.name)

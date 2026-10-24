@@ -1754,11 +1754,14 @@ async def _request_agent_backend_switch_impl(
                     "thread_mode": thread_mode,
                     "required_capabilities": required_capabilities,
                     "unsaved_work": unsaved_work,
+                    "handoff_summary": handoff_summary,
                 }
             )
+            bound = unsaved_work is not None or handoff_summary is not None
             if (
-                unsaved_work is not None
-                and switch_preview_digest(preview.digest, unsaved_work) != reference.preview_digest
+                bound
+                and switch_preview_digest(preview.digest, unsaved_work, handoff_summary)
+                != reference.preview_digest
             ):
                 # The answer is bound into the digest the card showed: a changed or
                 # invented one is a different request. (Omitting a bound answer fails
@@ -1798,9 +1801,7 @@ async def _request_agent_backend_switch_impl(
                     reference.expected_revision,
                     actor,
                     # A bound digest was checked above; this one is the switch's own.
-                    expected_preview_digest=preview.digest
-                    if unsaved_work is not None
-                    else reference.preview_digest,
+                    expected_preview_digest=preview.digest if bound else reference.preview_digest,
                     model=reference.model,
                     settings=reference_settings(reference),
                     **(
@@ -1869,7 +1870,7 @@ async def _request_agent_backend_switch_impl(
             model=preview.target_model,
             models=selectable_models(preview.target_backend),
             expected_revision=preview.setting_revision,
-            preview_digest=switch_preview_digest(preview.digest, unsaved_work),
+            preview_digest=switch_preview_digest(preview.digest, unsaved_work, handoff_summary),
             unsupported_skills=preview.unsupported_skills,
             unsupported_mcps=preview.unsupported_mcps,
             unsupported_capabilities=preview.unsupported_capabilities,

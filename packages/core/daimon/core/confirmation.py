@@ -132,6 +132,11 @@ class BackendSwitchReference(BaseModel):
     unsaved_work: Literal["copy", "leave"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # The summary of this conversation the switch hands the copy (J2), as the model
+    # sent it. Bound into `preview_digest`, and shown on the card.
+    handoff_summary: str | None = Field(
+        default=None, max_length=2000, exclude_if=lambda value: value is None
+    )
 
     @field_validator("accepted_drops", mode="before")
     @classmethod
@@ -143,12 +148,31 @@ class BackendSwitchReference(BaseModel):
         ).validate_python(value)
 
 
-def switch_preview_digest(digest: str, unsaved_work: Literal["copy", "leave"] | None) -> str:
+def switch_preview_digest(
+    digest: str,
+    unsaved_work: Literal["copy", "leave"] | None,
+    handoff_summary: str | None = None,
+) -> str:
     """A switch preview's digest as the tool returns it and its card checks it: bound to
-    the uncommitted-work answer the switch carries, so neither can change in between."""
-    if unsaved_work is None:
+    the uncommitted-work answer and the hand-off summary the switch carries (the raw
+    argument, as the card sees it), so none of them can change in between."""
+    if unsaved_work is None and handoff_summary is None:
         return digest
-    return hashlib.sha256(f"{digest}\nunsaved_work={unsaved_work}".encode()).hexdigest()
+    bound = digest
+    if unsaved_work is not None:
+        bound += f"\nunsaved_work={unsaved_work}"
+    if handoff_summary is not None:
+        bound += f"\nhandoff_summary={handoff_summary}"
+    return hashlib.sha256(bound.encode()).hexdigest()
+
+
+#: How much of a hand-off summary the switch card shows (cards have small limits).
+_SUMMARY_SHOWN: Final = 600
+
+
+def _clipped(text: str, limit: int) -> str:
+    """`text` cut at `limit` characters, marked when cut."""
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 #: What the card says each uncommitted-work answer does.
@@ -460,6 +484,7 @@ def prompt_for_tool_call(
                 "required_capabilities": data.get("required_capabilities"),
                 "for_everyone": data.get("for_everyone") or False,
                 "unsaved_work": data.get("unsaved_work"),
+                "handoff_summary": data.get("handoff_summary"),
             }
         )
         # No model-supplied compatibility text is accepted. The host hook must
@@ -774,7 +799,9 @@ def backend_switch_callbacks(
             or preview.agent_id != agent.agent_id
             or preview.target_backend != reference.target_backend
             or not preview.allowed
-            or switch_preview_digest(preview.digest, reference.unsaved_work)
+            or switch_preview_digest(
+                preview.digest, reference.unsaved_work, reference.handoff_summary
+            )
             != reference.preview_digest
             or (preview.declared_drops and reference.accepted_drops != preview.declared_drops)
             or (not preview.declared_drops and reference.accepted_drops not in (None, ()))
@@ -994,6 +1021,15 @@ def backend_switch_callbacks(
                 ("Uncommitted changes: " + _UNSAVED_WORK_WORDS[prompt.backend_switch.unsaved_work],)
                 if prompt.backend_switch is not None
                 and prompt.backend_switch.unsaved_work is not None
+                else ()
+            ),
+            *(
+                (
+                    f"Carries a summary of this conversation to {agent.name}: "
+                    + _clipped(prompt.backend_switch.handoff_summary, _SUMMARY_SHOWN),
+                )
+                if prompt.backend_switch is not None
+                and prompt.backend_switch.handoff_summary is not None
                 else ()
             ),
         )
