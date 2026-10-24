@@ -16,6 +16,7 @@ from uuid import UUID
 from daimon.core import pricing
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import (
@@ -781,7 +782,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             request.deps.state_store,
             deployment,
         ),
-        usage_store=GeminiUsageRuntime(accounting, prices),
+        # Inline reuse runs no sandbox or container: its usage settles at infrastructure
+        # $0 (infrastructure_cost.NO_INFRASTRUCTURE_PROFILES), never pending forever.
+        usage_store=GeminiUsageRuntime(accounting, prices, known_infrastructure_usd(PROFILE)),
     )
 
     return runtime

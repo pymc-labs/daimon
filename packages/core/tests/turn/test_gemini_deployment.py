@@ -991,7 +991,8 @@ async def test_only_explicit_tools_compile_and_scope_is_pinned(
     assert all(runtime.usage_store.prices[model] is price for model, price in expected.items())
     with pytest.raises(TypeError):
         runtime.usage_store.prices[FLASH_PRIMARY] = expected[FLASH_PRIMARY]
-    assert runtime.usage_store.infrastructure_usd is None
+        # Inline reuse has no sandbox or container: its usage settles at $0 infrastructure.
+        assert runtime.usage_store.infrastructure_usd == Decimal(0)
     assert not (tmp_path / "records.sqlite").exists()
     config = selected.admission.backend_revision
     assert config is not None
@@ -1346,14 +1347,20 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
     assert len(posts) == 2 and calls and len(clients) == 2 * len(calls)
     assert all(client.is_closed for client in clients)
     assert (tmp_path / "records.sqlite").exists() and (tmp_path / "holds.sqlite").exists()
-    # Unknown tariffs and infrastructure are preserved as pending, not free.
+    # Inline reuse has no infrastructure charge, so its measured usage settles at once:
+    # nothing pending, and the turn's cost is on the ledger (SMOKE fc0fa16a: every
+    # Gemini usage row stayed pending forever, so no Gemini turn was ever debited).
     from sqlalchemy import text
 
     async with deps.sessionmaker() as db:
         assert (
             await db.scalar(text("SELECT count(*) FROM accounting_outbox WHERE applied_at IS NULL"))
-            == 2
+            == 0
         )
+        debited = await db.scalar(
+            text("SELECT coalesce(sum(delta_usd), 0) FROM tenant_ledger WHERE delta_usd < 0")
+        )
+        assert debited < 0
 
 
 type _ClaimedWorker = tuple[
