@@ -682,7 +682,7 @@ async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimo
 
 
 @pytest.fixture
-def consent_recorded_before_self_cards(monkeypatch):
+def consent_recorded_before_self_cards(monkeypatch, request):
     """While on, gated-tool handling is as before Daimon posted the switch card itself.
 
     The catalogue also lists the switch tool and one other gated tool, so the
@@ -702,9 +702,13 @@ def consent_recorded_before_self_cards(monkeypatch):
 
     monkeypatch.setattr(discovery, "list_mcp_tools", with_gated_tools)
     real = tool_safety.self_carded_tools
-    state = {"old": True}
+    # "carded_then": the tools already self-carded when the consent was recorded.
+    carded_then = getattr(request, "param", frozenset())
+    state: dict[str, object] = {"old": True, "carded_then": carded_then}
     monkeypatch.setattr(
-        tool_safety, "self_carded_tools", lambda: frozenset() if state["old"] else real()
+        tool_safety,
+        "self_carded_tools",
+        lambda: state["carded_then"] if state["old"] else real(),
     )
     return state
 
@@ -753,20 +757,35 @@ async def test_a_consent_that_dropped_skills_still_prepares_and_now_keeps_them(
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_consent_that_dropped_skills_and_the_switch_tool_still_prepares(
-    consent_recorded_before_self_cards, consent_recorded_before_skill_tools, template, monkeypatch
+@pytest.mark.parametrize(
+    "consent_recorded_before_self_cards",
+    [frozenset(), frozenset({"request_agent_backend_switch"})],
+    ids=["every-carded-tool", "a-subset"],
+    indirect=True,
+)
+async def test_a_consent_that_dropped_skills_and_carded_tools_still_prepares(
+    consent_recorded_before_self_cards,
+    consent_recorded_before_skill_tools,
+    template,
+    monkeypatch,
 ):
-    """Both older differences at once: switched before the switch tool was offered
-    and before skills came along. It prepares, with both now kept."""
+    """Both older differences at once: switched before skills came along and before
+    some self-carded tools were offered (all of them, or only the fleet tool when the
+    switch tool was carded already). It prepares, with all of them now kept."""
     from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
 
+    carded_then = consent_recorded_before_self_cards["carded_then"]
+    assert isinstance(carded_then, frozenset)
     request, quote, *_ = template
-    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
-    assert {"skills", switch_drop} <= set(quote.declared_drops)
+    carded = ("request_agent_backend_switch", "request_fleet_config")
+    lost = {f"mcp_tool:daimon-mcp:{tool}" for tool in carded if tool not in carded_then}
+    assert {"skills", *lost} <= set(quote.declared_drops), "recorded the old way"
+    assert not {f"mcp_tool:daimon-mcp:{tool}" for tool in carded_then} & set(quote.declared_drops)
     consent_recorded_before_self_cards["old"] = False
     monkeypatch.setattr(consent_recorded_before_skill_tools, "SKILL_READ_PROXY", "call_tool")
     selected, _ = await _prepared(request)
-    assert not {"skills", switch_drop} & set(selected.target_spec.declared_drops)
+    drops = set(selected.target_spec.declared_drops)
+    assert not {"skills", *(f"mcp_tool:daimon-mcp:{tool}" for tool in carded)} & drops
     assert SKILL_READ_INSTRUCTION in (selected.target_spec.system or "")
 
 
