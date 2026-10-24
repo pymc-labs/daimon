@@ -615,6 +615,31 @@ async def test_the_switch_card_shows_the_summary_redacted(fresh_chat, monkeypatc
     assert key not in shown and key not in (card.consequence or "")
 
 
+#: Credential shapes an independent review found the first redactor let through.
+_LEAKY_SAMPLES = (
+    ("SLACK_BOT_TOKEN=abcdefghijklmnop1234", "abcdefghijklmnop1234"),
+    ("postgres://app:hunter2pass@db.internal:5432/app", "hunter2pass"),
+    ("xoxs-1234567890-abcdefghij", "xoxs-1234567890-abcdefghij"),
+    ("xapp-1-A0123456789-abcdefghij", "xapp-1-A0123456789-abcdefghij"),
+    ("Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==", "dXNlcjpwYXNzd29yZDEyMw=="),
+    ('"client_secret": "s3cr3tValue123456"', "s3cr3tValue123456"),
+    (
+        "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ),
+)
+
+
+@pytest.mark.parametrize(("pasted", "secret"), _LEAKY_SAMPLES)
+def test_a_summary_is_redacted_like_a_log(pasted, secret):
+    """The summary uses core's one free-text redactor, so none of these reach the card
+    or the copy."""
+    from daimon.core.handoff_context import redact_handoff_summary
+
+    redacted = redact_handoff_summary(f"{SUMMARY} Also: {pasted}.")
+    assert secret not in redacted and "[redacted]" in redacted
+
+
 async def test_a_copy_that_may_not_read_this_conversation_refuses_at_the_preview(
     fresh_chat, monkeypatch
 ):
