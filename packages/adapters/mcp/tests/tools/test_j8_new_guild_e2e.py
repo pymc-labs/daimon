@@ -7,8 +7,9 @@ code defaults apply. A member there, in a fresh public channel and in a private 
 1. asks a plain question and is answered;
 2. says "fork yourself across opus, astra and argon and compare X": three workers run
    under the default fleet and the card settles;
-3. says "make a copy of yourself on GPT": the copy is made (an admin's call) and the
-   switch to GPT is offered.
+3. says "make a copy of yourself on GPT": the copy is made and the member owns it
+   (#1423: anyone may copy the agent answering their own turn), and the switch to GPT
+   is theirs to make.
 A private Discord channel takes the same path as a public one: nothing in core
 treats it differently until an admin seals it (`sealed_channel_ids`).
 """
@@ -146,9 +147,11 @@ async def test_a_server_joined_without_signup_credit_is_refused_in_plain_words(
     )
     tenant_id = await join(sm, unfunded)
     assert await is_over_balance(sessionmaker=sm, tenant_id=tenant_id)
-    said = admission_refusal_message("balance_depleted", unfunded)
-    assert said.startswith("Your team's Daimon credit has run out.")
-    assert "/billing" in said
+    # It never had credit, so admission says so rather than that it "ran out" (#1446).
+    async with sm() as db:
+        assert not await tenant_ledger.ever_credited(db, tenant_id=tenant_id)
+    said = admission_refusal_message("balance_depleted", unfunded, cause="no_credit_yet")
+    assert said == ("Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`.")
 
 
 @pytest.mark.parametrize("channel", sorted(CHANNELS))
@@ -256,36 +259,44 @@ async def test_make_a_copy_of_yourself_on_gpt(joined, monkeypatch, channel):
         sm, client, SETTINGS, DeploymentDefault(agent_name="Daimon", environment_name="default")
     )
 
-    def person(*, admin: bool) -> AuthIdentity:
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_owners
+
+    def member(*, answered_by: str) -> AuthIdentity:
+        """A member's own turn credential, in a turn the named agent answers."""
         return AuthIdentity(
             tenant_id=tenant_id,
             account_id=account_id,
-            role=Role.ADMIN if admin else Role.USER,
-            is_admin=admin,
+            role=Role.USER,
+            is_admin=False,
             platform="discord",
             platform_user_id="requester",
+            chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=answered_by),
         )
 
-    # A member can't make a saved copy: they're told who can, nothing is created.
+    # A member may not copy an agent other than the one answering them: nothing is made.
     with pytest.raises(ToolError, match="requires a server admin"):
         await _fork_agent_impl(
-            runtime, person(admin=False), "Daimon", "Daimon", new_copy_if_taken=True
+            runtime,
+            member(answered_by="ag_other"),
+            "Daimon",
+            "Daimon",
+            expected_ma_agent_id="ag_daimon",
+            new_copy_if_taken=True,
         )
     assert created == []
-    # The server's admin can: the copy is made, under a free name, owned by them.
-    # (In chat the agent names the exact source it read with list_agents.)
+    # "Make a copy of yourself" to the agent answering them: the copy is made, under a
+    # free name, and the member owns it (#1423). In chat the agent names the exact
+    # source it read with list_agents.
     copy = await _fork_agent_impl(
         runtime,
-        person(admin=True),
+        member(answered_by="ag_daimon"),
         "Daimon",
         "Daimon",
         expected_ma_agent_id="ag_daimon",
         new_copy_if_taken=True,
     )
     assert copy.name == "Daimon-2" and len(created) == 1
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores import agent_owners
-
     async with sm() as db:
         owner = await agent_owners.owner_of(
             db, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_copy")
@@ -301,6 +312,12 @@ async def test_make_a_copy_of_yourself_on_gpt(joined, monkeypatch, channel):
         client, sm, tenant_id=tenant_id, agent_name=copy.name, actual_agent=native
     )
     service = make_backend_service(sm, SETTINGS.turn)
+    # The member owns the copy, so the switch is theirs to make, not only an admin's.
+    from daimon.core.authz import Subject
+    from daimon.core.channel_backend import BackendActor
+
+    actor = BackendActor(tenant_id, account_id, Subject(platform_user_id="requester"))
+    assert await service.may_edit(agent, actor)
     preview = await service.preview(agent, "openai")
     assert preview.allowed, preview
     assert preview.target_backend == "openai"
