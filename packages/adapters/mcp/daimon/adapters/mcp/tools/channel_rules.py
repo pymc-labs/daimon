@@ -136,23 +136,30 @@ async def _set_channel_rule_impl(
     label = await _channel_label(runtime, auth, channel) if copy_from is not None else None
     public_url = runtime.settings.mcp.public_url
 
-    async def start_copy(source_name: str, copy_name: str, copy_ma_agent_id: str) -> None:
-        """A channel's copy of an agent on GPT or Gemini starts there too (sweep item 3)."""
-        from daimon.adapters.mcp.tools.agents import start_copy_on_source_backend
-        from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+    async def start_copy(
+        source_name: str, source_ma_agent_id: str, copy_name: str, copy_ma_agent_id: str
+    ) -> None:
+        """A channel's copy of an agent on GPT or Gemini starts there too (sweep item 3).
 
-        source = await find_agent_by_daimon_tag(
-            runtime.client, tenant_id=auth.tenant_id, name=source_name
+        Called by core right after the fork, inside its archive-on-failure: any error
+        here (a failed read included) archives the copy before the channel names it.
+        """
+        from daimon.adapters.mcp.tools.agents import (
+            source_backend_for_copy,
+            start_copy_on_source_backend,
         )
-        if source is not None:
-            await start_copy_on_source_backend(
-                runtime,
-                auth,
-                source_ma_agent_id=source.id,
-                copy_name=copy_name,
-                copy_ma_agent_id=copy_ma_agent_id,
-                archive_on_failure=False,
-            )
+
+        carry = await source_backend_for_copy(
+            runtime, auth, source_name=source_name, source_ma_agent_id=source_ma_agent_id
+        )
+        await start_copy_on_source_backend(
+            runtime,
+            auth,
+            carry=carry,
+            copy_name=copy_name,
+            copy_ma_agent_id=copy_ma_agent_id,
+            archive_on_failure=False,
+        )
 
     try:
         change = await set_channel_rule(

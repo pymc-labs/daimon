@@ -513,3 +513,71 @@ async def test_a_copy_of_a_luna_agent_starts_on_luna_or_not_at_all(j10_root, tur
     # gpt-6-luna is OpenAI's default, which a revision stores as no model of its own.
     assert revision is not None and revision.backend == "openai"
     assert (revision.model or backend_selection("openai").model) == "gpt-6-luna"
+
+
+async def test_a_channels_own_copy_of_a_luna_agent_asked_for_in_chat_starts_on_luna(j10_root):
+    """The chat tool's channel copy (MCP set_channel_rule, copy_from): core passes the
+    source's id to the start, which gives the copy its source's provider before the
+    channel names it (#1510 review: never looked up again by name)."""
+    from daimon.adapters.mcp.tools.channel_rules import (
+        _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.stores import agent_backends
+    from mux.profiles import backend_selection
+
+    deps, prepared, *_ = j10_root
+    transport = j10_root[7]
+    created = stateful_agents(
+        transport,
+        prepared.admission.agent.model_dump(mode="json"),
+        prepared.admission.environment,
+    )
+    async with member_chat(j10_root) as (runtime_, auth, origin):
+        await create_from_chat(runtime_, auth, origin, "luna-agent", "luna")
+        admin = await _admin_of(runtime_, auth)
+        await _set_channel_rule_impl(
+            runtime_, admin, channel_id="1563400000000000123", readers="own", copy_from="luna-agent"
+        )
+    (copy,) = [a for a in created.values() if a["name"] not in ("luna-agent",)]
+    assert copy["archived_at"] is None
+    async with deps.sessionmaker() as session:
+        revision = await agent_backends.current(
+            session,
+            auth.tenant_id,
+            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=copy["id"]),
+        )
+    assert revision is not None and revision.backend == "openai"
+    assert (revision.model or backend_selection("openai").model) == "gpt-6-luna"
+
+
+async def test_a_fork_whose_source_provider_cant_be_read_makes_nothing(j10_root, monkeypatch):
+    """#1510 review 1: the source's provider is read BEFORE the copy exists, so a failed
+    read leaves no copy at all (none on Claude)."""
+    from daimon.adapters.mcp.tools.agents import (
+        _fork_agent_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.stores import agent_backends
+
+    deps, prepared, *_ = j10_root
+    transport = j10_root[7]
+    created = stateful_agents(
+        transport,
+        prepared.admission.agent.model_dump(mode="json"),
+        prepared.admission.environment,
+    )
+    async with member_chat(j10_root) as (runtime_, auth, origin):
+        luna = await create_from_chat(runtime_, auth, origin, "luna-agent", "luna")
+        admin = await _admin_of(runtime_, auth)
+        real = agent_backends.current
+
+        async def unreadable(session, tenant_id, agent_id, **kwargs):
+            if agent_id == derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=luna.id):
+                raise RuntimeError("backend revision read failed")
+            return await real(session, tenant_id, agent_id, **kwargs)
+
+        monkeypatch.setattr(agent_backends, "current", unreadable)
+        with pytest.raises(RuntimeError, match="read failed"):
+            await _fork_agent_impl(
+                runtime_, admin, "luna-agent", "luna-copy", expected_ma_agent_id=luna.id
+            )
+    assert not [a for a in created.values() if a["name"] == "luna-copy"], "no copy was made"
