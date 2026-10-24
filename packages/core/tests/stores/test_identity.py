@@ -71,6 +71,18 @@ async def test_cli_principal_tenant_isolation(
     assert p1.account_id != p2.account_id
 
 
+async def test_platform_principal_does_not_swallow_foreign_key_errors(
+    db_session: AsyncSession,
+) -> None:
+    with pytest.raises(IntegrityError) as error:
+        await get_or_create_platform_principal(
+            db_session, tenant_id=uuid.uuid4(), platform="discord", external_id="missing-tenant"
+        )
+    assert getattr(error.value.orig, "sqlstate", None) == "23503"
+    # The failed enrollment rolls back only its savepoint.
+    assert await db_session.scalar(select(1)) == 1
+
+
 async def test_platform_principal_tenant_isolation(
     db_session: AsyncSession,
 ) -> None:

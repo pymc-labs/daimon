@@ -16,6 +16,7 @@ from daimon.core.stores.domain import (
     PlatformPrincipalRow,
 )
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
@@ -48,28 +49,43 @@ async def get_or_create_cli_principal(
 async def get_or_create_platform_principal(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, external_id: str
 ) -> PlatformPrincipalRow:
-    """Look up `(platform, external_id)`; create account + principal if absent."""
-    existing = await session.execute(
-        select(PlatformPrincipal).where(
-            PlatformPrincipal.tenant_id == tenant_id,
-            PlatformPrincipal.platform == platform,
-            PlatformPrincipal.external_id == external_id,
-        )
+    """Reuse the tenant's principal, including when another transaction creates it."""
+    lookup = select(PlatformPrincipal).where(
+        PlatformPrincipal.tenant_id == tenant_id,
+        PlatformPrincipal.platform == platform,
+        PlatformPrincipal.external_id == external_id,
     )
-    orm = existing.scalar_one_or_none()
+    orm = (await session.execute(lookup)).scalar_one_or_none()
     if orm is not None:
         return PlatformPrincipalRow.model_validate(orm)
 
-    account = Account(tenant_id=tenant_id, role="user")
-    session.add(account)
-    await session.flush()
+    # A concurrent enrollment can be invisible to the SELECT yet win the unique
+    # key. Roll back its losing account too, without touching the caller's work.
+    async with session.begin_nested() as savepoint:
+        account = Account(tenant_id=tenant_id, role="user")
+        session.add(account)
+        await session.flush()
+        orm = (
+            await session.execute(
+                insert(PlatformPrincipal)
+                .values(
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    external_id=external_id,
+                    account_id=account.id,
+                )
+                .on_conflict_do_nothing(constraint="uq_platform_principal")
+                .returning(PlatformPrincipal)
+            )
+        ).scalar_one_or_none()
+        if orm is None:
+            await savepoint.rollback()
 
-    principal = PlatformPrincipal(
-        tenant_id=tenant_id, platform=platform, external_id=external_id, account_id=account.id
-    )
-    session.add(principal)
-    await session.flush()
-    return PlatformPrincipalRow.model_validate(principal)
+    if orm is None:
+        # READ COMMITTED gives this statement a fresh snapshot of the winner.
+        # Only the named uniqueness conflict is ignored; other errors propagate.
+        orm = (await session.execute(lookup)).scalar_one()
+    return PlatformPrincipalRow.model_validate(orm)
 
 
 async def mark_principal_foreign(
