@@ -77,9 +77,10 @@ from mux.state.store import (
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
-from sqlalchemy import ColumnElement, String, cast, func, select, text, tuple_, update
+from sqlalchemy import ColumnElement, String, cast, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 
 def _tenant(tenant_id: str) -> uuid.UUID:
@@ -1111,37 +1112,65 @@ async def pending_outbox(session: AsyncSession, *, limit: int = 100) -> list[Out
 
 
 async def pending_outbox_for_profiles(
-    session: AsyncSession, profiles: Collection[str], *, limit: int
+    session: AsyncSession,
+    profiles: Collection[str],
+    *,
+    limit: int,
+    after: tuple[str, str, int] | None = None,
 ) -> list[tuple[OutboxRow, uuid.UUID, BindingContract]]:
-    """Unapplied outbox rows whose binding's current generation has one of `profiles`.
+    """Unapplied outbox rows of bindings that only ever had one of `profiles`.
 
-    Oldest first, an observation's newest revision before its older ones. Each comes
-    with its tenant and that binding.
+    Every generation of the binding must be one of them: a binding id survives a
+    rebind to another profile, and a row of that other profile must not be read as
+    this one. Keyed by (binding, observation, newest revision first), from just after
+    `after`, so a caller can page past rows it could not settle. Each comes with its
+    tenant and the binding's current generation.
     """
+    generation = aliased(ProviderBinding)
+    other = (
+        select(generation.binding_id)
+        .where(
+            generation.binding_id == AccountingOutbox.binding_id,
+            generation.profile.not_in(profiles),
+        )
+        .correlate(AccountingOutbox)
+        .exists()
+    )
     latest = (
         select(ProviderBinding.binding_id, func.max(ProviderBinding.generation).label("generation"))
         .group_by(ProviderBinding.binding_id)
         .subquery()
     )
-    rows = (
-        await session.execute(
-            select(AccountingOutbox.row, AccountingOutbox.tenant_id, ProviderBinding.binding)
-            .join(latest, latest.c.binding_id == AccountingOutbox.binding_id)
-            .join(
-                ProviderBinding,
-                (ProviderBinding.binding_id == latest.c.binding_id)
-                & (ProviderBinding.generation == latest.c.generation),
-            )
-            .where(AccountingOutbox.applied_at.is_(None), ProviderBinding.profile.in_(profiles))
-            .order_by(
-                AccountingOutbox.created_at,
-                AccountingOutbox.binding_id,
-                AccountingOutbox.observation_id,
-                AccountingOutbox.revision.desc(),
-            )
-            .limit(limit)
+    statement = (
+        select(AccountingOutbox.row, AccountingOutbox.tenant_id, ProviderBinding.binding)
+        .join(latest, latest.c.binding_id == AccountingOutbox.binding_id)
+        .join(
+            ProviderBinding,
+            (ProviderBinding.binding_id == latest.c.binding_id)
+            & (ProviderBinding.generation == latest.c.generation),
         )
-    ).all()
+        .where(AccountingOutbox.applied_at.is_(None), ~other)
+        .order_by(
+            AccountingOutbox.binding_id,
+            AccountingOutbox.observation_id,
+            AccountingOutbox.revision.desc(),
+        )
+        .limit(limit)
+    )
+    if after is not None:
+        binding_id, observation_id, revision = after
+        statement = statement.where(
+            (
+                tuple_(AccountingOutbox.binding_id, AccountingOutbox.observation_id)
+                > tuple_(literal(binding_id), literal(observation_id))
+            )
+            | (
+                (AccountingOutbox.binding_id == binding_id)
+                & (AccountingOutbox.observation_id == observation_id)
+                & (AccountingOutbox.revision < revision)
+            )
+        )
+    rows = (await session.execute(statement)).all()
     return [
         (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
         for row, tenant_id, binding in rows

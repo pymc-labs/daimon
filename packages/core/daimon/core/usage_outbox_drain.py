@@ -23,18 +23,28 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-#: Rows one pass looks at. The next scheduler tick continues.
+#: Rows one pass looks at. The next scheduler tick continues after the last of them.
 DRAIN_BATCH = 200
+
+#: Where the previous pass stopped (one scheduler process drains); None starts over.
+_cursor: tuple[str, str, int] | None = None
 
 
 async def drain_pending_usage(
     sessionmaker: async_sessionmaker[AsyncSession], *, markup: Decimal, limit: int = DRAIN_BATCH
 ) -> tuple[int, Decimal]:
     """Apply what pending usage can now be priced; (rows applied, USD debited)."""
+    global _cursor
     async with sessionmaker() as db:
         rows = await mux_state.pending_outbox_for_profiles(
-            db, NO_INFRASTRUCTURE_PROFILES, limit=limit
+            db, NO_INFRASTRUCTURE_PROFILES, limit=limit, after=_cursor
         )
+    last = rows[-1][0] if rows else None
+    _cursor = (
+        (last.binding_id, last.observation_id, last.revision)
+        if last is not None and len(rows) == limit
+        else None
+    )
     applied, debited, skipped = 0, Decimal(0), 0
     # An observation's newest revision carries its whole cost; older ones only close.
     counted: set[tuple[str, str]] = set()
