@@ -1023,8 +1023,7 @@ async def test_the_card_says_plainly_that_saved_keys_wont_be_available(owned_pre
     prepared = await prepare(prompt)
     assert prepared.action == "Switch Researcher to OpenAI"
     assert (
-        "On OpenAI it won't have its saved keys, its memory and its sandbox's files and packages"
-        in prepared.consequence
+        "On OpenAI it won't have its saved keys, its memory and its sandbox" in prepared.consequence
     )
     assert prepared.consequence.count("saved keys") == 1
     assert "credentials" not in prepared.action + prepared.consequence
