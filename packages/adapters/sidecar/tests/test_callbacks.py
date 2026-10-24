@@ -230,7 +230,7 @@ async def test_stop_cancels_queued_wakes_and_prevents_claimed_presend(
         if stop == "capability":
             await watches.revoke_capabilities(db, registered.id, now=datetime.now(UTC))
         if stop == "watch":
-            await watches.stop_watch(db, registered.id, now=datetime.now(UTC))
+            await watches.delete_watch(db, registered.id, now=datetime.now(UTC))
         if stop == "rotation":
             await watches.rotate_signing_key(
                 db, registered.id, key=KEY + "new", key_id="v2", expires_at=registered.expires_at

@@ -259,7 +259,6 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 tenant_id=caller.auth.tenant_id,
                 owner_account_id=caller.auth.account_id,
                 admin=caller.is_admin,
-                requested_by=caller.auth.account_id,
             )
         assert cancelled is not None
         return LongJobCancelReply.model_validate(cancelled)

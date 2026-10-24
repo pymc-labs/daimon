@@ -9,7 +9,12 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
-from daimon.core._models import LongJobPolicyHistory, TaskContinuation, Tenant
+from daimon.core._models import (
+    LongJobCancelAuditRecord,
+    LongJobPolicyHistory,
+    TaskContinuation,
+    Tenant,
+)
 from daimon.core.authz import Subject
 from daimon.core.config import LongJobsSettings
 from daimon.core.errors import StoreError
@@ -909,7 +914,17 @@ async def test_cancel_audit_is_content_free_and_tenant_scoped(db_engine, db_clea
         await store.request_cancel(
             db, job.id, tenant_id=job.tenant_id, owner_account_id=job.owner_account_id
         )
-        assert await store.list_cancel_audits(db, tenant_id=uuid.uuid4(), job_id=job.id) == []
+        other_tenant_id = uuid.uuid4()
+        await store.scope(db, other_tenant_id)
+        assert not (
+            await db.scalars(
+                select(LongJobCancelAuditRecord).where(
+                    LongJobCancelAuditRecord.tenant_id == other_tenant_id,
+                    LongJobCancelAuditRecord.id == job.id,
+                )
+            )
+        ).all()
+        await store.scope(db, job.tenant_id)
         rows = (
             (await db.execute(text("SELECT to_jsonb(a) FROM long_job_cancel_audit a")))
             .scalars()
@@ -926,6 +941,7 @@ async def test_cancel_audit_is_content_free_and_tenant_scoped(db_engine, db_clea
         "requested_at",
     }
     assert audit["id"] == str(job.id)
+    assert audit["requested_by"] == str(job.owner_account_id)
     assert "secret" not in str(audit)
 
 
@@ -945,4 +961,12 @@ async def test_account_purge_cascades_owned_jobs_and_cancel_audit(db_engine, db_
     assert await read(sm, job) is None
     assert await read(sm, other) is not None
     async with sm.begin() as db:
-        assert await store.list_cancel_audits(db, tenant_id=job.tenant_id, job_id=job.id) == []
+        await store.scope(db, job.tenant_id)
+        assert not (
+            await db.scalars(
+                select(LongJobCancelAuditRecord).where(
+                    LongJobCancelAuditRecord.tenant_id == job.tenant_id,
+                    LongJobCancelAuditRecord.id == job.id,
+                )
+            )
+        ).all()

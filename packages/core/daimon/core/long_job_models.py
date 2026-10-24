@@ -104,8 +104,3 @@ class LongJobCancelReply(BaseModel):
     id: uuid.UUID
     state: LongJobState
     owner_account_id: uuid.UUID
-
-
-class LongJobCancelAudit(LongJobCancelReply):
-    requested_by: uuid.UUID
-    requested_at: datetime
