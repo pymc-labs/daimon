@@ -59,11 +59,14 @@ Settling replaces the note as for any post."""
 
 
 def _captured_routine(row: RoutineRow) -> ColumnElement[bool]:
-    """The same producer, destination and configuration revision as the fire."""
+    """The same owner, destination and configuration revision as the fire.
+
+    Resolver healing changes only agent_id, without a configuration revision.
+    Keep matching that fire's outcome even if its captured ID is now stale.
+    """
     return and_(
         Routine.tenant_id == row.tenant_id,
         Routine.created_by_user_id.is_not_distinct_from(row.created_by_user_id),
-        Routine.agent_id == row.agent_id,
         Routine.agent_name.is_not_distinct_from(row.agent_name),
         Routine.updated_at == row.updated_at,
         Routine.destination_kind.is_not_distinct_from(row.destination_kind),

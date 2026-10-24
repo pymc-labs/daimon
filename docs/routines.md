@@ -51,7 +51,8 @@ revoked access, interrupted claims and uncertain or partial sends are visible
 via MCP `get_routine` / `list_routines` in `delivery_status` / `delivery_note`.
 Admins can also see failures for their own routines in the Discord `/routines`
 panel. There is no public fallback and no automatic resend; a later scheduled
-run may try again. The first failure in a failing streak uses the same private checks.
+run may try again. Execution failures and slots skipped because the owner
+already has a DM turn running record `last_error` without sending a private notice.
 Destination changes cancel queued results; a destination changed during a
 run prevents that run's result from being queued to the new destination.
 
@@ -520,7 +521,9 @@ The next slot was already stamped at claim time, before the outcome was known,
 so a failing routine simply waits for its next slot and tries again, forever,
 staying enabled.
 
-A routine with a destination tells it when it starts failing. The first
+An owner-DM routine records execution failures and `owner_busy` skips in
+`last_error` without sending a notice. Channel and thread routines tell their
+destination when they start failing. The first
 failure after a success (or a routine's first run failing) queues a short
 notice in the same outbox a result uses (`record_failure` in
 `packages/core/daimon/core/routine_delivery.py`), so the chat adapter posts

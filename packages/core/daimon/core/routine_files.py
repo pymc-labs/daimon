@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
+import anthropic
+import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.output_delivery import (
@@ -17,6 +19,8 @@ from daimon.core.output_delivery import (
 )
 from daimon.core.stores.domain import RoutineRow
 from pydantic import BaseModel, Field
+
+log = structlog.get_logger(__name__)
 
 PREFIX = "\x1eroutine-files-v1\n"
 MAX_FILES = 10
@@ -65,7 +69,17 @@ async def collect_routine_files(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> str:
     """Reuse interactive listing settlement; keep references until the outbox settles."""
-    listed = await poll_output_files(client, session_id=session_id, sleep=sleep)
+    try:
+        listed = await poll_output_files(client, session_id=session_id, sleep=sleep)
+    except anthropic.APIError:
+        # File collection must not discard a routine's completed reply.
+        log.exception("routine.files_collection_failed", session_id=session_id)
+        return (
+            plain_payload(
+                "\n\n".join(filter(None, [text, "Generated files could not be attached."]))
+            )
+            or ""
+        )
     files: list[RoutineFile] = []
     notices: list[str] = []
     for meta in listed.values():
