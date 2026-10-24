@@ -1593,7 +1593,7 @@ def test_capture_facts_change_canonical_digest_even_when_authored_spec_is_unchan
 
 
 @pytest.mark.parametrize(
-    "opaque", ("extensions", "effort", "memory", "credential", "native_resource", "environment")
+    "opaque", ("extensions", "effort", "credential", "native_resource", "environment")
 )
 def test_unrepresentable_capture_is_typed_refused_before_any_allocation(opaque):
     root, captured = captured_worker_source(parent("openai"))
@@ -1620,7 +1620,6 @@ def test_unrepresentable_capture_is_typed_refused_before_any_allocation(opaque):
                 }
             )
         },
-        "memory": {"memory_required": True},
         "credential": {
             "resource_requirements": (
                 ResourceBinding(id="credential", kind="credential", credential_ref="opaque"),
@@ -1702,17 +1701,19 @@ def test_capture_inherited_drops_remain_restrictions():
     assert result.declared_drops == ("memory",)
 
 
-def test_existing_memory_store_cannot_disappear_from_capture_obligations():
+def test_existing_memory_store_is_a_declared_loss_for_every_worker():
+    """Even if memory is not required, an existing store never reaches a worker."""
     root, captured = captured_worker_source(parent("openai"))
     captured = captured.model_copy(
         update={"memory_required": False, "memory_store_id": "memstore-existing"}
     )
-    with pytest.raises(WorkerSpecRefused, match="memory: unsupported"):
-        resolve(root, captured_source=captured)
-    result = resolve(
+    result = resolve(root, captured_source=captured)
+    assert result.declared_drops == ("memory",)
+    assert result.resources == ()
+    explicit = resolve(
         root, root.spec.model_copy(update={"declared_drops": ("memory",)}), captured_source=captured
     )
-    assert result.declared_drops == ("memory",)
+    assert explicit.declared_drops == ("memory",) and explicit.resources == ()
 
 
 @pytest.mark.parametrize(

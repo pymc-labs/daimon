@@ -1459,7 +1459,7 @@ async def test_worker_materialization_runs_the_real_headless_driver(
     assert any(row.origin == "worker" and row.reason.value == "completed" for row in outcomes)
 
 
-@pytest.mark.parametrize("fault", ("disabled", "undeclared_memory", "lost_ack", "native_drift"))
+@pytest.mark.parametrize("fault", ("disabled", "lost_ack", "native_drift"))
 async def test_real_worker_materialization_refuses_without_input_or_recreation(
     materialization_worker_request: tuple[_ClaimedWorker, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1476,13 +1476,6 @@ async def test_real_worker_materialization_refuses_without_input_or_recreation(
         values = json.loads(owned.manifest_path.read_text())[0]
         values["worker_materialization"] = False
         owned.manifest_path.write_text(json.dumps([values]))
-    elif fault == "undeclared_memory":
-        spec = dict(worker.spec)
-        assert selected.worker is not None
-        spec["declared_drops"] = [
-            drop for drop in selected.worker.declared_drops if drop != "memory"
-        ]
-        worker = replace(worker, spec=spec)
 
     def native(call: httpx.Request) -> httpx.Response:
         response = owned.wire.handle(call)
@@ -1504,7 +1497,7 @@ async def test_real_worker_materialization_refuses_without_input_or_recreation(
 
         monkeypatch.setattr(sdk_deployment, "configured_catalog_transport", transport)
         for _attempt in range(2 if fault == "lost_ack" else 1):
-            with pytest.raises((AdmissionDenied, WorkerSpecRefused, FleetConflict)) as refused:
+            with pytest.raises((AdmissionDenied, WorkerSpecRefused, FleetConflict)):
                 await run_worker(
                     selected,
                     parent=root,
@@ -1512,10 +1505,6 @@ async def test_real_worker_materialization_refuses_without_input_or_recreation(
                     trigger_message="Complete the assigned task",
                     prices=prices,
                     cancel=asyncio.Event(),
-                )
-            if fault == "undeclared_memory":
-                assert (
-                    isinstance(refused.value, WorkerSpecRefused) and refused.value.field == "memory"
                 )
             assert not calls
             posts = [call for call in owned.wire.requests if call.method == "POST"]

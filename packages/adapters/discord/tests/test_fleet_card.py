@@ -2445,7 +2445,7 @@ def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
         spec={
             **copy_row.spec,
             "name": "W1",
-            "declared_drops": ["files", "mcp", "skills", "tools"],
+            "declared_drops": ["files", "mcp", "memory", "skills", "tools"],
         },
     )
     plain_row = worker(ordinal=1, role="W2")
@@ -2456,7 +2456,7 @@ def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
     text = "\n".join(
         item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
     )
-    assert "**W1** (without its files, its connected tools) ·" in text
+    assert "**W1** (without its files, its connected tools, its memory) ·" in text
     # Every task worker runs without tools and skills; that isn't news.
     assert "**W2** ·" in text
 

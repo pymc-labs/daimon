@@ -354,6 +354,7 @@ source_modules = [
     "daimon.core.accounting_outbox",
     "daimon.core.usage_compat",
     "daimon.core.usage_sweep",
+    "daimon.core.caller_resources",
     "daimon.core.usage_outbox_drain",
     "daimon.core.infrastructure_cost",
     "daimon.core.wizard",

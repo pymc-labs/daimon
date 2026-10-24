@@ -18,6 +18,11 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_
 from uuid import UUID
 
 import structlog
+from daimon.core.caller_resources import (
+    APP_SESSION_VAULT_PREFIX,
+    CALLER_RESOURCES_ID,
+    CALLER_VAULT_PREFIX,
+)
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
@@ -858,11 +863,10 @@ async def _freeze_root(
         # memory store exists) does the turn run with fleet off: nothing is
         # retained and the fleet tools say why. Any other refusal (policy, grant,
         # backend, budget, identity) still fails the turn as before.
-        from daimon.core.neutral_resources import fleet_root_obstacle
+        from daimon.core.neutral_resources import fleet_root_obstacles
 
-        obstacle = fleet_root_obstacle(source)
-        if obstacle is None and error.field == "memory" and source.memory_store_id is None:
-            obstacle = "memory"
+        obstacles = fleet_root_obstacles(source)
+        obstacle = obstacles[0] if obstacles else None
         if obstacle is None:
             raise
         log.warning(
@@ -871,6 +875,8 @@ async def _freeze_root(
             field=error.field,
             reason=error.reason,
             obstacle=obstacle,
+            # Every obstacle, not only the one shown: one can mask another.
+            obstacles=list(obstacles),
             origin_id=str(origin_id),
         )
         _remember_root_refusal(origin_id, obstacle)
@@ -2216,6 +2222,15 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
     return frozenset(paired)
 
 
+def _caller_private(binding: ResourceBinding) -> bool:
+    """A login that belongs to the person asking (their caller-mcp vault, in any of
+    its variants), never to the agent or a worker."""
+    return any(
+        value is not None and value.startswith(CALLER_VAULT_PREFIX)
+        for value in (binding.id, binding.credential_ref)
+    )
+
+
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     """Exclude validated native-only capabilities and their paired resources.
 
@@ -2227,8 +2242,11 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     - a stored connector login the projector can't pair with one server
       (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
     - stored secrets the session would write to a file (`.env`);
-    - repositories cloned with a login;
-    - memory, while the agent's memory store doesn't exist yet (its first turn).
+    - repositories cloned with a login, and a GitHub App session's vault
+      (`app-session-vault:*`);
+    - the caller's own logins (every `caller-mcp:` vault variant), never carried, and
+      their private carry (`caller-resources`), declared as `files`;
+    - memory, always: a worker never mounts the root's store (or a person's).
     """
     spec = source.effective_spec
     if spec is None:
@@ -2275,13 +2293,27 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
         if binding.kind == "credential" and binding.target_path is not None:
             drops.add("files")
             continue
+        if _caller_private(binding):
+            # The caller's own login (every caller-mcp vault variant, Slack turn and
+            # hold included) is never worker authority: excluded, so nothing carries it.
+            continue
+        if binding.kind == "native" and binding.id == CALLER_RESOURCES_ID:
+            # The caller's private carry (a DM, a seal, attached material): workers run
+            # without it, declared.
+            drops.add("files")
+            continue
+        if binding.kind == "native" and binding.id.startswith(APP_SESSION_VAULT_PREFIX):
+            # A GitHub App session's repository vault: workers run without it, declared.
+            drops.add("repository")
+            continue
         resources.append(binding)
     repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
     if len(repositories) != len(source.repository_sources):
         drops.add("repository")
-    if source.memory_store_id is None and source.memory_required is not False:
-        # The agent's memory store is created by its first session, so on its very
-        # first turn there is none to mount: its workers run without memory.
+    if source.memory_required is not False or source.memory_store_id is not None:
+        # A worker never carries the agent's memory: the root keeps its own store,
+        # and a person's personal store is never shared with a worker. The loss is
+        # declared, so the fleet card says "without its memory".
         drops.add("memory")
     if drops:
         normalized = normalized.model_copy(

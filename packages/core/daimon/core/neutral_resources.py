@@ -57,7 +57,6 @@ from daimon.core.stores.neutral_catalog import (
 )
 from mux.contracts import Contract, FrozenMap
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
-from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import Agents, ManagedAgents
 from mux.contracts.profile import SUPPORTED, Capability, Profile
@@ -1523,11 +1522,12 @@ def _with_root_model(
     return (*backends, selection), (*models, model)
 
 
-def _root_ceiling(
-    source: BackendAgent, *, account_id: str
-) -> tuple[AgentSpec, tuple[ResourceBinding, ...]]:
-    """The captured source's worker ceiling and the resources it carries, memory included."""
-    from daimon.core.memory_resource import memory_mount
+def _root_ceiling(source: BackendAgent) -> tuple[AgentSpec, tuple[ResourceBinding, ...]]:
+    """The captured source's worker ceiling and the resources a worker may carry.
+
+    Memory is never one of them: `worker_source_ceiling` declares its loss, so the
+    root's shared store (and a person's personal one) stays with the root.
+    """
     from daimon.core.turn.runtime_manifest import worker_source_ceiling
 
     actual = source.source
@@ -1539,29 +1539,7 @@ def _root_ceiling(
         raise WorkerSpecRefused("tools", "unsupported") from None
     # The complete capture remains the input to the existing obligation classifier.
     assert ceiling.effective_spec is not None
-    resources = ceiling.resource_requirements
-    read_only = source.memory_read_only is not False
-    if source.memory_store_id is not None:
-        mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
-        resources += (
-            ResourceBinding(
-                id=source.memory_store_id,
-                kind="native",
-                resource=actual.ref.model_copy(
-                    update={
-                        "kind": "memory_store",
-                        "id": source.memory_store_id,
-                        "account_id": account_id,
-                    }
-                ),
-                native=ExtensionConfig(
-                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
-                    version=1,
-                    value={"resource": mount},
-                ),
-            ),
-        )
-    return ceiling.effective_spec, resources
+    return ceiling.effective_spec, ceiling.resource_requirements
 
 
 #: Why an agent's own setup keeps it from running a fleet, in plain words.
@@ -1571,8 +1549,6 @@ FLEET_ROOT_OBSTACLES: Mapping[str, str] = {
     "files": "it has stored secrets or files that fleet workers can't receive",
     "repository": "it uses a repository with its own login",
     "tools": "it has tools that ask before running, or that fleet workers can't use",
-    # Only an existing store: before it exists, workers run without memory instead.
-    "memory": "its memory can't be shared with fleet workers",
     # Default-fleet turns that ran with fleet off instead of failing.
     "held": "this conversation includes another organisation, so fleets are off here",
     "shared_thread": "this is a shared thread, and fleets run only in your own thread",
@@ -1587,24 +1563,29 @@ def fleet_root_obstacle_text(obstacle: str) -> str:
     return f"This agent can't run a fleet yet: {reason}."
 
 
-def fleet_root_obstacle(source: BackendAgent) -> str | None:
-    """What in an agent's own setup keeps its source from becoming fleet worker authority.
+#: Most actionable first: what a person can change before what only code can.
+_OBSTACLE_ORDER = ("credentials", "mcp", "repository", "files", "tools")
+
+
+def fleet_root_obstacles(source: BackendAgent) -> tuple[str, ...]:
+    """Everything in an agent's own setup that keeps its source from becoming fleet
+    worker authority, most actionable first (see FLEET_ROOT_OBSTACLES).
 
     A projected capture's ceiling and resources, classified the way freezing the
     root does. It checks a subset of what the freeze checks (no grant, origin or
-    backend facts), so a None here can still be refused at the turn; a value is
-    a definite obstacle. Returns an obligation name (see FLEET_ROOT_OBSTACLES).
+    backend facts), so an empty result can still be refused at the turn. Every
+    obstacle is returned: one can otherwise mask another.
     """
     from daimon.core.turn.runtime_manifest import classify_source_obligations
 
     if source.resource_scope is None or source.environment is None:
-        return None
+        return ()
     try:
-        spec, resources = _root_ceiling(source, account_id=source.resource_scope.account_id)
+        spec, resources = _root_ceiling(source)
     except WorkerSpecRefused as error:
-        return error.field
+        return (error.field,)
     if any(tool.permission != "auto" for tool in spec.tools or ()):
-        return "tools"
+        return ("tools",)
     missing = classify_source_obligations(
         source,
         spec,
@@ -1612,13 +1593,16 @@ def fleet_root_obstacle(source: BackendAgent) -> str | None:
         resources=resources,
         worker_ceiling=True,
     )
-    if source.memory_store_id is None:
-        # An agent gets its memory store on its first session; that is no obstacle.
-        missing = missing - {"memory"}
-    for name in ("credentials", "mcp", "repository", "files", "tools"):
-        if name in missing:
-            return name
-    return sorted(missing)[0] if missing else None
+    # Memory is a worker loss, never an obstacle: every worker runs without it.
+    missing = missing - {"memory"}
+    ordered = [name for name in _OBSTACLE_ORDER if name in missing]
+    return (*ordered, *sorted(missing - set(_OBSTACLE_ORDER)))
+
+
+def fleet_root_obstacle(source: BackendAgent) -> str | None:
+    """The most actionable of `fleet_root_obstacles`, or None: the one a person sees."""
+    obstacles = fleet_root_obstacles(source)
+    return obstacles[0] if obstacles else None
 
 
 def _is_current_default(grant: AgentFleetGrant, policy: TenantAccessPolicy) -> bool:
@@ -1677,7 +1661,7 @@ def fleet_root_permissions(
         != (fleet.scope.tenant_id, fleet.scope.account_id)
     ):
         raise WorkerSpecRefused("origin", "unbound")
-    spec, resources = _root_ceiling(source, account_id=fleet.scope.account_id)
+    spec, resources = _root_ceiling(source)
     read_only = source.memory_read_only is not False
     # The run gets its own time; each worker is capped at spawn (`worker_runtime_ceiling`).
     duration = min(grant.max_run_seconds, TURN_CEILING_S)
@@ -1902,6 +1886,7 @@ def freeze_root_permissions(
     No latest-source read, allocation, credential lookup or financial hold occurs.
     """
     from daimon.core.channel_backend import check_backend
+    from daimon.core.turn.runtime_manifest import source_instructions_preserved
 
     fleet, actual, effective = grants.fleet, source.source, source.effective_spec
     if (
@@ -1949,7 +1934,9 @@ def freeze_root_permissions(
         caps = WorkerLimits.model_validate(grants.limits.model_dump())
     except ValueError:
         raise WorkerSpecRefused("budget", "unsupported") from None
-    if grants.base_system != grants.spec.system:
+    if not source_instructions_preserved(grants.base_system, grants.spec.system):
+        # A resolved ceiling may append the host's own worker-restriction guidance;
+        # that is a restriction, never a widening of the captured source text.
         raise WorkerSpecRefused("system", "unbound")
     narrowed = resolve_worker_spec(
         grants,
@@ -2138,6 +2125,19 @@ def resolve_worker_spec(
         resolved = AgentSpec.model_validate(data)
     except ValueError:
         raise WorkerSpecRefused("spec", "unsupported") from None
+    if captured_source is not None and (
+        captured_source.memory_required is not False or captured_source.memory_store_id is not None
+    ):
+        # Memory belongs to the agent and to the person talking to it. No worker
+        # mounts it, so this is a host-imposed loss, not one a caller may forget
+        # to declare. It reaches the resolved spec, so the card can show it.
+        resolved = resolved.model_copy(
+            update={
+                "declared_drops": tuple(
+                    sorted({*resolved.declared_drops, cast(DeclaredDrop, "memory")})
+                )
+            }
+        )
     if captured_source is not None:
         actual, effective = captured_source.source, captured_source.effective_spec
         if (

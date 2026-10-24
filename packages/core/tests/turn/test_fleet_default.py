@@ -289,8 +289,8 @@ async def memoryless_root(db_preflight, db_committing_engine):
 
 async def test_fresh_agent_spawns_three_workers_under_the_default_caps(root_turn):
     specs = await _spawn_three_default_workers(root_turn)
-    # The agent's memory store exists, so its workers keep (read-only) memory.
-    assert all("memory" not in spec.declared_drops for spec in specs)
+    # The root keeps its memory store; every worker declares it runs without it.
+    assert all("memory" in spec.declared_drops for spec in specs)
 
 
 async def test_a_first_ask_before_the_memory_store_exists_runs_workers_without_memory(
@@ -303,7 +303,30 @@ async def test_a_first_ask_before_the_memory_store_exists_runs_workers_without_m
     assert all("memory" in spec.declared_drops for spec in specs)
 
 
-async def _spawn_three_default_workers(root_turn):
+async def test_a_memory_store_root_spawns_workers_across_providers_without_memory(root_turn):
+    """A shared+personal store root runs a fleet; every provider's worker is memoryless."""
+    from daimon.core.stores import agent_memory_stores
+
+    deps, prepared, *_ = root_turn
+    source = prepared._source
+    assert source.memory_store_id is not None
+    async with deps.sessionmaker.begin() as db:
+        await agent_memory_stores.insert_personal_memory_store(
+            db,
+            tenant_id=source.tenant_id,
+            agent_id=source.agent_id,
+            account_id=prepared.admission.account_id,
+            memory_store_id="personal-root-memory",
+        )
+    specs = await _spawn_three_default_workers(
+        root_turn,
+        models=("claude-haiku-5-5", "gpt-6-astra", "gemini-4-argon"),
+    )
+    assert {spec.model.provider for spec in specs} == {"anthropic", "openai", "gemini"}
+    assert all("memory" in spec.declared_drops for spec in specs)
+
+
+async def _spawn_three_default_workers(root_turn, models: tuple[str, ...] | None = None):
     deps, prepared, _, intent, origin, scope, _, _ = root_turn
     grant = await unconfigured(root_turn)
     await freeze(root_turn)
@@ -338,14 +361,23 @@ async def _spawn_three_default_workers(root_turn):
         prices.update(provider_prices(backend.profile))
     ports = HostFleetPorts(deps.sessionmaker, prices=prices, markup=Decimal(1), dispatch=dispatch)
     root_model = parent.spec.model.id
-    models = [model.id for model in grant.models if model.provider == "anthropic"][:3]
-    assert root_model not in models or len(models) == 3
+    chosen = (
+        tuple(models)
+        if models is not None
+        else tuple(model.id for model in grant.models if model.provider == "anthropic")[:3]
+    )
+    assert len(chosen) == 3
+    assert root_model not in chosen or len(chosen) == 3
     workers, specs = [], []
-    for ordinal, model in enumerate(models):
+    for ordinal, model in enumerate(chosen):
+        provider = next(item.provider for item in grant.models if item.id == model)
         spec = task_worker_spec(parent, role=f"W{ordinal}", task="Postgres or SQLite?", model=model)
         limits = default_worker_limits(
-            parent.limits, run, tuple(workers), provider="anthropic", planned_workers=3
+            parent.limits, run, tuple(workers), provider=provider, planned_workers=3
         )
+        if provider == "gemini" and model == "gemini-4-argon":
+            # Argon runs only on the bounded envelope the spawn fills in.
+            limits = limits.model_copy(update={"max_input_tokens": 4096, "max_output_tokens": 1024})
         assert limits.budget_usd <= Decimal("0.67")  # a third of $2, in cents
         resolved = resolve_worker_spec(
             parent,

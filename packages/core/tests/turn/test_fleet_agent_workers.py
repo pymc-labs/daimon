@@ -140,7 +140,8 @@ async def test_a_worker_runs_as_the_named_agent_with_its_own_ceiling(captured, o
     )
     # Its own agent, prompt and tools; the root's run, subject and finite limits.
     assert worker_root.agent_id == researcher.agent_id != root.agent_id
-    assert worker_root.spec.system == RESEARCHER_SYSTEM
+    assert worker_root.spec.system.startswith(RESEARCHER_SYSTEM)
+    assert "no persistent memory" in worker_root.spec.system
     assert [tool.name for tool in worker_root.spec.tools] == ["lookup"]
     assert worker_root.source_revisions == ((researcher.source.ref, researcher.source.revision),)
     assert (worker_root.fleet, worker_root.subject, worker_root.limits) == (
@@ -679,16 +680,13 @@ async def test_prepare_worker_agent_decides_admission_again_for_that_agent(
         assert worker.admission.memory_read_only is root_read_only
 
 
-@pytest.mark.parametrize("provisioned", [True, False])
-async def test_a_never_run_agent_gets_its_memory_store_and_its_worker_reads_it(
-    captured, owned, monkeypatch, provisioned
-):
-    """CLI- and chat-created agents get their store on their first session (r13b)."""
+async def test_a_never_run_agent_runs_as_a_worker_without_memory(captured, owned, monkeypatch):
+    """An agent that never ran needs no store: its worker declares the memory loss."""
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
 
-    from daimon.core import channel_backend, memory_resource
-    from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
+    from daimon.core import channel_backend
+    from daimon.core.fleet_orchestration import HostFleetPorts
     from daimon.core.turn import admission as admission_module
     from daimon.core.turn import runtime_manifest
 
@@ -699,9 +697,8 @@ async def test_a_never_run_agent_gets_its_memory_store_and_its_worker_reads_it(
         owned, fleet.scope, ma_id="fresh-source", name="fresh", memory_store=False
     )
     assert fresh.memory_store_id is None
-    warm = fresh.model_copy(update={"memory_store_id": "memstore-fresh"})
     as_fresh = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
-    provisions, prepared = [], []
+    prepared = []
 
     async def load(client, sessionmaker, *, tenant_id, agent_name):
         assert agent_name == "fresh"
@@ -714,22 +711,12 @@ async def test_a_never_run_agent_gets_its_memory_store_and_its_worker_reads_it(
         return value.model_copy(update={"limits": limits})
 
     async def prepare(deps, request, source):
-        # Captured before (no store yet) and again after the store exists.
         prepared.append(source)
-        captured_source = fresh if len(prepared) == 1 or not provisioned else warm
-        return SimpleNamespace(source=captured_source, admission=SimpleNamespace(grant=as_fresh))
-
-    async def ensure(client, sessionmaker, **kwargs):
-        provisions.append(kwargs)
-        if not provisioned:
-            from daimon.core.errors import StoreError
-
-            raise StoreError("memory store create failed")
+        return SimpleNamespace(source=fresh, admission=SimpleNamespace(grant=as_fresh))
 
     monkeypatch.setattr(channel_backend, "load_backend_agent", load)
     monkeypatch.setattr(runtime_manifest, "read_agent_fleet_grant", read_grant)
     monkeypatch.setattr(admission_module, "prepare_worker_agent", prepare)
-    monkeypatch.setattr(memory_resource, "ensure_memory_store_and_mount", ensure)
     ports = HostFleetPorts(
         sessions,
         prices={},
@@ -743,17 +730,11 @@ async def test_a_never_run_agent_gets_its_memory_store_and_its_worker_reads_it(
         yield SimpleNamespace(tenant_id=identity.tenant_id, admission=SimpleNamespace())
 
     monkeypatch.setattr(ports, "_load_preparation", root_request)
-    if not provisioned:
-        with pytest.raises(FleetRefused, match="worker_agent_memory_unavailable"):
-            await ports.agent_worker_parent(root, "fresh")
-        return
     worker_root = await ports.agent_worker_parent(root, "fresh")
-    # Provisioned once, the way the agent's own first session would, then captured again.
-    assert [(p["agent_id"], p["read_only"]) for p in provisions] == [(fresh.agent_id, True)]
-    assert len(prepared) == 2
-    (mount,) = [r for r in worker_root.resources if r.resource.kind == "memory_store"]
-    assert mount.resource.id == "memstore-fresh"
-    assert worker_root.memory_read_only is True
+    # No store is created for a fleet worker, and none is mounted.
+    assert len(prepared) == 1
+    assert worker_root.resources == ()
+    assert "memory" in worker_root.spec.declared_drops
 
 
 @pytest.mark.parametrize("refusal", ["policy", "grant"])

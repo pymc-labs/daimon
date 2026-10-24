@@ -908,7 +908,11 @@ class FleetOrchestrator:
                 captured_source.effective_spec,
                 task,
                 parent.models[0],
-                (*await owner.agent_consented_drops(parent), *as_agent_drops),
+                (
+                    *parent.spec.declared_drops,
+                    *await owner.agent_consented_drops(parent),
+                    *as_agent_drops,
+                ),
             )
 
         selected_run = parent.fleet.run_id if run_id is None else run_id
@@ -2007,18 +2011,10 @@ class HostFleetPorts:
                 raise FleetRefused("worker_agent_not_in_grant")
             try:
                 request = await prepare_worker_agent(deps, root, source)
-                if request.source is not None and request.source.memory_store_id is None:
-                    # Agents get their shared memory store on their first session. One
-                    # that never ran yet gets it now, as that session would, so its
-                    # worker mounts it read-only; then its source is captured again.
-                    await self._provision_agent_memory(source)
-                    request = await prepare_worker_agent(deps, root, source)
             except (AgentBackendRefused, AdmissionDenied):
                 raise FleetRefused("worker_agent_not_allowed_here") from None
             if request.source is None or request.admission.grant is None:
                 raise FleetRefused("worker_agent_unavailable")
-            if request.source.memory_store_id is None:
-                raise FleetRefused("worker_agent_memory_unavailable")
             async with self.sessions() as db:
                 policy = await load_access_policy(db, tenant_id=root.tenant_id)
                 setting = await agent_backends.current(db, root.tenant_id, source.agent_id)
@@ -2063,26 +2059,6 @@ class HostFleetPorts:
         if parent.agent_id is None:
             return ()
         return self._agent_drops.get((parent.fleet.run_id, parent.agent_id), ())
-
-    async def _provision_agent_memory(self, source: BackendAgent) -> None:
-        """Create an agent's shared memory store the way its first session does."""
-        from daimon.core.memory_resource import ensure_memory_store_and_mount
-
-        deps = self._deps
-        if deps is None:
-            raise FleetRefused("prerequisites_unavailable")
-        try:
-            await ensure_memory_store_and_mount(
-                deps.anthropic,
-                deps.sessionmaker,
-                tenant_id=source.tenant_id,
-                agent_id=source.agent_id,
-                agent_name=source.name,
-                read_only=True,
-            )
-        except Exception as error:  # an API, store, timeout or binding failure; not cancel
-            log.warning("fleet.worker_agent_memory_unavailable", error=type(error).__name__)
-            raise FleetRefused("worker_agent_memory_unavailable") from None
 
     async def worker_agents(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy

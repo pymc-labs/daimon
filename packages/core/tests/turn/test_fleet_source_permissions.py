@@ -224,13 +224,14 @@ async def test_real_source_and_scoped_admin_grant_preserve_exact_authority(captu
     assert permissions.fleet == fleet and permissions.subject == admission.subject
     assert permissions.agent == admission.agent and permissions.agent_id == source.agent_id
     assert permissions.backend_grants == grant.backends and permissions.models == grant.models
-    assert permissions.spec.system == source.effective_spec.system
+    assert permissions.spec.system.startswith(source.effective_spec.system)
+    assert "no persistent memory" in permissions.spec.system
     assert permissions.spec.tools[0].name == "helper"
     assert permissions.environment == source.environment.spec
     assert permissions.source_revisions == ((source.source.ref, source.source.revision),)
-    assert permissions.resources[0].resource.id == source.memory_store_id
-    assert permissions.resources[0].resource.account_id == fleet.scope.account_id
-    assert permissions.resources[0].native.value["resource"]["access"] == "read_only"
+    # Workers never carry the root's store (nor a person's personal one).
+    assert permissions.resources == ()
+    assert "memory" in permissions.spec.declared_drops
     assert permissions.seal_ids == frozenset({"root-seal"}) and permissions.memory_read_only
     # The run's time (600 s); each worker's 120 s is applied at spawn.
     assert permissions.limits.deadline == NOW + timedelta(seconds=600)
@@ -439,6 +440,30 @@ async def test_unsupported_missing_or_foreign_capture_refuses_before_native_io(c
     assert len(trace.requests) == 1
 
 
+async def test_a_memory_store_root_is_never_a_fleet_obstacle(captured):
+    """An existing shared store is a worker loss, not an operator-only refusal."""
+    source, admission, grant, fleet, policy, _ = captured
+    assert source.memory_store_id is not None
+    assert fleet_root_obstacle(source) is None
+    permissions = compose(captured)
+    assert "memory" in permissions.spec.declared_drops
+    assert permissions.resources == ()
+
+
+async def test_an_unrelated_capture_never_reports_memory_as_the_obstacle(captured):
+    """A valid store plus any other resource used to surface "memory" for both."""
+    from mux.contracts.resources import ResourceBinding
+
+    source = captured[0]
+    assert source.memory_store_id is not None
+    extra = ResourceBinding(id="caller-resources", kind="native")
+    source = source.model_copy(
+        update={"resource_requirements": (*source.resource_requirements, extra)}
+    )
+    obstacle = fleet_root_obstacle(source)
+    assert obstacle != "memory"
+
+
 async def test_a_root_before_its_memory_store_exists_runs_workers_without_memory(captured):
     """The store is created by the agent's first session: its workers declare the loss."""
     source, admission, grant, fleet, policy, trace = captured
@@ -612,7 +637,7 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
                 agent=executing,
                 environment_id=environment.id,
                 metadata=payload["metadata"],
-                resources=payload["resources"],
+                resources=payload.get("resources", []),
             )
             snapshots["session"] = session.model_dump(mode="json")
         return httpx.Response(200, json=snapshots["session"])
@@ -695,7 +720,8 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
         )
     assert not result.agent.mcp_servers
     assert len(result.agent.skills) == 11
-    assert len(result.resources) == 1
+    # A memory-dropping worker mounts no store: its create request carries none.
+    assert result.resources == []
     assert len(executing.tools) == 1
     assert agent_payload(worker.spec)["tools"][0]["default_config"]["enabled"] is False
     assert not any("vault" in call.path for call in trace.requests)

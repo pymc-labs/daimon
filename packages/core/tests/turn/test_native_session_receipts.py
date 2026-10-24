@@ -696,7 +696,7 @@ async def _exercise_session_receipt(native_worker, fault, *, native_path=False):
 
 @pytest.mark.parametrize("source_read_only", [False, True], indirect=True)
 @pytest.mark.parametrize("native_worker", ["paid_w1", "paid_w1_mcp"], indirect=True)
-async def test_paid_w1_declared_tool_and_skill_losses_keep_native_memory_binding(native_worker):
+async def test_paid_w1_tool_and_skill_losses_also_drop_native_memory(native_worker):
     from anthropic.types.beta import BetaManagedAgentsCustomSkill
 
     request, root, claimed, trace, controls = native_worker
@@ -712,8 +712,9 @@ async def test_paid_w1_declared_tool_and_skill_losses_keep_native_memory_binding
     native_worker = request, root, claimed, trace, controls
     resolved = request.worker
     assert resolved is not None
-    assert {"skills", "tools"} <= set(resolved.spec.declared_drops)
+    assert {"memory", "skills", "tools"} <= set(resolved.spec.declared_drops)
     assert not resolved.spec.tools and not resolved.spec.skills and not resolved.spec.mcp_servers
+    assert resolved.resources == ()
     assert resolved.permissions.memory_read_only is True
     await _exercise_session_receipt(native_worker, None, native_path=True)
     compiled = next(
@@ -730,10 +731,7 @@ async def test_paid_w1_declared_tool_and_skill_losses_keep_native_memory_binding
         for call in trace.requests
         if call.method == "POST" and call.path == "/v1/sessions"
     )
-    assert len(payload["resources"]) == 1
-    assert payload["resources"][0]["memory_store_id"] == resolved.resources[0].resource.id
-    assert payload["resources"][0] == resolved.resources[0].native.value["resource"]
-    assert payload["resources"][0]["access"] == "read_only"
+    assert not payload.get("resources")
     if isinstance(payload["agent"], dict):
         assert not payload["agent"].get("skills")
         assert not payload["agent"].get("tools")
