@@ -160,6 +160,27 @@ async def test_an_event_arriving_during_the_check_is_folded_not_lost(
     assert [block.text for block in final.content if block.kind == "text"] == ["ok"]
 
 
+async def test_an_event_held_when_the_check_says_idle_is_folded_live_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check reports idle while the stream's terminal event is already fetched."""
+    fake = FakeAnthropic()
+    answer = make_agent_message(event_id="answer", text="ok")
+    done = make_status_idle(event_id="done", stop_reason=make_end_turn())
+    fake.beta.sessions.events.stream_scripts = [
+        [YieldEvent(answer), DelayThenYield(seconds=0.08, event=done)]
+    ]
+    fake.beta.sessions.events.replay_events = [answer, done]
+    fake.beta.sessions.retrieve_statuses = ["idle", "idle"]
+    io = IdleChecked(fake, slow_s=0.05)
+    _install(monkeypatch, io)
+    lifecycle = RecordingLifecycle()
+    final = await _run(fake, lifecycle)
+    assert io.replays == 0, "the held terminal event ended the turn live, not a replay"
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert len(lifecycle.terminal_success) == 1
+
+
 async def test_an_io_without_the_opt_in_is_never_polled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Managed Agents: no `idle_check_s`, so a silent stream is not status-checked."""
 
