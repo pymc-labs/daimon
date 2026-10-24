@@ -86,7 +86,10 @@ async def test_j5_a_members_raise_reaches_the_model_as_the_real_reason(owned_pre
     result = await posture.decide(call)
     assert result.allow is False
     said = result.deny_message or ""
-    assert "Only an admin can raise fleet limits" in said, said
+    # The M12 repro (6 workers / $3, no admin ceiling): the limit and who can raise it.
+    assert said.startswith(
+        "Only an admin can raise this agent's fleet above 4 workers / $2 a run; ask an admin."
+    ), said
     assert "couldn't be shown" not in said and "could not be shown" not in said
 
 
@@ -102,7 +105,7 @@ async def test_j5_a_raise_refusal_is_a_card_refusal(owned_preview):
     call, prepare, trace, reply = await _owner_card(owned_preview, max_workers=8)
     prompt = prompt_for_tool_call(call, requester_platform_user_id="requester", now=NOW)
     trace.queue(reply())
-    with pytest.raises(CardRefusal, match="Only an admin can raise fleet limits"):
+    with pytest.raises(CardRefusal, match="Only an admin can raise this agent's fleet above"):
         await prepare(prompt)
 
 

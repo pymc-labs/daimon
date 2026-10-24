@@ -311,7 +311,9 @@ async def _request_fleet_config_impl(
             summary=summary,
         )
     except AgentBackendRefused as exc:
-        raise ToolError(configuration_refusal(exc.reason) + " Nothing changed.") from exc
+        raise ToolError(
+            configuration_refusal(exc.reason, exc.detail) + " Nothing changed."
+        ) from exc
     except ValueError as exc:
         if not isinstance(exc, ValidationError):
             raise ToolError(str(exc) + " Nothing changed.") from exc
@@ -371,7 +373,9 @@ async def _request_provider_allowlist_impl(
             summary=summary,
         )
     except AgentBackendRefused as exc:
-        raise ToolError(configuration_refusal(exc.reason) + " Nothing changed.") from exc
+        raise ToolError(
+            configuration_refusal(exc.reason, exc.detail) + " Nothing changed."
+        ) from exc
     except ValidationError as exc:
         raise ToolError(
             "This preview is incomplete. Preview and confirm again. Nothing changed."

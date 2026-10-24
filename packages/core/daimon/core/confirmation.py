@@ -930,7 +930,7 @@ def backend_switch_callbacks(
                 )
         except AgentBackendRefused as exc:
             if exc.reason == "fleet_raise_admin_required":
-                raise CardRefusal(configuration_refusal(exc.reason)) from exc
+                raise CardRefusal(configuration_refusal(exc.reason, exc.detail)) from exc
             raise CardRefusal("This preview changed. Preview and confirm again.") from exc
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)

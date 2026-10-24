@@ -619,7 +619,10 @@ def fleet_removal_lines(before: AgentFleetGrant | None, after: AgentFleetGrant) 
     return tuple(lines)
 
 
-def configuration_refusal(reason: str) -> str:
+def configuration_refusal(reason: str, detail: str | None = None) -> str:
+    if reason == "fleet_raise_admin_required" and detail is not None:
+        # The limit an owner may go up to, and who can raise it.
+        return f"Only an admin can raise this agent's fleet above {detail}; ask an admin."
     if reason.startswith("fleet_root_"):
         from daimon.core.neutral_resources import fleet_root_obstacle_text
 

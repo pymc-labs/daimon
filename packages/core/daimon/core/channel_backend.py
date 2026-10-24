@@ -1143,7 +1143,16 @@ class AgentBackendService:
             if stored.expires_at > now:
                 ceilings.append(stored)
         if not any(fleet_grant_within(value, ceiling) for ceiling in ceilings):
-            raise AgentBackendRefused("fleet_raise_admin_required")
+            # Name the owner's highest limit: an admin's raise, else the default.
+            bound = ceilings[-1] if ceilings else None
+            raise AgentBackendRefused(
+                "fleet_raise_admin_required",
+                detail=(
+                    f"{bound.max_workers} workers / ${bound.limits.budget_usd.normalize():f} a run"
+                    if bound is not None
+                    else None
+                ),
+            )
 
     async def check_owner_fleet_ceiling(
         self, agent: BackendAgent, value: AgentFleetGrant, actor: BackendActor, *, now: datetime
