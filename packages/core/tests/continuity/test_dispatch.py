@@ -23,7 +23,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.stores.thread_sessions import mark_turn_active
+from daimon.core.stores.thread_sessions import clear_active_turn, mark_turn_active
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn_origin import build_handoff_notice
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
@@ -255,6 +255,35 @@ async def test_a_wake_behind_a_running_turn_is_released_without_a_notice(
     row = await _row(db_session_factory, key)
     assert row.status == "pending" and row.available_at is not None
     assert row.available_at >= before + WAKE_RETRY_DELAY, "retried after the turn in progress"
+
+
+async def test_a_handoff_behind_a_running_turn_is_retried_not_settled(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """J6g: the hand-off's queued work was recorded by the turn still marked
+    active. It must wait for that turn and then run, not settle on the notice."""
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, caller[0])
+        assert tenant is not None
+        account = await make_account(session, tenant=tenant)
+        live = await make_thread_session(
+            session, tenant=tenant, account=account, platform="teams", thread_id=_THREAD
+        )
+        await mark_turn_active(session, id=live.id, active_turn_message_id="m-1", now=_SOON)
+    caller = (caller[0], account.id)
+    monkeypatch.setattr("daimon.core.continuity.dispatch.WAKE_RETRY_DELAY", timedelta(0))
+    key = await _queue(db_session_factory, caller, "w")
+    assert await _dispatch(db_session_factory, caller) == ([], []), "nobody is told"
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.available_at is not None) == ("pending", True), (
+        "the handoff waits for the turn in progress instead of settling"
+    )
+    async with db_session_factory.begin() as session:
+        await clear_active_turn(session, id=live.id)
+    assert await _dispatch(db_session_factory, caller) == (["w"], []), "it runs after that turn"
+    assert await _status(db_session_factory, key) == ("delivered", None)
 
 
 @pytest.mark.parametrize("path", ["responder_changed", "target_gone"])
