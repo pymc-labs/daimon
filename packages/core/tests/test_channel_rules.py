@@ -1293,3 +1293,52 @@ async def test_a_panel_copy_of_an_agent_gone_since_it_was_named_is_refused(
             client, db_session_factory, tenant.id, "c1", copy=True, copy_from="gone-agent"
         )
     assert list(state.agents) == ["agent_0"], "nothing was copied"
+
+
+async def test_a_native_one_shot_cancel_during_the_archive_is_re_raised_after_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1525 review: a native `task.cancel()` that lands while the copy is being archived
+    is absorbed until the archive is done, then re-raised: the copy is gone AND the
+    caller still sees its cancellation."""
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    archived: list[str] = []
+
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    client = build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    _on_gpt(monkeypatch, "agent_0")
+    archiving = asyncio.Event()
+    real_archive = channel_rules.archive_agent
+
+    async def slow_archive(*args: Any, **kwargs: Any) -> Any:
+        archiving.set()
+        await asyncio.sleep(0.05)  # the cancel lands here, mid-archive
+        return await real_archive(*args, **kwargs)
+
+    monkeypatch.setattr(channel_rules, "archive_agent", slow_archive)
+
+    async def refused(source: str, source_id: str, copy: str, copy_id: str) -> None:
+        raise DaimonError("OpenAI isn't turned on here. Nothing was created.")
+
+    task = asyncio.ensure_future(
+        _set_rule(client, db_session_factory, tenant.id, "c1", copy=True, start_copy=refused)
+    )
+    await asyncio.wait_for(archiving.wait(), timeout=5)
+    task.cancel()  # once, natively
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(archived) == 1, "the archive finished before the cancellation went on"
