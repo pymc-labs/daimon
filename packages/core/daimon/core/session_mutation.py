@@ -45,5 +45,5 @@ async def session_mutation_fence(
             raise
         return stack
 
-    async with await retry_fences(acquire):
+    async with await retry_fences(acquire, label="session_mutation"):
         yield

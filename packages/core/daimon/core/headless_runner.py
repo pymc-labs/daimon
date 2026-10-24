@@ -1265,7 +1265,9 @@ async def run_worker(
                                 )
 
                         retained, _, origin = await retry_fences(
-                            resolve_attempt, busy_error=PolicyBusyError
+                            resolve_attempt,
+                            busy_error=PolicyBusyError,
+                            label="backend_policy:headless_worker",
                         )
                     if retained != revision or origin != "agent":
                         raise FleetConflict(

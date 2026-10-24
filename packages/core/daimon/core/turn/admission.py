@@ -1219,7 +1219,7 @@ async def _admit_gates(
                     # admin's policy write holds it waits (bounded) instead of failing
                     # with an error nobody can act on (smoke 0eee1b8e J7, Ref 8V6AW4).
                     backend_revision, backend_ever_shared, source = await retry_fences(
-                        select, busy_error=PolicyBusyError
+                        select, busy_error=PolicyBusyError, label="backend_policy:admission"
                     )
                     backend = (
                         check_backend(backend_revision, enabled_backends=policy.enabled_backends)

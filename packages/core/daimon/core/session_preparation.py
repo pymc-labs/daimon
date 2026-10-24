@@ -664,7 +664,7 @@ async def prepare_session_for_turn(
                 now=now,
             )
 
-    return await retry_fences(attempt)
+    return await retry_fences(attempt, label="session_preparation")
 
 
 async def _resolve_legacy_budget_stamp(
