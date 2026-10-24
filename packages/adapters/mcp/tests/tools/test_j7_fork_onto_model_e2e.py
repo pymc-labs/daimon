@@ -66,3 +66,31 @@ async def test_a_member_forking_onto_a_different_model_is_pointed_at_a_fleet(fre
     assert "keeps Daimon's model" in text and "fleet_spawn" in text, text
     assert "admin" not in text.lower() and "owner" not in text.lower(), text
     assert chat.ma.created == []
+
+
+async def test_a_member_without_a_chat_turn_forking_onto_another_model_hears_the_model(
+    fresh_chat,
+):
+    """#1503 review: the model check must come before EVERY permission gate. A member
+    outside their own chat turn (an agent key, the hub) fails the first admin gate, and
+    still hears that a saved copy keeps its source's model."""
+    from dataclasses import replace
+
+    chat = fresh_chat
+    if chat.auth.is_admin:
+        pytest.skip("the member is the case under test")
+    outside = replace(chat.auth, chat_agent_id=None)
+    with pytest.raises(ToolError) as refused:
+        await _fork_agent_impl(
+            chat.runtime,
+            outside,
+            "Daimon",
+            "Daimon",
+            expected_ma_agent_id="agent_daimon",
+            new_copy_if_taken=True,
+            model="gpt-6-luna",
+        )
+    text = str(refused.value)
+    assert "keeps Daimon's model" in text and "fleet_spawn" in text, text
+    assert "admin" not in text.lower() and "owner" not in text.lower(), text
+    assert chat.ma.created == []

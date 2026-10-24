@@ -1546,6 +1546,20 @@ async def _fork_agent_impl(
             requested = resolve_model(model)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+        # So is a model the copy can't have: a saved copy keeps its source's model, which
+        # the person can act on (a fleet worker), unlike a permission rule. The source is
+        # read as the caller sees it, so this names nothing they couldn't see.
+        named = await resolve_setup_agent(
+            runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
+        )
+        if requested.id != await _runs_on_model(runtime, auth, named):
+            from daimon.core.agent_model_names import model_name
+
+            raise ToolError(
+                f"A saved copy keeps {source_name}'s model; it can't become "
+                f"{model_name(requested)}. To run a copy of {source_name} on it, start a "
+                "fleet task worker with fleet_spawn (model=...). Nothing was created."
+            )
     # Forking another agent is an admin's call: a fork routes nowhere and has no
     # channel pin of its own, so it is free to run anywhere the source can't. Anyone
     # may copy the agent answering their own chat turn (it is theirs to own; TARGET-V2
@@ -1573,14 +1587,6 @@ async def _fork_agent_impl(
         source = await resolve_setup_agent(
             runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
         )
-        if requested is not None and requested.id != await _runs_on_model(runtime, auth, source):
-            from daimon.core.agent_model_names import model_name
-
-            raise ToolError(
-                f"A saved copy keeps {source_name}'s model; it can't become "
-                f"{model_name(requested)}. To run a copy of {source_name} on it, start a "
-                "fleet task worker with fleet_spawn (model=...). Nothing was created."
-            )
         # From the turn's credential, never a model-supplied id.
         answering = (
             auth.chat_agent_id is not None
