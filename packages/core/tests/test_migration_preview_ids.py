@@ -919,7 +919,12 @@ async def test_real_deployed_chains_upgrade_without_replaying_preview_data(
             _assert_head(sync)
             _assert_usage_index_valid(sync)
             for table, query in queries.items():
-                assert sync.scalar(text(query)) == before[table], table
+                if table in RECRUITMENT_TABLES:
+                    # The forward removal intentionally deletes this ledger.
+                    assert not inspect(sync).has_table(table), table
+                else:
+                    assert sync.scalar(text(query)) == before[table], table
+            _assert_recruitment_removed(sync)
             if start == "0122_recruitment":
                 assert not any(
                     "UPDATE routines" in sql or "CREATE TABLE lead_" in sql for sql in statements
