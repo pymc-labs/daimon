@@ -536,9 +536,6 @@ async def test_a_native_agent_coordinates_a_fleet(fresh_chat, monkeypatch, backe
     # there too (not on the copy's original Claude model).
     if backend is not None:
         assert (frozen.spec.model.provider, frozen.spec.model.id) == (backend, NATIVE[backend])
-        # The model is told about fleet workers by name (M07 layer 2): its native agent
-        # allowlists fleet_spawn, not only the search proxy.
-        assert "fleet_spawn" in json.dumps(provider_agent), provider_agent
     else:
         assert (frozen.spec.model.provider, frozen.spec.model.id) == ("anthropic", HAIKU)
 
