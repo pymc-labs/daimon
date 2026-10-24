@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -438,45 +439,48 @@ async def _fleet_worker_money(
 _UNANSWERED_SENDS = ("sent", "accepted", "outcome_unknown")
 
 
-async def _worker_sends(
-    session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
-) -> list[str]:
-    """Statuses of every input send of the worker, in either key form: the creation
-    input's `<spawn>:send:N` and a prepared turn's `turn:<session>:<spawn>:send:N`."""
-    return await mux_state.send_statuses(
-        session,
-        tenant_id=tenant_id,
-        account_id=run.orchestrator_account_id,
-        pattern=f"%{spawn_operation_key(run.id, worker.ordinal)}:send:%",
-    )
+_SEND = re.compile(r"(fleet:[0-9a-f-]+:spawn:\d+):send:")
 
 
-async def _input_sent(
-    session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
-) -> bool:
-    """Whether the worker may have been sent its input (and so made a model call).
+async def _worker_activity(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    candidates: Sequence[tuple[FleetRun, FleetWorker]],
+) -> tuple[set[uuid.UUID], set[uuid.UUID]]:
+    """(sent, in flight) among `candidates`, from one read of their sends and one of
+    their slots' leases, under the caller's fleet lock.
 
-    Never sent needs both records to agree: the worker store counted no accepted input
-    or claim attempt, and none of its sends got past pending. Some send paths keep no
-    operation row, so absent rows alone prove nothing.
+    Sent: the worker store counted accepted input or a claim attempt, or any send of
+    it, in either key form (the creation input's `<spawn>:send:N` or a prepared turn's
+    `turn:<session>:<spawn>:send:N`), got past pending. Some send paths keep no operation
+    row, so absent rows alone prove nothing. In flight: an unexpired lease on its slot,
+    or any send unanswered (sent, accepted or of unknown outcome).
     """
-    if worker.turns_used or worker.attempts:
-        return True
-    return any(
-        status != "pending" for status in await _worker_sends(session, tenant_id, run, worker)
-    )
-
-
-async def _turn_in_flight(
-    session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
-) -> bool:
-    """Whether the worker may still be spending: its slot's lease is unexpired, or any
-    of its sends is unanswered (sent, accepted or of unknown outcome)."""
-    lease = await mux_state.active_lease(session, worker_slot(run, worker))
-    if lease is not None and lease.expires_at > await mux_state.database_clock(session):
-        return True
-    sends = await _worker_sends(session, tenant_id, run, worker)
-    return any(status in _UNANSWERED_SENDS for status in sends)
+    if not candidates:
+        return set(), set()
+    spawns = {spawn_operation_key(run.id, worker.ordinal): worker.id for run, worker in candidates}
+    statuses: dict[uuid.UUID, list[str]] = {}
+    for key, status in await mux_state.send_statuses_like(
+        session, tenant_id=tenant_id, patterns=[f"%{spawn}:send:%" for spawn in spawns]
+    ):
+        match = _SEND.search(key)
+        if match is not None and match.group(1) in spawns:
+            statuses.setdefault(spawns[match.group(1)], []).append(status)
+    slots = {worker.id: worker_slot(run, worker) for run, worker in candidates}
+    leases = await mux_state.active_leases(session, list(slots.values()))
+    now = await mux_state.database_clock(session) if leases else None
+    sent: set[uuid.UUID] = set()
+    in_flight: set[uuid.UUID] = set()
+    for _, worker in candidates:
+        mine = statuses.get(worker.id, [])
+        if worker.turns_used or worker.attempts or any(s != "pending" for s in mine):
+            sent.add(worker.id)
+        lease = leases.get(mux_state.slot_key(slots[worker.id]))
+        if (lease is not None and now is not None and lease.expires_at > now) or any(
+            s in _UNANSWERED_SENDS for s in mine
+        ):
+            in_flight.add(worker.id)
+    return sent, in_flight
 
 
 async def _prefetch_fleet_money(
@@ -509,9 +513,11 @@ def _root_money(record: OperationRecord) -> tuple[Decimal, Decimal]:
     return exposure, debit
 
 
-async def _root_released(session: AsyncSession, record: OperationRecord, now: datetime) -> bool:
-    """A root past its deadline whose turn has ended and whose usage is all on the
-    ledger holds nothing more.
+async def _released_roots(
+    session: AsyncSession, roots: Sequence[OperationRecord], now: datetime
+) -> set[int]:
+    """Indexes of the roots past their deadline whose turn has ended and whose usage is
+    all on the ledger: they hold nothing more. Four reads for all of them.
 
     Its turn can no longer spend, and what it spent is already debited from the
     balance. A past deadline alone doesn't end a turn (its `fleet_root:` operation is
@@ -520,32 +526,53 @@ async def _root_released(session: AsyncSession, record: OperationRecord, now: da
     A root without a readable deadline, without a binding (read with released slots,
     whose old rows still count), or with usage not yet applied keeps its hold.
     """
-    controls = record.result.get("root_controls")
-    if not isinstance(controls, dict) or record.slot is None:
-        return False
-    try:
-        deadline = datetime.fromisoformat(str(controls["deadline"]))
-    except (KeyError, ValueError):
-        return False
-    if deadline.tzinfo is None or deadline > now:
-        return False
-    binding = await mux_state.get_binding(session, record.slot, include_released=True)
-    native = binding.native_refs.get("session") if binding is not None else None
-    account_id = record.slot.account_id
-    if binding is None or not native or account_id is None:
-        return False
-    lease = await mux_state.active_lease(session, record.slot)
-    if lease is not None and lease.expires_at > now:
-        return False
-    sends = await mux_state.send_statuses(
-        session,
-        tenant_id=uuid.UUID(record.slot.tenant_id),
-        account_id=account_id,
-        pattern=f"turn:{native}:%",
+    due: dict[int, OperationRecord] = {}
+    for index, record in enumerate(roots):
+        controls = record.result.get("root_controls")
+        if not isinstance(controls, dict) or record.slot is None:
+            continue
+        try:
+            deadline = datetime.fromisoformat(str(controls["deadline"]))
+        except (KeyError, ValueError):
+            continue
+        if deadline.tzinfo is not None and deadline <= now and record.slot.account_id:
+            due[index] = record
+    if not due:
+        return set()
+    slots = {index: record.slot for index, record in due.items() if record.slot is not None}
+    bindings = await mux_state.bindings_for_slots(session, list(slots.values()))
+    natives: dict[int, tuple[str, str]] = {}
+    for index, slot in slots.items():
+        binding = bindings.get(mux_state.slot_key(slot))
+        native = binding.native_refs.get("session") if binding is not None else None
+        if binding is not None and native:
+            natives[index] = (binding.id, native)
+    if not natives:
+        return set()
+    leases = await mux_state.active_leases(session, [slots[index] for index in natives])
+    unanswered = {
+        key
+        for key, status in await mux_state.send_statuses_like(
+            session,
+            tenant_id=uuid.UUID(next(iter(due.values())).tenant_id),
+            patterns=[f"turn:{native}:%" for _, native in natives.values()],
+        )
+        if status in _UNANSWERED_SENDS
+    }
+    pending = await mux_state.bindings_with_pending_outbox(
+        session, [binding_id for binding_id, _ in natives.values()]
     )
-    if any(status in _UNANSWERED_SENDS for status in sends):
-        return False
-    return not await mux_state.binding_has_pending_outbox(session, binding.id)
+    released: set[int] = set()
+    for index, (binding_id, native) in natives.items():
+        lease = leases.get(mux_state.slot_key(slots[index]))
+        if lease is not None and lease.expires_at > now:
+            continue
+        if any(key.startswith(f"turn:{native}:") for key in unanswered):
+            continue
+        if binding_id in pending:
+            continue
+        released.add(index)
+    return released
 
 
 async def _financial_room(
@@ -561,11 +588,14 @@ async def _financial_room(
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         held = [(r.platform, r.channel_id, r.reserved_usd - r.observed_usd) for r, _ in graph]
-        now = await mux_state.database_clock(session) if roots else None
-        for root in roots:
+        released: set[int] = (
+            await _released_roots(session, roots, await mux_state.database_clock(session))
+            if roots
+            else set()
+        )
+        for index, root in enumerate(roots):
             exposure, debit = _root_money(root)
-            assert now is not None
-            if await _root_released(session, root, now):
+            if index in released:
                 # Its spend is in the balance already; the rest of its cash returns.
                 continue
             assert root.slot is not None
@@ -864,6 +894,7 @@ async def _produce_fleet_budget(
         prefetch = await _prefetch_fleet_money(session, graph, tenant_id=tenant_id)
         with localcontext() as arithmetic:
             arithmetic.prec = 80
+            money: dict[uuid.UUID, tuple[Decimal, UsageState, bool]] = {}
             for other_run, members in graph:
                 debit_total = Decimal(0)
                 for member in members:
@@ -879,6 +910,25 @@ async def _produce_fleet_budget(
                     )
                     unpriced_usage = unpriced_usage or unpriced
                     floors[member.id] = floor
+                    money[member.id] = (debit, usage, no_native_evidence)
+                    debit_total += debit
+                debits[other_run.id] = debit_total
+            # A finished worker of a finished run with no pending usage and a hold above
+            # its debit may settle: what may still be spending is read in one batch.
+            candidates = [
+                (other_run, member)
+                for other_run, members in graph
+                for member in members
+                if other_run.status not in RUN_TRANSITIONS
+                and member.status in TERMINAL
+                and money[member.id][1] != "pending"
+                and member.reserved_usd > money[member.id][0]
+            ]
+            sent, in_flight = await _worker_activity(session, tenant_id, candidates)
+            settling = {member.id for _, member in candidates} - in_flight
+            for _, members in graph:
+                for member in members:
+                    debit, usage, no_native_evidence = money[member.id]
                     # An unbound starting/claimed worker is ambiguous. The retained
                     # claim stamp and attempt inventory must also prove no allocation.
                     if (
@@ -890,30 +940,19 @@ async def _produce_fleet_budget(
                     ):
                         zero_spend.add(member.id)
                         exposures[member.id] = debit
-                    elif (
-                        other_run.status not in RUN_TRANSITIONS
-                        and member.status in TERMINAL
-                        and usage != "pending"
-                        and (
-                            usage == "settled"
-                            or not await _input_sent(session, tenant_id, other_run, member)
-                        )
-                        and not await _turn_in_flight(session, tenant_id, other_run, member)
-                    ):
+                    elif member.id in settling and (usage == "settled" or member.id not in sent):
                         # A finished worker of a finished run has spent exactly its debit
                         # when every usage revision is on the ledger, or when it was never
-                        # sent its input (no processed send operation: no model call). The
-                        # rest of its reservation returns to the tenant (SMOKE fc0fa16a: 74
-                        # finished runs held $102 of a $104 balance). Pending usage, input
-                        # sent with no usage recorded (spend may exist provider-side), or a
-                        # turn still in flight (the deadline sweep marks a worker failed
-                        # without stopping its native turn) keeps the hold.
+                        # sent its input (no model call). The rest of its reservation
+                        # returns to the tenant (SMOKE fc0fa16a: 74 finished runs held $102
+                        # of a $104 balance). Pending usage, input sent with no usage
+                        # recorded (spend may exist provider-side), or a turn still in
+                        # flight (the deadline sweep marks a worker failed without stopping
+                        # its native turn) keeps the hold.
                         settled_spend[member.id] = debit
                         exposures[member.id] = debit
                     else:
-                        exposures[member.id] = max(member.reserved_usd, floor)
-                    debit_total += debit
-                debits[other_run.id] = debit_total
+                        exposures[member.id] = max(member.reserved_usd, floors[member.id])
             graph = (
                 fleet_store.project_budget(
                     graph,

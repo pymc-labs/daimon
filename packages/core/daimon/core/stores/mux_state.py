@@ -77,7 +77,19 @@ from mux.state.store import (
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
-from sqlalchemy import ColumnElement, String, cast, func, literal, select, text, tuple_, update
+from sqlalchemy import (
+    ColumnElement,
+    String,
+    and_,
+    cast,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -664,22 +676,104 @@ async def get_operation(session: AsyncSession, scope: Scope, key: str) -> Operat
     return record
 
 
-async def send_statuses(
-    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID | str, pattern: str
-) -> list[str]:
-    """Statuses of the account's operations whose key matches the LIKE `pattern`.
+async def active_leases(session: AsyncSession, slots: Collection[Slot]) -> dict[SlotKey, Lease]:
+    """Every given slot's active lease as stored (expired or not), in one read."""
+    if not slots:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                ThreadLease.tenant_id,
+                ThreadLease.platform,
+                ThreadLease.channel_id,
+                ThreadLease.thread_id,
+                ThreadLease.account_id,
+                ThreadLease.active,
+            ).where(or_(*(and_(*_where_slot(ThreadLease, slot)) for slot in slots)))
+        )
+    ).all()
+    return {
+        (row.tenant_id, row.platform, row.channel_id, row.thread_id, row.account_id): (
+            Lease.model_validate(row.active)
+        )
+        for row in rows
+        if row.active is not None
+    }
 
-    For a reader under the tenant's financial lock that must see every send of a
-    worker or root turn, whichever key form it took (the creation input's
-    `<spawn>:send:N` or a prepared turn's `turn:<session>:<spawn>:send:N`).
-    """
-    return list(
-        await session.scalars(
-            select(MuxOperation.status).where(
-                MuxOperation.tenant_id == tenant_id,
-                MuxOperation.account_id == str(account_id),
-                MuxOperation.key.like(pattern),
+
+async def bindings_for_slots(
+    session: AsyncSession, slots: Collection[Slot]
+) -> dict[SlotKey, BindingContract]:
+    """Every given slot's current binding, released slots included, in two reads."""
+    if not slots:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                ProviderBindingSlot.tenant_id,
+                ProviderBindingSlot.platform,
+                ProviderBindingSlot.channel_id,
+                ProviderBindingSlot.thread_id,
+                ProviderBindingSlot.account_id,
+                ProviderBindingSlot.binding_id,
+                ProviderBindingSlot.generation,
+            ).where(or_(*(and_(*_where_slot(ProviderBindingSlot, slot)) for slot in slots)))
+        )
+    ).all()
+    if not rows:
+        return {}
+    bodies = {
+        (binding_id, generation): body
+        for binding_id, generation, body in (
+            await session.execute(
+                select(
+                    ProviderBinding.binding_id, ProviderBinding.generation, ProviderBinding.binding
+                ).where(
+                    tuple_(ProviderBinding.binding_id, ProviderBinding.generation).in_(
+                        [(row.binding_id, row.generation) for row in rows]
+                    )
+                )
             )
+        ).all()
+    }
+    return {
+        (row.tenant_id, row.platform, row.channel_id, row.thread_id, row.account_id): (
+            BindingContract.model_validate(bodies[(row.binding_id, row.generation)])
+        )
+        for row in rows
+        if (row.binding_id, row.generation) in bodies
+    }
+
+
+async def send_statuses_like(
+    session: AsyncSession, *, tenant_id: uuid.UUID, patterns: Collection[str]
+) -> list[tuple[str, str]]:
+    """(key, status) of the tenant's operations matching any LIKE pattern, in one read."""
+    if not patterns:
+        return []
+    rows = await session.execute(
+        select(MuxOperation.key, MuxOperation.status).where(
+            MuxOperation.tenant_id == tenant_id,
+            or_(*(MuxOperation.key.like(pattern) for pattern in patterns)),
+        )
+    )
+    return [(key, status) for key, status in rows.all()]
+
+
+async def bindings_with_pending_outbox(
+    session: AsyncSession, binding_ids: Collection[str]
+) -> set[str]:
+    """Which of these bindings have a usage revision not yet applied to the ledger."""
+    if not binding_ids:
+        return set()
+    return set(
+        await session.scalars(
+            select(AccountingOutbox.binding_id)
+            .where(
+                AccountingOutbox.binding_id.in_(list(binding_ids)),
+                AccountingOutbox.applied_at.is_(None),
+            )
+            .distinct()
         )
     )
 
@@ -1195,18 +1289,6 @@ async def pending_outbox_for_profiles(
         (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
         for row, tenant_id, binding in rows
     ]
-
-
-async def binding_has_pending_outbox(session: AsyncSession, binding_id: str) -> bool:
-    """Whether any usage revision of this binding is not yet applied to the ledger."""
-    return (
-        await session.scalar(
-            select(AccountingOutbox.revision)
-            .where(AccountingOutbox.binding_id == binding_id, AccountingOutbox.applied_at.is_(None))
-            .limit(1)
-        )
-        is not None
-    )
 
 
 async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:
