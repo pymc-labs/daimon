@@ -369,6 +369,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bound lock waits to five seconds when upgrading cold-DM agent selection and routine DM destinations, so busy tables cannot stall Daimon startup indefinitely.
+
 - Watch turns show their status card until the answer is posted; a brief Discord outage no longer pauses the watch.
 - Concurrent routines for the same owner reuse their platform identity when enrollment is still committing, instead of failing with a duplicate-principal error.
 

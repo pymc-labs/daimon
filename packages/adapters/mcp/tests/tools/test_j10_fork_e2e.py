@@ -452,9 +452,7 @@ async def root_turn_harness(
 
 
 async def _settled(ports, root, count):
-    # Refreshed membership/capability reads add database work for all three
-    # providers. Keep the completion wait inside the outer per-test ceiling.
-    async with asyncio.timeout(180):
+    async with asyncio.timeout(30):
         while True:
             _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
             if len(rows) == count and all(
