@@ -870,7 +870,10 @@
         ``skill_repos`` or use ``sync_skills`` after the agent is created.
         <blank line>
         A returned ``answering`` field says the new agent is routed nowhere yet:
-        post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
+        post it verbatim. If the person who now owns it asked to talk to it here
+        ("then have it say hi"), hand this conversation to it with hand_off_task,
+        their request as the continuation; that needs no admin.
+        Always pass this turn's ``origin_context_id``: a chat turn
         without it is refused while a channel in the workspace is confidential, and with
       ''',
       'parameters': dict({
@@ -2599,7 +2602,9 @@
         <blank line>
         Continue configuring it through Daimon with the copy named as the setup
         target. A returned ``answering`` field says the copy is routed nowhere yet:
-        post it verbatim.
+        post it verbatim. If the person who now owns it asked to talk to it here,
+        hand this conversation to it with hand_off_task (no admin needed), unless
+        they asked for it on another provider: then post its switch card first.
         <blank line>
         ``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``

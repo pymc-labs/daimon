@@ -114,3 +114,16 @@ def test_the_notes_name_the_space_they_are_given() -> None:
     assert "whole workspace" in build_clear_default_note(scope_label="workspace", cleared=True)
     assert precedence_line("server") == "A channel's own choice beats the server default."
     assert precedence_line() == "A channel's own choice beats the workspace default."
+
+
+def test_build_unrouted_note_tells_an_owner_they_need_no_admin_here() -> None:
+    """M06: the owner talks to their own new agent in their own conversation."""
+    note = build_unrouted_note(
+        agent_name="latent-mine", channel_label=None, is_admin=False, owned_here=True
+    )
+    assert note.startswith(UNROUTED_LINE)
+    assert "It's yours, so you can talk to it here without an admin" in note
+    assert 'say "hand this conversation to latent-mine"' in note
+    # Channel-wide routing is still an admin's: said as such, never as the only way.
+    assert note.endswith("an admin can tell Daimon: make latent-mine answer in that channel.")
+    assert UNROUTED_NEXT_STEP not in note

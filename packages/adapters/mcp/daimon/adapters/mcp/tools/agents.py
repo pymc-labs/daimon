@@ -291,10 +291,16 @@ async def _with_answering_note(
         )
     if reachable:
         return info
+    # Made from a chat turn by the person who owns it: they can talk to it here
+    # now, no admin needed (M06). The ownership is read, never assumed.
+    owned_here = auth.chat_agent_id is not None and await caller_owns_agent(runtime, auth, info.id)
     return info.model_copy(
         update={
             "answering": build_unrouted_note(
-                agent_name=info.name, channel_label=None, is_admin=auth.is_admin
+                agent_name=info.name,
+                channel_label=None,
+                is_admin=auth.is_admin,
+                owned_here=owned_here,
             )
         }
     )
@@ -2664,7 +2670,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``skill_repos`` or use ``sync_skills`` after the agent is created.
 
         A returned ``answering`` field says the new agent is routed nowhere yet:
-        post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
+        post it verbatim. If the person who now owns it asked to talk to it here
+        ("then have it say hi"), hand this conversation to it with hand_off_task,
+        their request as the continuation; that needs no admin.
+        Always pass this turn's ``origin_context_id``: a chat turn
         without it is refused while a channel in the workspace is confidential, and with
         """
         source_model, backend = _create_model(model)
@@ -2812,7 +2821,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Continue configuring it through Daimon with the copy named as the setup
         target. A returned ``answering`` field says the copy is routed nowhere yet:
-        post it verbatim.
+        post it verbatim. If the person who now owns it asked to talk to it here,
+        hand this conversation to it with hand_off_task (no admin needed), unless
+        they asked for it on another provider: then post its switch card first.
 
         ``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free
         ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``

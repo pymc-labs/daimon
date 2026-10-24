@@ -104,14 +104,28 @@ def build_routing_request(*, agent_name: str, channel_label: str) -> str:
     return f"Make {agent_name} answer in {channel_label}."
 
 
-def build_unrouted_note(*, agent_name: str, channel_label: str | None, is_admin: bool) -> str:
+def build_unrouted_note(
+    *, agent_name: str, channel_label: str | None, is_admin: bool, owned_here: bool = False
+) -> str:
     """State that ``agent_name`` is routed nowhere, plus the next step.
 
     With ``channel_label`` known the next step is the exact request to make,
     in the caller's own voice: an admin can say it themselves, a member has to
     ask one. With no channel in hand there is nothing concrete to name, so the
     generic next step stands in.
+
+    ``owned_here``: the caller owns the agent and is in a conversation now. Its
+    owner needs no admin to talk to it here (an owner hand-off, M06); only making
+    it answer for everyone in a channel does.
     """
+    if owned_here:
+        return (
+            f"{UNROUTED_LINE}\n"
+            f"It's yours, so you can talk to it here without an admin: say \"hand this "
+            f'conversation to {agent_name}" and it answers you in this thread (one only '
+            "you are in). To make it answer for everyone in a channel, an admin can tell "
+            f"Daimon: make {agent_name} answer in that channel."
+        )
     if channel_label is None:
         return f"{UNROUTED_LINE}\n{UNROUTED_NEXT_STEP}"
     lead = "Tell Daimon" if is_admin else "An admin can tell Daimon"
