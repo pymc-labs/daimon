@@ -1183,3 +1183,38 @@ async def test_driver_acknowledges_only_after_final_delivery():
         billing=_EXEMPT,
     )
     assert phases == ["accepted", "done"]
+
+
+async def test_an_upstream_provider_rejection_logs_the_rejected_field() -> None:
+    """A provider 400 names the redacted request field, never the message or a value."""
+    import structlog.testing
+    from daimon.core.turn.driver import _finalize_upstream  # pyright: ignore[reportPrivateUsage]
+    from daimon.core.turn.state import TurnState
+    from mux.contracts.errors import ProviderError
+
+    async def render_once(_state: TurnState) -> None:
+        return None
+
+    error = ProviderError(
+        "invalid_request",
+        retryable=False,
+        native_code="400",
+        native_message="never logged",
+        native_error_code="invalid_value",
+        native_param="spend_control.limit",
+    )
+    with structlog.testing.capture_logs() as logs:
+        await _finalize_upstream(
+            state_cell=[TurnState()],
+            lifecycle=RecordingLifecycle(),
+            render_once=render_once,
+            session_id="sess_1",
+            err=error,
+            rate_limit_until=None,
+            retry_after_s=None,
+            renders_failed=0,
+        )
+    (failed,) = [entry for entry in logs if entry["event"] == "turn.failed"]
+    assert failed["provider_param"] == "spend_control.limit"
+    assert failed["provider_native_code"] == "400"
+    assert "never logged" not in str(failed)
