@@ -510,9 +510,8 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     )
     from daimon.core.stores.thread_sessions import get_live_thread_session, record_snapshot
     from daimon.core.tool_safety import ToolSafetyPolicy
-    from daimon.core.turn import driver
+    from daimon.core.turn import mutation_gate
     from daimon.core.turn import run as run_module
-    from daimon.core.turn import unattended_capabilities as capabilities
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import PreparedTurn
@@ -639,12 +638,12 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     )
     if ending == "cache_error":
         monkeypatch.setattr(
-            capabilities,
+            run_module,
             "invalidate_cached_tools",
             AsyncMock(side_effect=RuntimeError("cache failed")),
         )
-    monkeypatch.setattr(capabilities, "send_capabilities", constrain)
-    monkeypatch.setattr(capabilities, "restore_capabilities", restore)
+    monkeypatch.setattr(run_module, "send_capabilities", constrain)
+    monkeypatch.setattr(run_module, "restore_capabilities", restore)
     monkeypatch.setattr(
         session_ports_compat,
         "retrieve_session_record",
@@ -664,7 +663,7 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
                 ToolCall(tool_use_id="refused-watch-action", server_name=server, tool_name=tool)
             )
             assert not verdict.allow
-        gate = driver._UNATTENDED_GATE.get()
+        gate = mutation_gate.unattended_gate.get()
         assert gate is not None
         await gate()
         if ending.startswith("spend_"):

@@ -48,7 +48,6 @@ import dataclasses
 import functools
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager
-from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 
@@ -244,7 +243,7 @@ async def _refuse_blocked(
     interrupts, or cleanup interrupts here on outside cancellation or failure.
     A denial resumes execution too, even on runtimes without session reads.
     """
-    if _UNATTENDED.get():
+    if unattended_execution.get():
         # A denial resumes execution too. Once cancellation or a gate failure
         # ends the decision boundary, leave calls paused and only interrupt.
         if interrupt_unattended:
@@ -378,32 +377,25 @@ async def _decide_or_refuse_on_cancel(
     raise _InterruptInConsume()
 
 
-#: The gate an unattended run installs (`unattended_sends`): awaited right
-#: before the turn's message and before every confirmation batch, live or on a
-#: reconnect, so each send resumes the session under the policy now in force.
-#: A gate that raises stops that send.
-_UNATTENDED: ContextVar[bool] = ContextVar("turn_unattended", default=False)
-_UNATTENDED_GATE = unattended_gate
-
-
 @contextlib.contextmanager
 def unattended_sends(gate: Callable[[], Awaitable[None]] | None) -> Iterator[None]:
     """Run unattended, with an optional refresh gate before every send.
+
+    The gate runs before the message and every confirmation batch, including
+    reconnects. A gate that raises stops that send.
 
     Every send is a single attempt. A missing gate is used only with a
     refusal posture on runtimes without session reads; abort cleanup still
     leaves pending calls unanswered and interrupts those runs.
     """
-    unattended_token = _UNATTENDED.set(True)
-    token = _UNATTENDED_GATE.set(gate)
+    token = unattended_gate.set(gate)
     execution_token = unattended_execution.set(True)
     try:
         with single_attempt_mutation():
             yield
     finally:
-        _UNATTENDED_GATE.reset(token)
+        unattended_gate.reset(token)
         unattended_execution.reset(execution_token)
-        _UNATTENDED.reset(unattended_token)
 
 
 async def _send_decision_batch(
@@ -418,7 +410,7 @@ async def _send_decision_batch(
     try:
         if cancel.is_set():
             raise _InterruptInConsume()
-        if (gate := _UNATTENDED_GATE.get()) is not None:
+        if (gate := unattended_gate.get()) is not None:
 
             async def run_gate() -> None:
                 await gate()
@@ -447,7 +439,7 @@ async def _send_decision_batch(
             session_id=session_id,
         )
         if (
-            _UNATTENDED.get()
+            unattended_execution.get()
             or cancel.is_set()
             or isinstance(err, asyncio.CancelledError | _InterruptInConsume)
         ):
@@ -790,7 +782,7 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
-            if (gate := _UNATTENDED_GATE.get()) is not None:
+            if (gate := unattended_gate.get()) is not None:
                 await gate()
             send_check_token = initial_send_check.set(before_send)
             try:
