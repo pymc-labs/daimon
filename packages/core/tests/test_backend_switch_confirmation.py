@@ -1227,6 +1227,36 @@ async def test_a_refusal_worded_for_the_person_reaches_the_model_with_do_not_ret
     assert result.deny_message == f"{said} Nothing changed. Do not retry it."
 
 
+async def test_a_stale_preview_stays_retryable_and_says_nothing_changed_once():
+    """J5's typed refusal is a CardRefusal too: it never gets "do not retry", and its
+    own "Nothing changed." is never doubled."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import (
+        STALE_SETTING_TEXT,
+        STALE_SWITCH_TEXT,
+        CardRefusal,
+        StalePreview,
+    )
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY, backend_switch_tools
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    for text in (STALE_SWITCH_TEXT, STALE_SETTING_TEXT):
+        assert str(StalePreview(text)) == text and text.count("Nothing changed.") == 1
+        posture = chat_tool_confirmation(
+            OPEN_TOOL_SAFETY,
+            requester_platform_user_id="requester",
+            confirm=AsyncMock(side_effect=StalePreview(text)),
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            confirmed_tools=backend_switch_tools(enabled=True),
+        )
+        assert isinstance(posture, PolicyApproval)
+        result = await posture.decide(_call())
+        assert result.allow is False and result.deny_message == text
+    assert str(CardRefusal("Already done. Nothing changed.")).count("Nothing changed.") == 1
+
+
 async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_preview):
     """A setup conversation stays put on an approved switch, so the card says nothing moves."""
     from unittest.mock import AsyncMock

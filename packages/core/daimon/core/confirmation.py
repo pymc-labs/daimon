@@ -725,6 +725,11 @@ def settings_line(settings: Mapping[str, object]) -> str:
     return "; ".join(parts) or "the model provider's defaults"
 
 
+def nothing_changed(text: str) -> str:
+    """`text`, ending once with "Nothing changed." (never twice)."""
+    return text if text.endswith("Nothing changed.") else f"{text} Nothing changed."
+
+
 class CardRefusal(ValueError):
     """A card refused for a reason worded for the person; its text is shown as is.
 
@@ -732,7 +737,7 @@ class CardRefusal(ValueError):
     """
 
     def __init__(self, text: str) -> None:
-        super().__init__(f"{text} Nothing changed.")
+        super().__init__(nothing_changed(text))
 
 
 #: The agent or setting moved between the preview and the confirm (another change in
