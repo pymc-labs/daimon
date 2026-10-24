@@ -589,3 +589,50 @@ async def test_the_rich_graph_exercises_every_class_of_money(sm):
         assert any(w.binding_id is not None for w in workers)
     _, run2_workers = await fleet.run_status(sm, tenant_id=run2.tenant_id, run_id=run2.id)
     assert {w.status for w in run2_workers} == {"running", "failed", "pending"}
+
+
+async def _finished_run(sm, parent, run, workers):
+    """A terminal run with `workers` terminal, fully settled workers."""
+    p, r = await _run(sm, parent, run)
+    for ordinal in range(workers):
+        worker = await _running(sm, p, r, ordinal, revisions=((1, 1000, 100),))
+        await fleet.finish(
+            sm,
+            tenant_id=r.tenant_id,
+            worker_id=worker.id,
+            expected_version=worker.version,
+            status="failed",
+            error_code="test",
+        )
+    current, _ = await fleet.run_status(sm, tenant_id=r.tenant_id, run_id=r.id)
+    await fleet.set_run_status(
+        sm,
+        tenant_id=r.tenant_id,
+        run_id=r.id,
+        expected_version=current.version,
+        status="failed",
+    )
+    return p, r
+
+
+@pytest.mark.parametrize("workers", [2, 8])
+async def test_a_finished_runs_workers_do_not_add_statements_per_admission(sm, db_engine, workers):
+    """The producer runs under the fleet lock: a finished run must not add reads per worker.
+
+    Before batching, every terminal worker of a terminal run did an active-lease,
+    database-clock and send-status read inside the producer's tenant lock (3N statements).
+    That convoy made J3/J4/J10 wait behind accumulated finished runs. The bound is the
+    same for 2 and for 8 settled workers.
+    """
+    parent, run = await setup(sm, parent=root(budget="10"), funds="100", cap="8", max_workers=12)
+    await _finished_run(sm, parent, run, workers)
+
+    async def call():
+        async with sm() as db, db.begin():
+            return await produce_fleet_budget(
+                db, parent=parent, prices=tariffs(parent), markup=Decimal(1)
+            )
+
+    with Statements(db_engine) as recorder:
+        count, _, _ = await recorder.count(call)
+    assert count < 35, count
