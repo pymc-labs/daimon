@@ -1111,6 +1111,55 @@ async def _create_agent_impl(
     return await _with_answering_note(runtime, auth, info)
 
 
+async def start_copy_on_source_backend(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    source_ma_agent_id: str,
+    copy_name: str,
+    copy_ma_agent_id: str,
+    archive_on_failure: bool = True,
+) -> str | None:
+    """Start a just-made copy on its source's provider and model (sweep item 3).
+
+    A copy's definition is a Managed Agents record, so without this a copy of a GPT or
+    Gemini agent silently answered (and billed) on Claude. Through the switch's own
+    preview and write (`_start_on_backend`). If it can't start there, the copy is
+    archived (shielded, like create's) and the person is told plainly. Returns what
+    to say about where it runs, or None for a copy of a Claude agent.
+    """
+    from daimon.core.stores import agent_backends
+    from daimon.core.turn.notices import provider_name
+    from mux.profiles import backend_selection
+
+    async with runtime.session_factory() as session:
+        revision = await agent_backends.current(
+            session,
+            auth.tenant_id,
+            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=source_ma_agent_id),
+        )
+    backend = revision.backend if revision is not None else None
+    if backend is None or backend == DEFAULT_BACKEND:
+        return None
+    assert revision is not None
+    model = revision.model or backend_selection(backend).model
+    try:
+        return await _start_on_backend(runtime, auth, None, copy_name, backend, model or "")
+    except BaseException as exc:
+        if not archive_on_failure:
+            raise  # the caller archives it (a channel's copy: `_archive_unused_copy`)
+        removed = False
+        with anyio.CancelScope(shield=True):
+            removed = await _discard_created(runtime, auth, copy_ma_agent_id)
+        if not removed and isinstance(exc, Exception):
+            raise ToolError(
+                f"{copy_name} couldn't start on {provider_name(backend)}, and removing it "
+                "failed too, so it may still exist on Claude. Ask an admin to archive "
+                f"{copy_name}."
+            ) from exc
+        raise
+
+
 async def _discard_created(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str) -> bool:
     """Archive an agent create_agent made in this call and couldn't finish; False when
     the archive itself failed (logged at error: the agent may still be live)."""
@@ -1626,7 +1675,17 @@ async def _fork_agent_impl(
             )
         except DaimonError as exc:
             raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
+        # A copy of an agent on GPT or Gemini starts there too, never on Claude.
+        started = await start_copy_on_source_backend(
+            runtime,
+            auth,
+            source_ma_agent_id=source.id,
+            copy_name=new_name,
+            copy_ma_agent_id=copy.agent.id,
+        )
     info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
+    if started is not None:
+        info = info.model_copy(update={"applies": started})
     if _setup_hidden(copy.agent, auth):
         info = info.for_member()
     if copy.dropped_skills:

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
@@ -618,8 +618,13 @@ async def set_channel_rule(
     public_url: str | None = None,
     release_agents: bool = False,
     resource_host: NeutralResourceHost | None = None,
+    start_copy: Callable[[str, str, str], Awaitable[None]] | None = None,
 ) -> RuleChange:
     """Set `channel_id`'s rule; raise `ChannelRuleRefused` if refused. None keeps a side.
+
+    `start_copy(source_name, copy_name, copy_ma_agent_id)` starts a copy of an agent on another
+    provider there too (the MCP layer's switch path, which owns the source capture).
+    Without it, such an agent isn't copied at all: a copy would answer on Claude.
 
     A copy is made only when `copy` is set, readers become own and the
     channel has no agent that may be its own, so repeating a request never
@@ -679,6 +684,15 @@ async def set_channel_rule(
             for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
         }
         new_name = copy_name(channel_label, channel_id, taken=taken, ruled=ruled)
+        if start_copy is None:
+            await _refuse_a_copy_off_claude(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                source_name=source,
+                # Reuse the agent looked up before the lock (`known`) when it's there.
+                source_agent=known.get(source),
+            )
         made = await fork_agent(
             anthropic,
             sessionmaker,
@@ -710,6 +724,10 @@ async def set_channel_rule(
         )
 
     try:
+        if start_copy is not None and resource_host is None:
+            # Before the channel names it: a copy that can't start on its source's
+            # provider is archived below with any other refused copy.
+            await start_copy(source, new_name, made.agent.id)
         async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
             await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
             await lock_access_policy(session, tenant_id=tenant_id)
@@ -755,6 +773,41 @@ async def set_channel_rule(
         default=default,
         resource_host=resource_host,
     )
+
+
+async def _refuse_a_copy_off_claude(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    source_name: str,
+    source_agent: _PolicyAgent | None = None,
+) -> None:
+    """A setup panel or the CLI can't start a copy on another provider (that needs the
+    chat path's source capture), so it refuses before copying an agent on GPT or
+    Gemini rather than make one that answers on Claude."""
+    from daimon.core.errors import UserFacingError
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+    from daimon.core.turn.notices import provider_name
+    from mux.contracts.config import DEFAULT_BACKEND
+
+    source = source_agent or await find_agent_by_daimon_tag(
+        anthropic, tenant_id=tenant_id, name=source_name
+    )
+    if source is None:
+        return  # fork_agent says it's missing
+    async with sessionmaker() as session:
+        revision = await agent_backends.current(
+            session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=source.id)
+        )
+    backend = revision.backend if revision is not None else None
+    if backend is not None and backend != DEFAULT_BACKEND:
+        raise UserFacingError(
+            f"{source_name} runs on {provider_name(backend)}, so this channel's own copy of it "
+            "has to be made by asking Daimon in chat, where the copy starts on "
+            f"{provider_name(backend)} too. Nothing was changed."
+        )
 
 
 async def set_category_rule(

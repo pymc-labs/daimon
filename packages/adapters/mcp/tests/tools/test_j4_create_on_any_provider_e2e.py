@@ -453,3 +453,63 @@ async def test_a_session_opened_before_a_switch_does_not_continue_on_claude(j10_
         request.method == "POST" and "/events" in request.path
         for request in transport.requests[before:]
     )
+
+
+async def _admin_of(runtime_, auth):
+    return replace(auth, is_admin=True, role=Role.ADMIN)
+
+
+@pytest.mark.parametrize("turned_off", (False, True))
+async def test_a_copy_of_a_luna_agent_starts_on_luna_or_not_at_all(j10_root, turned_off):
+    """Sweep item 3: fork_agent of an agent on GPT starts the copy on GPT (its source's
+    provider and model); if it can't, the copy is archived and said plainly. Never a
+    copy that answers (and bills) on Claude."""
+    from daimon.adapters.mcp.tools.agents import (
+        _fork_agent_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.stores import agent_backends
+    from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+
+    deps, prepared, *_ = j10_root
+    transport = j10_root[7]
+    created = stateful_agents(
+        transport,
+        prepared.admission.agent.model_dump(mode="json"),
+        prepared.admission.environment,
+    )
+    async with member_chat(j10_root) as (runtime_, auth, origin):
+        luna = await create_from_chat(runtime_, auth, origin, "luna-agent", "luna")
+        if turned_off:
+            async with deps.sessionmaker.begin() as session:
+                policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+                await set_access_policy(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    policy=policy.model_copy(
+                        update={"enabled_backends": ("anthropic",), "backends_explicit": True}
+                    ),
+                )
+        admin = await _admin_of(runtime_, auth)
+        if turned_off:
+            with pytest.raises(ToolError, match="Nothing was created"):
+                await _fork_agent_impl(
+                    runtime_, admin, "luna-agent", "luna-copy", expected_ma_agent_id=luna.id
+                )
+            copies = [a for a in created.values() if a["name"] == "luna-copy"]
+            assert copies and all(a["archived_at"] is not None for a in copies)
+            return
+        copy = await _fork_agent_impl(
+            runtime_, admin, "luna-agent", "luna-copy", expected_ma_agent_id=luna.id
+        )
+    assert "luna-copy runs on GPT-6 Luna" in (copy.applies or "")
+    async with deps.sessionmaker() as session:
+        revision = await agent_backends.current(
+            session,
+            auth.tenant_id,
+            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=copy.id),
+        )
+    from mux.profiles import backend_selection
+
+    # gpt-6-luna is OpenAI's default, which a revision stores as no model of its own.
+    assert revision is not None and revision.backend == "openai"
+    assert (revision.model or backend_selection("openai").model) == "gpt-6-luna"
