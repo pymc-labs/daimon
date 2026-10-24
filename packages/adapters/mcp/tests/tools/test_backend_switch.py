@@ -1381,29 +1381,42 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
     assert post.await_count == 1
 
 
-async def test_a_provider_turn_card_is_refused_when_the_preview_moved(active_chat, monkeypatch):
+async def test_a_provider_turn_card_shows_the_current_preview_when_it_moved(
+    active_chat, monkeypatch
+):
+    """J5: a confirm whose preview went stale posts one card with the current preview
+    (its drops and cost); the press applies what that card showed."""
     from unittest.mock import AsyncMock
 
     import daimon.adapters.mcp.tools.discord._switch_card as switch_card_mod
+    from daimon.core.stores.backend_switch_cards import get_card
+    from daimon.core.switch_cards import parse_custom_id
 
     runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
     _without_own_tools(payload)
     provider_turn = replace(auth, no_confirmation_surface=True)
     post = AsyncMock(return_value="message-1")
     monkeypatch.setattr(switch_card_mod, "post_switch_card", post)
+    switch = {
+        "agent_name": "Researcher",
+        "target_backend": "gemini",
+        "origin_context_id": str(origin.id),
+    }
     agent()
-    with pytest.raises(ToolError, match="Nothing changed"):
-        agent()
-        await _request_agent_backend_switch_impl(
-            runtime,
-            provider_turn,
-            agent_name="Researcher",
-            target_backend="gemini",
-            origin_context_id=str(origin.id),
-            expected_revision=0,
-            preview_digest="0" * 64,
-        )
-    post.assert_not_awaited()
+    preview = await _request_agent_backend_switch_impl(runtime, provider_turn, **switch)
+    agent()
+    agent()
+    posted = await _request_agent_backend_switch_impl(
+        runtime, provider_turn, **switch, expected_revision=0, preview_digest="0" * 64
+    )
+    assert posted.status == "awaiting_confirmation"
+    ((_, kwargs),) = [(call.args, call.kwargs) for call in post.await_args_list]
+    card_id, _ = parse_custom_id(kwargs["card"].buttons[0].custom_id)
+    async with runtime.session_factory() as session:
+        row = await get_card(session, tenant_id=auth.tenant_id, card_id=card_id)
+    assert row is not None
+    assert row.reference["preview_digest"] == preview.preview_digest
+    assert tuple(row.reference["accepted_drops"] or ()) == tuple(preview.declared_drops)
 
 
 async def test_a_claude_turn_never_self_posts_a_card(active_chat, monkeypatch):

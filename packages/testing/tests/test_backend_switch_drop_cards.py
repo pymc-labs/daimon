@@ -665,6 +665,61 @@ async def test_a_model_said_by_name_prepares_the_card_the_tool_previewed(
     assert current.backend == target
 
 
+@pytest.mark.parametrize("target", TARGETS)
+async def test_a_change_after_the_preview_posts_one_card_with_the_fresh_preview(
+    chat: Chat, card: Card, target: str
+) -> None:
+    """J5 (smoke 857a82bb): "switch it to GPT and turn off web search" can preview
+    the switch first, then change the agent, then confirm with the stale preview.
+    The card re-previews the same request against the agent as it is now and shows
+    that; the approved call (the model's original arguments) then applies it.
+    Adapted from dsh's stale-preview test."""
+    preview = await chat.tool(target)
+    data = tool_call(target, preview, list(preview.declared_drops))
+    # Web search is turned off after the preview: the agent's setup moved.
+    chat.payload["tools"] = [
+        *(chat.payload.get("tools") or []),
+        {"type": "agent_toolset_20260401", "configs": [{"name": "web_search", "enabled": False}]},
+    ]
+    from daimon.core.confirmation import drop_words
+
+    fresh = await chat.tool(target)
+    assert fresh.declared_drops == (*DROPS, "tools") != preview.declared_drops
+    text = await card.post(prompt_for(chat, data))
+    assert f"won't have {drop_words(fresh.declared_drops)}" in text, text
+    assert await card.click(REQUESTER[chat.platform]) is None
+    assert isinstance(await card.answer(), ApprovedConfirmation)
+    changed = await apply(chat, data)
+    assert changed.status == "changed" and changed.declared_drops == fresh.declared_drops
+    _, current = await chat.current()
+    assert current.backend == target and current.declared_drops == fresh.declared_drops
+    assert len(await chat.audit()) == 1
+    # The re-preview is used once: the same stale call cannot apply again.
+    with pytest.raises(Exception, match="Someone just switched Researcher"):
+        await apply(chat, data)
+
+
+async def test_a_stale_preview_whose_re_preview_is_refused_asks_to_preview_again(
+    chat: Chat, card: Card, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback (dsh's typed refusal): when the agent changed and the switch is
+    now refused (the provider was turned off), the model is told to preview again."""
+    from daimon.core.confirmation import STALE_SWITCH_TEXT, StalePreview
+
+    preview = await chat.tool(TARGET)
+    data = tool_call(TARGET, preview, list(preview.declared_drops))
+    chat.payload["system"] = "Changed after the switch preview was taken."
+    monkeypatch.setattr("daimon.core.channel_backend.backend_is_enabled", lambda *_: False)
+    with pytest.raises(StalePreview, match="Preview the switch again") as refused:
+        await card.post(prompt_for(chat, data))
+    assert str(refused.value) == STALE_SWITCH_TEXT
+    assert not card._posted()  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(Exception, match="(?i)isn't turned on"):
+        await apply(chat, data)
+    _, current = await chat.current()
+    assert current is None and await chat.audit() == []
+
+
 @pytest.mark.parametrize("accepted", ["missing", "partial", "extra", "empty"])
 async def test_accepted_drops_other_than_the_preview_never_post_or_apply(
     chat: Chat, card: Card, accepted: str
@@ -704,7 +759,9 @@ async def test_a_card_changed_after_prepare_is_refused_on_click(
         # The agent itself changed after the card was drawn: a fresh preview differs.
         chat.payload["system"] = "Changed after the card was drawn."
     refusal = await card.click(REQUESTER[chat.platform])
-    assert refusal is not None and "Preview and confirm again" in refusal
+    assert refusal is not None and re.search(
+        r"(?i)preview (the switch )?(and confirm )?again", refusal
+    )
     assert await card.still_pending()
     if change == "source":
         with pytest.raises(Exception, match="(?i)preview again"):

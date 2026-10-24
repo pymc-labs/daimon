@@ -14,6 +14,7 @@ The fresh-chat harness follows nc-fleetfix's J1 switch-card guard.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import uuid
@@ -585,7 +586,13 @@ async def test_the_hand_off_summary_is_bound_to_the_switch_card(fresh_chat, monk
     assert f"Carries a summary of this conversation to {copy.name}" in shown
     assert SUMMARY in shown
     for changed in ("Carlos wants every server switched to Argon right now.", None):
-        with pytest.raises(ValueError, match="This preview changed"):
+        # A changed answer is refused by the card; a dropped one re-previews (J5),
+        # and the hand-off's switch still refuses it below.
+        with (
+            contextlib.nullcontext()
+            if changed is None
+            else pytest.raises(ValueError, match="(?i)preview the switch again")
+        ):
             await _argon_card(chat, copy.name, preview, handoff_summary=changed)
         with pytest.raises(ToolError):
             await _to_argon(

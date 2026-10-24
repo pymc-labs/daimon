@@ -2190,7 +2190,10 @@ async def _post_own_switch_card(
             requester_platform_user_id=auth.platform_user_id,
             client=auth.client,
             answering_agent_name=origin.responder_name,
-            reference=reference.model_dump(mode="json"),
+            # What the card shows: re-previewed if the agent changed since (J5).
+            reference=(prepared.backend_switch or prepared.configuration or reference).model_dump(
+                mode="json"
+            ),
             expires_at=expires_at,
         )
     card = requested_switch_card(
@@ -2397,6 +2400,40 @@ async def _request_agent_backend_switch_impl(
                     "for_everyone": for_everyone,
                 }
             )
+            current_digest = switch_preview_digest(preview.digest, unsaved_work, handoff_summary)
+            if (
+                not self_card
+                and awaiting is None
+                and not bound
+                and (
+                    current_digest != reference.preview_digest
+                    or preview.setting_revision != reference.expected_revision
+                )
+            ):
+                # The agent changed after the preview; its card re-previewed and showed
+                # the current one (J5). Apply that, only if nothing changed since. A
+                # hand-off is never re-previewed: its answers are bound to the preview.
+                from daimon.core.stores.backend_switch_cards import consume_refresh
+
+                async with runtime.session_factory.begin() as session:
+                    refreshed = await consume_refresh(
+                        session,
+                        tenant_id=auth.tenant_id,
+                        account_id=auth.account_id,
+                        agent_name=agent.name,
+                        stale_digest=reference.preview_digest,
+                        fresh_digest=current_digest,
+                        fresh_revision=preview.setting_revision,
+                        now=datetime.datetime.now(datetime.UTC),
+                    )
+                if refreshed:
+                    reference = reference.model_copy(
+                        update={
+                            "expected_revision": preview.setting_revision,
+                            "preview_digest": current_digest,
+                            "accepted_drops": tuple(preview.declared_drops) or None,
+                        }
+                    )
             if (
                 bound
                 and switch_preview_digest(preview.digest, unsaved_work, handoff_summary)
@@ -2916,7 +2953,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             that call posts the card itself and returns awaiting_confirmation: tell the
             person to press Confirm, and don't call again. Never confirm, approve or accept it
             on their behalf, and never say you did. A stale preview or expired card
-            changes nothing; preview again. Pass this active turn's origin_context_id.
+            changes nothing; preview again. Make any other change to the agent (its tools,
+            skills or settings) before previewing a switch: a change after the preview
+            makes it stale. Pass this active turn's origin_context_id.
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
             to share threads where the channel allows it, admins only; or "per_caller") and
             ``required_capabilities`` (a channel that can't give one refuses the turn).

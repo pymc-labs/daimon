@@ -31,6 +31,7 @@ from daimon.core.confirmation import (
     ApprovedConfirmation,
     CardRefusal,
     ConfirmationHook,
+    StalePreview,
     ToolRuleCardReference,
     no_confirmation_surface,
     prompt_for_tool_call,
@@ -549,6 +550,10 @@ def interactive_decider(
             # Named boundary: prompt validation and the adapter's card must
             # both succeed before the write may run.
             log.warning("tool_safety.confirm_failed", tool=call.key, error=str(err))
+            if isinstance(err, StalePreview):
+                # The agent moved since the preview (another change this turn): a new
+                # preview and confirm fix it, so never "do not retry" (J5).
+                return ToolConfirmationResult(allow=False, deny_message=str(err))
             if isinstance(err, CardRefusal):
                 # Worded for the person (e.g. another switch landed first): pass it on.
                 return ToolConfirmationResult(allow=False, deny_message=str(err))
