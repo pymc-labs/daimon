@@ -2824,4 +2824,5 @@ def test_a_claude_worker_of_an_app_repository_agent_shows_its_repository_as_lost
         "declared_drops": sorted({*copy.spec.get("declared_drops", ()), "repository"}),
     }
     view = build_fleet_view(run(), (replace(copy, spec=spec, model="claude-opus-5-5"),))
-    assert any("without its repository" in text for text in _view_texts(view))
+    # The short loss line (#1532): what this worker runs without, in plain words.
+    assert any("(no repository)" in text for text in _view_texts(view)), _view_texts(view)
