@@ -2901,6 +2901,53 @@ def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> A
     )
 
 
+def _with_skills_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+    """`target` as a consent recorded before skills came along through Daimon MCP names it.
+
+    That consent declared `skills` a loss and its instructions had no skill line
+    (J6 b). Only that one difference is rebuilt, as `_with_switch_tool_dropped`
+    does for the switch tool; the copy then runs with its skills from now on.
+    """
+    if "skills" in target.declared_drops or SKILL_READ_INSTRUCTION not in (target.system or ""):
+        return None
+    drops = tuple(sorted((*target.declared_drops, "skills")))
+    return target.model_copy(
+        update={
+            "declared_drops": drops,
+            "system": compose_source_instructions(
+                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
+            ),
+        }
+    )
+
+
+def _consented_before(
+    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+) -> bool:
+    """A consent recorded before the switch tool or the skill tools were offered.
+
+    Either difference alone, or both, is rebuilt; anything else still needs a
+    fresh confirmation.
+    """
+    without_skills = _with_skills_dropped(target, source_system)
+    candidates = (
+        _with_switch_tool_dropped(target, _without_losses_line(target)),
+        without_skills,
+        _with_switch_tool_dropped(without_skills, source_system) if without_skills else None,
+    )
+    return any(_consented(candidate, consent) for candidate in candidates)
+
+
+def _without_losses_line(target: AgentSpec) -> str | None:
+    """The target's instructions before its "Unavailable capabilities" line, if any:
+    the source's own plus any representation paragraph (the skill tools line)."""
+    marker = "\n\nUnavailable capabilities: "
+    system = target.system
+    if system is None or marker not in system:
+        return system
+    return system[: system.rindex(marker)]
+
+
 def source_preservation_pin(source: BackendAgent) -> str:
     """Pin complete owner-captured intent independently of the current caller address."""
     updates: dict[str, object] = {"resource_scope": None}
@@ -3072,9 +3119,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not _consented(target, consent) and not _consented(
-            _with_switch_tool_dropped(target, spec.system), consent
-        ):
+        if not _consented(target, consent) and not _consented_before(target, spec.system, consent):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
         worker is None

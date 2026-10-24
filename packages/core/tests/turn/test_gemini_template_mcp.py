@@ -720,6 +720,31 @@ async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
     assert switch_drop not in selected.target_spec.declared_drops
 
 
+@pytest.fixture
+def consent_recorded_before_skill_tools(monkeypatch):
+    """While the consent is recorded, the template drops custom skills as before J6 b."""
+    from daimon.core.turn import runtime_manifest
+
+    monkeypatch.setattr(runtime_manifest, "SKILL_READ_PROXY", "no-such-proxy")
+    return runtime_manifest
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_skills_still_prepares_and_now_keeps_them(
+    consent_recorded_before_skill_tools, template, monkeypatch
+):
+    """A copy switched before skills came along through Daimon MCP keeps working
+    without re-confirming, and runs with its skills from now on (#1484)."""
+    from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
+
+    request, quote, *_ = template
+    assert "skills" in quote.declared_drops, "the consent was recorded the old way"
+    monkeypatch.setattr(consent_recorded_before_skill_tools, "SKILL_READ_PROXY", "call_tool")
+    selected, _ = await _prepared(request)
+    assert "skills" not in selected.target_spec.declared_drops
+    assert SKILL_READ_INSTRUCTION in (selected.target_spec.system or "")
+
+
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
     consent_recorded_before_self_cards, template, monkeypatch
