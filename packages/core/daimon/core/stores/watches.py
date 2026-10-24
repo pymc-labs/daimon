@@ -538,8 +538,6 @@ async def pause_watch(
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None:
         raise ValueError("Watch not found")
-    if row.status == "paused":
-        return
     await _cancel_queued(session, [watch_id])
     row.status = "paused"
     row.revision += 1
