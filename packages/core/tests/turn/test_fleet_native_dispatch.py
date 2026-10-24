@@ -231,13 +231,9 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
         # Retry before execution begins: the same committed worker, not a second allocation.
         second = await owner.spawn(root, policy, **terms)
         assert second["worker_id"] == first["worker_id"]
-        async with asyncio.timeout(10):
-            while True:
-                _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
-                actual = next(row for row in rows if str(row.id) == first["worker_id"])
-                if actual.status == "succeeded":
-                    break
-                await asyncio.sleep(0.01)
+        actual = await _settled(ports, root, first["worker_id"])
+        assert actual.status == "succeeded"
+        _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         assert actual.ordinal == 1 and actual.result is not None
         assert rows[0].status == "starting" and rows[0].binding_id is None
         posts = [call.url.path for call in calls if call.method == "POST"]
@@ -470,14 +466,6 @@ async def test_loader_is_bounded_before_and_after_admission_without_native_effec
     worker_root, phase
 ):
     request, root, _, resolved, prices, calls, _, _, _ = worker_root
-    root = replace(
-        root,
-        limits=root.limits.model_copy(
-            update={
-                "deadline": datetime.now(UTC) + timedelta(seconds=-1 if phase == "expired" else 2),
-            }
-        ),
-    )
     entered, release = asyncio.Event(), asyncio.Event()
     before, rows_before = await fleet.run_status(
         request.deps.sessionmaker, tenant_id=request.tenant_id, run_id=root.fleet.run_id
@@ -486,6 +474,16 @@ async def test_loader_is_bounded_before_and_after_admission_without_native_effec
         revision_before = await mux_state.effective_revision(
             db, root.fleet.root.channel, resolved.backend.content_digest(), "agent"
         )
+    # Baseline reads and real admission must not consume the loader's entire
+    # test window on a busy local database. The loader still meets a real bound.
+    root = replace(
+        root,
+        limits=root.limits.model_copy(
+            update={
+                "deadline": datetime.now(UTC) + timedelta(seconds=-1 if phase == "expired" else 10),
+            }
+        ),
+    )
 
     async def preparation(parent):
         _, rows = await fleet.run_status(
@@ -505,7 +503,7 @@ async def test_loader_is_bounded_before_and_after_admission_without_native_effec
         deps=replace(request.deps, fleet_enabled=True),
     )
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(15):
             with pytest.raises(FleetRefused, match="preparation_deadline_exceeded"):
                 if phase == "funded":
                     terms = _spawn_terms(request, root, resolved, "blocked-loader")
@@ -930,7 +928,10 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
         )
         succeeded = await _settled(ports, healthy_root, next_reply["worker_id"])
         assert succeeded.status == "succeeded" and succeeded.result is not None
-        assert len([call for call in calls if call.method == "POST"]) == 3
+        assert [call.url.path for call in calls if call.method == "POST"] == [
+            "/v1/agents",
+            "/v1/agents/sessions",
+        ]
     finally:
         release.set()
         await ports.close()

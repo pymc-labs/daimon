@@ -66,6 +66,7 @@ async def root_turn(
     null_environment_description=False,
     resolved_model=False,
     memory=True,
+    deadline_seconds=120,
 ):
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
@@ -278,7 +279,7 @@ async def root_turn(
                 source_agents=(captured.source.ref,),
                 source_revisions=((captured.source.ref, captured.source.revision),),
                 limits=root.limits.model_copy(
-                    update={"deadline": datetime.now(UTC) + timedelta(seconds=120)}
+                    update={"deadline": datetime.now(UTC) + timedelta(seconds=deadline_seconds)}
                 ),
             )
             grant_service = AgentBackendService(sm, enabled=True)

@@ -89,11 +89,16 @@ async def test_recorded_root_freeze_retained_reader_dispatch_create_events_usage
     assert operation.operation.status == "processed"
     events = await deps.state_store.read_events(SESSION_ID, after=-1)
     assert any(e.type == "session.turn_ended" for e in events)
+    # Create already carried the input. History can reconcile its answer
+    # before the stream delivers it; retain the actual provenance of either
+    # native path, with one stable normalized item ID.
     assert any(
-        event.id == "openai:item:turn-1:answer" and event.native.event_id == "turn-1:answer"
+        event.id == "openai:item:turn-1:answer"
+        and event.native.provider == "openai"
+        and event.native.event_id in {"turn-1:answer", "openai:item:turn-1:answer"}
         for event in events
         if event.type == "agent.message"
-    ), "the supported worker keeps the actual native stream provenance"
+    ), "the supported worker keeps the actual native stream or history provenance"
     assert any(e.type == "agent.message" for e in events)
     again = await owner.spawn(parent, policy, **kwargs)
     assert again["worker_id"] == first["worker_id"] and again["status"] == "succeeded"

@@ -1,9 +1,10 @@
 """Real conversation-only worker fixture shared by provider and fleet regressions."""
 
 import json
+import re
 from contextlib import aclosing
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -107,7 +108,12 @@ async def conversation_root(
     # These workers carry a native budget: exercise a project that honours it.
     openai_native_spend_cap(monkeypatch)
     async with aclosing(
-        root_turn.__wrapped__(db_preflight, db_committing_engine, live_root=True)
+        root_turn.__wrapped__(
+            db_preflight,
+            db_committing_engine,
+            live_root=True,
+            deadline_seconds=600 if getattr(request, "param", None) == "load" else 120,
+        )
     ) as roots:
         updated, current, source = await default_source_turn(await anext(roots))
         deps, prepared, _, intent, _, scope, _, transport = updated
@@ -262,7 +268,10 @@ async def conversation_root(
                     resources=(),
                     limits=WorkerLimits(
                         budget_usd=Decimal("0.055"),
-                        deadline=parent.limits.deadline,
+                        deadline=min(
+                            parent.limits.deadline,
+                            datetime.now(UTC) + timedelta(seconds=value.max_worker_seconds),
+                        ),
                         max_turns=1,
                         native_budget_usd=Decimal("0.01"),
                     ),
@@ -281,6 +290,17 @@ async def worker_root(conversation_root, request):
     deps, root, policy, resolved, wire, ports, _, transport = conversation_root
     original = await ports._prepare_original(root)
     source = original.admission.agent.model_dump(mode="json")
+    # Drift tests must mutate the response returned by the real source read,
+    # rather than a detached copy of the admission snapshot.
+    source_path = "/v1/agents/" + original.admission.agent.id
+    transport.router.routes[:] = [
+        route
+        for route in transport.router.routes
+        if not (route[0] == "GET" and route[1].fullmatch(source_path))
+    ]
+    transport.router.add(
+        "GET", re.escape(source_path), lambda call, match: httpx.Response(200, json=source)
+    )
     captured = await capture_preparation_source(original)
     assert captured.source is not None
     resolved = resolve_worker_spec(

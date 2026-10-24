@@ -42,6 +42,7 @@ from daimon.core.config import (
     DatabaseSettings,
     McpSettings,
     Settings,
+    TurnSettings,
 )
 from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
 from daimon.core.tool_safety import backend_switch_tools, microsoft_send_tools
@@ -152,6 +153,7 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession], anthropic: AsyncAn
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            turn=TurnSettings(channel_backends=False, agent_backends=False),
             mcp=McpSettings(
                 legacy_token_cutoff=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
                 allow_legacy_tokens=True,
@@ -351,10 +353,12 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
     assert {tool["name"] for tool in chat["result"]["tools"]} == {
         "call_tool",
         "search_tools",
-        # Unregistered here: backend selection and Microsoft accounts are off.
+        # Backend selection and Microsoft accounts are off; routine sandbox
+        # configuration stays hidden from these non-admin credentials.
         *(
             APPROVAL_TOOLS
             - backend_switch_tools(enabled=True)
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
+            - {"set_routine_sandbox_tools"}
         ),
     }

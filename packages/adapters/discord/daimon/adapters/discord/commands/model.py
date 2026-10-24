@@ -22,6 +22,7 @@ from daimon.adapters.discord.checks import (
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.thread_models import (
     FLEET_ROOT_NOTE,
     choose_thread_model,
@@ -49,7 +50,7 @@ class ModelCog(commands.Cog):
         super().__init__()
         self.bot = bot
 
-    @app_commands.command(name="model", description="Show or switch this conversation's model")
+    @app_commands.command(name="model", description=DESCRIPTIONS["model"])
     @app_commands.describe(choice="Leave empty to see the current model")
     @app_commands.choices(
         choice=[

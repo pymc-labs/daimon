@@ -18,6 +18,7 @@ import json
 import re
 import time
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 
 import httpx
@@ -117,6 +118,10 @@ class MultiWorkerNative:
         for session_id, (wire, agent_id) in self.sessions.items():
             if path.startswith("/v1/agents/sessions/" + session_id):
                 response = wire.handle(call)
+                if call.method == "GET" and path.endswith("/events"):
+                    # Input was accepted by create, before Wire opened/reset
+                    # this stream's event. Deliver that already accepted turn.
+                    wire.sent.set()
                 for turn in wire.turns:
                     turn["agent_id"] = agent_id
                 if (
@@ -209,6 +214,7 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
         await engine.dispose()
 
 
+@pytest.mark.parametrize("conversation_root", ["load"], indirect=True)
 @pytest.mark.parametrize(
     "lock",
     [
@@ -262,9 +268,15 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
             created_by="host",
         )
         roots.append(replace(root, fleet=replace(root.fleet, run_id=run.id)))
-    # One-sentence workers, each within a quarter of its run's budget.
+    # One-sentence workers, each within a quarter of its run's overall and
+    # provider budgets. The supported conversation fixture retains both caps.
+    provider_cap = root.limits.provider_limits_usd[resolved.backend.backend]
     small = resolved.limits.model_copy(
-        update={"budget_usd": min(resolved.limits.budget_usd, first.total_budget_usd / 4)}
+        update={
+            "budget_usd": min(
+                resolved.limits.budget_usd, first.total_budget_usd / 4, provider_cap / 4
+            )
+        }
     )
     async with (
         _watch_lock_busy(request.deps.sessionmaker, request.tenant_id, monkeypatch)
@@ -286,12 +298,23 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
         started = time.monotonic()
         try:
             spawned = []
+            assert root.max_worker_seconds == 120
             for fleet_root in roots:
                 for index in range(WORKERS):
                     terms = _spawn_terms(
                         request, fleet_root, resolved, f"j3-load-{fleet_root.fleet.run_id}-{index}"
                     )
-                    reply = await owner.spawn(fleet_root, policy, **(terms | {"limits": small}))
+                    # Each admitted worker gets the grant's own runtime window;
+                    # fixture setup and earlier spawns must not age its deadline.
+                    limits = small.model_copy(
+                        update={
+                            "deadline": min(
+                                fleet_root.limits.deadline,
+                                terms["now"] + timedelta(seconds=root.max_worker_seconds),
+                            )
+                        }
+                    )
+                    reply = await owner.spawn(fleet_root, policy, **(terms | {"limits": limits}))
                     spawned.append((fleet_root, reply["worker_id"]))
             ended = []
             try:

@@ -1973,7 +1973,7 @@ async def test_owner_dm_resolves_recipient_without_channel_lookup(
 @pytest.mark.parametrize("platform", ["slack", "teams"])
 async def test_dm_writes_rejected_on_unsupported_platform(platform):
     auth = _auth_identity(platform=platform, platform_user_id="123")
-    with pytest.raises(ToolError, match="only on Discord"):
+    with pytest.raises(ToolError, match="not supported here"):
         await _routines_mod._check_destination(  # pyright: ignore[reportPrivateUsage]
             MagicMock(), auth, kind="dm", destination_id=None
         )

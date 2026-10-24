@@ -126,6 +126,7 @@ from mux.contracts.ids import ChannelRef, Scope, ThreadRef
 from mux.contracts.resources import Agent, AgentSpec, ProviderBinding
 from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
+from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
 from mux.state.lease import Lease, Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.mutation_retry import MutationRetryPolicy
@@ -1045,7 +1046,7 @@ async def run_worker(
                 )
             if cancel.is_set():
                 raise asyncio.CancelledError
-            if revision.profile not in {"anthropic.managed_agents", "selfhosted.loop"}:
+            if revision.profile not in {MANAGED_AGENTS.profile_id, SELFHOSTED_LOOP.profile_id}:
                 from daimon.core.turn.unattended import require_native_unattended_capabilities
 
                 # The task text can be carried by native resource creation.

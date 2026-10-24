@@ -1058,11 +1058,11 @@ async def test_automatic_worker_refuses_before_budgeted_input_can_lose_ack(
             prices=prices,
             cancel=asyncio.Event(),
         )
-    assert sum(call.method == "POST" and call.url.path.endswith("/events") for call in calls) == 0
+    assert calls == []
     async with request.deps.sessionmaker.begin() as db:
         _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
     persisted = next(row for row in rows if row.id == worker.id)
-    assert persisted.turns_used == 0 and persisted.reserved_usd == worker.budget_usd
+    assert persisted.turns_used == 0 and persisted.reserved_usd == worker.reserved_usd
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
@@ -1436,7 +1436,6 @@ async def test_conversation_worker_budget_reaches_real_request_and_one_input(
 async def test_conversation_worker_lost_ack_keeps_one_claim(
     safe_claimed_openai_worker, monkeypatch
 ):
-    from daimon.core.errors import TurnError
     from daimon.core.headless_runner import run_worker
     from daimon.core.stores import fleet
 
@@ -1450,7 +1449,9 @@ async def test_conversation_worker_lost_ack_keeps_one_claim(
         return response
 
     monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
-    with pytest.raises(TurnError):
+    # Conversation-only carries input in create, so an unknown ACK fails
+    # preparation rather than a later running turn. Its claim stays charged.
+    with pytest.raises(ProviderError):
         await run_worker(
             request,
             parent=root,
