@@ -47,6 +47,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_PAGE_NEXT,
     ACTION_REVOKE_TOKEN,
     ACTION_ROUTING,
+    ACTION_RULE_CONFIDENTIAL,
     ACTION_RULE_COPY,
     ACTION_RULE_READERS,
     ACTION_RULE_RELEASE,
@@ -557,6 +558,16 @@ async def test_routing_action_pushes_from_root_and_details_view_has_no_routing_a
         ),
     )
 
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack\.com/api/conversations\.info.*"),
+        payload={"ok": True, "channel": {"is_ext_shared": True}},
+        repeat=True,
+    )
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack\.com/api/conversations\.members.*"),
+        payload={"ok": True, "members": []},
+        repeat=True,
+    )
     await handle_agent_setup_action(runtime, _action_payload(ACTION_ROUTING, meta=_meta()))
     await handle_agent_setup_action(
         runtime, _action_payload(ACTION_DETAILS, meta=_meta(), value=_OTHER_AGENT)
@@ -564,6 +575,8 @@ async def test_routing_action_pushes_from_root_and_details_view_has_no_routing_a
 
     pushes = _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY)
     assert len(pushes) == 2, "each navigation from the root pushes one view"
+    assert "outside your organisation" in str(pushes[0]["view"])
+    assert "Make confidential" not in str(pushes[0]["view"]), "non-admin sees warning only"
     routing_meta = decode_panel_metadata(pushes[0]["view"]["private_metadata"])
     assert routing_meta is not None and routing_meta.view == "routing", (
         "the first push is the routing view"
@@ -918,7 +931,9 @@ async def test_operator_token_click_refuses_a_member(
     assert (event.tool_name, event.outcome) == ("panel:operator_token_mint", "denied")
 
 
+@pytest.mark.parametrize("action_id", [ACTION_RULE_READERS, ACTION_RULE_CONFIDENTIAL])
 async def test_rule_click_refuses_a_member(
+    action_id: str,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -930,9 +945,7 @@ async def test_rule_click_refuses_a_member(
 
     await handle_agent_setup_action(
         runtime,
-        _action_payload(
-            ACTION_RULE_READERS, meta=_meta(view="routing"), selected="own", view_id="V_ROUTING"
-        ),
+        _action_payload(action_id, meta=_meta(view="routing"), selected="own", view_id="V_ROUTING"),
     )
 
     ephemerals = _sent(
@@ -1015,6 +1028,12 @@ async def test_rule_clicks_refuse_a_shared_agent_then_keep_the_channel_to_a_copy
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert (policy.channel_rules, policy.agent_rules) == ({}, {}), "all lifted"
+    await handle_agent_setup_action(runtime, click(ACTION_RULE_CONFIDENTIAL))
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    assert policy.channel_rules[room].readers == "own", (
+        "Make confidential uses the existing rule path"
+    )
 
 
 async def test_stale_change_click_is_refused_and_use_default_still_runs(
@@ -1130,3 +1149,103 @@ async def test_own_conversation_does_not_grant_unbound_agent_mutation_ownership(
     await handle_agent_setup_action(runtime, click)
 
     assert _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY) == [], "unbound must refuse"
+
+
+async def test_routing_pages_use_fresh_current_channel_sharing_facts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    from daimon.adapters.slack.agent_setup.actions import load_routing_view
+    from daimon.adapters.slack.outsiders import SLACK_GUESTS_UNCHECKED
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+    mock = fake_slack_web_client.mock
+    for page, shared in ((0, False), (1, True), (0, False)):
+        mock.get(
+            re.compile(r"https://slack\.com/api/conversations\.info.*"),
+            payload={"ok": True, "channel": {"is_org_shared": shared}},
+        )
+        view = await load_routing_view(
+            runtime,
+            fake_slack_web_client.client,
+            tenant_id=tenant_id,
+            meta=_meta(view="routing", page=page),
+            is_admin=True,
+        )
+        assert ("Make confidential" in str(view)) is shared
+        assert ("outside your organisation" in str(view)) is shared
+        assert SLACK_GUESTS_UNCHECKED in str(view)
+    info_requests = [
+        calls
+        for (method, url), calls in mock.requests.items()
+        if method == "GET" and url.path.endswith("/conversations.info")
+    ]
+    assert sum(map(len, info_requests)) == 3
+    assert not any(
+        url.path.endswith(("/users.list", "/conversations.members")) for _, url in mock.requests
+    )
+
+
+@pytest.mark.parametrize(
+    "shared_field", ["is_shared", "is_org_shared", "is_pending_ext_shared", "pending_shared"]
+)
+@pytest.mark.parametrize("admin", [False, True])
+async def test_permissions_sharing_warning_and_admin_button(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    shared_field: str,
+    admin: bool,
+) -> None:
+    from daimon.adapters.slack.agent_setup.actions import load_routing_view
+    from daimon.adapters.slack.outsiders import SLACK_GUESTS_UNCHECKED
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack\.com/api/conversations\.info.*"),
+        payload={
+            "ok": True,
+            "channel": {shared_field: ["T_OTHER"] if shared_field == "pending_shared" else True},
+        },
+    )
+    view = await load_routing_view(
+        runtime,
+        fake_slack_web_client.client,
+        tenant_id=tenant_id,
+        meta=_meta(view="routing"),
+        is_admin=admin,
+    )
+    assert "outside your organisation" in str(view)
+    assert ("Make confidential" in str(view)) is admin
+    assert SLACK_GUESTS_UNCHECKED in str(view)
+
+
+async def test_permissions_info_failure_has_outsider_note(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    from daimon.adapters.slack.agent_setup.actions import load_routing_view
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack\.com/api/conversations\.info.*"),
+        payload={"ok": False, "error": "ratelimited"},
+    )
+    view = await load_routing_view(
+        runtime,
+        fake_slack_web_client.client,
+        tenant_id=tenant_id,
+        meta=_meta(view="routing"),
+        is_admin=True,
+    )
+    assert "Outsider check skipped" in str(view)
+    assert "Guest check skipped" not in str(view)
+    assert "Make confidential" not in str(view)

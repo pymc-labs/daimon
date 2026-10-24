@@ -102,3 +102,38 @@ def test_discord_unknown_publishing_and_history_drop_their_fields() -> None:
     )
     embed = build_here_embed(card).to_dict()
     assert embed["fields"] == [{"name": "Reading", "value": "Any conversation", "inline": True}]
+
+
+@pytest.mark.parametrize("readers", ["any", "inside", "own"])
+def test_outsider_warning_on_here(readers: str) -> None:
+    card = HereCard(
+        agent_name=None,
+        tier=None,
+        channel_rule=ChannelRule(),
+        effective_readers=readers,
+        effective_writers="any",
+        who_may_answer="",
+        reads_kept_inside=False,
+        outsiders_can_view=True,
+        text="",
+    )
+    assert ("outside your organisation" in str(build_here_embed(card).to_dict())) is (
+        readers != "own"
+    )
+
+
+def test_unconfigured_internal_roles_hint_on_here() -> None:
+    from daimon.core.outsiders import INTERNAL_ROLES_HINT
+
+    card = HereCard(
+        agent_name=None,
+        tier=None,
+        channel_rule=ChannelRule(),
+        effective_readers="any",
+        effective_writers="any",
+        who_may_answer="",
+        reads_kept_inside=False,
+        outsider_note=INTERNAL_ROLES_HINT,
+        text="",
+    )
+    assert INTERNAL_ROLES_HINT in str(build_here_embed(card).to_dict())

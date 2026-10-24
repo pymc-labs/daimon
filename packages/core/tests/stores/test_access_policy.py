@@ -102,34 +102,41 @@ async def test_a_row_with_the_old_member_guest_list_still_loads(db_session: Asyn
     ), "the guest list is ignored, the rest kept"
 
 
+@pytest.mark.parametrize("field", ["invoker_role_ids", "internal_role_ids"])
 async def test_discord_role_policy_roundtrip_and_everyone_rejection(
     db_session: AsyncSession,
+    field: str,
 ) -> None:
     tenant = await make_tenant(db_session, workspace_id="111")
-    policy = TenantAccessPolicy(invoker_role_ids=("222",))
+    policy = TenantAccessPolicy.model_validate({field: ["222"]})
     await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
     db_session.expire_all()
     assert await load_access_policy(db_session, tenant_id=tenant.id) == policy
     with pytest.raises(ValueError, match="@everyone"):
         await set_access_policy(
-            db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_role_ids=("111",))
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy.model_validate({field: ["111"]}),
         )
 
 
 @pytest.mark.parametrize("platform", ["slack", "teams"])
+@pytest.mark.parametrize("field", ["invoker_role_ids", "internal_role_ids"])
 async def test_other_platforms_reject_role_writes_and_invalid_rows(
-    db_session: AsyncSession, platform: str
+    db_session: AsyncSession, platform: str, field: str
 ) -> None:
     tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="Discord"):
         await set_access_policy(
-            db_session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_role_ids=("222",))
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy.model_validate({field: ["222"]}),
         )
     await db_session.execute(
         text(
             "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
         ),
-        {"t": tenant.id, "p": '{"invoker_role_ids": ["222"]}'},
+        {"t": tenant.id, "p": '{"' + field + '": ["222"]}'},
     )
     with pytest.raises(AccessPolicyUnreadable):
         await load_access_policy(db_session, tenant_id=tenant.id)

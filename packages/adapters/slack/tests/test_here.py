@@ -11,9 +11,11 @@ from daimon.adapters.slack.here import (  # pyright: ignore[reportPrivateUsage]
     build_here_attachment,
     handle_here_command,
 )
-from daimon.core.access_policy import ChannelRule
+from daimon.adapters.slack.outsiders import SLACK_GUESTS_UNCHECKED
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import CredentialStatus, HereCard, render_here_card_text
+from daimon.core.outsiders import OUTSIDER_CHECK_SKIPPED
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -170,11 +172,14 @@ def test_slack_unknown_publishing_and_history_drop_their_lines() -> None:
     assert "No access to earlier messages" not in str(blocks)
 
 
+@pytest.mark.parametrize("connect", [False, True])
 async def test_here_posts_ephemeral_card(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    connect: bool, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     client = MagicMock()
-    client.conversations_info = AsyncMock(return_value={"channel": {"is_private": False}})
+    client.conversations_info = AsyncMock(
+        return_value={"channel": {"is_private": False, "is_ext_shared": connect}}
+    )
     client.users_conversations = AsyncMock(return_value={"channels": []})
     client.users_info = AsyncMock(return_value={"user": {}})
     client.chat_postEphemeral = AsyncMock()
@@ -206,7 +211,24 @@ async def test_here_posts_ephemeral_card(
         channel="C1",
         user="U1",
         text="Channel status",
-        attachments=[build_here_attachment(_card("channel"))],
+        attachments=[
+            build_here_attachment(
+                _card("channel").model_copy(
+                    update={
+                        "outsiders_can_view": True if connect else None,
+                        "outsider_note": SLACK_GUESTS_UNCHECKED,
+                        "text": render_here_card_text(
+                            _card("channel").model_copy(
+                                update={
+                                    "outsiders_can_view": True if connect else None,
+                                    "outsider_note": SLACK_GUESTS_UNCHECKED,
+                                }
+                            )
+                        ),
+                    }
+                )
+            )
+        ],
         parse="none",
         link_names=False,
     )
@@ -240,6 +262,10 @@ async def test_private_channel_without_bot_membership_returns_card_by_response_u
             "daimon.adapters.slack.here.load_here_card",
             new=AsyncMock(return_value=_card("no_view")),
         ) as load,
+        patch(
+            "daimon.adapters.slack.here.load_access_policy",
+            new=AsyncMock(return_value=TenantAccessPolicy()),
+        ),
         patch("daimon.adapters.slack.here.AsyncWebhookClient", return_value=webhook),
     ):
         await handle_here_command(
@@ -256,7 +282,22 @@ async def test_private_channel_without_bot_membership_returns_card_by_response_u
     webhook.send_dict.assert_awaited_once_with(
         {
             "text": "Channel status",
-            "attachments": [build_here_attachment(_card("no_view"))],
+            "attachments": [
+                build_here_attachment(
+                    _card("no_view").model_copy(
+                        update={
+                            "outsider_note": f"{OUTSIDER_CHECK_SKIPPED}\n{SLACK_GUESTS_UNCHECKED}",
+                            "text": render_here_card_text(
+                                _card("no_view").model_copy(
+                                    update={
+                                        "outsider_note": f"{OUTSIDER_CHECK_SKIPPED}\n{SLACK_GUESTS_UNCHECKED}"
+                                    }
+                                )
+                            ),
+                        }
+                    )
+                )
+            ],
             "response_type": "ephemeral",
             "parse": "none",
         }
@@ -269,7 +310,9 @@ async def test_daemon_error_uses_error_card(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     client = MagicMock()
-    client.conversations_info = AsyncMock(return_value={"channel": {"is_member": True}})
+    client.conversations_info = AsyncMock(
+        return_value={"channel": {"is_member": True, "is_ext_shared": False}}
+    )
     client.users_conversations = AsyncMock(return_value={"channels": []})
     client.users_info = AsyncMock(return_value={"user": {}})
     runtime = MagicMock()
@@ -294,3 +337,211 @@ async def test_daemon_error_uses_error_card(
     error.assert_awaited_once()
     assert error.await_args is not None
     assert isinstance(error.await_args.args[1], DaimonError)
+
+
+@pytest.mark.parametrize("admin", [True, False])
+@pytest.mark.parametrize("readers", ["any", "inside", "own"])
+def test_outsider_warning_and_admin_fix(admin: bool, readers: str) -> None:
+    card = _card("channel").model_copy(
+        update={
+            "outsiders_can_view": True,
+            "effective_readers": readers,
+            "outsider_note": SLACK_GUESTS_UNCHECKED,
+        }
+    )
+    rendered = str(build_here_attachment(card, is_admin=admin))
+    assert ("outside your organisation" in rendered) is (readers != "own")
+    assert (SLACK_GUESTS_UNCHECKED in rendered) is (readers != "own")
+    assert ("Make confidential" in rendered) is (admin and readers != "own")
+
+
+def test_unchecked_guest_limitation_is_visible() -> None:
+    card = _card("no_agent").model_copy(update={"outsider_note": SLACK_GUESTS_UNCHECKED})
+    assert SLACK_GUESTS_UNCHECKED in str(build_here_attachment(card))
+
+
+@pytest.mark.parametrize("admin", [True, False])
+async def test_confidential_click_rechecks_admin(admin: bool) -> None:
+    from daimon.adapters.slack.here import handle_make_confidential
+
+    client = MagicMock()
+    client.chat_postEphemeral = AsyncMock()
+    runtime = MagicMock()
+    with (
+        patch("daimon.adapters.slack.here.resolve_web_client", AsyncMock(return_value=client)),
+        patch("daimon.adapters.slack.here.resolve_is_admin", AsyncMock(return_value=admin)),
+        patch(
+            "daimon.adapters.slack.agent_setup.rules.change_rule", AsyncMock(return_value="saved")
+        ) as change,
+    ):
+        await handle_make_confidential(
+            runtime,
+            {
+                "team": {"id": "T1"},
+                "channel": {"id": "C1"},
+                "user": {"id": "U1"},
+                "actions": [{"value": "C_OTHER"}],
+            },
+        )
+    assert change.await_count == int(admin)
+    if admin:
+        assert change.await_args.kwargs["channel_id"] == "C1"
+        assert change.await_args.kwargs["readers"] == "own"
+    else:
+        assert "Only a workspace admin" in client.chat_postEphemeral.await_args.kwargs["text"]
+
+
+def _review_runtime(db_session_factory: async_sessionmaker[AsyncSession]) -> MagicMock:
+    runtime = MagicMock()
+    runtime.settings.github_app.app_id = None
+    runtime.settings.mcp.public_url = None
+    runtime.sessionmaker = db_session_factory
+    return runtime
+
+
+def _review_client(*, connect: bool) -> MagicMock:
+    client = MagicMock()
+    client.conversations_info = AsyncMock(
+        return_value={"channel": {"is_member": True, "is_ext_shared": connect}}
+    )
+    client.users_conversations = AsyncMock(return_value={"channels": []})
+    client.users_info = AsyncMock(
+        return_value={"user": {"is_admin": True, "is_restricted": False, "team_id": "T1"}}
+    )
+    client.chat_postEphemeral = AsyncMock()
+    return client
+
+
+def _wire_review_here(monkeypatch: pytest.MonkeyPatch, client: MagicMock) -> AsyncMock:
+    from daimon.adapters.slack import here as module
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    monkeypatch.setattr(module, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(module, "find_platform_principal", AsyncMock(return_value=None))
+    monkeypatch.setattr(module, "load_access_policy", AsyncMock(return_value=TenantAccessPolicy()))
+    load = AsyncMock(return_value=_card("channel"))
+    monkeypatch.setattr(module, "load_here_card", load)
+    return load
+
+
+async def test_whole_here_concurrent_connect_renders_only_check_connect(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    import asyncio
+
+    client, runtime = _review_client(connect=True), _review_runtime(db_session_factory)
+    _wire_review_here(monkeypatch, client)
+    payload = {"team_id": "T1", "channel_id": "C1", "user_id": "U_CALLER"}
+    await asyncio.gather(*(handle_here_command(runtime, payload) for _ in range(3)))
+    assert client.conversations_info.await_count == 3, "one live Connect fact per render"
+    assert client.users_info.await_count == 6, (
+        "only live requester/admin lookups, never guest lookups"
+    )
+    assert all(call.kwargs["user"] == "U_CALLER" for call in client.users_info.await_args_list)
+    assert client.chat_postEphemeral.await_count == 3
+    for call in client.chat_postEphemeral.await_args_list:
+        assert "outside your organisation" in str(call.kwargs["attachments"])
+
+
+async def test_whole_here_repeated_renders_use_fresh_sharing_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, runtime = _review_client(connect=False), _review_runtime(db_session_factory)
+    _wire_review_here(monkeypatch, client)
+    for shared in (False, True, False):
+        client.conversations_info.return_value = {
+            "channel": {"is_member": True, "is_org_shared": shared}
+        }
+        await handle_here_command(
+            runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U_CALLER"}
+        )
+    assert client.conversations_info.await_count == 3
+    for call, shared in zip(
+        client.chat_postEphemeral.await_args_list, (False, True, False), strict=True
+    ):
+        attachment = str(call.kwargs["attachments"])
+        assert ("outside your organisation" in attachment) is shared
+        assert ("Make confidential" in attachment) is shared
+        assert SLACK_GUESTS_UNCHECKED in attachment
+    assert all(call.kwargs["user"] == "U_CALLER" for call in client.users_info.await_args_list)
+
+
+@pytest.mark.parametrize("phase", ["requester", "listing"])
+@pytest.mark.parametrize("readers", ["any", "own"])
+async def test_whole_here_retains_connect_warning_on_metadata_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    phase: str,
+    readers: str,
+) -> None:
+    from daimon.adapters.slack import here as module
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    client, runtime = _review_client(connect=True), _review_runtime(db_session_factory)
+    load = _wire_review_here(monkeypatch, client)
+    rule = ChannelRule(readers="own", writers="own") if readers == "own" else ChannelRule()
+    monkeypatch.setattr(
+        module,
+        "load_access_policy",
+        AsyncMock(return_value=TenantAccessPolicy(channel_rules={"C1": rule})),
+    )
+    rate_limit = SlackApiError("ratelimited", MagicMock(data={"error": "ratelimited"}))
+    if phase == "requester":
+        client.users_info.side_effect = rate_limit
+    else:
+        client.users_conversations.side_effect = rate_limit
+    await handle_here_command(runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U_CALLER"})
+    load.assert_not_awaited()
+    module.find_platform_principal.assert_not_awaited()
+    client.chat_postEphemeral.assert_awaited_once()
+    attachment = client.chat_postEphemeral.await_args.kwargs["attachments"]
+    assert ("outside your organisation" in str(attachment)) is (readers != "own")
+    assert "Some channel details are unavailable" in str(attachment)
+    assert "ResearchBot" not in str(attachment)
+    assert "Make confidential" not in str(attachment), (
+        "no admin actions survive incomplete metadata"
+    )
+    assert "actions" not in str(attachment)
+
+
+async def test_whole_here_repeated_rate_limits_preserve_known_outside_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, runtime = _review_client(connect=True), _review_runtime(db_session_factory)
+    load = _wire_review_here(monkeypatch, client)
+    client.users_info.side_effect = SlackApiError(
+        "ratelimited", MagicMock(data={"error": "ratelimited"})
+    )
+    for _ in range(3):
+        await handle_here_command(
+            runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U_CALLER"}
+        )
+    load.assert_not_awaited()
+    assert client.conversations_info.await_count == 3
+    for call in client.chat_postEphemeral.await_args_list:
+        attachment = str(call.kwargs["attachments"])
+        assert "outside your organisation" in attachment
+        assert SLACK_GUESTS_UNCHECKED in attachment
+        assert "Make confidential" not in attachment
+        assert "ResearchBot" not in attachment
+
+
+async def test_whole_here_info_failure_uses_outsider_note_and_hides_details(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, runtime = _review_client(connect=True), _review_runtime(db_session_factory)
+    load = _wire_review_here(monkeypatch, client)
+    client.conversations_info.side_effect = SlackApiError(
+        "ratelimited", MagicMock(data={"error": "ratelimited"})
+    )
+    await handle_here_command(runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U_CALLER"})
+    load.assert_not_awaited()
+    attachment = str(client.chat_postEphemeral.await_args.kwargs["attachments"])
+    assert "Outsider check skipped" in attachment
+    assert "Guest check skipped" not in attachment
+    assert "ResearchBot" not in attachment
+    assert "Make confidential" not in attachment
