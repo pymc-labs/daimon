@@ -50,7 +50,8 @@ async def lock_funds(
     upgrade two such transactions deadlock on; refused below). Never hold over native
     I/O.
     """
-    if financial and session.info.get(_LEDGER_SHARE_TAKEN) is session.get_transaction():
+    inserted_in = session.info.get(_LEDGER_SHARE_TAKEN)
+    if financial and inserted_in is not None and inserted_in is session.get_transaction():
         raise RuntimeError(
             "lock a tenant's funds before inserting into its ledger in one transaction"
         )

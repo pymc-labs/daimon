@@ -154,8 +154,9 @@ def render_env_example() -> str:
     lines.append("# 7-key flat env read by daimon.core.billing.load_billing_config.")
     lines.append("# No DAIMON_ prefix. Billing is disabled (not an error) when any is unset.")
     lines.append("# With billing disabled, /billing top-ups can't create a checkout. Credit")
-    lines.append("# manually: insert a tenant_ledger row (delta_usd > 0, reason='topup', a")
-    lines.append("# unique idempotency_key — its unique index makes a re-run a no-op).")
+    lines.append("# manually with `daimon tenants credit <platform> <workspace_id> <usd> --note")
+    lines.append("# ...` (reuse `--id` to retry safely). Never insert ledger rows by hand: the")
+    lines.append("# CLI takes the tenant lock a funds check relies on.")
     for name in BILLING_FLAT_VARS:
         lines.append(f"# {name}=")
     lines.append("")
