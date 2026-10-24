@@ -133,7 +133,7 @@ class Chat:
     trace: ScriptedTransport
 
 
-@pytest.fixture(params=("admin",))
+@pytest.fixture(params=("member", "admin"))
 async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     """The built-in Daimon answering a person's first message in a fresh public channel."""
     from daimon.core.provider_keys import DEFAULT_KEY_ENV
