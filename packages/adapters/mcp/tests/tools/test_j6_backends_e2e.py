@@ -38,7 +38,7 @@ def _gap(reason: str):
 
 J6B = "J6 (b) skills/built-in tools off Anthropic: scope waits on ROOT/Carlos (J6-OPTIONS.md)"
 LEGS = [
-    pytest.param("openai", "mcp", marks=_gap("GPT roots keep no Daimon MCP - nc-defaults #1441")),
+    pytest.param("openai", "mcp"),  # #1441: GPT roots keep Daimon MCP
     pytest.param("openai", "skill", marks=_gap(J6B)),
     pytest.param("openai", "builtin", marks=_gap(J6B)),
     pytest.param("gemini", "mcp"),
