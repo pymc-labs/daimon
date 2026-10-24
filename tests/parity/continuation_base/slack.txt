@@ -51,7 +51,7 @@ async def dispatch_pending_continuations(sessionmaker: async_sessionmaker[AsyncS
         request = ContinuationRequest(tenant_id=row.tenant_id, platform='slack', parent_channel_id=row.parent_channel_id, thread_id=row.thread_id, requester_account_id=row.requester_account_id, requester_external_user_id=row.requester_external_user_id, target_ma_agent_id=row.target_ma_agent_id, target_name=row.target_name, requested_work=row.requested_work, reason=row.reason, idempotency_key=row.idempotency_key)
         latest_user_message_at = await _latest_human_message_at(web_client, channel=channel, thread_ts=thread_id, after=row.created_at)
         decision = await decide_continuation(sessionmaker, anthropic, request=request, now=now(), latest_user_message_at=latest_user_message_at, active_turn=active_turn)
-        if decision.action == 'skip_turn_running' and row.available_at is not None:
+        if decision.action == 'skip_turn_running' and (row.available_at is not None or row.reason == 'task_handoff'):
             await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
             continue
         if decision.action == 'dispatch':
