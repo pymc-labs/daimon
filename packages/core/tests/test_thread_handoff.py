@@ -779,3 +779,64 @@ async def test_owning_a_copy_never_lifts_the_channels_rules(
             await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
     assert refused.value.refusal.reason == reason
     assert await _binding(db_session_factory, tenant.id) is None
+
+
+@pytest.mark.parametrize("change", ["reassigned", "cleared"])
+async def test_an_owner_thread_stops_routing_when_its_copy_changes_owner(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], change: str
+) -> None:
+    from daimon.core.errors import UserFacingError
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores import agent_owners
+    from daimon.core.stores.scoped_config_read import resolve
+
+    tenant = await _seed(db_session)
+    member = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    await db_session.commit()
+    async with db_session_factory.begin() as session:
+        await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    copy_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_copy")
+    async with db_session_factory.begin() as session:
+        await agent_owners.clear_owner(session, tenant_id=tenant.id, agent_id=copy_id)
+        if change == "reassigned":
+            await agent_owners.set_owner(
+                session,
+                tenant_id=tenant.id,
+                agent_id=copy_id,
+                owner_account_id=other.id,
+                source="admin_assigned",
+            )
+    here = ScopeContext(
+        tenant_id=tenant.id, channel_id="C1", account_id=member.id, platform="slack", thread_id="T1"
+    )
+    async with db_session_factory() as session:
+        with pytest.raises(UserFacingError, match="changed owner"):
+            await resolve(session, context=here, default=_DEFAULT)
+
+
+async def test_an_owner_thread_never_routes_a_caller_with_no_account(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.scope import ScopeContext
+    from daimon.core.stores.scoped_config_read import resolve
+
+    tenant = await _seed(db_session)
+    member = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    await db_session.commit()
+    async with db_session_factory.begin() as session:
+        await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    anonymous = ScopeContext(tenant_id=tenant.id, channel_id="C1", platform="slack", thread_id="T1")
+    async with db_session_factory() as session:
+        config = await resolve(session, context=anonymous, default=_DEFAULT)
+    # Fail closed: the channel's own agent, never the private copy.
+    assert config.responder_ma_agent_id != "agt_copy" and config.thread_binding_id is None
