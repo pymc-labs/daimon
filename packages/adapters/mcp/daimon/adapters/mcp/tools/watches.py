@@ -385,7 +385,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         interval: int = 300,
         lifetime_days: int = 7,
     ) -> WatchSummary:
-        """Watch an OS page event or a reviewed OS read tool from this conversation.
+        """Watch a reviewed Discord read tool from this conversation.
 
         Binds the current human owner, tenant, agent and exact Discord thread.
         Requires an attended turn origin and verified owner card approval.
@@ -398,8 +398,10 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expressions are refused. Polls start with a saved baseline and compare
         change, added array elements, or updated object keys every 60–86400 seconds.
         Lifetime is 1–30 days. Producers remain disabled until both operator gates
-        are enabled. Page signing keys are sent privately to the owner once and
-        never returned here; install them on the OS host and sidecar privately.
+        are enabled. Page-event registration exists, but page-event watches are not
+        yet delivered: no host produces signed events and sidecar verification is
+        not connected to per-watch keys. Page signing keys are sent privately to
+        the owner once and never returned here.
         """
         return await create_watch_impl(
             runtime,

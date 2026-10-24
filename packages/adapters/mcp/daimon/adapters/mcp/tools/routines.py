@@ -1019,8 +1019,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
         optionally name where each run's result goes. Channel/thread runs are
-        told where; if the agent does not post there itself, daimon posts the end
-        of its final reply there. Owner-DM runs queue their successful final reply
+        told where; if the agent does not post there itself, Daimon posts its full
+        final reply there. Owner-DM runs queue their successful final reply
         privately for the owner. Use the canonical thread identifier returned by
         this platform's read tools, in a channel you are in. Where DM delivery is
         supported, ``dm`` delivers only to the authenticated owner; omit

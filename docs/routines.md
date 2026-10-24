@@ -66,9 +66,11 @@ agent, and prints the resolved recipient and budget source. An optional
 `--source-channel` must resolve to a supported channel or thread in the selected
 tenant's Discord guild. Threads retain their parent for budgeting and their own
 ID for source restriction checks. Dry-run performs the same source verification
-and sealing checks as a save. There is no independent recipient option. Use MCP or the owner-only delivery choice in `/routines`
-for interactive edits; list/get include the resolved owner ID and delivery
-status. `clear_destination=true` retains its existing meaning.
+and sealing checks as a save. There is no independent recipient option. Use MCP
+for owner edits. The Discord `/routines` panel requires Manage Server; its
+delivery choice is available only when that admin owns the routine. MCP list/get
+include the resolved owner ID and delivery status. `clear_destination=true`
+retains its existing meaning.
 
 A one-off "remind me in two hours" or "check back tomorrow at nine" is not a
 routine. Use a timer (`create_timer`, see [mcp-tools.md](mcp-tools.md#timers))
@@ -186,8 +188,8 @@ The platform surfaces differ, and the difference is deliberate:
   (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). Its form
   and schedule words read the same as Slack's. The shared rules (glyph, label,
   ordering, admin-or-creator) live in `daimon.core.routines`.
-- **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
-  view its last output. Creating one on Discord means asking the agent in
+- **Discord** `/routines` requires **Manage Server** and is read-mostly: pick a
+  routine, pause or resume it, view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
   (`packages/adapters/discord/daimon/adapters/discord/routines_panel/`).
 - The CLI has no routine CRUD. `daimon routines backfill-agent-names` is an
@@ -466,7 +468,7 @@ and queued work, recording `scheduler_shutdown` for cancelled tasks.
 | --- | --- | --- | --- |
 | create | a caller with a platform user identity, for the agent they are talking to or the one the destination channel answers with; any agent for an admin | via the agent calling the tool | workspace admin only |
 | list / read last output | admin or the routine's creator | `Manage Server`, and only the command's invoker | admin or the routine's creator (the panel lists only your own routines unless you are an admin) |
-| pause / resume | `update_routine`: admin or creator | admin or creator, re-checked at click | admin or creator |
+| pause / resume | `update_routine`: admin or creator | `Manage Server`, re-checked at click | admin or creator |
 | delete | admin or creator | not offered | admin or creator |
 
 Ownership is `created_by_user_id`, and the check fails closed on both nulls:
@@ -726,9 +728,9 @@ invoker-policy bypass; destination and agent restrictions remain separate.
 ### Sandbox tools
 
 Built-in sandbox tools are off for every routine run by default. They can be
-turned on for one channel or thread routine at a time, for that routine's own
-scheduled runs only. DM routines cannot be opted in: they run as the owner's
-private DM turn. Owning a routine is not enough to opt it in.
+turned on for one channel, thread or destination-free routine at a time, for
+that routine's own scheduled runs only. DM routines cannot be opted in: they run
+as the owner's private DM turn. Owning a routine is not enough to opt it in.
 
 An opt-in covers exactly the agent and environment the routine runs with when
 it is made. **Built-ins are enabled for a run only when the run's agent

@@ -1546,10 +1546,10 @@ proxy.
 
 `bool` · optional · default `False`
 
-Enable OS-signed page-event and reviewed READ-tool polling producers and dispatch. Keep
-disabled until the execution-bound unattended origin grants, non-gateable cleanup and
-watch release are reviewed. The database global gate must also be explicitly enabled by
-an operator.
+Enable reviewed Discord READ-tool polling and watch dispatch. Page-event watches have no
+connected producer or per-watch sidecar key integration. Keep disabled until the
+execution-bound unattended origin grants, non-gateable cleanup and watch release are
+reviewed. The database global gate must also be explicitly enabled by an operator.
 
 ## Private Channel Messages
 

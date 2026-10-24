@@ -2076,8 +2076,8 @@
         <blank line>
         ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
         optionally name where each run's result goes. Channel/thread runs are
-        told where; if the agent does not post there itself, daimon posts the end
-        of its final reply there. Owner-DM runs queue their successful final reply
+        told where; if the agent does not post there itself, Daimon posts its full
+        final reply there. Owner-DM runs queue their successful final reply
         privately for the owner. Use the canonical thread identifier returned by
         this platform's read tools, in a channel you are in. Where DM delivery is
         supported, ``dm`` delivers only to the authenticated owner; omit
@@ -2267,7 +2267,7 @@
     }),
     'create_watch': dict({
       'description': '''
-        Watch an OS page event or a reviewed OS read tool from this conversation.
+        Watch a reviewed Discord read tool from this conversation.
         <blank line>
         Binds the current human owner, tenant, agent and exact Discord thread.
         Requires an attended turn origin and verified owner card approval.
@@ -2280,8 +2280,10 @@
         expressions are refused. Polls start with a saved baseline and compare
         change, added array elements, or updated object keys every 60–86400 seconds.
         Lifetime is 1–30 days. Producers remain disabled until both operator gates
-        are enabled. Page signing keys are sent privately to the owner once and
-        never returned here; install them on the OS host and sidecar privately.
+        are enabled. Page-event registration exists, but page-event watches are not
+        yet delivered: no host produces signed events and sidecar verification is
+        not connected to per-watch keys. Page signing keys are sent privately to
+        the owner once and never returned here.
       ''',
       'parameters': dict({
         'additionalProperties': False,

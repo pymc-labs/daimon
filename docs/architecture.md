@@ -2444,8 +2444,9 @@ route-bound server selector, including pagination for more than 25 servers. It r
 the original message for five minutes and rechecks eligibility on selection. Later
 messages on that route are silently ignored while selection is pending. After expiry,
 the next message discovers again. Unknown membership asks for a retry rather than
-presenting an incomplete choice. No eligible tenant means no reply and a structured
-reason log. Discovery and server switching share a per-user bucket of three attempts,
+presenting an incomplete choice. No eligible tenant means no model turn and a structured
+reason log; Daimon sends a one-time `/dm-me` guidance reply per person per process.
+Discovery and server switching share a per-user bucket of three attempts,
 refilling one every 20 seconds; exhaustion is silent. Ordinary active replies do not
 consume this bucket. Pending controls and rate buckets are process-local; a restart
 invalidates selectors, so the person sends a new message.
@@ -2624,10 +2625,13 @@ which may contain signed upload URLs.
 
 ### Signed page-event watch entry point
 
-OS page hosts sign events after their own ACL/CSRF checks. The sidecar verifies
-HMAC, binding, freshness and replay before acknowledging a transaction that stores
-evidence and enqueues a `watch_fired` wake. It has no direct table access or turn
-runner; core's durable queue handles dispatch. Discord, Slack and Teams share
+Only polled Discord `read_thread` and `read_channel` watches work end to end.
+Page-event watches are not yet delivered: no host calls `sign_page_event`, and
+the sidecar has no integration for the per-watch signing key. Notion, Linear,
+HubSpot, URL and webhook watches therefore cannot fire through this path.
+The callback infrastructure verifies HMAC, binding, freshness and replay before
+acknowledging a transaction that stores evidence and enqueues a `watch_fired` wake.
+It has no direct table access or turn runner; core's durable queue handles dispatch. Discord, Slack and Teams share
 compatible readers; CLI and scheduler do not dispatch continuations. Old readers
 ignore the new reason before batching, preserving unrelated work on rollback.
 
@@ -2696,8 +2700,9 @@ back off exponentially to one day; revoked access pauses the watch and cancels w
 MCP enrollment requires an attended turn origin and binds its tenant, owner, agent,
 thread, parent and session. Owner/admin management cancels queued wakes on pause,
 rotation and deletion. Fresh signing keys go only to the owner's private DM, once;
-MCP results and stored rows contain no plaintext key. Operators install the delivered
-key on the OS host and sidecar. The offline CLI importer accepts no signing keys,
+MCP results and stored rows contain no plaintext key. Key delivery alone does not
+connect a page producer or configure sidecar verification. The offline CLI
+importer accepts no signing keys,
 imports everything paused, and requires explicit exact-binding confirmation before
 activation. An unmapped source cannot be confirmed or resumed. The existing Discord
 notice poller sends its owner a private migration notice without running a model or
