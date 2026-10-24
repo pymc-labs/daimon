@@ -435,41 +435,48 @@ async def _fleet_worker_money(
         return max(floor, debit), debit, bool(usage.unpriced_observations), False, state
 
 
+_UNANSWERED_SENDS = ("sent", "accepted", "outcome_unknown")
+
+
+async def _worker_sends(
+    session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
+) -> list[str]:
+    """Statuses of every input send of the worker, in either key form: the creation
+    input's `<spawn>:send:N` and a prepared turn's `turn:<session>:<spawn>:send:N`."""
+    return await mux_state.send_statuses(
+        session,
+        tenant_id=tenant_id,
+        account_id=run.orchestrator_account_id,
+        pattern=f"%{spawn_operation_key(run.id, worker.ordinal)}:send:%",
+    )
+
+
 async def _input_sent(
     session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
 ) -> bool:
     """Whether the worker may have been sent its input (and so made a model call).
 
     Never sent needs both records to agree: the worker store counted no accepted input
-    or claim attempt, and its send operation is absent or still pending. Some send
-    paths keep no operation row, so an absent row alone proves nothing.
+    or claim attempt, and none of its sends got past pending. Some send paths keep no
+    operation row, so absent rows alone prove nothing.
     """
     if worker.turns_used or worker.attempts:
         return True
-    status = await mux_state.operation_status(
-        session,
-        tenant_id=tenant_id,
-        account_id=run.orchestrator_account_id,
-        key=spawn_operation_key(run.id, worker.ordinal) + ":send:0",
+    return any(
+        status != "pending" for status in await _worker_sends(session, tenant_id, run, worker)
     )
-    return status not in (None, "pending")
 
 
 async def _turn_in_flight(
     session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
 ) -> bool:
-    """Whether the worker may still be spending: its slot's lease is unexpired, or its
-    input send is unanswered (sent, accepted or of unknown outcome)."""
+    """Whether the worker may still be spending: its slot's lease is unexpired, or any
+    of its sends is unanswered (sent, accepted or of unknown outcome)."""
     lease = await mux_state.active_lease(session, worker_slot(run, worker))
     if lease is not None and lease.expires_at > await mux_state.database_clock(session):
         return True
-    status = await mux_state.operation_status(
-        session,
-        tenant_id=tenant_id,
-        account_id=run.orchestrator_account_id,
-        key=spawn_operation_key(run.id, worker.ordinal) + ":send:0",
-    )
-    return status in ("sent", "accepted", "outcome_unknown")
+    sends = await _worker_sends(session, tenant_id, run, worker)
+    return any(status in _UNANSWERED_SENDS for status in sends)
 
 
 async def _prefetch_fleet_money(
@@ -503,13 +510,15 @@ def _root_money(record: OperationRecord) -> tuple[Decimal, Decimal]:
 
 
 async def _root_released(session: AsyncSession, record: OperationRecord, now: datetime) -> bool:
-    """A root past its deadline whose turn ended and whose usage is all on the ledger
-    holds nothing more.
+    """A root past its deadline whose turn has ended and whose usage is all on the
+    ledger holds nothing more.
 
     Its turn can no longer spend, and what it spent is already debited from the
-    balance. A root without a readable deadline, without a terminal record of its input
-    (processed or failed), without a binding, or with usage not yet applied (unknown
-    price or infrastructure) keeps its hold.
+    balance. A past deadline alone doesn't end a turn (its `fleet_root:` operation is
+    processed at run setup, before any model call), so the turn must also be over: no
+    unexpired lease on the root's slot and no unanswered send on its native session.
+    A root without a readable deadline, without a binding (read with released slots,
+    whose old rows still count), or with usage not yet applied keeps its hold.
     """
     controls = record.result.get("root_controls")
     if not isinstance(controls, dict) or record.slot is None:
@@ -520,15 +529,23 @@ async def _root_released(session: AsyncSession, record: OperationRecord, now: da
         return False
     if deadline.tzinfo is None or deadline > now:
         return False
-    # A past deadline alone doesn't end a turn: its input must have a terminal record.
-    if record.operation.status not in ("processed", "failed"):
-        return False
-    # A released slot's binding still owns its old usage rows; a slot with no binding
-    # at all can't prove where its usage went.
     binding = await mux_state.get_binding(session, record.slot, include_released=True)
-    return binding is not None and not await mux_state.binding_has_pending_outbox(
-        session, binding.id
+    native = binding.native_refs.get("session") if binding is not None else None
+    account_id = record.slot.account_id
+    if binding is None or not native or account_id is None:
+        return False
+    lease = await mux_state.active_lease(session, record.slot)
+    if lease is not None and lease.expires_at > now:
+        return False
+    sends = await mux_state.send_statuses(
+        session,
+        tenant_id=uuid.UUID(record.slot.tenant_id),
+        account_id=account_id,
+        pattern=f"turn:{native}:%",
     )
+    if any(status in _UNANSWERED_SENDS for status in sends):
+        return False
+    return not await mux_state.binding_has_pending_outbox(session, binding.id)
 
 
 async def _financial_room(

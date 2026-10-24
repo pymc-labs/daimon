@@ -199,7 +199,7 @@ async def test_a_finished_worker_sent_its_input_with_no_usage_recorded_keeps_its
     assert kept.reserved_usd == Decimal(1)
 
 
-@pytest.mark.parametrize("evidence", ["lease", "unanswered_send"])
+@pytest.mark.parametrize("evidence", ["lease", "unanswered_send", "prepared_turn_send"])
 async def test_a_deadline_swept_worker_still_mid_turn_keeps_its_hold(sm, evidence):
     """The deadline sweep marks a worker failed without stopping its native turn: an
     unexpired lease on its slot, or an unanswered send, means it may still be spending,
@@ -224,11 +224,26 @@ async def test_a_deadline_swept_worker_still_mid_turn_keeps_its_hold(sm, evidenc
                 ttl=timedelta(minutes=5),
             )
         else:
+            spawn = spawn_operation_key(run.id, worker.ordinal)
+            if evidence == "prepared_turn_send":
+                # A prepared turn sends on its own key form; its lease has expired.
+                await mux_state.acquire_lease(
+                    db,
+                    worker_slot(run, worker),
+                    holder="worker",
+                    turn_id="current",
+                    clock=mux_state.database_clock,
+                    ttl=timedelta(milliseconds=1),
+                )
             await db.execute(
                 insert(MuxOperation).values(
                     tenant_id=run.tenant_id,
                     account_id=str(run.orchestrator_account_id),
-                    key=spawn_operation_key(run.id, worker.ordinal) + ":send:0",
+                    key=(
+                        f"turn:native-{worker.id}:{spawn}:send:0"
+                        if evidence == "prepared_turn_send"
+                        else spawn + ":send:0"
+                    ),
                     principal_id=str(run.orchestrator_account_id),
                     status="sent",
                     record={},

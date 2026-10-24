@@ -664,19 +664,22 @@ async def get_operation(session: AsyncSession, scope: Scope, key: str) -> Operat
     return record
 
 
-async def operation_status(
-    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, key: str
-) -> str | None:
-    """An operation's status by its stored identity (tenant, owning account, key).
+async def send_statuses(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID | str, pattern: str
+) -> list[str]:
+    """Statuses of the account's operations whose key matches the LIKE `pattern`.
 
-    For a reader that holds the tenant's financial lock and must see another
-    account's run, not only the caller's scope. None when no such operation exists.
+    For a reader under the tenant's financial lock that must see every send of a
+    worker or root turn, whichever key form it took (the creation input's
+    `<spawn>:send:N` or a prepared turn's `turn:<session>:<spawn>:send:N`).
     """
-    return await session.scalar(
-        select(MuxOperation.status).where(
-            MuxOperation.tenant_id == tenant_id,
-            MuxOperation.account_id == str(account_id),
-            MuxOperation.key == key,
+    return list(
+        await session.scalars(
+            select(MuxOperation.status).where(
+                MuxOperation.tenant_id == tenant_id,
+                MuxOperation.account_id == str(account_id),
+                MuxOperation.key.like(pattern),
+            )
         )
     )
 
