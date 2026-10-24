@@ -30,7 +30,6 @@ def validation_error() -> ValidationError:
         WorkerSpecRefused("backend", "not_subset"),
         FleetRefused("run_limit_reached"),
         FleetConflict("claim changed", reason="claim_changed"),
-        UnsupportedCapability(("x",), "anthropic.managed_agents"),
         ProviderError("invalid_request", retryable=False),
     ],
 )
@@ -328,3 +327,25 @@ async def test_the_budget_watch_stamps_its_cancel_reason():
     assert first.reason == "shutdown"
     assert set(_CANCEL_CODES.values()) <= set(WORKER_ERROR_TEXT)
     assert WORKER_ERROR_TEXT[_CANCEL_CODES["shutdown"]].startswith("Daimon restarted")
+
+
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+def test_a_worker_whose_model_cant_run_its_setup_says_so_plainly(phase):
+    # Carlos's Opus worker f95639c4: "Daimon refused to start it" hid what went wrong.
+    error = UnsupportedCapability(("session_resource",), "anthropic.managed_agents")
+    code = worker_failure_code(error, phase)
+    assert code == "capability_unsupported"
+    text = worker_error_text(code, ref="f95639c4")
+    assert text is not None and text.startswith("its model can't run here")
+    assert text.endswith("(ref f95639c4)")
+
+
+def test_refusal_causes_name_our_capabilities_and_redact_user_names():
+    from daimon.core.channel_backend import backend_refusal_causes
+
+    error = UnsupportedCapability(
+        ("session_resource", "environment_sources", "mcp_tool:acme:secret_tool", "Bad Name"),
+        "anthropic.managed_agents",
+    )
+    (cause,) = backend_refusal_causes(error)
+    assert cause["missing"] == ["environment_sources", "redacted", "session_resource"]

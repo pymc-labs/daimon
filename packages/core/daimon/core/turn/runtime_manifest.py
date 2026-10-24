@@ -3216,7 +3216,23 @@ async def read_preparation_counterpart(
         raise AdmissionDenied(reason="backend_unsupported") from error
     except (UnsupportedCapability, TimeoutError, TurnError) as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
-    except Exception:
+    except Exception as error:
+        from daimon.core.observability import redact_text
+
+        # Anything else becomes the generic refusal; name it once so the cause of
+        # a counterpart that wouldn't prepare is never lost (smoke a1d991fb: Gemini
+        # copies and a Flash worker refused here with nothing logged).
+        log.warning(
+            "turn.preparation_counterpart_error",
+            error_class=type(error).__name__,
+            error=redact_text(str(error))[:300],
+            profile=(
+                request.admission.backend_revision.profile
+                if request.admission.backend_revision is not None
+                else None
+            ),
+            worker=request.worker is not None,
+        )
         raise AdmissionDenied(reason="backend_unsupported") from None
 
 
