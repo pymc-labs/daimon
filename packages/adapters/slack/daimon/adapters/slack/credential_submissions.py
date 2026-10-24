@@ -288,7 +288,6 @@ async def _decide_mcp_connect_at_submit(
     client: AsyncWebClient,
     *,
     row: CredentialRequestRow,
-    team_id: str,
     user_id: str,
 ) -> McpConnectDecision:
     """Re-decide an MCP token submission against the person submitting it.
@@ -917,9 +916,7 @@ async def run_mcp_credential_submission(
         return
 
     connect, now = await prepare_mcp_submit(
-        decide=lambda: _decide_mcp_connect_at_submit(
-            runtime, client, row=request, team_id=team_id, user_id=user_id
-        ),
+        decide=lambda: _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id),
         clock=lambda: datetime.now(UTC),
     )
     try:
