@@ -2812,3 +2812,16 @@ async def test_a_root_gone_stale_mid_turn_keeps_its_card_instead_of_failing_ever
     assert await card.refresh() is True
     assert await card.refresh() is True
     assert edit.await_count == edits
+
+
+def test_a_claude_worker_of_an_app_repository_agent_shows_its_repository_as_lost():
+    # Carlos's Opus worker f95639c4: its agent has GitHub App repositories, which no
+    # worker carries. The worker now runs, and the card says what it runs without.
+    copy = worker()
+    spec = {
+        **copy.spec,
+        "name": "Opus worker",
+        "declared_drops": sorted({*copy.spec.get("declared_drops", ()), "repository"}),
+    }
+    view = build_fleet_view(run(), (replace(copy, spec=spec, model="claude-opus-5-5"),))
+    assert any("without its repository" in text for text in _view_texts(view))

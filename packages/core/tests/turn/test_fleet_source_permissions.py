@@ -537,11 +537,12 @@ async def test_native_clone_inherits_only_the_projected_ceiling(captured):
     assert {c["name"] for t in payload["tools"] for c in t["configs"]} == set(_HAIKU55_BUILTINS)
 
 
+@pytest.mark.parametrize("app_repos", [False, True])
 @pytest.mark.parametrize(
     "captured", ("haiku55", "haiku55_credentials", "haiku55_effort"), indirect=True
 )
 async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
-    captured, owned, monkeypatch
+    captured, owned, monkeypatch, app_repos
 ):
     from daimon.core.config import McpSettings
     from daimon.core.mux_compat import sdk_agent
@@ -552,6 +553,35 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
     from pydantic import SecretStr
 
     source, _, _, _, policy, _ = captured
+    # Whether this fixture's own source needs Daimon MCP settings (before App repos).
+    needs_mcp = bool(source.resource_requirements)
+    if app_repos:
+        # Carlos's Opus worker f95639c4: an agent with GitHub App repositories. Its
+        # workers declare them lost (they're cloned with the App's login); the bind
+        # refused on the root's unstripped repositories anyway.
+        from daimon.core.caller_resources import APP_SESSION_VAULT_PREFIX
+        from mux.contracts.resources import ResourceBinding, WorkspaceSource
+
+        source = source.model_copy(
+            update={
+                "repository_sources": (
+                    WorkspaceSource(
+                        kind="repository",
+                        target_path="/workspace/acme/app",
+                        repository_url="https://github.com/acme/app",
+                        credential_ref=f"app-repo:{source.tenant_id}:{source.agent_id}:1:1:1",
+                    ),
+                ),
+                "resource_requirements": (
+                    *source.resource_requirements,
+                    ResourceBinding(
+                        id=f"{APP_SESSION_VAULT_PREFIX}{source.tenant_id}:{source.agent_id}",
+                        kind="native",
+                    ),
+                ),
+            }
+        )
+        captured = (source, *captured[1:])
     from daimon.core import sessions as session_module
 
     async def no_root_env(*args, **kwargs):
@@ -570,6 +600,14 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
     monkeypatch.setattr(session_module, "_session_app_mode", root_in_app_mode)
     monkeypatch.setattr(session_module, "effective_app_grant_view", no_root_vault)
     monkeypatch.setattr(session_module, "create_session_vault", no_root_vault)
+    if app_repos:
+        # The root's own recapture reads the agent's declared App repositories, as live.
+        declared = source.repository_sources
+
+        async def declared_app_repositories(*args, **kwargs):
+            return declared
+
+        monkeypatch.setattr(session_module, "declared_app_repositories", declared_app_repositories)
     permissions = compose(captured)
     worker = resolve_worker_spec(
         permissions,
@@ -633,7 +671,7 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
         McpSettings(
             public_url="https://mcp.invalid/mcp", jwt_secret=SecretStr("offline-placeholder")
         )
-        if source.resource_requirements
+        if needs_mcp
         else None
     )
     async with trace.client() as client:
@@ -696,6 +734,12 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
     assert not result.agent.mcp_servers
     assert len(result.agent.skills) == 11
     assert len(result.resources) == 1
+    # The App repositories are the worker's declared loss, and none is mounted.
+    assert ("repository" in worker.spec.declared_drops) is app_repos
+    assert not any(
+        resource.get("type") == "github_repository"
+        for resource in snapshots["session"].get("resources") or ()
+    )
     assert len(executing.tools) == 1
     assert agent_payload(worker.spec)["tools"][0]["default_config"]["enabled"] is False
     assert not any("vault" in call.path for call in trace.requests)

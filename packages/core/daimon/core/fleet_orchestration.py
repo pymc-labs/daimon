@@ -133,6 +133,7 @@ WorkerFailureCode = Literal[
     "provider_not_allowed",
     "channel_backend_pinned",
     "worker_runtime_missing",
+    "capability_unsupported",
     "provider_daily_cap_reached",
     "provider_price_unavailable",
     "setup_error",
@@ -274,7 +275,7 @@ def worker_failure_code(
     from daimon.core.neutral_resources import WorkerSpecRefused
     from daimon.core.session_fence_retry import FenceUnavailable
     from daimon.core.stores.access_policy import PolicyBusyError
-    from mux.errors import MuxError
+    from mux.errors import MuxError, UnsupportedCapability
 
     if isinstance(error, FleetConflict) and error.reason == "worker_setup_busy":
         # Our own setup or a busy fleet lock, in either phase: never the model's fault.
@@ -299,7 +300,13 @@ def worker_failure_code(
         # person's Stop is kept as stop_requested by the transition itself.
         return "watch_ended"
     if not isinstance(error, Exception) or isinstance(error, refusal):
-        return _admission_cause(error) or phase
+        if (cause := _admission_cause(error)) is not None:
+            return cause
+        if any(isinstance(current, UnsupportedCapability) for current in _chain(error)):
+            # The model can't run with something its setup needs here (Carlos's Opus
+            # worker f95639c4): say so plainly, not "Daimon refused to start it".
+            return "capability_unsupported"
+        return phase
     if isinstance(error, _provider_failures()):
         return "provider_error"
     return "setup_error"

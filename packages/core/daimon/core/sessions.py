@@ -726,18 +726,41 @@ async def create_session(
         # Source authority is refreshed before resource effects and at the existing final fence.
         await before_create()
         memoryless = "memory" in worker.spec.declared_drops
-        if (
-            (resource_source.memory_store_id is None and not memoryless)
-            # A native session always runs in its environment: a sandbox loss
-            # has no proven native form, so it still refuses here.
-            or "sandbox" in worker.spec.declared_drops
-            or worker_source_ceiling(resource_source).resource_requirements
-            or resource_source.repository_sources
-            or extra_resources
-        ):
-            raise UnsupportedCapability(
-                ("native_worker_resource_projection",), worker.backend.profile
-            )
+        ceiling = worker_source_ceiling(resource_source)
+        # A repository the ceiling dropped (one cloned with a login, e.g. every GitHub
+        # App repository) is the worker's declared loss, and a worker session never
+        # mounts one (it gets no App vault or repository grant below). Only a
+        # repository the ceiling kept would need a worker form, which none has yet.
+        dropped_repositories = len(ceiling.repository_sources) != len(
+            resource_source.repository_sources
+        )
+        refusal = next(
+            (
+                name
+                for name, refused in (
+                    (
+                        "worker_memory_store_absent",
+                        resource_source.memory_store_id is None and not memoryless,
+                    ),
+                    # A native session always runs in its environment: a sandbox loss
+                    # has no proven native form, so it still refuses here.
+                    ("worker_sandbox_drop", "sandbox" in worker.spec.declared_drops),
+                    ("worker_resource_requirements", bool(ceiling.resource_requirements)),
+                    ("worker_repository_sources", bool(ceiling.repository_sources)),
+                    (
+                        "worker_repository_undeclared",
+                        dropped_repositories and "repository" not in worker.spec.declared_drops,
+                    ),
+                    ("worker_extra_resources", bool(extra_resources)),
+                )
+                if refused
+            ),
+            None,
+        )
+        if refusal is not None:
+            # One closed name per condition, so a refusal says which (Carlos's Opus
+            # worker f95639c4 refused on the unstripped repositories of an App agent).
+            raise UnsupportedCapability((refusal,), worker.backend.profile)
         if len(worker.resources) != (0 if memoryless else 1):
             raise ScopeViolation(
                 "worker-resources",
