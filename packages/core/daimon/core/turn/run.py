@@ -1333,7 +1333,7 @@ async def run_prepared_turn_impl(
                                         public_url=deps.public_url,
                                         session_factory=deps.sessionmaker,
                                         tenant_id=tenant_id,
-                                        allow_builtins=False,
+                                        allow_builtins=capability_policy("wake").allow_builtins,
                                         allow_skills=capability_policy("wake").allow_skills,
                                         tool_allowlist=_JOB_ALLOWLIST,
                                     )

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from daimon.core._models import (
     Account,
     TaskContinuation,
+    Tenant,
     Watch,
     WatchCapability,
     WatchControl,
@@ -902,6 +903,10 @@ async def claim_import_notice(
         select(Watch)
         .where(
             Watch.platform == "discord",
+            # Keep expiries older than 24 hours silent; failed deliveries retry every
+            # five minutes within this window, allowing for outages and deploys.
+            or_(Watch.status != "expired", Watch.expires_at >= now - timedelta(hours=24)),
+            Watch.tenant_id.in_(select(Tenant.id).where(Tenant.archived_at.is_(None))),
             or_(
                 pending & (reason == "source_unmapped"),
                 lifecycle

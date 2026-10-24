@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Skip archived workspaces when draining watch notices so other owners still receive
+  theirs, and limit expired-watch notices to watches that expired within the last 24 hours.
+
 - Explain queued mentions once a previous turn has run for three minutes on Discord,
   Slack and Teams; bound upstream liveness reads while retaining turn ownership
   when status is unknown. Turn mutations retain their original timeout and disable
