@@ -151,6 +151,12 @@ class BackendSwitchReference(BaseModel):
         ).validate_python(value)
 
 
+def _settings_key(reference: ConfigurationReference) -> str:
+    """Whose setting a settings card changes: the agent's, else the operation's own
+    (the server's providers, the chat's pin)."""
+    return reference.agent_name or reference.operation
+
+
 def _forked_copy(agent: BackendAgent) -> bool:
     """A copy fork_agent made in a conversation: its switch may hand it that
     conversation (J1), so its answers are bound to the preview they answered."""
@@ -884,11 +890,29 @@ def backend_switch_callbacks(
         return agent, preview, reference
 
     async def verified_configuration(
-        prompt: ConfirmationPrompt, clicker: str
-    ) -> tuple[str, tuple[str, ...]]:
+        prompt: ConfirmationPrompt, clicker: str, *, refresh: bool = False
+    ) -> tuple[str, tuple[str, ...], ConfigurationReference]:
+        """The settings card's checks, re-run. With `refresh` (preparing the card), a
+        confirm whose digest isn't this request's preview (a digest from reading the
+        current limits, say) is re-previewed: the card shows these exact settings and
+        the person approves what they see. Another write since (a new revision) still
+        refuses, and a click (no `refresh`) needs exactly what the card showed."""
         from daimon.core.channel_backend import AgentBackendRefused, BackendActor
 
         reference = prompt.configuration
+
+        def previewed(revision: int | str, digest: str) -> ConfigurationReference:
+            assert reference is not None
+            if revision != reference.expected_revision:
+                raise StalePreview(STALE_SETTING_TEXT)
+            if digest == reference.preview_digest:
+                return reference
+            if not refresh:
+                raise StalePreview(STALE_SETTING_TEXT)
+            return reference.model_copy(
+                update={"preview_digest": digest, "refreshed_from": reference.preview_digest}
+            )
+
         if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
             raise ValueError("This confirmation is unavailable. Preview again.")
         async with sessionmaker() as session:
@@ -923,13 +947,9 @@ def backend_switch_callbacks(
                         if pin is not None
                         else None
                     )
-                if (
-                    pin is None
-                    or origin != "channel"
-                    or pin.local != reference.expected_revision
-                    or channel_pin_digest(pin) != reference.preview_digest
-                ):
+                if pin is None or origin != "channel":
                     raise StalePreview(STALE_SETTING_TEXT)
+                reference = previewed(pin.local, channel_pin_digest(pin))
                 model = f" ({pin.model})" if pin.model else ""
                 action = "Clear this channel's provider pin"
                 details = (
@@ -940,18 +960,14 @@ def backend_switch_callbacks(
             elif reference.operation == "provider_allowlist":
                 assert reference.providers is not None
                 policy = await service.tenant_policy(tenant_id)
-                if (
-                    policy.revision != reference.expected_revision
-                    or provider_preview_digest(policy, reference.providers)
-                    != reference.preview_digest
-                ):
-                    raise StalePreview(STALE_SETTING_TEXT)
+                providers = reference.providers
+                reference = previewed(policy.revision, provider_preview_digest(policy, providers))
                 await service.set_tenant_allowlist(
-                    tenant_id, reference.providers, policy.revision, actor, dry_run=True
+                    tenant_id, providers, policy.revision, actor, dry_run=True
                 )
                 action = "Change allowed providers"
                 details = (
-                    "Allowed providers: " + (", ".join(reference.providers) or "none"),
+                    "Allowed providers: " + (", ".join(providers) or "none"),
                     "Applies to this server. Saving makes this list the server's own choice: "
                     "it stops following the providers this Daimon install has keys for.",
                 )
@@ -1001,11 +1017,7 @@ def backend_switch_callbacks(
                 preview = await service.preview_fleet_grant(
                     agent, value, now=datetime.now(prompt.expires_at.tzinfo)
                 )
-                if (
-                    preview.setting_revision != reference.expected_revision
-                    or preview.digest != reference.preview_digest
-                ):
-                    raise StalePreview(STALE_SETTING_TEXT)
+                reference = previewed(preview.setting_revision, preview.digest)
                 action = (
                     "Turn off fleet for "
                     if reference.operation == "fleet_revoke"
@@ -1029,7 +1041,7 @@ def backend_switch_callbacks(
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
             raise ValueError("This permission changed. Preview and confirm again.")
-        return action, details
+        return action, details, reference
 
     async def _answering_here(turn_agent: str | None) -> str | None:
         """Who answers this conversation next: a hand-off's agent, else this turn's.
@@ -1057,15 +1069,85 @@ def backend_switch_callbacks(
             return handed.responder_name
         return turn_agent
 
+    def _card_place() -> tuple[str, str, str]:
+        return handoff_thread or (
+            (pin_channel.platform, pin_channel.channel_id, "")
+            if pin_channel is not None
+            else (place_word, "", "")
+        )
+
+    async def record_refresh(
+        prompt: ConfirmationPrompt,
+        key: str,
+        stale_digest: str,
+        fresh: BackendSwitchReference | ConfigurationReference,
+        operation: str,
+    ) -> None:
+        """The approved call still carries the old preview: record what this card
+        shows, so that call (once its card is confirmed, and unchanged since) applies it."""
+        from daimon.core.stores import backend_switch_cards as cards
+
+        platform, channel, thread = _card_place()
+        async with sessionmaker.begin() as session:
+            await cards.record_refresh(
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                platform=platform,
+                channel_id=channel,
+                thread_id=thread,
+                requester_platform_user_id=prompt.requester_platform_user_id,
+                agent_name=key,
+                stale_digest=stale_digest,
+                fresh=fresh,
+                expires_at=prompt.expires_at,
+                operation=operation,
+            )
+
+    async def approve_refresh(
+        key: str,
+        reference: BackendSwitchReference | ConfigurationReference,
+        operation: str,
+    ) -> None:
+        """Confirm on a re-previewed card (a click that passed every check; a Deny never
+        gets here) is what lets the approved call apply it."""
+        from daimon.core.stores import backend_switch_cards as cards
+
+        assert reference.refreshed_from is not None
+        async with sessionmaker.begin() as session:
+            approved = await cards.approve_refresh(
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                agent_name=key,
+                stale_digest=reference.refreshed_from,
+                fresh_digest=reference.preview_digest,
+                fresh_revision=reference.expected_revision,
+                now=datetime.now(UTC),
+                operation=operation,
+            )
+        if not approved:
+            raise StalePreview(STALE_SETTING_TEXT if operation != "switch" else STALE_SWITCH_TEXT)
+
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
         from daimon.core.handoff_context import redact_handoff_summary
 
         if prompt.configuration is not None:
-            action, details = await verified_configuration(
-                prompt, prompt.requester_platform_user_id
+            asked = prompt.configuration
+            action, details, shown = await verified_configuration(
+                prompt, prompt.requester_platform_user_id, refresh=True
             )
+            if shown != asked:
+                await record_refresh(
+                    prompt,
+                    _settings_key(asked),
+                    asked.preview_digest,
+                    shown,
+                    asked.operation,
+                )
             return prompt.model_copy(
                 update={
+                    "configuration": shown,
                     "title": action + "?",
                     "action": action,
                     "denied_action": "Settings unchanged",
@@ -1078,29 +1160,7 @@ def backend_switch_callbacks(
         )
         stale = prompt.backend_switch
         if stale is not None and fresh != stale:
-            # The approved call still carries the old preview: record what this card
-            # shows, so that call (and only it, unchanged since) applies it.
-            from daimon.core.stores import backend_switch_cards as cards
-
-            platform, channel, thread = handoff_thread or (
-                (pin_channel.platform, pin_channel.channel_id, "")
-                if pin_channel is not None
-                else (place_word, "", "")
-            )
-            async with sessionmaker.begin() as session:
-                await cards.record_refresh(
-                    session,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    platform=platform,
-                    channel_id=channel,
-                    thread_id=thread,
-                    requester_platform_user_id=prompt.requester_platform_user_id,
-                    agent_name=agent.name,
-                    stale_digest=stale.preview_digest,
-                    fresh=fresh,
-                    expires_at=prompt.expires_at,
-                )
+            await record_refresh(prompt, agent.name, stale.preview_digest, fresh, "switch")
             prompt = prompt.model_copy(update={"backend_switch": fresh})
         details = (
             *(
@@ -1192,27 +1252,13 @@ def backend_switch_callbacks(
     async def check(prompt: ConfirmationPrompt, clicker: str) -> str | None:
         try:
             if prompt.configuration is not None:
-                await verified_configuration(prompt, clicker)
+                *_, shown = await verified_configuration(prompt, clicker)
+                if shown.refreshed_from is not None:
+                    await approve_refresh(_settings_key(shown), shown, shown.operation)
             else:
                 agent, _, reference = await verified(prompt, clicker)
                 if reference.refreshed_from is not None:
-                    # Confirm on this card (a click that passed every check; a Deny
-                    # never gets here) is what lets the approved call apply it.
-                    from daimon.core.stores import backend_switch_cards as cards
-
-                    async with sessionmaker.begin() as session:
-                        approved = await cards.approve_refresh(
-                            session,
-                            tenant_id=tenant_id,
-                            account_id=account_id,
-                            agent_name=agent.name,
-                            stale_digest=reference.refreshed_from,
-                            fresh_digest=reference.preview_digest,
-                            fresh_revision=reference.expected_revision,
-                            now=datetime.now(UTC),
-                        )
-                    if not approved:
-                        raise StalePreview(STALE_SWITCH_TEXT)
+                    await approve_refresh(agent.name, reference, "switch")
         except CardRefusal as exc:
             return str(exc)
         except ValueError:
