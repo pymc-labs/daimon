@@ -697,6 +697,18 @@ async def _sweep_wizard_sessions(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.wizard_sweep.failed")
 
 
+async def _sweep_fleet_plans(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Delete expired fleet plans (none can be spent once expired). Boundary catch: a
+    sweep failure must not kill the scheduler loop; the next tick retries."""
+    from daimon.core.stores.fleet_plans import sweep_expired_plans
+
+    try:
+        async with sm.begin() as session:
+            await sweep_expired_plans(session, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.fleet_plan_sweep.failed")
+
+
 async def _sweep_slack_event_dedup(sm: async_sessionmaker[AsyncSession]) -> None:
     """Prune aged slack_event_dedup rows once. Boundary catch: a sweep
     failure must not kill the scheduler loop — the next tick retries.
@@ -1412,6 +1424,7 @@ async def run(
                 sweep=lambda: _sweep_headless_usage(client, sm, markup=settings.billing.markup),
             )
             await _sweep_wizard_sessions(sm)
+            await _sweep_fleet_plans(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
@@ -1449,6 +1462,7 @@ async def run(
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
+            await _sweep_fleet_plans(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)

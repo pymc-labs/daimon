@@ -1505,6 +1505,14 @@ Most worker turns one process runs at once, across all tenants.
 Most times in total a worker is started when it keeps being lost before its turn is
 sent. A worker whose turn was sent is reconciled, never resent.
 
+### `DAIMON_FLEET__REQUIRE_PLAN`
+
+`bool` · optional · default `False`
+
+Ask before a fleet runs: a chat turn's fleet starts only under a plan the person
+accepted (its models, budget, time and turns, from the agent's fleet limits), and never
+goes past it. Off by default. Agent keys, the hub and routines are unaffected.
+
 ## Private Channel Messages
 
 Read from `daimon.core.config.PrivateChannelMessagesSettings`. Prefix

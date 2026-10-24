@@ -859,6 +859,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "selfhosted_resource_operations": "account UUID stored as account_id text",
         "neutral_agent_revisions": "accounts.id FK cascade",
         "neutral_skill_versions": "accounts.id FK cascade",
+        "fleet_plans": "accounts.id FK cascade",
         "cli_principals": "account_id FK -> accounts.id",
         "platform_principals": "account_id FK -> accounts.id",
         "user_config": "account_id PK/FK -> accounts.id",

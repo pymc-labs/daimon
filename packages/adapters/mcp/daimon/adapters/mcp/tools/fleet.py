@@ -11,9 +11,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, NamedTuple, Protocol, TypedDict, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.turn.deps import TurnDeps
     from mux.contracts.ids import Scope
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -170,6 +171,44 @@ async def _refusals_logged(
         ) from None
 
 
+#: How long a plan waits for the person before it expires (nothing ran; ask again).
+_PLAN_TTL = timedelta(minutes=30)
+
+
+class _PlanClaim(NamedTuple):
+    """A spawn's claim under its plan: `new` when this call made it (only then may a
+    failed spawn give it back), and the limits to spawn with."""
+
+    plan_id: uuid.UUID
+    new: bool
+    budget_usd: Decimal | None
+    deadline: datetime | None
+    max_turns: int | None
+
+
+class _PlanWhere(TypedDict):
+    """Which person's plans, in which conversation, as of when (the store's scope)."""
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    platform: str
+    channel_id: str
+    thread_id: str | None
+    now: datetime
+
+
+class PlanWorker(BaseModel):
+    """One worker the turn intends: a task on a model (its own if omitted), or an
+    on-server agent by name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(min_length=1, max_length=200)
+    task: str | None = Field(default=None, max_length=20000)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    agent: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class AgentWorker(BaseModel):
     """A worker that runs AS this on-server agent, with any losses it declares.
 
@@ -217,6 +256,16 @@ class FleetToolService(Protocol):
         model: str | None = None,
         planned_workers: int | None = None,
         planned_models: Sequence[str] | None = None,
+        plan_id: uuid.UUID | None = None,
+    ) -> Mapping[str, JsonValue]: ...
+
+    async def plan(
+        self,
+        caller: AuthIdentity,
+        *,
+        workers: Sequence[PlanWorker],
+        origin_context_id: uuid.UUID | None = None,
+        result_contract: str | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def status(
@@ -297,6 +346,196 @@ class HostFleetToolService:
         self._parent_loader = parent_loader
         self._runtime = runtime
         self._deps = deps
+
+    def _plan_sessions(self) -> async_sessionmaker[AsyncSession]:
+        if self._runtime is not None:
+            return self._runtime.session_factory
+        if self._deps is not None:
+            return self._deps.sessionmaker
+        raise ToolError("Fleet plans are unavailable: host prerequisites are not installed.")
+
+    def _plan_required(self, caller: AuthIdentity) -> bool:
+        """`fleet.require_plan`, for a chat turn (agent keys, the hub and routines keep
+        explicit parameters within the caps)."""
+        settings = self._runtime.settings if self._runtime is not None else None
+        return (
+            settings is not None
+            and settings.fleet.require_plan
+            and caller.chat_agent_id is not None
+            and caller.agent_id is None
+        )
+
+    async def plan(
+        self,
+        caller: AuthIdentity,
+        *,
+        workers: Sequence[PlanWorker],
+        origin_context_id: uuid.UUID | None = None,
+        result_contract: str | None = None,
+    ) -> Mapping[str, JsonValue]:
+        """A pending fleet plan for this turn's thread, from the agent's fleet limits."""
+        from daimon.core.fleet_plan import PlanCaps, PlannedWorker, PlanRefused, build_plan
+        from daimon.core.neutral_resources import worker_runtime_ceiling
+        from daimon.core.stores.fleet_plans import create_plan
+
+        parent, _ = await self._parent(caller, origin_context_id=origin_context_id)
+        allowed = _without_fast((*parent.models, parent.spec.model))
+        planned: list[PlannedWorker] = []
+        for worker in workers:
+            if worker.agent is not None:
+                planned.append(
+                    PlannedWorker(role=worker.role, task=worker.task, agent=worker.agent)
+                )
+                continue
+            model = (
+                fleet_model(worker.model, allowed)
+                if worker.model is not None
+                else parent.spec.model.id
+            )
+            planned.append(PlannedWorker(role=worker.role, task=worker.task, model=model))
+        now = datetime.now(UTC)
+        providers: set[Provider] = {
+            model.provider for model in allowed if model.id in {w.model for w in planned}
+        } or {parent.spec.model.provider}
+        ceilings = [
+            ceiling
+            for provider in providers
+            if (ceiling := worker_runtime_ceiling(parent, provider)) is not None
+        ]
+        seconds = int((parent.limits.deadline - now).total_seconds())
+        if ceilings:
+            seconds = min(seconds, *ceilings)
+        settings = self._runtime.settings.fleet if self._runtime is not None else None
+        try:
+            caps = PlanCaps(
+                max_workers=settings.max_workers_per_run if settings is not None else 8,
+                budget_usd=parent.limits.budget_usd,
+                worker_seconds=max(seconds, 1),
+                max_turns=parent.limits.max_turns,
+                models=tuple(model.id for model in allowed),
+            )
+            plan = build_plan(caps, tuple(planned), result_contract=result_contract)
+        except PlanRefused as exc:
+            raise ToolError(f"{exc} Nothing was started.") from exc
+        root = parent.fleet.root
+        async with self._plan_sessions().begin() as session:
+            plan_id = await create_plan(
+                session,
+                tenant_id=caller.tenant_id,
+                account_id=caller.account_id,
+                platform=root.channel.platform,
+                channel_id=root.channel.channel_id,
+                thread_id=root.thread_id,
+                plan=plan,
+                caps=caps,
+                now=now,
+                ttl=_PLAN_TTL,
+            )
+        return {
+            "plan_id": str(plan_id),
+            "plan": cast(JsonValue, plan.model_dump(mode="json")),
+            "caps": cast(JsonValue, caps.model_dump(mode="json")),
+            "status": "pending",
+        }
+
+    async def _claim_under_plan(
+        self,
+        caller: AuthIdentity,
+        parent: WorkerPermissions,
+        *,
+        plan_id: uuid.UUID | None,
+        run_id: uuid.UUID | None,
+        operation_key: str,
+        reviewer: bool,
+        model: str | None,
+        agent: str | None,
+        budget_usd: Decimal | None,
+        deadline: datetime | None,
+        max_turns: int | None,
+        now: datetime,
+    ) -> _PlanClaim | None:
+        """With `fleet.require_plan` on, claim this chat-turn spawn under its accepted
+        plan (a reviewer under its run's plan) and fit its limits inside it; None when no
+        plan is required. Returns the plan id, whether this call made the claim, and the
+        limits to spawn with."""
+        from daimon.core.fleet_plan import PlanRefused, spawn_within_plan
+        from daimon.core.stores import fleet_plans
+
+        if not self._plan_required(caller):
+            return None
+        root = parent.fleet.root
+        where: _PlanWhere = {
+            "tenant_id": caller.tenant_id,
+            "account_id": caller.account_id,
+            "platform": root.channel.platform,
+            "channel_id": root.channel.channel_id,
+            "thread_id": root.thread_id,
+            "now": now,
+        }
+        run = run_id or parent.fleet.run_id
+        try:
+            async with self._plan_sessions().begin() as session:
+                if reviewer:
+                    plan_id = await fleet_plans.plan_id_for_run(
+                        session, tenant_id=caller.tenant_id, run_id=run
+                    )
+                    if plan_id is None:
+                        raise PlanRefused(
+                            "This fleet run wasn't started under an accepted plan, so it "
+                            "can't be reviewed under one."
+                        )
+                elif plan_id is None:
+                    raise ToolError(
+                        "This fleet needs a plan the person accepts first: call fleet_plan, "
+                        "and start the workers once they accept it. Nothing was started."
+                    )
+                plan = await fleet_plans.accepted_plan(session, plan_id=plan_id, **where)
+                if plan is None:
+                    raise PlanRefused(
+                        "That fleet plan isn't accepted for this conversation (it is pending, "
+                        "used up, expired, or another one's)."
+                    )
+                # A reviewer is held to the plan's models, budget, time and turns too; it
+                # spends from what the workers left of the plan's total.
+                budget, seconds, turns = spawn_within_plan(
+                    plan,
+                    model=model,
+                    agent=agent,
+                    budget_usd=budget_usd,
+                    worker_seconds=int((deadline - now).total_seconds())
+                    if deadline is not None
+                    else None,
+                    max_turns=max_turns,
+                )
+                if not await fleet_plans.claim_spawn(
+                    session,
+                    **where,
+                    plan_id=plan_id,
+                    operation_key=operation_key,
+                    budget_usd=budget,
+                    worker=not reviewer,
+                ):
+                    # A retry of a started spawn: the orchestrator reuses that worker's
+                    # admitted limits, so it gets the caller's own (unset ones stay unset).
+                    # Not this call's claim, so a failure here gives nothing back.
+                    return _PlanClaim(plan_id, False, budget_usd, deadline, max_turns)
+                if not reviewer:
+                    await fleet_plans.bind_run(
+                        session, plan_id=plan_id, tenant_id=caller.tenant_id, run_id=run
+                    )
+                return _PlanClaim(plan_id, True, budget, now + timedelta(seconds=seconds), turns)
+        except PlanRefused as exc:
+            raise ToolError(f"{exc} Nothing was started.") from exc
+
+    async def _release_claim(
+        self, caller: AuthIdentity, plan_id: uuid.UUID, operation_key: str
+    ) -> None:
+        from daimon.core.stores import fleet_plans
+
+        async with self._plan_sessions().begin() as session:
+            await fleet_plans.release_spawn(
+                session, plan_id=plan_id, tenant_id=caller.tenant_id, operation_key=operation_key
+            )
 
     async def _agent_obstacle(
         self, caller: AuthIdentity, origin: TurnOriginRow, scope: Scope
@@ -455,6 +694,7 @@ class HostFleetToolService:
         model: str | None = None,
         planned_workers: int | None = None,
         planned_models: Sequence[str] | None = None,
+        plan_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id
@@ -462,7 +702,6 @@ class HostFleetToolService:
         from daimon.core.neutral_resources import (
             planned_providers,
             task_worker_spec,
-            worker_runtime_ceiling,
         )
 
         as_agent_drops: tuple[DeclaredDrop, ...] = ()
@@ -525,6 +764,106 @@ class HostFleetToolService:
         )
         planned_on_provider = providers.count(provider) if providers is not None else None
         now = datetime.now(UTC)
+        # The model the plan checks: the task worker's, or a clone's named override (a
+        # clone's own model can't be read here, so under a plan it must name one).
+        planned_model = (
+            spec.model.id
+            if spec is not None
+            else overrides.model.id
+            if overrides is not None and overrides.model is not None
+            else None
+        )
+        if self._plan_required(caller) and clone is not None and planned_model is None:
+            raise ToolError(
+                "A cloned worker under a fleet plan names its model (overrides.model), so "
+                "the plan can be checked. Nothing was started."
+            )
+        claimed = await self._claim_under_plan(
+            caller,
+            parent,
+            plan_id=plan_id,
+            run_id=run_id,
+            operation_key=operation_key,
+            reviewer=reviewer_of is not None,
+            model=planned_model,
+            agent=as_agent,
+            budget_usd=budget_usd,
+            deadline=deadline,
+            max_turns=max_turns,
+            now=now,
+        )
+        if claimed is not None:
+            budget_usd, deadline, max_turns = (
+                claimed.budget_usd,
+                claimed.deadline,
+                claimed.max_turns,
+            )
+        try:
+            return await self._spawn_admitted(
+                parent,
+                policy,
+                now=now,
+                run_id=run_id,
+                operation_key=operation_key,
+                role=role,
+                backend=backend,
+                provider=provider,
+                budget_usd=budget_usd,
+                deadline=deadline,
+                max_turns=max_turns,
+                max_input_tokens=max_input_tokens,
+                max_output_tokens=max_output_tokens,
+                planned_workers=planned_workers,
+                planned_on_provider=planned_on_provider,
+                as_agent=as_agent,
+                as_agent_drops=as_agent_drops,
+                task=task,
+                spec=spec,
+                clone=clone,
+                clone_revision=clone_revision,
+                overrides=overrides,
+                session=session,
+                result_contract=result_contract,
+                reviewer_of=reviewer_of,
+            )
+        except BaseException:
+            if claimed is not None and claimed.new:
+                # Not started: the slot and money this call claimed go back for a retry.
+                # A failed retry of a started spawn claimed nothing, so frees nothing.
+                await self._release_claim(caller, claimed.plan_id, operation_key)
+            raise
+
+    async def _spawn_admitted(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        *,
+        now: datetime,
+        run_id: uuid.UUID | None,
+        operation_key: str,
+        role: str,
+        backend: BackendConfig | None,
+        provider: Provider,
+        budget_usd: Decimal | None,
+        deadline: datetime | None,
+        max_turns: int | None,
+        max_input_tokens: int | None,
+        max_output_tokens: int | None,
+        planned_workers: int | None,
+        planned_on_provider: int | None,
+        as_agent: str | None,
+        as_agent_drops: tuple[DeclaredDrop, ...],
+        task: str | None,
+        spec: AgentSpec | None,
+        clone: ResourceRef | None,
+        clone_revision: Revision | None,
+        overrides: AgentPatch | None,
+        session: SessionSpec | None,
+        result_contract: Mapping[str, JsonValue] | None,
+        reviewer_of: uuid.UUID | None,
+    ) -> Mapping[str, JsonValue]:
+        from daimon.core.neutral_resources import worker_runtime_ceiling
+
         limits = await self._orchestrator.spawn_limits(
             parent,
             policy,
@@ -707,6 +1046,7 @@ def register_fleet_tools(
         model: str | None = None,
         planned_workers: int | None = None,
         planned_models: list[str] | None = None,
+        plan_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         async def checked() -> dict[str, JsonValue]:
             return await _spawn_checked(
@@ -732,6 +1072,7 @@ def register_fleet_tools(
                 model=model,
                 planned_workers=planned_workers,
                 planned_models=planned_models,
+                plan_id=plan_id,
             )
 
         return await _refusals_logged(operation_key, checked)
@@ -760,6 +1101,7 @@ def register_fleet_tools(
         model: str | None,
         planned_workers: int | None,
         planned_models: list[str] | None,
+        plan_id: uuid.UUID | None,
     ) -> dict[str, JsonValue]:
         if isinstance(agent, (str, AgentWorker)):
             name = agent if isinstance(agent, str) else agent.name
@@ -802,10 +1144,44 @@ def register_fleet_tools(
                 model=model,
                 planned_workers=planned_workers,
                 planned_models=planned_models,
+                plan_id=plan_id,
             )
         )
 
-    @mcp.tool(tags={"fleet"})
+    if runtime.settings.fleet.require_plan:
+
+        @mcp.tool(tags={"fleet"})
+        async def fleet_plan(  # pyright: ignore[reportUnusedFunction]
+            ctx: Context,
+            workers: Annotated[list[PlanWorker], Field(min_length=1)],
+            origin_context_id: uuid.UUID | None = None,
+            result_contract: Annotated[str, Field(max_length=2000)] | None = None,
+        ) -> dict[str, JsonValue]:
+            """Plan a fleet run before it starts; the person accepts or changes it.
+
+            Call this FIRST for any fleet ("fork yourself across haiku, luna and
+            flash"): one entry per worker, each with role, task and model (or agent
+            for an on-server agent). It returns a pending plan with its plan_id and the
+            recommended defaults (each worker's budget, time and turns, from this
+            agent's fleet limits). Show the person the plan and let them accept or
+            change it; nothing starts or is spent until they accept. Then pass the
+            plan_id to every fleet_spawn of the run; a spawn without an accepted plan,
+            or one past it, is refused. Pass origin_context_id from your turn controls.
+            """
+            return dict(
+                await owner().plan(
+                    await _auth(ctx),
+                    workers=workers,
+                    origin_context_id=origin_context_id,
+                    result_contract=result_contract,
+                )
+            )
+
+    # plan_id exists only where plans are required: with them off, the tool is unchanged.
+    @mcp.tool(
+        tags={"fleet"},
+        exclude_args=None if runtime.settings.fleet.require_plan else ["plan_id"],
+    )
     async def fleet_spawn(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         operation_key: OperationKey,
@@ -814,6 +1190,7 @@ def register_fleet_tools(
         model: str | None = None,
         planned_workers: PositiveCount | None = None,
         planned_models: Annotated[list[str], Field(min_length=1)] | None = None,
+        plan_id: uuid.UUID | None = None,
         origin_context_id: uuid.UUID | None = None,
         backend: BackendConfig | None = None,
         budget_usd: PositiveMoney | None = None,
@@ -878,6 +1255,7 @@ def register_fleet_tools(
             model=model,
             planned_workers=planned_workers,
             planned_models=planned_models,
+            plan_id=plan_id,
             run_id=run_id,
             origin_context_id=origin_context_id,
             operation_key=operation_key,

@@ -2105,6 +2105,15 @@ class FleetSettings(BaseModel):
             "its turn is sent. A worker whose turn was sent is reconciled, never resent."
         ),
     )
+    require_plan: bool = Field(
+        default=False,
+        description=(
+            "Ask before a fleet runs: a chat turn's fleet starts only under a plan the "
+            "person accepted (its models, budget, time and turns, from the agent's fleet "
+            "limits), and never goes past it. Off by default. Agent keys, the hub and "
+            "routines are unaffected."
+        ),
+    )
 
 
 class Settings(BaseSettings):
