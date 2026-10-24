@@ -154,6 +154,35 @@ def fleet_status_summary(kind: str, platform: str | None, *, obstacle: str | Non
     )
 
 
+async def _confirmed_refresh(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    operation: str,
+    key: str,
+    stale_digest: str,
+    fresh_digest: str,
+    revision: int | str,
+) -> bool:
+    """Whether this confirm's card re-previewed it (its digest wasn't this request's
+    preview, J5) and the person pressed Confirm on that card: then the call applies
+    what the card showed, once, and only while it is still the current preview."""
+    from daimon.core.stores.backend_switch_cards import consume_refresh
+
+    async with runtime.session_factory.begin() as session:
+        return await consume_refresh(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            agent_name=key,
+            stale_digest=stale_digest,
+            fresh_digest=fresh_digest,
+            fresh_revision=revision,
+            now=datetime.now(UTC),
+            operation=operation,
+        )
+
+
 #: How a change is made, after reading the current limits.
 FLEET_CHANGE_STEPS = (
     "To change them, call request_fleet_config with the new config and no "
@@ -280,6 +309,20 @@ async def _request_fleet_config_impl(
                     "preview_digest": preview_digest,
                 }
             )
+            if (
+                reference.expected_revision == preview.setting_revision
+                and reference.preview_digest != preview.digest
+                and await _confirmed_refresh(
+                    runtime,
+                    auth,
+                    operation=reference.operation,
+                    key=agent_name,
+                    stale_digest=reference.preview_digest,
+                    fresh_digest=preview.digest,
+                    revision=preview.setting_revision,
+                )
+            ):
+                reference = reference.model_copy(update={"preview_digest": preview.digest})
             agent = await load_backend_agent(
                 runtime.client,
                 runtime.session_factory,
@@ -327,8 +370,11 @@ async def _request_fleet_config_impl(
     except ValueError as exc:
         if not isinstance(exc, ValidationError):
             raise ToolError(str(exc) + " Nothing changed.") from exc
+        # Most often a confirm with no preview of its own (an empty digest, say).
         raise ToolError(
-            "Check the fleet limits and use the exact expiry from the preview. Nothing changed."
+            "Preview the new limits first: call request_fleet_config with the config and "
+            "no preview_digest, then confirm with the exact config it returns (its expiry "
+            "included) and its preview_digest. Nothing changed."
         ) from exc
 
 
@@ -368,7 +414,22 @@ async def _request_provider_allowlist_impl(
                     "preview_digest": preview_digest,
                 }
             )
-            if reference.expected_revision != policy.revision or reference.preview_digest != digest:
+            refreshed = (
+                reference.expected_revision == policy.revision
+                and reference.preview_digest != digest
+                and await _confirmed_refresh(
+                    runtime,
+                    auth,
+                    operation="provider_allowlist",
+                    key="provider_allowlist",
+                    stale_digest=reference.preview_digest,
+                    fresh_digest=digest,
+                    revision=policy.revision,
+                )
+            )
+            if reference.expected_revision != policy.revision or (
+                reference.preview_digest != digest and not refreshed
+            ):
                 raise ToolError("This preview changed. Preview and confirm again. Nothing changed.")
             await service.set_tenant_allowlist(
                 auth.tenant_id, providers, policy.revision, _actor(auth)
@@ -437,7 +498,20 @@ async def _request_channel_pin_clear_impl(
             "own provider. Call request_channel_pin_clear again with this expected_revision and "
             "preview_digest; the requesting admin must Confirm on the card. Nothing changed yet.",
         )
-    if expected_revision != pin.local or preview_digest != digest:
+    refreshed = (
+        expected_revision == pin.local
+        and preview_digest != digest
+        and await _confirmed_refresh(
+            runtime,
+            auth,
+            operation="channel_pin_clear",
+            key="channel_pin_clear",
+            stale_digest=preview_digest,
+            fresh_digest=digest,
+            revision=pin.local,
+        )
+    )
+    if expected_revision != pin.local or (preview_digest != digest and not refreshed):
         raise ToolError("This channel's pin changed. Preview and confirm again. Nothing changed.")
     try:
         async with runtime.session_factory.begin() as session:

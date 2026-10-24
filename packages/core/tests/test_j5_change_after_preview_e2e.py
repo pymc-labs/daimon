@@ -94,17 +94,16 @@ async def test_j5_a_change_between_preview_and_confirm_posts_one_fresh_card(owne
     assert shown.target_backend == "openai"
 
 
-async def test_j5_new_fleet_limits_confirmed_with_another_previews_digest_are_retried(
+async def test_j5_new_fleet_limits_confirmed_with_another_previews_digest_post_one_card(
     owned_preview,
 ):
     """Carlos's server, 2026-10-24 (rid 01M5PVBJQXBVSKJ3VN4VZMZCG6): the model read the
     current fleet limits, then confirmed new ones ($6 a run) with that read's digest.
     The card refused, and the model was told the card could not be shown, do not
-    retry. It is told to preview these exact settings again, and that preview's
-    confirm posts the card."""
+    retry. The card now re-previews these exact limits and posts ONE card showing
+    them; the person approves what they see."""
     from datetime import UTC, datetime, timedelta
 
-    from daimon.core.confirmation import STALE_SETTING_TEXT
     from daimon.core.fleet_configuration import FleetConfigInput, configured_fleet_grant
 
     service, agent, actor, sessions, client, trace, _, reply, _ = owned_preview
@@ -164,11 +163,10 @@ async def test_j5_new_fleet_limits_confirmed_with_another_previews_digest_are_re
     current = await digest(limits("2"))
     wanted = limits("6")
     result = await posture.decide(confirm_call(wanted, current))
-    assert result.allow is False
-    said = result.deny_message or ""
-    assert said == STALE_SETTING_TEXT, said
-    assert "could not be shown" not in said and "not retry" not in said.lower()
-    assert posted == []
-    retried = await posture.decide(confirm_call(wanted, await digest(wanted)))
-    assert retried.allow is True, retried.deny_message
+    assert result.allow is True, result.deny_message
     assert len(posted) == 1
+    shown = posted[0].configuration
+    fresh = await digest(wanted)
+    assert shown.preview_digest == fresh.digest != current.digest
+    assert shown.refreshed_from == current.digest
+    assert any("$6 per run" in line for line in posted[0].detail_lines)

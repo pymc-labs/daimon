@@ -201,6 +201,7 @@ async def record_refresh(
     stale_digest: str,
     fresh: BaseModel,
     expires_at: datetime,
+    operation: str = "switch",
 ) -> None:
     """A switch card re-previewed when it was built (J5): the stale preview it was asked
     with, and the one it showed. Never pressable (no message) and never a waiting card
@@ -225,6 +226,7 @@ async def record_refresh(
         requester_platform_user_id=requester_platform_user_id,
         reference={
             "refresh": {
+                "operation": operation,
                 "agent": agent_name,
                 "of": stale_digest,
                 "fresh": fresh_reference["preview_digest"],
@@ -245,9 +247,10 @@ def _refresh_row(
     agent_name: str,
     stale_digest: str,
     fresh_digest: str,
-    fresh_revision: int,
+    fresh_revision: int | str,
     status: str,
     now: datetime,
+    operation: str,
 ) -> ScalarSelect[uuid.UUID]:
     """One live refresh row for this account, agent and stale -> fresh preview."""
     return (
@@ -258,6 +261,7 @@ def _refresh_row(
             BackendSwitchCard.reference.contains(
                 {
                     "refresh": {
+                        "operation": operation,
                         "agent": agent_name,
                         "of": stale_digest,
                         "fresh": fresh_digest,
@@ -282,8 +286,9 @@ async def approve_refresh(
     agent_name: str,
     stale_digest: str,
     fresh_digest: str,
-    fresh_revision: int,
+    fresh_revision: int | str,
     now: datetime,
+    operation: str = "switch",
 ) -> bool:
     """The person pressed Confirm on a re-previewed card: its refresh may now be spent
     (pending -> claimed). A denied or expired card's refresh never is."""
@@ -296,6 +301,7 @@ async def approve_refresh(
         fresh_revision,
         "pending",
         now,
+        operation,
     )
     approved = await session.scalar(
         update(BackendSwitchCard)
@@ -314,8 +320,9 @@ async def consume_refresh(
     agent_name: str,
     stale_digest: str,
     fresh_digest: str,
-    fresh_revision: int,
+    fresh_revision: int | str,
     now: datetime,
+    operation: str = "switch",
 ) -> bool:
     """Spend one approved card refresh: the approved call's stale preview, re-previewed to
     exactly the agent's current one. False when none matches (the agent changed again,
@@ -329,6 +336,7 @@ async def consume_refresh(
         fresh_revision,
         "claimed",
         now,
+        operation,
     )
     spent = await session.scalar(
         update(BackendSwitchCard)

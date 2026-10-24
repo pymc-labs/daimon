@@ -549,3 +549,116 @@ async def test_the_obstacle_check_classifies_the_captured_source_and_never_raise
 
     monkeypatch.setattr(fleet_config, "_capture_fleet_target", broken)
     assert await fleet_config.fleet_root_obstacle_for(None, None, None) is None
+
+
+async def _fleet_card(runtime, auth, data: dict):
+    """The card the host posts for a confirmed request_fleet_config call, and its check."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.channel_backend import make_backend_service
+    from daimon.core.confirmation import backend_switch_callbacks, prompt_for_tool_call
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+
+    prepare, check = backend_switch_callbacks(
+        make_backend_service(runtime.session_factory, runtime.settings.turn),
+        sessionmaker=runtime.session_factory,
+        anthropic=runtime.client,
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        current_admin=AsyncMock(return_value=True),
+    )
+    prompt = prompt_for_tool_call(
+        ToolCall(
+            tool_use_id="fleet-card",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="request_fleet_config",
+            input=data,
+        ),
+        requester_platform_user_id="123",
+        now=datetime.now(UTC),
+    )
+    return await prepare(prompt), check
+
+
+@pytest.mark.parametrize("confirmed", [True, False], ids=["confirmed", "denied"])
+async def test_new_limits_confirmed_with_another_previews_digest_post_their_own_card(
+    active_chat, confirmed
+):
+    """Carlos's server, 2026-10-24 (rid 01M5PVBJQXBVSKJ3VN4VZMZCG6): new fleet limits
+    confirmed with a digest that previewed others. The card re-previews these exact
+    limits and shows them; Confirm on it lets the call (the model's own arguments)
+    save them, once. A card never confirmed saves nothing."""
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, _ = active_chat
+    gates(payload, frozen)
+    gate()
+    agent()
+    other = await _request_fleet_config_impl(
+        runtime, auth, agent_name="Researcher", config=config(), origin_context_id=str(origin.id)
+    )
+    gate()
+    agent()
+    wanted = await _request_fleet_config_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        config=config(budget_usd="6", max_worker_seconds=900),
+        origin_context_id=str(origin.id),
+    )
+    assert wanted.preview_digest != other.preview_digest
+    args = dict(
+        agent_name="Researcher",
+        config=wanted.config,
+        expected_revision=other.expected_revision,
+        preview_digest=other.preview_digest,
+    )
+    agent()
+    shown, check = await _fleet_card(
+        runtime, auth, {**args, "config": wanted.config.model_dump(mode="json")}
+    )
+    assert shown.configuration.preview_digest == wanted.preview_digest
+    assert any("$6 per run" in line for line in shown.detail_lines), shown.detail_lines
+    if confirmed:
+        agent()
+        assert await check(shown, "123") is None
+    gate()
+    agent()
+    agent()
+    agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id="agent_owned")
+    if not confirmed:
+        with pytest.raises(ToolError, match="(?i)preview"):
+            await _request_fleet_config_impl(
+                runtime, auth, **args, origin_context_id=str(origin.id)
+            )
+        assert (
+            await service.read_fleet_grant(auth.tenant_id, agent_id, now=datetime.now(UTC)) is None
+        )
+        return
+    changed = await _request_fleet_config_impl(
+        runtime, auth, **args, origin_context_id=str(origin.id)
+    )
+    assert changed.status == "changed"
+    stored = await service.read_fleet_grant(auth.tenant_id, agent_id, now=datetime.now(UTC))
+    assert stored is not None and stored.limits.budget_usd == 6
+    gate()
+    agent()
+    agent()
+    with pytest.raises(ToolError):
+        await _request_fleet_config_impl(runtime, auth, **args, origin_context_id=str(origin.id))
+
+
+async def test_a_confirm_with_no_preview_of_its_own_says_to_preview_first(active_chat):
+    """The empty digest a read used to return, confirmed with new limits."""
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, _ = active_chat
+    gates(payload, frozen)
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="Preview the new limits first"):
+        await _request_fleet_config_impl(
+            runtime,
+            auth,
+            agent_name="Researcher",
+            config=config(budget_usd="6", expires_at=datetime.now(UTC) + timedelta(days=9)),
+            expected_revision=0,
+            preview_digest="",
+            origin_context_id=str(origin.id),
+        )

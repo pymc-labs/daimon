@@ -417,6 +417,9 @@ class ConfigurationReference(BaseModel):
     providers: tuple[Provider, ...] | None = None
     expected_revision: StrictInt | StrictStr
     preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    # Set only by the card (never a tool argument): the digest this card re-previewed
+    # from, when the confirm carried another (J5). Its Confirm approves that refresh.
+    refreshed_from: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _bound(self) -> ConfigurationReference:
