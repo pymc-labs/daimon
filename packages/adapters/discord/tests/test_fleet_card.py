@@ -2750,3 +2750,50 @@ async def test_a_root_gone_stale_mid_turn_keeps_its_card_instead_of_failing_ever
     assert await card.refresh() is True
     assert await card.refresh() is True
     assert edit.await_count == edits
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_a_turns_own_card_before_its_root_is_readable_is_no_card_not_a_refusal(
+    discord_frozen_root, monkeypatch, started
+):
+    """Smoke a1d991fb: a render tick that reached the turn's root while its freeze was
+    still in flight got "origin unbound" and failed the tick (and could drop what rode
+    on it). The turn's own card (no run id yet) now has no card then; a card for a run
+    the turn started still refuses an unprovable root and still resolves a real one."""
+    from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.runtime_manifest import read_frozen_root
+
+    deps, _, _, intent, _, scope, _, _ = discord_frozen_root
+    root, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 70, 50
+    thread.guild.id = 60
+    shared = FleetOrchestrator(HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1")))
+    real = DiscordFleetCardFactory.from_runtime(shared, deps)
+    resolved = await real._resolve(thread, 123, intent.id, root.fleet.run_id, None)
+    assert resolved is not None and resolved[0].fleet.run_id == root.fleet.run_id
+
+    async def pending(*args, **kwargs):
+        raise WorkerSpecRefused("origin", "unbound")
+
+    monkeypatch.setattr(runtime_manifest, "read_frozen_root", pending)
+    factory = DiscordFleetCardFactory.from_runtime(shared, deps)
+    send = AsyncMock()
+    card = factory(
+        thread,
+        123,
+        send,
+        AsyncMock(),
+        turn_card_intent_id=intent.id,
+        run_id=root.fleet.run_id if started else None,
+    )
+    assert card is not None
+    if started:
+        with pytest.raises(FleetRefused):
+            await card.refresh()
+    else:
+        assert await card.refresh() is False
+        assert await card.refresh() is False
+    send.assert_not_awaited()
