@@ -276,7 +276,9 @@ _DROP_WORDS = {
     "memory": "its memory",
     "sandbox": "its sandbox",
     "model_controls": "its model settings",
-    "files": "its files",
+    # The `files` loss also covers the caller's own private items and logins, which
+    # no worker ever carries (caller_resources): say so plainly.
+    "files": "its files and the caller's private items and logins",
     "repository": "its repository",
     "credentials": "its saved keys",
 }

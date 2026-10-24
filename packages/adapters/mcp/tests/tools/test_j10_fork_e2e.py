@@ -776,7 +776,7 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
     # on its card line, and a dropped login (when there is one) in the spawn reply.
     words = {
         "mcp": "its connected tools",
-        "files": "its files",
+        "files": "its files and the caller's private items and logins",
         "repository": "its repository",
         "memory": "its memory",
     }

@@ -2456,7 +2456,10 @@ def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
     text = "\n".join(
         item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
     )
-    assert "**W1** (without its files, its connected tools) ·" in text
+    assert (
+        "**W1** (without its files and the caller's private items and logins, its connected tools) ·"
+        in text
+    )
     # Every task worker runs without tools and skills; that isn't news.
     assert "**W2** ·" in text
 
