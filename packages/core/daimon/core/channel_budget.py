@@ -455,6 +455,23 @@ async def _input_sent(
     return status not in (None, "pending")
 
 
+async def _turn_in_flight(
+    session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
+) -> bool:
+    """Whether the worker may still be spending: its slot's lease is unexpired, or its
+    input send is unanswered (sent, accepted or of unknown outcome)."""
+    lease = await mux_state.active_lease(session, worker_slot(run, worker))
+    if lease is not None and lease.expires_at > await mux_state.database_clock(session):
+        return True
+    status = await mux_state.operation_status(
+        session,
+        tenant_id=tenant_id,
+        account_id=run.orchestrator_account_id,
+        key=spawn_operation_key(run.id, worker.ordinal) + ":send:0",
+    )
+    return status in ("sent", "accepted", "outcome_unknown")
+
+
 async def _prefetch_fleet_money(
     session: AsyncSession, graph: fleet_store.BudgetGraph, *, tenant_id: uuid.UUID
 ) -> AccountingPrefetch | None:
@@ -486,11 +503,13 @@ def _root_money(record: OperationRecord) -> tuple[Decimal, Decimal]:
 
 
 async def _root_released(session: AsyncSession, record: OperationRecord, now: datetime) -> bool:
-    """A root past its deadline whose usage is all on the ledger holds nothing more.
+    """A root past its deadline whose turn ended and whose usage is all on the ledger
+    holds nothing more.
 
     Its turn can no longer spend, and what it spent is already debited from the
-    balance. A root without a readable deadline, or with usage not yet applied (unknown
-    price or infrastructure), keeps its hold.
+    balance. A root without a readable deadline, without a terminal record of its input
+    (processed or failed), without a binding, or with usage not yet applied (unknown
+    price or infrastructure) keeps its hold.
     """
     controls = record.result.get("root_controls")
     if not isinstance(controls, dict) or record.slot is None:
@@ -501,8 +520,15 @@ async def _root_released(session: AsyncSession, record: OperationRecord, now: da
         return False
     if deadline.tzinfo is None or deadline > now:
         return False
-    binding = await mux_state.get_binding(session, record.slot)
-    return binding is None or not await mux_state.binding_has_pending_outbox(session, binding.id)
+    # A past deadline alone doesn't end a turn: its input must have a terminal record.
+    if record.operation.status not in ("processed", "failed"):
+        return False
+    # A released slot's binding still owns its old usage rows; a slot with no binding
+    # at all can't prove where its usage went.
+    binding = await mux_state.get_binding(session, record.slot, include_released=True)
+    return binding is not None and not await mux_state.binding_has_pending_outbox(
+        session, binding.id
+    )
 
 
 async def _financial_room(
@@ -855,14 +881,16 @@ async def _produce_fleet_budget(
                             usage == "settled"
                             or not await _input_sent(session, tenant_id, other_run, member)
                         )
+                        and not await _turn_in_flight(session, tenant_id, other_run, member)
                     ):
                         # A finished worker of a finished run has spent exactly its debit
                         # when every usage revision is on the ledger, or when it was never
                         # sent its input (no processed send operation: no model call). The
                         # rest of its reservation returns to the tenant (SMOKE fc0fa16a: 74
-                        # finished runs held $102 of a $104 balance). Pending usage, or
-                        # input sent with no usage recorded (spend may exist provider-side),
-                        # keeps the hold.
+                        # finished runs held $102 of a $104 balance). Pending usage, input
+                        # sent with no usage recorded (spend may exist provider-side), or a
+                        # turn still in flight (the deadline sweep marks a worker failed
+                        # without stopping its native turn) keeps the hold.
                         settled_spend[member.id] = debit
                         exposures[member.id] = debit
                     else:

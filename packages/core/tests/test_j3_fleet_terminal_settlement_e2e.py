@@ -197,3 +197,46 @@ async def test_a_finished_worker_sent_its_input_with_no_usage_recorded_keeps_its
     await read(sm, p2, await add(sm, p2, ordinal=0))
     _, (kept,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
     assert kept.reserved_usd == Decimal(1)
+
+
+@pytest.mark.parametrize("evidence", ["lease", "unanswered_send"])
+async def test_a_deadline_swept_worker_still_mid_turn_keeps_its_hold(sm, evidence):
+    """The deadline sweep marks a worker failed without stopping its native turn: an
+    unexpired lease on its slot, or an unanswered send, means it may still be spending,
+    even with its earlier usage all on the ledger."""
+    from datetime import timedelta
+
+    from daimon.core._models import MuxOperation
+    from daimon.core.fleet import spawn_operation_key, worker_slot
+    from daimon.core.stores import mux_state
+    from sqlalchemy import func, insert
+
+    parent, run = await setup(sm, funds="10", cap="2")
+    worker = await _running(sm, parent, run, 0, revisions=((1, 1000, 100),))
+    async with sm() as db, db.begin():
+        if evidence == "lease":
+            await mux_state.acquire_lease(
+                db,
+                worker_slot(run, worker),
+                holder="worker",
+                turn_id="current",
+                clock=mux_state.database_clock,
+                ttl=timedelta(minutes=5),
+            )
+        else:
+            await db.execute(
+                insert(MuxOperation).values(
+                    tenant_id=run.tenant_id,
+                    account_id=str(run.orchestrator_account_id),
+                    key=spawn_operation_key(run.id, worker.ordinal) + ":send:0",
+                    principal_id=str(run.orchestrator_account_id),
+                    status="sent",
+                    record={},
+                    updated_at=func.now(),
+                )
+            )
+    await _finish(sm, parent, run, worker)
+    p2, run2 = await _run(sm, parent, run, cap="2")
+    await read(sm, p2, await add(sm, p2, ordinal=0))
+    _, (kept,) = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    assert kept.reserved_usd == Decimal(1)
