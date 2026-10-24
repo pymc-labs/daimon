@@ -738,6 +738,13 @@ async def test_lifecycle_change_sends_one_owner_notice(runtime_watch, transition
 
     if transition == "access_revoked":
         async with runtime.session_factory.begin() as db:
+            # Key rotation can change revision without changing the paused state.
+            await db.execute(
+                text("UPDATE watches SET revision=revision+1 WHERE id=:id"), {"id": watch.id}
+            )
+        await poll_watch_notices(runtime.session_factory, deliver=deliver)
+        deliver.assert_awaited_once()
+        async with runtime.session_factory.begin() as db:
             await watches.resume_watch(db, watch.id, now=datetime.now(UTC))
             await watches.pause_watch(db, watch.id, reason="access_revoked")
         await poll_watch_notices(runtime.session_factory, deliver=deliver)

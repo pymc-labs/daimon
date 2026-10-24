@@ -577,7 +577,14 @@ async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
             raise ValueError("Issue a fresh page signing key before resuming")
     row.status = "active"
     row.revision += 1
-    row.source_state = {**row.source_state, "reason": None}
+    row.source_state = {
+        **row.source_state,
+        "reason": None,
+        "notice_state": None,
+        "notice_pending": False,
+        "notice_lease": None,
+        "notice_lease_until": None,
+    }
     row.next_check_at = now
     row.backoff_until = None
     await session.flush()
@@ -900,9 +907,7 @@ async def claim_import_notice(
                 )
                 .exists(),
                 Watch.status.in_(("paused", "expired"))
-                & Watch.source_state["notice_state"].astext.is_distinct_from(
-                    func.concat(Watch.status, ":", Watch.revision)
-                ),
+                & Watch.source_state["notice_state"].astext.is_distinct_from(Watch.status),
             ),
             or_(
                 Watch.source_state["notice_lease_until"].astext.is_(None),
@@ -931,7 +936,7 @@ async def claim_import_notice(
     row.source_state = {
         **state,
         "notice_pending": True,
-        "notice_state": f"{row.status}:{row.revision}",
+        "notice_state": row.status,
         "notice_lease": token,
         "notice_lease_until": (now + timedelta(minutes=2)).isoformat(),
     }
@@ -952,7 +957,6 @@ async def settle_import_notice(
     if (
         row is None
         or row.status != notice.status
-        or row.revision != notice.revision
         or row.source_state.get("notice_lease") != notice.source_state.get("notice_lease")
     ):
         return
