@@ -745,6 +745,37 @@ async def test_a_consent_that_dropped_skills_still_prepares_and_now_keeps_them(
     assert SKILL_READ_INSTRUCTION in (selected.target_spec.system or "")
 
 
+@pytest.fixture
+def consent_recorded_before_template_tools(monkeypatch):
+    """While the consent is recorded, a template maps none of the source's tools and
+    drops them whole, as before #1483."""
+    import mux.profiles
+    from mux.errors import InvalidConfig
+
+    real = mux.profiles.represented_execution_tools
+
+    def unmapped(profile, tools):
+        raise InvalidConfig("as before #1483")
+
+    monkeypatch.setattr(mux.profiles, "represented_execution_tools", unmapped)
+    return lambda: monkeypatch.setattr(mux.profiles, "represented_execution_tools", real)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_tools_still_prepares_and_now_keeps_them(
+    consent_recorded_before_template_tools, template
+):
+    """A copy switched before #1483 kept its tools keeps working without
+    re-confirming, and runs with code execution from now on."""
+    request, quote, *_ = template
+    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
+    assert not any(drop.startswith("builtin_tool:") for drop in quote.declared_drops)
+    consent_recorded_before_template_tools()  # today's template maps the tools
+    selected, _ = await _prepared(request)
+    assert "tools" not in selected.target_spec.declared_drops
+    assert [tool.name for tool in selected.target_spec.tools or ()] == ["code_execution"]
+
+
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_a_consent_that_dropped_skills_and_the_switch_tool_still_prepares(
     consent_recorded_before_self_cards, consent_recorded_before_skill_tools, template, monkeypatch
