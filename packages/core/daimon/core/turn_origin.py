@@ -387,11 +387,11 @@ def render_turn_origin(
         )
     if moved is not None:
         rendered += (
-            " conversation_move: when kind is moved, say once, first, that this "
-            "conversation moved to that provider and model and earlier messages here "
-            "aren't carried over; when kind is stays, say once that this conversation "
-            "is shared and stays on running_on, and new conversations use that provider "
-            "and model."
+            " conversation_move: when kind is moved, this conversation just moved to "
+            "that provider and model: say so first, once, and that earlier messages here "
+            "aren't carried over. When kind is stays, this conversation is shared and "
+            "stays on running_on while new conversations use that provider and model: "
+            "say so only if asked about your model or the switch."
         )
     rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to

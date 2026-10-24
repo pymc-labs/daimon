@@ -83,7 +83,7 @@ from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
-from daimon.core.stores import agent_backends, mux_state, thread_provider_releases
+from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
@@ -99,11 +99,7 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
-from daimon.core.thread_release import (
-    apply_thread_release,
-    release_due,
-    request_thread_release,
-)
+from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
@@ -119,6 +115,7 @@ from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import ChannelRef, Provider, Scope, ThreadRef
+from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 from mux.profiles.selfhosted import LOOP
@@ -141,7 +138,6 @@ __all__ = [
 
 if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
-    from mux.state.store import StateStore
 
 _log = structlog.get_logger(__name__)
 
@@ -196,90 +192,57 @@ class ThreadFollow:
     model: str | None
 
 
+def _effective_model(provider: Provider, model: str | None) -> str | None:
+    """A provider default stored as None is that provider's default model."""
+    from mux.profiles import backend_selection
+
+    return model or backend_selection(provider).model
+
+
 async def _thread_follow(
     session: AsyncSession,
-    deps: TurnDeps,
-    store: StateStore,
     *,
     tenant_id: uuid.UUID,
-    channel: ChannelRef | None,
-    thread_id: str | None,
-    own_slot: Slot,
-    responder_ma_agent_id: str | None,
-    ever_shared: bool,
-    eligible: bool,
+    channel: ChannelRef,
+    agent_ma_id: str,
+    bound_provider: Provider,
+    bound_model: str | None,
+    shared: bool,
     enabled_backends: tuple[Provider, ...],
-    now: datetime,
 ) -> ThreadFollow | None:
     """Whether this conversation must follow its agent's switch (M03).
 
     The person's own slot of a conversation keeps the provider it started on until
     something moves it. A confirmed switch from chat moves it (`_move_this_thread`);
-    every other switch (set_agent_backend, a setup panel, the CLI) used to leave it on
-    the old provider while the agent said otherwise. So: when the answering agent's
-    current selection differs from the provider (or, off Anthropic, the model) this
-    slot is bound to, the slot moves on this message, exactly as a confirmed switch
-    moves it. A shared conversation never moves; it stays and says so. A channel
-    that pins its own provider wins, and is never reached here.
+    every other switch (set_agent_backend, a setup panel, the CLI, a hand-over) used
+    to leave it on the old provider while the agent said otherwise. So when the
+    answering agent's current selection differs from the provider (or, off
+    Anthropic, the effective model) this slot runs on, and that selection can run
+    here, the slot moves on this message. `agent_ma_id` is the Anthropic source
+    agent admission resolved, never a provider's own agent id. A shared
+    conversation never moves ("stays"). Nothing is written here.
     """
     from daimon.core.ma_identity import derive_agent_uuid
-    from mux.profiles import MANAGED_AGENTS
+    from mux.profiles import backend_selection
 
-    if not eligible or channel is None or thread_id is None:
-        return None
-    thread = ThreadRef(channel=channel, thread_id=thread_id)
-    binding = await store.get_binding(own_slot)
-    if binding is not None:
-        bound_provider, bound_revision = binding.provider, binding.config_revision
-        bound_agent = binding.native_refs.get("agent")
-    else:
-        previous = (
-            await get_thread_session_at(
-                session,
-                tenant_id=tenant_id,
-                platform=channel.platform,
-                thread_id=thread_id,
-                account_id=uuid.UUID(own_slot.account_id),
-                at=now,
-            )
-            if own_slot.account_id is not None
-            else None
-        )
-        if previous is None:
-            return None
-        # Pinned only by an older Managed Agents session: on the default provider.
-        bound_provider, bound_revision = MANAGED_AGENTS.provider, 0
-        bound_agent = previous.ma_agent_id
-    # The agent answering here: a hand-off's, else the one this slot is bound to.
-    responder_ma_agent_id = responder_ma_agent_id or bound_agent
-    if responder_ma_agent_id is None:
-        return None
     preference = await channel_backend.current_agent_backend(
-        session,
-        tenant_id,
-        derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=responder_ma_agent_id),
+        session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_ma_id)
     )
     provider: Provider = (
         preference.backend
         if preference is not None and preference.backend is not None
         else MANAGED_AGENTS.provider
     )
-    model = preference.model if preference is not None else None
-    if bound_provider == provider:
-        if provider == MANAGED_AGENTS.provider or model is None:
-            return None
-        try:
-            retained, _, _ = await channel_backend.resolve_turn_backend(
-                session, channel, None, enabled=True, retained_revision=bound_revision
-            )
-        except (channel_backend.AgentBackendRefused, BackendUnsupported):
-            return None
-        if retained is None or retained.model in (None, model):
-            return None
+    if provider == LOOP.provider:
+        return None
+    model = _effective_model(provider, preference.model if preference is not None else None)
+    if bound_provider == provider and (
+        provider == MANAGED_AGENTS.provider
+        or _effective_model(bound_provider, bound_model) == model
+    ):
+        return None
     # Only toward a provider that can run here: an unavailable preference never
     # strands a conversation that still works where it is.
-    from mux.profiles import backend_selection
-
     selection = backend_selection(provider)
     if model is not None:
         selection = selection.model_copy(update={"model": model})
@@ -289,20 +252,7 @@ async def _thread_follow(
         )
     except BackendUnsupported:
         return None
-    if ever_shared and await store.get_binding(Slot(thread=thread)) is not None:
-        return ThreadFollow("stays", provider, model)
-    # As a confirmed switch from chat does: request the release; admission selects
-    # as released now and applies it once this message is admitted. Nothing opens
-    # on the new provider until this message runs.
-    current = await store.get_binding(own_slot, include_released=True)
-    async with deps.sessionmaker.begin() as release_session:
-        await request_thread_release(
-            release_session,
-            own_slot,
-            generation=current.generation if current is not None else 0,
-            now=now,
-        )
-    return ThreadFollow("moved", provider, model)
+    return ThreadFollow("stays" if shared else "moved", provider, model)
 
 
 @dataclass(frozen=True)
@@ -598,8 +548,9 @@ async def admit_impl(
 
     M03: a message may move its conversation to the agent's switched provider
     (`_thread_follow`). When that move is refused there (e.g. the provider can't
-    serve this agent yet), the move is withdrawn and the message is admitted where
-    the conversation already works, so an unavailable preference never strands it.
+    serve this agent yet), the message is admitted where the conversation already
+    works instead: the move is written only after a successful admission, so there
+    is nothing to withdraw and an unavailable preference never strands it.
     """
     gates = partial(
         _admit_gates,
@@ -625,9 +576,7 @@ async def admit_impl(
     except AdmissionDenied as denied:
         if denied.reason != "backend_unsupported" or not followed:
             raise
-    async with deps.sessionmaker.begin() as release_session:
-        for slot in followed:
-            await thread_provider_releases.take_request(release_session, slot)
+    # Nothing was written for the move: admit where the conversation already works.
     return await gates(followed=[], follow_switch=False)
 
 
@@ -774,31 +723,20 @@ async def _admit_gates(
         )
         backend_footer_profile: str | None = None
         retained_revision: int | None = None
-        backend_follow = await _thread_follow(
-            session,
-            deps,
-            state_store,
-            tenant_id=tenant_id,
-            channel=channel,
-            thread_id=thread_id,
-            own_slot=own_slot,
-            responder_ma_agent_id=config.responder_ma_agent_id,
-            ever_shared=backend_ever_shared,
-            enabled_backends=tuple(policy.enabled_backends),
-            eligible=(
-                follow_switch
-                and selection_enabled
-                and not is_dm
-                and config.thread_binding_kind != "setup"
-                and not configured_channel
-                and not released
-            ),
-            now=now,
+        backend_follow: ThreadFollow | None = None
+        follow_eligible = (
+            follow_switch
+            and selection_enabled
+            and channel is not None
+            and thread_id is not None
+            and not is_dm
+            and config.thread_binding_kind != "setup"
+            and not configured_channel
+            and not released
         )
-        if backend_follow is not None and backend_follow.kind == "moved":
-            released = True
-            if followed is not None:
-                followed.append(own_slot)
+        retained_binding: ProviderBinding | None = None
+        retained_shared = False
+        follow_generation: int | None = None
         if (
             selection_enabled
             and channel is not None
@@ -825,6 +763,7 @@ async def _admit_gates(
                         binding.id, "selected binding differs from authorized thread"
                     )
                 retained_revision = binding.config_revision
+                retained_binding, retained_shared = binding, slot.account_id is None
                 try:
                     retained, _, source = await channel_backend.resolve_turn_backend(
                         session, channel, None, enabled=True, retained_revision=retained_revision
@@ -1199,8 +1138,36 @@ async def _admit_gates(
     async def resolve_preference() -> None:
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
         nonlocal backend_footer_profile, source_agent
+        nonlocal retained_revision, backend_follow, follow_generation
         if selfhosted:
             return
+        if follow_eligible and channel is not None and retained_revision is not None:
+            # M03: the conversation follows its (Anthropic source) agent's switch.
+            async with deps.sessionmaker() as follow_session:
+                backend_follow = await _thread_follow(
+                    follow_session,
+                    tenant_id=tenant_id,
+                    channel=channel,
+                    agent_ma_id=agent.id,
+                    bound_provider=(
+                        backend_revision.backend
+                        if backend_revision is not None
+                        else MANAGED_AGENTS.provider
+                    ),
+                    bound_model=backend_revision.model if backend_revision is not None else None,
+                    shared=retained_shared,
+                    enabled_backends=tuple(policy.enabled_backends),
+                )
+            if backend_follow is not None and backend_follow.kind == "moved":
+                # Select as released now; the release is written only once this
+                # message is admitted (below), so a refusal leaves nothing behind.
+                follow_generation = retained_binding.generation if retained_binding else 0
+                retained_revision = None
+                backend_revision = None
+                backend_revision_origin = None
+                backend_footer_profile = None
+                if followed is not None:
+                    followed.append(own_slot)
         if selection_enabled and channel is not None:
             if retained_revision is None and not configured_channel:
                 # Reuse the authorized source read; a friendly name cannot carry
@@ -1411,6 +1378,18 @@ async def _admit_gates(
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
     )
+    if follow_generation is not None:
+        # Admitted: this conversation follows its agent (M03), only if its slot is
+        # still the binding this message read (a concurrent move or card wins).
+        await release_now(
+            deps.sessionmaker,
+            state_store,
+            own_slot,
+            generation=follow_generation,
+            tenant_id=tenant_id,
+            account_id=principal.account_id,
+            now=now,
+        )
     if released:
         # Admitted: now the release may consume its request (`daimon.core.thread_release`).
         await apply_thread_release(

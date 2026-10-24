@@ -1,143 +1,148 @@
-"""M03: a conversation follows its agent's model-provider switch, or says it stays.
+"""M03: a conversation follows its agent's model-provider switch, or stays when shared.
 
-`_thread_follow` decides, before slot selection, whether the person's own slot of
-this conversation moves to what its agent now selects. The J1 leg
-(`test_j1_switch_card_guard`) proves the whole path on a real switch; these pin
-its branches.
+`_thread_follow` decides, once admission has resolved the conversation's Anthropic
+source agent, whether the person's own slot moves to what that agent now selects.
+It writes nothing; `release_now` moves the slot only after the message is admitted,
+and only from the generation that message read. The J1 legs
+(`test_j1_switch_card_guard`) prove the whole path, several messages on.
 """
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from daimon.core.turn import admission
-from mux.contracts.ids import ChannelRef, ThreadRef
-from mux.contracts.resources import ProviderBinding
-from mux.state.lease import Slot
+from mux.contracts.ids import ChannelRef
 
 TENANT = uuid.uuid4()
-ACCOUNT = uuid.uuid4()
 CHANNEL = ChannelRef(tenant_id=str(TENANT), platform="discord", channel_id="channel")
-THREAD = ThreadRef(channel=CHANNEL, thread_id="thread")
-OWN = Slot(thread=THREAD, account_id=str(ACCOUNT))
-SHARED = Slot(thread=THREAD)
-NOW = datetime(2026, 10, 24, tzinfo=UTC)
-
-
-def _binding(slot: Slot, provider: str, profile: str, revision: int = 0) -> ProviderBinding:
-    return ProviderBinding(
-        id=str(uuid.uuid4()),
-        thread=THREAD,
-        provider=provider,
-        profile=profile,
-        native_refs={"agent": "agent_daimon"},
-        generation=1,
-        config_revision=revision,
-        legacy_account_id=slot.account_id,
-    )
-
-
-class Store:
-    def __init__(self, **bindings: ProviderBinding) -> None:
-        self.bindings = bindings
-
-    async def get_binding(self, slot: Slot, include_released: bool = False):
-        return self.bindings.get("own" if slot.account_id else "shared")
+ALL = ("anthropic", "openai", "gemini")
 
 
 @pytest.fixture
-def world(monkeypatch):
-    released: list[Slot] = []
+def prefer(monkeypatch):
+    asked: list[uuid.UUID] = []
 
-    async def release(session, slot, *, generation, now):
-        released.append(slot)
-
-    @contextlib.asynccontextmanager
-    async def begin():
-        yield None
-
-    monkeypatch.setattr(admission, "request_thread_release", release)
-    deps = SimpleNamespace(sessionmaker=SimpleNamespace(begin=begin))
-
-    def prefer(provider: str | None, model: str | None = None) -> None:
+    def set_preference(provider: str | None, model: str | None = None) -> list[uuid.UUID]:
         async def current(session, tenant_id, agent_id):
+            asked.append(agent_id)
             return None if provider is None else SimpleNamespace(backend=provider, model=model)
 
         monkeypatch.setattr(admission.channel_backend, "current_agent_backend", current)
+        return asked
 
-    async def follow(store: Store, **changes):
-        values = {
-            "tenant_id": TENANT,
-            "channel": CHANNEL,
-            "thread_id": "thread",
-            "own_slot": OWN,
-            "responder_ma_agent_id": None,
-            "ever_shared": False,
-            "eligible": True,
-            "enabled_backends": ("anthropic", "openai", "gemini"),
-            "now": NOW,
-        }
-        values.update(changes)
-        return await admission._thread_follow(None, deps, store, **values)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
-
-    return SimpleNamespace(prefer=prefer, follow=follow, released=released)
+    return set_preference
 
 
-CLAUDE = ("anthropic", "anthropic.managed_agents")
-GEMINI = ("gemini", "gemini.inline_reuse")
+async def follow(bound: tuple[str, str | None], *, shared=False, enabled=ALL):
+    return await admission._thread_follow(  # pyright: ignore[reportPrivateUsage]
+        None,  # pyright: ignore[reportArgumentType]
+        tenant_id=TENANT,
+        channel=CHANNEL,
+        agent_ma_id="agent_daimon",
+        bound_provider=bound[0],  # pyright: ignore[reportArgumentType]
+        bound_model=bound[1],
+        shared=shared,
+        enabled_backends=enabled,  # pyright: ignore[reportArgumentType]
+    )
 
 
-async def test_a_switched_agents_own_conversation_moves(world):
-    world.prefer("gemini", "gemini-3.8-flash")
-    moved = await world.follow(Store(own=_binding(OWN, *CLAUDE)))
-    assert moved == admission.ThreadFollow("moved", "gemini", "gemini-3.8-flash")
-    assert world.released == [OWN], "the release is requested, as a confirmed switch does"
+async def test_it_asks_about_the_anthropic_source_agent(prefer):
+    """Never a provider's own agent id: that one has no preference (review finding 1)."""
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    asked = prefer("gemini", "gemini-3.8-flash")
+    await follow(("anthropic", None))
+    assert asked == [derive_agent_uuid(tenant_id=TENANT, ma_agent_id="agent_daimon")]
 
 
-async def test_a_shared_conversation_stays_and_says_so(world):
-    world.prefer("gemini", "gemini-3.8-flash")
-    store = Store(own=_binding(OWN, *CLAUDE), shared=_binding(SHARED, *CLAUDE))
-    stays = await world.follow(store, ever_shared=True)
-    assert stays == admission.ThreadFollow("stays", "gemini", "gemini-3.8-flash")
-    assert world.released == [], "a shared conversation never moves"
+async def test_a_switched_agents_own_conversation_moves(prefer):
+    prefer("gemini", "gemini-3.8-flash")
+    assert await follow(("anthropic", None)) == admission.ThreadFollow(
+        "moved", "gemini", "gemini-3.8-flash"
+    )
 
 
-async def test_nothing_moves_when_the_provider_already_matches(world):
-    world.prefer(None)  # no preference: the default provider
-    assert await world.follow(Store(own=_binding(OWN, *CLAUDE))) is None
-    world.prefer("gemini")  # the provider's default model
-    assert await world.follow(Store(own=_binding(OWN, *GEMINI))) is None
-    assert world.released == []
+async def test_a_shared_conversation_stays(prefer):
+    prefer("gemini", "gemini-3.8-flash")
+    assert await follow(("anthropic", None), shared=True) == admission.ThreadFollow(
+        "stays", "gemini", "gemini-3.8-flash"
+    )
 
 
-async def test_a_model_change_off_anthropic_moves_the_conversation(world, monkeypatch):
-    world.prefer("gemini", "gemini-4-argon")
-
-    async def retained(session, channel, agent, *, enabled, retained_revision):
-        return SimpleNamespace(model="gemini-3.8-flash"), None, "agent"
-
-    monkeypatch.setattr(admission.channel_backend, "resolve_turn_backend", retained)
-    moved = await world.follow(Store(own=_binding(OWN, *GEMINI, revision=3)))
-    assert moved is not None and moved.kind == "moved" and moved.model == "gemini-4-argon"
-
-
-async def test_a_new_conversation_has_nothing_to_move(world, monkeypatch):
-    world.prefer("gemini")
-
-    async def none(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(admission, "get_thread_session_at", none)
-    assert await world.follow(Store()) is None
+@pytest.mark.parametrize(
+    ("preference", "bound"),
+    [
+        ((None, None), ("anthropic", None)),  # no preference: the default provider
+        (("gemini", "gemini-3.8-flash"), ("gemini", "gemini-3.8-flash")),
+        # A provider default stored as None is that default model (review finding 5).
+        (("gemini", None), ("gemini", "gemini-3.8-flash")),
+        (("gemini", "gemini-3.8-flash"), ("gemini", None)),
+        (("openai", None), ("openai", "gpt-6-luna")),
+    ],
+)
+async def test_nothing_moves_when_provider_and_model_already_match(prefer, preference, bound):
+    prefer(*preference)
+    assert await follow(bound) is None
 
 
-@pytest.mark.parametrize("changes", [{"eligible": False}, {"channel": None}, {"thread_id": None}])
-async def test_a_channel_pin_a_setup_conversation_or_a_dm_never_moves(world, changes):
-    """The caller passes eligible=False for a pinned channel, setup or a DM."""
-    world.prefer("gemini")
-    assert await world.follow(Store(own=_binding(OWN, *CLAUDE)), **changes) is None
-    assert world.released == []
+async def test_going_back_to_the_providers_default_model_moves(prefer):
+    """Argon -> the provider default (stored as None): the slot moves to Flash."""
+    prefer("gemini", None)
+    moved = await follow(("gemini", "gemini-4-argon"))
+    assert moved is not None and (moved.kind, moved.model) == ("moved", "gemini-3.8-flash")
+
+
+async def test_never_toward_a_provider_that_cant_run_here(prefer):
+    prefer("gemini", "gemini-3.8-flash")
+    assert await follow(("anthropic", None), enabled=("anthropic", "openai")) is None
+
+
+async def test_never_toward_a_self_hosted_model(prefer):
+    from mux.profiles.selfhosted import LOOP
+
+    prefer(LOOP.provider)
+    assert await follow(("anthropic", None)) is None
+
+
+async def test_release_now_moves_only_from_the_generation_it_read():
+    """A slot that moved meanwhile (another message, a card) is left alone."""
+    from daimon.core.thread_release import release_now
+    from mux.contracts.ids import ThreadRef
+    from mux.contracts.resources import ProviderBinding
+    from mux.state.lease import Slot
+
+    slot = Slot(thread=ThreadRef(channel=CHANNEL, thread_id="thread"), account_id="acct")
+    current = ProviderBinding(
+        id="binding",
+        thread=slot.thread,
+        provider="gemini",
+        profile="gemini.inline_reuse",
+        native_refs={"session": "s", "agent": "gemini-own-agent-id"},
+        generation=3,
+        config_revision=2,
+        legacy_account_id="acct",
+    )
+    written: list[int] = []
+
+    class Store:
+        async def get_binding(self, slot, include_released=False):
+            return current
+
+        async def put_binding(self, binding, *, expected_generation):
+            written.append(expected_generation)
+            return binding
+
+    moved = await release_now(
+        None,  # pyright: ignore[reportArgumentType]
+        Store(),  # pyright: ignore[reportArgumentType]
+        slot,
+        generation=2,
+        tenant_id=TENANT,
+        account_id=uuid.uuid4(),
+        now=datetime.now(UTC),
+    )
+    assert moved is False and written == []
