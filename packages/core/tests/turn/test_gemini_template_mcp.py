@@ -735,3 +735,71 @@ async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confir
     )
     with pytest.raises((AgentBackendRefused, AdmissionDenied)):
         await _prepared(request)
+
+
+@pytest.fixture
+def consent_recorded_before_template_tools(monkeypatch):
+    """While the consent is recorded, a template maps none of the source's tools and
+    drops them whole, as before #1483."""
+    import mux.profiles
+    from mux.errors import InvalidConfig
+
+    real = mux.profiles.represented_execution_tools
+
+    def unmapped(profile, tools):
+        raise InvalidConfig("as before #1483")
+
+    monkeypatch.setattr(mux.profiles, "represented_execution_tools", unmapped)
+    return lambda: monkeypatch.setattr(mux.profiles, "represented_execution_tools", real)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_tools_still_prepares_and_now_keeps_them(
+    consent_recorded_before_template_tools, template
+):
+    """PRE fleet-gemini (smoke 4acca048): switched before #1483, its consent named
+    `tools` a whole loss. It keeps working without re-confirming, and runs with
+    code execution from now on."""
+    request, quote, *_ = template
+    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
+    assert not any(drop.startswith("builtin_tool:") for drop in quote.declared_drops)
+    consent_recorded_before_template_tools()  # today's template maps the tools
+    selected, _ = await _prepared(request)
+    assert "tools" not in selected.target_spec.declared_drops
+    assert [tool.name for tool in selected.target_spec.tools or ()] == ["code_execution"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_tools_and_the_switch_tool_still_prepares(
+    consent_recorded_before_self_cards, consent_recorded_before_template_tools, template
+):
+    request, quote, *_ = template
+    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+    assert {"tools", switch_drop} <= set(quote.declared_drops)
+    consent_recorded_before_self_cards["old"] = False
+    consent_recorded_before_template_tools()
+    selected, _ = await _prepared(request)
+    spec = selected.target_spec
+    assert not {"tools", switch_drop} & set(spec.declared_drops)
+    assert [tool.name for tool in spec.tools or ()] == ["code_execution"]
+    assert "request_agent_backend_switch" in _connection(selected).tool_policy["allowed_tools"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_new_confirmation(
+    consent_recorded_before_self_cards,
+    consent_recorded_before_template_tools,
+    template,
+    monkeypatch,
+):
+    """Tools are explained by #1483; one more gated tool offered is not: a fresh card."""
+    from daimon.core import tool_safety
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    request, quote, *_ = template
+    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
+    consent_recorded_before_template_tools()
+    # The switch tool stays dropped as consented; add_skill is newly offered.
+    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: frozenset({"add_skill"}))
+    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
+        await _prepared(request)
