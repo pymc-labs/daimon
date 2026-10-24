@@ -431,15 +431,14 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
     assert account is not None
     await db_session.refresh(account)
     assert account.role == "user", "GitHub helpers must never write role snapshots"
-    with pytest.raises(ValueError, match="tenant admin"):
-        await connect_link(
-            db_session,
-            settings=settings,
-            tenant_id=tenant_id,
-            platform="discord",
-            platform_user_id="former-holder",
-            verified_tenant_admin=True,
-        )
+    await connect_link(
+        db_session,
+        settings=settings,
+        tenant_id=tenant_id,
+        platform="discord",
+        platform_user_id="former-holder",
+        verified_tenant_admin=True,
+    )
     with pytest.raises(ValueError, match="admin can connect GitHub"):
         await connect_link(
             db_session,

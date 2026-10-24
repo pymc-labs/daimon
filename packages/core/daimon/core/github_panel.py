@@ -265,6 +265,7 @@ async def connect_link(
         agent_name=agent_name,
         agent_ma_id=agent_ma_id,
         agent_manager_verified=verified_tenant_admin or verified_agent_manager,
+        verified_platform_admin=verified_tenant_admin,
         origin_platform=platform,
         origin_parent_channel_id=origin_parent_channel_id,
         origin_thread_id=origin_thread_id,

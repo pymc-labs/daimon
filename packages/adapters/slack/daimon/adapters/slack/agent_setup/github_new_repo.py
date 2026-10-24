@@ -49,7 +49,12 @@ async def send_pending_notice(
         async with runtime.sessionmaker() as session:
             try:
                 account_id = await admin_account_for_platform_user(
-                    session, tenant_id=tenant_id, external_id=user_id
+                    session,
+                    tenant_id=tenant_id,
+                    external_id=user_id,
+                    is_platform_admin=await resolve_is_platform_admin(
+                        client, user_id=user_id, host_team_id=team_id
+                    ),
                 )
             except ValueError:
                 account_id = None
@@ -146,7 +151,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 is_platform_admin=True,
             )
             account_id = await admin_account_for_platform_user(
-                session, tenant_id=tenant_id, external_id=user_id
+                session, tenant_id=tenant_id, external_id=user_id, is_platform_admin=True
             )
             group = await notices_for_day(session, tenant_id=tenant_id, day=day)
             if group is None:
