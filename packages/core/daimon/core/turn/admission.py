@@ -173,7 +173,6 @@ class AdmissionGrant:
     channel_id: str
     thread_id: str | None
     is_dm: bool
-    platform: str = "discord"
     cold_dm: bool = False
     act_for_creator: bool = False
     # Set by the DM path: the conversation's source, whose seal is re-checked.
@@ -952,7 +951,6 @@ async def admit_impl(
         platform=platform,
         cold_dm=cold_dm or dm_agent_name is not None,
         hold=hold,
-        platform=platform,
     )
     _require_run_agent(policy, grant)
     mark("agent_policy")
@@ -1399,7 +1397,11 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 def _approval_gate_for(
     deps: TurnDeps, policy: TenantAccessPolicy, grant: AdmissionGrant
 ) -> ApprovalGate | None:
-    if grant.is_dm or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides):
+    if (
+        grant.is_dm
+        or grant.platform is None
+        or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides)
+    ):
         return None
     gate = resolve_approval_gate(
         policy, platform=grant.platform, channel_id=grant.channel_id, thread_id=grant.thread_id
@@ -1412,6 +1414,7 @@ async def refresh_approval_gate(deps: TurnDeps, admission: Admission) -> Approva
     grant = admission.grant
     if (
         grant is None
+        or grant.platform is None
         or grant.is_dm
         or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides)
     ):

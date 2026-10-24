@@ -410,10 +410,7 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
-    if (
-        call.tool_name in {"request_fleet_config", "request_provider_allowlist"}
-        and own_server
-    ):
+    if call.tool_name in {"request_fleet_config", "request_provider_allowlist"}:
         if call.tool_name == "request_fleet_config":
             reference = ConfigurationReference.model_validate(
                 {
@@ -442,7 +439,7 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
-    if call.tool_name == "request_channel_pin_clear" and own_server:
+    if call.tool_name == "request_channel_pin_clear":
         reference = ConfigurationReference.model_validate(
             {
                 "operation": "channel_pin_clear",

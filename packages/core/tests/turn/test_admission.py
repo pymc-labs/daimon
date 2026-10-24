@@ -2350,7 +2350,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
     from daimon.core.approval_gate import ApprovalGate
     from daimon.core.stores.access_policy import set_access_policy
     from daimon.core.tool_safety import ToolSafetyPolicy
-    from daimon.core.turn.admission import reauthorize
+    from daimon.core.turn.admission import reauthorize, refresh_approval_gate
 
     tenant = await make_tenant(db_session)
     await make_tenant_config(
@@ -2374,6 +2374,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
     )
     admission = await admit(
         deps,
+        requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="user-1",
@@ -2407,9 +2408,12 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
     )
 
+    assert fresh.grant is not None
+    unbound = replace(fresh, grant=replace(fresh.grant, platform=None))
+    assert await refresh_approval_gate(deps, unbound) is None
+
     if is_dm:
         from daimon.core.tool_safety import ToolCall
-        from daimon.core.turn.admission import refresh_approval_gate
         from daimon.core.turn.approvals import chat_tool_confirmation
         from daimon.core.turn.posture import PolicyApproval
 
@@ -2484,6 +2488,7 @@ async def test_gate_revocation_reaches_prepared_and_running_turns(
     await change("off")
     admission = await admit(
         deps,
+        requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="user-1",
@@ -2520,6 +2525,7 @@ async def test_gate_revocation_reaches_prepared_and_running_turns(
     # A retry is a newly admitted turn, never a spin over the stale prepared grant.
     readmitted = await admit(
         deps,
+        requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="user-1",

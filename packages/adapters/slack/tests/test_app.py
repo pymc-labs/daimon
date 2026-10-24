@@ -7533,3 +7533,25 @@ async def test_approval_thread_modal_acks_before_dispatch_and_rejects_external(e
         if external
         else ["send_socket_mode_response", "approval-thread"]
     )
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_approval_select_uses_verified_host_block_action_dispatch(external):
+    app = _make_app()
+    socket = _FakeSocketClient()
+    payload = _make_block_actions_payload(action_id="here_approvals")
+    payload["user"]["team_id"] = "T_OTHER" if external else "T_TEST"
+    handled = AsyncMock()
+    refused = AsyncMock()
+    with (
+        patch("daimon.adapters.slack.app.handle_here_approvals", new=handled),
+        patch.object(app, "_refuse_external_click", new=refused),
+    ):
+        await app.on_request(
+            socket,
+            SocketModeRequest(type="interactive", envelope_id="gate-select", payload=payload),
+        )
+        await asyncio.gather(*list(app._bg_tasks))
+    assert socket.call_log[0] == "send_socket_mode_response"
+    assert handled.await_count == (0 if external else 1)
+    assert refused.await_count == (1 if external else 0)

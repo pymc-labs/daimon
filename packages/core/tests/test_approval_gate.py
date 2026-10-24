@@ -31,6 +31,31 @@ TRUSTED = frozenset({"daimon-mcp"})
 WRITE = ToolCall(tool_use_id="t1", server_name="third-party", tool_name="create_issue")
 
 
+ADMIN_INPUTS: dict[str, dict[str, object]] = {
+    "request_agent_backend_switch": {
+        "agent_name": "agent",
+        "target_backend": "anthropic",
+        "expected_revision": 1,
+        "preview_digest": "a" * 64,
+    },
+    "request_fleet_config": {
+        "agent_name": "agent",
+        "revoke": True,
+        "expected_revision": 1,
+        "preview_digest": "a" * 64,
+    },
+    "request_provider_allowlist": {
+        "providers": ["anthropic"],
+        "expected_revision": "policy-revision",
+        "preview_digest": "a" * 64,
+    },
+    "request_channel_pin_clear": {
+        "expected_revision": 1,
+        "preview_digest": "a" * 64,
+    },
+}
+
+
 @pytest.mark.parametrize("scope", ["server", "channel:C1", "thread:C1:1.2"])
 async def test_off_allows_third_party_write_without_card_and_logs_setter(scope: str) -> None:
     card = AsyncMock(return_value="denied")
@@ -72,16 +97,7 @@ async def test_every_fixed_daimon_gate_still_asks(tool: str) -> None:
             tool_name=tool,
             input={
                 **{CONFIRMED_DAIMON_TOOLS.get(tool, "unused"): "value"},
-                **(
-                    {
-                        "agent_name": "agent",
-                        "target_backend": "anthropic",
-                        "expected_revision": 1,
-                        "preview_digest": "a" * 64,
-                    }
-                    if tool == "request_agent_backend_switch"
-                    else {}
-                ),
+                **ADMIN_INPUTS.get(tool, {}),
             },
         )
     )
@@ -457,13 +473,14 @@ async def test_fixed_gate_names_ask_on_own_endpoint_aliases_and_unrelated_server
                 "agent_name": "agent",
                 "target_backend": "anthropic",
                 "expected_revision": 1,
+                **ADMIN_INPUTS.get(tool, {}),
             },
         )
     )
     assert not result.allow
     card.assert_awaited_once()
 
-    if own_endpoint and tool == "request_agent_backend_switch":
+    if tool in ADMIN_INPUTS:
         assert card.await_args.args[0].admin is True
 
 
@@ -566,11 +583,12 @@ async def test_protected_names_never_auto_allow_on_any_host(endpoint: str, tool:
                 "target_backend": "anthropic",
                 "name": "set_channel_rule",
                 "arguments": {"readers": "any"},
+                **ADMIN_INPUTS.get(tool, {}),
             },
         )
     )
     assert not result.allow
     card.assert_awaited_once()
     gate.assert_not_awaited()
-    if tool == "request_agent_backend_switch":
+    if tool in ADMIN_INPUTS:
         assert card.await_args.args[0].admin is True
