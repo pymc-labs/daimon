@@ -1662,12 +1662,15 @@ def fleet_root_permissions(
     now: datetime,
     seal_ids: frozenset[str] = frozenset(),
     own_backends: tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]] | None = None,
+    execution_model: ModelRef | None = None,
 ) -> WorkerPermissions:
     """Compose captured source; caller joins origin/binding and rechecks grant epoch.
 
     The root gets the grant's model choices plus its own model. `own_backends`
     replaces those choices for an agent that runs as a worker: its own config
-    decides its model, not the grant's model list.
+    decides its model, not the grant's model list. `execution_model` is the model a
+    root actually runs on when it answers through a native counterpart (a GPT or
+    Gemini agent): it is the root's own model, so a worker that names none runs on it.
     """
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
@@ -1697,6 +1700,8 @@ def fleet_root_permissions(
     ):
         raise WorkerSpecRefused("origin", "unbound")
     spec, resources = _root_ceiling(source, account_id=fleet.scope.account_id)
+    if execution_model is not None:
+        spec = spec.model_copy(update={"model": execution_model})
     read_only = source.memory_read_only is not False
     # The run gets its own time; each worker is capped at spawn (`worker_runtime_ceiling`).
     duration = min(grant.max_run_seconds, TURN_CEILING_S)

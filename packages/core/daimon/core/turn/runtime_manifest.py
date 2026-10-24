@@ -752,6 +752,27 @@ async def freeze_prepared_root(
             _remember_root_refusal(origin_id, obstacle)
 
 
+def _counterpart_admitted(admission: Admission, scope: Scope) -> bool:
+    """A root that answers through a native counterpart (a GPT or Gemini agent) can
+    coordinate a fleet: its counterpart must be the one admission verified for this
+    turn, in this tenant, on the admitted backend revision's provider and model.
+
+    The logical agent is what the fleet freezes; the counterpart is only how it runs.
+    """
+    counterpart, revision = admission.backend_counterpart, admission.backend_revision
+    if counterpart is None:
+        return True
+    agent = counterpart.agent
+    return (
+        revision is not None
+        and agent.ref.tenant_id == scope.tenant_id
+        and agent.spec.model.id == revision.model
+        and agent.spec.model.provider == revision.backend
+        and agent.lifecycle == "active"
+        and agent.archived_at is None
+    )
+
+
 async def _freeze_root(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -791,7 +812,7 @@ async def _freeze_root(
     ):
         raise WorkerSpecRefused("origin", "unbound")
     request = prepared._preparation  # pyright: ignore[reportPrivateUsage]
-    if request is None or prepared.admission.backend_counterpart is not None:
+    if request is None or not _counterpart_admitted(prepared.admission, scope):
         raise WorkerSpecRefused("origin", "unbound")
     admission = prepared.admission
     if grant.thread_id is None:
@@ -859,6 +880,17 @@ async def _freeze_root(
             policy=policy,
             now=now(),
             seal_ids=prepared.admission.origin_seal_ids,
+            # A GPT/Gemini root runs on its counterpart's model: that is its own model.
+            execution_model=(
+                ModelRef(
+                    provider=prepared.admission.backend_revision.backend,
+                    id=prepared.admission.backend_revision.model,
+                )
+                if prepared.admission.backend_counterpart is not None
+                and prepared.admission.backend_revision is not None
+                and prepared.admission.backend_revision.model is not None
+                else None
+            ),
         )
     except WorkerSpecRefused as error:
         # Only when the agent's own setup can't become worker authority (e.g. a
