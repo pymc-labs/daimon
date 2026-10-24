@@ -555,6 +555,11 @@ class ToolSafetyPolicy(BaseModel):
         ),
     )
 
+    @property
+    def gate_overrides_active(self) -> bool:
+        """Whether native admins can override third-party write approvals."""
+        return self.enabled and self.allow_gate_overrides
+
 
 OPEN_TOOL_SAFETY: Final[ToolSafetyPolicy] = ToolSafetyPolicy()
 

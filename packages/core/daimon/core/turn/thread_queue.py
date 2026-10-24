@@ -65,7 +65,7 @@ def group_by_author[Message, Author: Hashable](
     queued: list[Message],
     author: Callable[[Message], Author | None],
     *,
-    separate: Callable[[Message], bool] = lambda _: False,
+    separate: Callable[[Message], bool],
 ) -> list[list[Message]]:
     """Keep first-seen author order and arrival order within each author.
 
@@ -94,7 +94,7 @@ class ThreadQueue[Key: Hashable, Message]:
         processing: set[Key],
         pending: dict[Key, list[Message]],
         *,
-        start_turn: Callable[[Key], None] | None = None,
+        start_turn: Callable[[Key], None],
     ) -> None:
         self.processing = processing
         self.pending = pending
@@ -124,8 +124,7 @@ class ThreadQueue[Key: Hashable, Message]:
         while turns:
             for turn in turns:
                 # Each author batch starts a new turn while ownership stays held.
-                if self._start_turn is not None:
-                    self._start_turn(key)
+                self._start_turn(key)
                 await run(turn)
             turns = compose(self.pending.pop(key, []))
 

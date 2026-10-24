@@ -108,10 +108,7 @@ async def _load(context: CommandContext) -> HereCard:
                 app_configured=runtime.settings.github_app.app_id is not None
                 and runtime.settings.github_app.private_key is not None,
             ),
-            gate_overrides_active=(
-                runtime.settings.tool_safety.enabled
-                and runtime.settings.tool_safety.allow_gate_overrides
-            ),
+            gate_overrides_active=runtime.settings.tool_safety.gate_overrides_active,
             public_mcp_url=str(public_url) if public_url is not None else None,
             # Only the caller sees the answer, so an admin may see admin views.
             is_admin=context.is_admin,
