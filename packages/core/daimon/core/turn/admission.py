@@ -182,6 +182,10 @@ class AdmissionGrant:
     platform: str | None = None
 
 
+class _FollowLost(Exception):
+    """This message's move lost to a concurrent one (`release_now` found the slot moved)."""
+
+
 @dataclass(frozen=True)
 class ThreadFollow:
     """How this conversation followed its agent's model-provider switch (M03)."""
@@ -550,7 +554,9 @@ async def admit_impl(
     (`_thread_follow`). When that move is refused there (e.g. the provider can't
     serve this agent yet), the message is admitted where the conversation already
     works instead: the move is written only after a successful admission, so there
-    is nothing to withdraw and an unavailable preference never strands it.
+    is nothing to withdraw and an unavailable preference never strands it. When
+    another message or a card moved the slot first, it is admitted again from where
+    the slot now is.
     """
     gates = partial(
         _admit_gates,
@@ -573,6 +579,8 @@ async def admit_impl(
     followed: list[Slot] = []
     try:
         return await gates(followed=followed)
+    except _FollowLost:
+        pass
     except AdmissionDenied as denied:
         if denied.reason != "backend_unsupported" or not followed:
             raise
@@ -1378,18 +1386,20 @@ async def _admit_gates(
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
     )
-    if follow_generation is not None:
-        # Admitted: this conversation follows its agent (M03), only if its slot is
-        # still the binding this message read (a concurrent move or card wins).
-        await release_now(
-            deps.sessionmaker,
-            state_store,
-            own_slot,
-            generation=follow_generation,
-            tenant_id=tenant_id,
-            account_id=principal.account_id,
-            now=now,
-        )
+    # Admitted: this conversation follows its agent (M03), only if its slot is still
+    # the binding this message read (a concurrent move or card wins).
+    if follow_generation is not None and not await release_now(
+        deps.sessionmaker,
+        state_store,
+        own_slot,
+        generation=follow_generation,
+        tenant_id=tenant_id,
+        account_id=principal.account_id,
+        now=now,
+    ):
+        # Another message or a card moved the slot first: this admission chose a
+        # provider the slot isn't on. Decide again from where it is now.
+        raise _FollowLost
     if released:
         # Admitted: now the release may consume its request (`daimon.core.thread_release`).
         await apply_thread_release(
