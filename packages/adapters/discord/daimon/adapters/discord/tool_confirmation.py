@@ -161,7 +161,9 @@ class _ConfirmationView(discord.ui.LayoutView):
                 )
                 always.callback = self._on_always
                 row.add_item(always)
-            row.add_item(details)
+            # An admin card already shows its details above the buttons.
+            if not prompt.admin:
+                row.add_item(details)
             container.add_item(row)
         footer = _footer(card, prompt)
         if footer is not None:
@@ -324,6 +326,28 @@ def confirmation_requester(view: object) -> str | None:
     return view.pending_requester() if isinstance(view, _ConfirmationView) else None
 
 
+async def tenant_guild(
+    client: discord.Client,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+) -> discord.Guild | None:
+    """The Discord server a tenant stands for, or None when it can't be found."""
+    from daimon.core.stores.tenants import get_tenant
+
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+    if tenant is None or tenant.platform != "discord" or not tenant.external_id.isdigit():
+        return None
+    guild_id = int(tenant.external_id)
+    guild = client.get_guild(guild_id)
+    if guild is not None:
+        return guild
+    try:
+        return await client.fetch_guild(guild_id)
+    except discord.HTTPException:
+        return None
+
+
 def discord_confirmation_hook(
     channel: discord.abc.Messageable,
     *,
@@ -333,8 +357,27 @@ def discord_confirmation_hook(
     account_id: uuid.UUID | None = None,
     prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
     check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
+    client: discord.Client | None = None,
 ) -> ConfirmationHook:
-    """A hook that posts each prompt's card into `channel` (the turn's thread)."""
+    """A hook that posts each prompt's card into `channel` (the turn's thread).
+
+    The clicker's admin role is read live from the server the turn belongs to:
+    the thread's or text channel's own server, or for a DM the tenant's server,
+    which needs `client`. Anywhere else, or a DM without `client`, the clicker
+    counts as no admin.
+    """
+
+    async def role_guild() -> discord.Guild | None:
+        if isinstance(channel, (discord.Thread, discord.TextChannel)):
+            return channel.guild
+        if (
+            not isinstance(channel, discord.DMChannel)
+            or client is None
+            or runtime is None
+            or tenant_id is None
+        ):
+            return None
+        return await tenant_guild(client, runtime.sessionmaker, tenant_id)
 
     if runtime is not None:
         from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
@@ -349,9 +392,10 @@ def discord_confirmation_hook(
                 raise ValueError("Backend confirmation requires an admitted account and tenant")
 
             async def current_admin(clicker: str) -> bool:
-                if not isinstance(channel, (discord.Thread, discord.TextChannel)):
+                guild = await role_guild()
+                if guild is None:
                     return False
-                role, _ = await requester_role(channel.guild, clicker)
+                role, _ = await requester_role(guild, clicker)
                 return role is Role.ADMIN
 
             from daimon.core.turn.admission import capture_admitted_backend_source
@@ -401,13 +445,12 @@ def discord_confirmation_hook(
         from daimon.adapters.discord.bot import requester_role
         from daimon.core.stores.domain import Role
 
-        if (
-            rule_factory is None
-            or tenant_id is None
-            or not isinstance(channel, (discord.Thread, discord.TextChannel))
-        ):
+        if rule_factory is None or tenant_id is None:
             return Subject()
-        role, _roles = await requester_role(channel.guild, clicker)
+        guild = await role_guild()
+        if guild is None:
+            return Subject()
+        role, _roles = await requester_role(guild, clicker)
         async with rule_factory() as session:
             return await load_live_subject(
                 session,
