@@ -1103,6 +1103,8 @@ async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_noth
         account_id=caller.id,
         tenant_id=tenant.id,
         role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
@@ -1209,6 +1211,7 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         platform="discord",
         platform_user_id="42",
         is_admin=role is Role.ADMIN,
+        is_platform_admin=role is Role.ADMIN,
         chat_session_id="test-session",
     )
 
@@ -1272,6 +1275,7 @@ async def test_handoff_from_a_dm_is_outside_every_pin(
         platform="discord",
         platform_user_id="42",
         is_admin=True,
+        is_platform_admin=True,
         chat_session_id="test-session",
     )
 
@@ -1322,6 +1326,7 @@ async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
         platform="discord",
         platform_user_id="42",
         is_admin=True,
+        is_platform_admin=True,
         chat_session_id="test-session",
     )
 
@@ -1611,6 +1616,7 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
         tenant_id=tenant.id,
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="42",
         chat_session_id="provider-handoff-grant",

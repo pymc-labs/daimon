@@ -73,6 +73,8 @@ def _override_users_info_admin(mock: Any) -> None:
         payload={
             "ok": True,
             "user": {
+                "deleted": False,
+                "is_bot": False,
                 "id": _USER_ID,
                 "name": "admin",
                 "team_id": _TEAM_ID,

@@ -37,6 +37,7 @@ from daimon.adapters.teams.routines_card import (
     panel_card,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -125,7 +126,9 @@ class RoutinesPanel:
 
                     async def allowed(row: RoutineRow) -> bool:
                         return can_manage_routine(
-                            row, user_id=actor.user_id, is_admin=actor.is_admin
+                            row,
+                            user_id=actor.user_id,
+                            is_admin=actor.admin_for(DelegatedAction.ROUTINES),
                         )
 
                     result = await apply_routine_action(
@@ -145,7 +148,11 @@ class RoutinesPanel:
                     row = await store.get_routine(session, routine_id, tenant_id=tenant_id)
                     if row is None:
                         return toast(GONE)
-                    if not can_manage_routine(row, user_id=actor.user_id, is_admin=actor.is_admin):
+                    if not can_manage_routine(
+                        row,
+                        user_id=actor.user_id,
+                        is_admin=actor.admin_for(DelegatedAction.ROUTINES),
+                    ):
                         return toast(NOT_OWNER)
                     if op == "output":
                         if not can_read_routine_output(row, user_id=actor.user_id):
@@ -157,7 +164,10 @@ class RoutinesPanel:
                         await store.delete_routine(session, routine_id, tenant_id=tenant_id)
                         notice = "🗑️ Routine deleted."
         card = await self._panel(
-            actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin, notice=notice
+            actor.tenant_id,
+            user_id=actor.user_id,
+            is_admin=actor.admin_for(DelegatedAction.ROUTINES),
+            notice=notice,
         )
         return replace_card(card)
 
@@ -171,7 +181,7 @@ class RoutinesPanel:
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
-        if actor is None or not actor.is_admin:
+        if actor is None or not actor.admin_for(DelegatedAction.ROUTINES):
             return dialog_notice(NEW_ROUTINE, DENIED if actor is None else ADMIN_ONLY)
         return await self._form(actor, {})
 
@@ -179,7 +189,7 @@ class RoutinesPanel:
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, ctx.activity)
-        if actor is None or not actor.is_admin:
+        if actor is None or not actor.admin_for(DelegatedAction.ROUTINES):
             return dialog_message(DENIED if actor is None else ADMIN_ONLY)
         values = form_values(ctx.activity.value.data)
         error = await self._create(actor, values)

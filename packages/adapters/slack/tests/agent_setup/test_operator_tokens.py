@@ -22,9 +22,11 @@ from daimon.adapters.slack.agent_setup.panel_views import (
 )
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_platform_principal, make_tenant
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -57,11 +59,20 @@ def _client() -> MagicMock:
 
 
 async def _setup(
-    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, *, admin: bool
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    admin: bool,
+    recorded_admin: bool = True,
 ) -> None:
     async with factory.begin() as session:
-        await make_tenant(session, platform="slack", workspace_id=TEAM)
-    monkeypatch.setattr(operator_tokens, "resolve_is_admin", AsyncMock(return_value=admin))
+        tenant = await make_tenant(session, platform="slack", workspace_id=TEAM)
+        principal = await make_platform_principal(
+            session, tenant=tenant, platform="slack", external_id=USER
+        )
+        if admin and recorded_admin:
+            await set_role(session, principal.account_id, Role.ADMIN)
+    monkeypatch.setattr(operator_tokens, "resolve_is_platform_admin", AsyncMock(return_value=admin))
     monkeypatch.setattr(operator_tokens, "load_routing_view", AsyncMock(return_value={"v": 1}))
 
 
@@ -157,3 +168,19 @@ async def test_a_forged_deployment_scope_is_refused(
         tokens == []
         and "can't be granted from here" in client.chat_postEphemeral.call_args.kwargs["text"]
     )
+
+
+async def test_live_admin_with_user_snapshot_gets_refresh_message_and_no_token(
+    db_session_factory, monkeypatch
+) -> None:
+    await _setup(db_session_factory, monkeypatch, admin=True, recorded_admin=False)
+    client = _client()
+    submission = evaluate_operator_token_submission(_payload(["tenant:read"]))
+    assert submission is not None
+    await run_operator_token_submission(
+        _runtime(db_session_factory), client, team_id=TEAM, user_id=USER, submission=submission
+    )
+    tokens, events = await _state(db_session_factory)
+    assert tokens == [] and events == [("panel:operator_token_mint", "denied")]
+    text = client.chat_postEphemeral.call_args.kwargs["text"]
+    assert "Send Daimon a message" in text and "Bearer" not in text

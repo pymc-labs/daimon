@@ -1,7 +1,7 @@
 """Redeem-code modal for /billing.
 
-A server-wide code needs a server admin and credits the whole server. A
-channel code is for any member and credits the channel /billing ran in (a
+All codes require a platform admin. A server-wide code credits the server; a
+channel code credits the channel /billing ran in (a
 thread's parent). Admin rights are read again on submit, because the modal
 outlives the click that opened it. Redemption goes through
 ``daimon.core.promo_credit``; the panel is re-rendered so the new balance,
@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import structlog
-from daimon.adapters.discord.billing_panel.read import invoking_channel_id, is_guild_admin
+from daimon.adapters.discord.billing_panel.read import invoking_channel_id, is_platform_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.billing_panel import redeemed_text
@@ -100,7 +100,7 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
                 channel=None
                 if channel_id is None
                 else PromoChannel(platform="discord", channel_id=channel_id),
-                is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
+                is_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
             )
         except (DaimonError, SQLAlchemyError) as exc:
             # Deferred already, so the person gets an answer whatever failed.

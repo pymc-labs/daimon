@@ -30,6 +30,7 @@ from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_panel_
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
@@ -115,7 +116,9 @@ async def run_add_skill_submission(
             client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text
         )
 
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(
+        client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.SKILLS
+    )
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session, platform="slack", external_id=user_id, tenant_id=tenant_id
@@ -197,6 +200,7 @@ async def run_add_skill_submission(
             meta=meta.with_view("details", agent_name=agent_name),
             agent_name=agent_name,
             is_admin=is_admin,
+            user_id=user_id,
         )
         if details is not None:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]

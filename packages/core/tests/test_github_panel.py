@@ -409,13 +409,13 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
     account = await db_session.get(Account, member_id)
     assert account is not None
     assert account.role == "user"
-    with pytest.raises(ValueError, match="Only an admin"):
+    with pytest.raises(ValueError, match="platform admin"):
         await sync_connect_admin(
             db_session,
             tenant_id=tenant_id,
             platform="discord",
             platform_user_id="former-holder",
-            verified_tenant_admin=False,
+            is_platform_admin=False,
         )
     account = await db_session.get(Account, member_id)
     assert account is not None
@@ -425,21 +425,22 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         tenant_id=tenant_id,
         platform="discord",
         platform_user_id="former-holder",
-        verified_tenant_admin=True,
+        is_platform_admin=True,
     )
     account = await db_session.get(Account, member_id)
     assert account is not None
     await db_session.refresh(account)
-    assert account.role == "admin"
-    await connect_link(
-        db_session,
-        settings=settings,
-        tenant_id=tenant_id,
-        platform="discord",
-        platform_user_id="former-holder",
-        verified_tenant_admin=True,
-    )
-    with pytest.raises(ValueError, match="Only an admin"):
+    assert account.role == "user", "GitHub helpers must never write role snapshots"
+    with pytest.raises(ValueError, match="tenant admin"):
+        await connect_link(
+            db_session,
+            settings=settings,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id="former-holder",
+            verified_tenant_admin=True,
+        )
+    with pytest.raises(ValueError, match="admin can connect GitHub"):
         await connect_link(
             db_session,
             settings=settings,

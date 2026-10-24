@@ -107,7 +107,8 @@ _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def _caller_is_admin(auth: AuthIdentity) -> bool:
     """Whether this caller may REQUEST a key outside the member allowlist.
 
-    `auth.is_admin` is the middleware's gate: the account's live DB role is
+    The live configuration verdict is the middleware’s gate; account roles
+    never cache delegated authority. The verified platform principal is
     ADMIN, or the token is an internal CLI/scheduler/headless token carrying
     the admin claim. An agent-scoped key (`auth.agent_id` set) re-derives its
     role from the account that owns it, which may be an admin — so it is
@@ -119,7 +120,7 @@ def _caller_is_admin(auth: AuthIdentity) -> bool:
     policy, so a mint by an admin-capable token never lets a member store an
     admin-only name.
     """
-    return auth.is_admin and auth.agent_id is None
+    return auth.admin_for() and auth.agent_id is None
 
 
 _PENDING_TASK_DESCRIPTION = (
@@ -286,7 +287,11 @@ async def _decide_attachment_write(
         ma_agent_id=str(ma_agent.id),
         is_daimon_managed=ma_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
     )
-    return decide_operation(operation, is_admin=auth.is_admin, target=facts), facts
+    return decide_operation(
+        operation,
+        is_admin=auth.admin_for(),
+        target=facts,
+    ), facts
 
 
 async def _require_key_replacement_allowed(
@@ -418,7 +423,13 @@ async def _mint_and_post(
     replaces_updated_at: datetime | None = None,
     branch: str | None = None,
 ) -> RequestCredentialResult:
-    await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
+    await require_pin_write_access(
+        runtime,
+        auth,
+        ma_agent=ma_agent,
+        origin=origin,
+        action=None,
+    )
     # A tool-supplied channel cannot redirect a private-input request.
     channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
     if auth.platform == "teams" and runtime.teams_client is None:

@@ -1017,10 +1017,8 @@ class AgentBackendService:
             if grant_operation:
                 if now is None:
                     raise AgentBackendRefused("invalid_fleet_grant")
-                if operation == "fleet_grant_set" and not admin:
-                    # An owner only tightens: within the default, or within the
-                    # agent's current custom grant (an admin's raise).
-                    await self._require_owner_ceiling(session, agent, current, fleet_grant, now=now)
+                if not admin:
+                    raise AgentBackendRefused("admin_required")
                 preview = await self._fleet_preview(session, agent, fleet_grant, now=now)
                 backend = current.backend if current else None
                 model = current.model if current else None

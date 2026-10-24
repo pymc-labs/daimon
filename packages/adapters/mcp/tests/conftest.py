@@ -108,3 +108,29 @@ def current_discord_membership(monkeypatch: pytest.MonkeyPatch) -> None:
             object.__setattr__(runtime, "membership_resolver", CachedMembershipResolver(fetch))
 
     monkeypatch.setattr(McpRuntime, "__post_init__", initialize)
+
+
+@pytest.fixture
+def platform_admin_edge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Platform facts for transport tests; token claims never serve as attestation."""
+    from daimon.adapters.mcp.middleware import mcp_identity
+    from daimon.testing.admin_facts import platform_authority_from_test_accounts
+
+    monkeypatch.setattr(mcp_identity, "resolve_authority", platform_authority_from_test_accounts)
+
+
+@pytest.fixture(autouse=True)
+def empty_accounts_for_mock_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Schema-only unit harnesses have no accounts; real DB tests stay untouched."""
+    from unittest.mock import Mock
+
+    from daimon.adapters.mcp.middleware import mcp_identity
+
+    real = mcp_identity.get_account_with_tenant
+
+    async def lookup(session, *, account_id):
+        if isinstance(session, Mock):
+            return None
+        return await real(session, account_id=account_id)
+
+    monkeypatch.setattr(mcp_identity, "get_account_with_tenant", lookup)

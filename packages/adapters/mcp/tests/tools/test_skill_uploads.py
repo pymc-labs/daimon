@@ -93,6 +93,7 @@ class _World:
             external_id=external_id,
             platform_user_id=USER if platform else None,
             is_admin=admin,
+            is_platform_admin=admin,
             chat_session_id="test-session",
         )
 
@@ -321,6 +322,11 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
             **extra,
         )
 
+    if where == "agent_key":
+        with pytest.raises(ToolError, match="needs its owner or a server admin"):
+            await add()
+        assert world.created == []
+        return
     preview = await add()
     summary = preview.summary
     assert "content_hash=" not in summary and "open helper and use Add skill" in summary

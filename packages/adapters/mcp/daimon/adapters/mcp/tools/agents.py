@@ -54,6 +54,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.core import channel_backend
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
@@ -244,7 +245,9 @@ async def _with_answering_note(
     return info.model_copy(
         update={
             "answering": build_unrouted_note(
-                agent_name=info.name, channel_label=None, is_admin=auth.is_admin
+                agent_name=info.name,
+                channel_label=None,
+                is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS),
             )
         }
     )
@@ -425,7 +428,7 @@ async def _list_agents_impl(
         )
         for a in rows
     ]
-    if auth.is_admin:
+    if auth.admin_for(DelegatedAction.AGENT_SETTINGS):
         return infos
     return [info if info.owned_by_you else info.for_member() for info in infos]
 
@@ -454,7 +457,7 @@ async def _get_agent_impl(
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
     owned = await caller_owns_agent(runtime, auth, agent.id)
-    sees_setup = auth.is_admin or owned
+    sees_setup = auth.admin_for(DelegatedAction.AGENT_SETTINGS) or owned
     if sees_setup and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
@@ -624,6 +627,8 @@ async def _create_agent_impl(
     spec: AgentSpec,
     origin_context_id: str | None = None,
 ) -> AgentInfo:
+    if spec.mcp_servers and not may_own(auth):
+        _require_admin(auth)
     if spec.skills:
         raise ToolError(
             "create_agent: skills must be empty. To add skills, either sync a "
@@ -784,6 +789,8 @@ async def _update_agent_impl(
         location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
+    if mcp_servers is not None:
+        await _require_connection_editor(runtime, auth, agent)
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
 
     touched_fields = {field_name for field_name, value in scalars.items() if value is not None}
@@ -956,6 +963,15 @@ async def _update_agent_impl(
     return result
 
 
+async def _require_connection_editor(
+    runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
+) -> None:
+    """Keep native admin exemptions and the independent ownership right separate."""
+    if auth.admin_for() or await caller_owns_agent(runtime, auth, agent.id):
+        return
+    raise ToolError("Connections require a platform admin or this agent's owner.")
+
+
 async def _require_mcp_replace_allowed(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1025,6 +1041,7 @@ async def _attach_mcp_server_impl(
         location_channel_id=origin_channel_id(origin),
     )
     _reject_system_agent(agent)
+    await _require_connection_editor(runtime, auth, agent)
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
     await reachability.require_admin_for_reachable_agent(
         runtime, auth, agent_name=agent_name, agent=agent
@@ -1084,7 +1101,7 @@ async def _fork_agent_impl(
 
     # Forking is an admin's call: a fork routes nowhere and has no channel
     # pin of its own, so it is free to run anywhere the source can't.
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.AGENT_LIFECYCLE)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     public_url = runtime.settings.mcp.public_url
     async with contextlib.AsyncExitStack() as stack:
@@ -1114,7 +1131,7 @@ async def _fork_agent_impl(
                 source=source,
                 new_name=new_name,
                 public_url=str(public_url) if public_url is not None else None,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_LIFECYCLE)),
                 default_agent_name=runtime.deployment_default.agent_name,
                 # Whoever made the copy owns it.
                 owner=auth.account_id if may_own(auth) else None,
@@ -1143,7 +1160,7 @@ async def _archive_agent_impl(
     name: str,
     expected_ma_agent_id: str | None = None,
 ) -> None:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.AGENT_LIFECYCLE)
     agent = await resolve_setup_agent(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
@@ -1222,7 +1239,7 @@ async def _capture_backend_source(
             channel_id=origin.parent_channel_id if origin is not None else None,
             thread_id=origin.thread_id if origin is not None else None,
         ),
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
         place=turn_origin_place(origin) if origin is not None else Place(),
         is_dm=False,
         slack_turn_context_id=None,
@@ -1452,7 +1469,7 @@ async def _set_agent_backend_impl(
     actor = channel_backend.BackendActor(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
     )
     on_now: Provider | None = None
     try:
@@ -1647,7 +1664,7 @@ async def _request_agent_backend_switch_impl(
             BackendActor(
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
             ),
             auth,
         )
@@ -1670,7 +1687,9 @@ async def _request_agent_backend_switch_impl(
                 unsaved_work=unsaved_work,
                 switch="check",
             )
-        if thread_mode == "shared" and not (auth.is_admin and auth.agent_id is None):
+        if thread_mode == "shared" and not (
+            auth.admin_for(DelegatedAction.AGENT_SETTINGS) and auth.agent_id is None
+        ):
             # The service refuses it too; say so before a card is posted.
             raise ToolError(
                 f"Sharing threads applies in every channel, so it needs "
@@ -1709,7 +1728,7 @@ async def _request_agent_backend_switch_impl(
             actor = BackendActor(
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
-                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
             )
             from daimon.core.turn.notices import provider_name
 

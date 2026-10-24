@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import get_args
 
 import pytest
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.operation_policy import (
     OperationKind,
     TargetFacts,
     decide_operation,
+    delegated_action_for_operation,
     needs_reachability_read,
 )
 
@@ -216,3 +218,21 @@ def test_a_member_s_change_to_an_unmanaged_agent_reads_its_owner() -> None:
     assert not needs_reachability_read("repo_bind", is_admin=False, is_daimon_managed=False)
     assert not needs_reachability_read("key_add", is_admin=False, is_daimon_managed=False)
     assert not needs_reachability_read("agent_spec_edit", is_admin=False, is_daimon_managed=True)
+
+
+def test_delegation_never_exempts_credential_or_connection_operations() -> None:
+    shared = _facts(managed=False, reachable=True)
+    for operation in get_args(OperationKind):
+        action = delegated_action_for_operation(operation)
+        effective = admin_for_action(platform_admin=False, daimon_admin=True, action=action)
+        if operation in {"agent_spec_edit", "skill_add", "skill_remove"}:
+            assert effective
+            assert decide_operation(operation, is_admin=effective, target=shared) == "allow"
+        else:
+            assert action is None and not effective
+            if operation not in {"key_add", "keys_import"}:
+                assert (
+                    decide_operation(operation, is_admin=effective, target=shared) == "needs_admin"
+                )
+    assert "credentials" not in set(DelegatedAction)
+    assert "mcp_connections" not in set(DelegatedAction)

@@ -635,30 +635,25 @@ async def test_an_owner_can_not_raise_any_default_limit_but_an_admin_can(people_
     # The write itself (what the Confirm click executes) refuses too.
     with pytest.raises(AgentBackendRefused) as refused:
         await put(service, agent, actors["owner"], raised)
-    assert refused.value.reason == "fleet_raise_admin_required"
+    assert refused.value.reason == "admin_required"
     assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).kind == "default"
     # An admin may raise it.
     saved = await put(service, agent, actors["admin"], raised)
     assert saved.fleet_grant is not None
 
 
-async def test_an_owner_tightens_the_default_and_an_admins_raise(people_default):
+async def test_only_platform_admin_can_tighten_raise_or_revoke_worker_limits(people_default):
     from daimon.core.channel_backend import AgentBackendRefused
 
     service, agent, actors, _, default = people_default
     tighter = default.model_copy(update={"max_workers": 2})
-    await put(service, agent, actors["owner"], tighter)
-    # Back up to the default is still within the default.
-    await put(service, agent, actors["owner"], default)
-    # An admin raises to 8; the owner may lower within it, never above it.
+    for who in ("owner", "member"):
+        for value in (tighter, default, None):
+            with pytest.raises(AgentBackendRefused, match="admin"):
+                await put(service, agent, actors[who], value)
+    await put(service, agent, actors["admin"], tighter)
     await put(service, agent, actors["admin"], default.model_copy(update={"max_workers": 8}))
-    await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 6}))
-    with pytest.raises(AgentBackendRefused, match="admin"):
-        await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 9}))
-    # The owner may still turn it off; a member may do nothing.
-    await put(service, agent, actors["owner"], None)
-    with pytest.raises(AgentBackendRefused):
-        await put(service, agent, actors["member"], tighter)
+    await put(service, agent, actors["admin"], None)
 
 
 def test_tightening_is_checked_for_worker_agents_provider_and_token_caps():

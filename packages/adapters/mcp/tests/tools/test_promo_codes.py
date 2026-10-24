@@ -42,6 +42,8 @@ async def _setup(session: AsyncSession, *, is_admin: bool = True) -> AuthIdentit
         tenant_id=tenant.id,
         role=Role.ADMIN if is_admin else Role.USER,
         is_admin=is_admin,
+        is_platform_admin=is_admin,
+        token_kind="cli",
     )
 
 
@@ -115,7 +117,7 @@ async def test_non_admin_is_refused_before_redeeming(
     """A non-admin gets a tool error and the code grants nothing."""
     auth = await _setup(db_session, is_admin=False)
     await _code(db_session, "WELCOME-2026", timed=False)
-    with pytest.raises(ToolError, match="requires an admin"):
+    with pytest.raises(ToolError, match="requires a live platform admin"):
         await _redeem_promo_code_impl(_runtime(db_session_factory), auth, "WELCOME-2026")
     assert await tenant_ledger.get_balance(db_session, tenant_id=auth.tenant_id) == 0, (
         "a refused non-admin should add no credit"

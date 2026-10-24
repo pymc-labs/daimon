@@ -29,6 +29,7 @@ from daimon.adapters.slack.routines_panel.read import load_routines, routines_vi
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.cron_words import schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -173,7 +174,9 @@ async def _refuse_non_admin(
     Every mutating run_* calls this first. Returns True = caller should return
     early (refused). Returns False = admin confirmed, proceed.
     """
-    is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(
+        web_client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+    )
     if not is_admin:
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -314,7 +317,9 @@ async def run_routines_delete_submission(
                     text="This routine no longer exists.",
                 )
                 return
-            is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
+            is_admin = await resolve_is_admin(
+                web_client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+            )
             if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,

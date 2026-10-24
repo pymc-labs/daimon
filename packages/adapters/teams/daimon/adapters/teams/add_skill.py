@@ -24,6 +24,7 @@ from daimon.adapters.teams.admin_caller import admin_caller
 from daimon.adapters.teams.card_actions import Actor
 from daimon.adapters.teams.deployment_admins import with_admin_team, with_admin_team_if_asked
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.authz import Place, Subject
@@ -79,7 +80,10 @@ async def skill_change_refusal(
     if agent.is_built_in:
         return BUILT_IN
     caller = await admin_caller(
-        runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
+        runtime,
+        tenant_id=actor.tenant_id,
+        user_id=actor.user_id,
+        is_admin=actor.admin_for(DelegatedAction.SKILLS),
     )
     names = (agent.name, *(agent_pin_names(ma_agent.name, ma_agent.metadata) if ma_agent else ()))
 
@@ -96,7 +100,11 @@ async def skill_change_refusal(
 
         async def live_subject() -> Subject:
             return await load_live_subject(
-                session, tenant_id=actor.tenant_id, platform="teams", caller=caller
+                session,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                caller=caller,
+                action=DelegatedAction.SKILLS,
             )
 
         # The panel is in the 1:1 chat: no channel, so a pin is kept only by its admins.
@@ -122,7 +130,8 @@ async def skill_change_refusal(
             caller_account_id=account_id,
             caller_platform_user_id=actor.user_id,
         )
-    if decide_operation("skill_add", is_admin=caller.is_server_admin, target=facts) == "allow":
+        effective_admin = (await live_subject()).is_admin
+    if decide_operation("skill_add", is_admin=effective_admin, target=facts) == "allow":
         return None
     return await with_admin_team(runtime, needs_admin(agent.name))
 

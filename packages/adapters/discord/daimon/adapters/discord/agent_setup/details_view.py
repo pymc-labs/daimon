@@ -37,6 +37,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import channel_backend
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_detail_lists import (
     DETAIL_LIST_COLLAPSED_COUNT,
     DetailListName,
@@ -513,7 +514,7 @@ class DetailsView(PanelViewBase):
         self.add_item(container)
 
     async def _backend_allowed(self, interaction: discord.Interaction) -> bool:
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.AGENT_SETTINGS):  # pyright: ignore[reportArgumentType]
             await self._backend_audit(interaction, outcome="denied", reason="needs_admin")
             return False
         if not await self.interaction_check(interaction):
@@ -610,7 +611,7 @@ class DetailsView(PanelViewBase):
             tenant_id=preview.tenant_id,
             account_id=self.state.account_id,
             subject=build_subject(
-                is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+                is_admin=await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS),  # pyright: ignore[reportArgumentType]
                 platform_user_id=str(interaction.user.id),
             ),
         )

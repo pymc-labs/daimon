@@ -8,6 +8,7 @@ from typing import Literal
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.discord._client import (
@@ -21,7 +22,6 @@ from daimon.adapters.mcp.tools.setup_target import (
 )
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.adapters.mcp.tools.teams._direct import send_card_to_caller
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.github_connect_cards import (
     CONNECT_GITHUB_EMOJI,
     connect_attachment,
@@ -30,10 +30,8 @@ from daimon.core.github_connect_cards import (
     teams_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
-from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
     list_agent_grants,
     list_authorized_repos,
@@ -217,19 +215,8 @@ async def _github_connect_impl(
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
-        is_admin = account.role == Role.ADMIN and auth.is_admin
-        manages = is_admin or await requester_manages_agent(
-            session,
-            tenant_id=auth.tenant_id,
-            account_id=auth.account_id,
-            platform=auth.platform,
-            platform_user_id=auth.platform_user_id if auth.agent_id is None else None,
-            agent_name=agent.name,
-            other_names=(target_name, str(agent.metadata.get(MA_METADATA_KEY_NAME) or "")),
-            ma_agent_id=str(agent.id),
-            default=runtime.deployment_default,
-            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-        )
+        is_admin = await current_admin(session, auth)
+        manages = is_admin
         if not manages:
             await record_connect_request(
                 session,

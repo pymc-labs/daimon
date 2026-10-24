@@ -159,6 +159,8 @@ source_modules = [
     "daimon.core.lead_source",
     "daimon.adapters",
     "daimon.core.access_policy",
+    "daimon.core.admin_actions",
+    "daimon.core.admin_authority",
     "daimon.core.agent_avatar_image",
     "daimon.core.agent_detail_lists",
     "daimon.core.agent_details",

@@ -96,6 +96,7 @@ class PurgePreview(BaseModel):
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
+    daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     channel_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -122,6 +123,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.daimon_admins, "Daimon admin grants"),
         (preview.channel_admins, "channel admin list"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
@@ -414,6 +416,16 @@ async def collect_purge_preview(
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
 
         # 16. channel_admins — the channels whose grant lists this person's id.
+        from daimon.core.stores.daimon_admins import count_user_rows
+
+        daimon_admins_total = 0
+        for pp in pp_list:
+            daimon_admins_total += await count_user_rows(
+                session,
+                tenant_id=pp.tenant_id,
+                platform=pp.platform,
+                platform_user_id=pp.external_id,
+            )
         channel_admins_total = 0
         for pp in pp_list:
             channel_admins_total += await channel_admins_store.count_channel_admin_grants_for_user(
@@ -501,6 +513,7 @@ async def collect_purge_preview(
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
+        daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
         channel_admins=PurgePreviewRow(count=channel_admins_total, example=None),
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),

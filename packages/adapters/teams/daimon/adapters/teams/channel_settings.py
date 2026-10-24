@@ -32,6 +32,7 @@ from daimon.adapters.teams.card_actions import (
 from daimon.adapters.teams.deployment_admins import with_admin_team
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import load_answering_map
 from daimon.core.authz import Subject, build_subject
 from daimon.core.channel_environments import (
@@ -144,7 +145,10 @@ class ChannelSettingsDialog:
                 session,
                 tenant_id=actor.tenant_id,
                 platform="teams",
-                caller=AdminCaller(platform_user_id=actor.user_id, is_server_admin=actor.is_admin),
+                caller=AdminCaller(
+                    platform_user_id=actor.user_id, is_server_admin=actor.is_platform_admin
+                ),
+                action=DelegatedAction.CHANNEL_PERMISSIONS,
             )
 
     async def _listed(self, tenant_id: uuid.UUID) -> dict[str, str | None]:
@@ -162,7 +166,9 @@ class ChannelSettingsDialog:
         async with self._runtime.sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=actor.tenant_id)
         channels = cards.visible_channels(listed, own_reader_channels(policy))
-        form = cards.channel_picker_form(channels, free_entry=actor.is_admin, notice=notice)
+        form = cards.channel_picker_form(
+            channels, free_entry=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS), notice=notice
+        )
         return dialog(TITLE, form)
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
@@ -170,7 +176,7 @@ class ChannelSettingsDialog:
         if actor is None:
             return dialog_notice(TITLE, DENIED)
         subject = await self._subject(actor)
-        if not actor.is_admin:
+        if not actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS):
             return dialog_notice(TITLE, await self._need_admin())
         return await self._picker(actor, subject)
 
@@ -202,7 +208,7 @@ class ChannelSettingsDialog:
                         self._runtime.anthropic,
                         tenant_id=tenant_id,
                         channel_id=channel_id,
-                        is_admin=actor.is_admin,
+                        is_admin=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS),
                         default=self._runtime.deployment_default,
                     )
                 names = await list_environment_names(
@@ -223,8 +229,10 @@ class ChannelSettingsDialog:
             channel_id=channel_id,
             label=cards.channel_label(channel_id, name),
             picker=picker,
-            rule=channel_rule_status(policy, channel_id) if actor.is_admin else None,
-            skills=tuple(skills) if actor.is_admin else None,
+            rule=channel_rule_status(policy, channel_id)
+            if actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS)
+            else None,
+            skills=tuple(skills) if actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS) else None,
         )
         return dialog(TITLE, cards.channel_settings_form(settings, notice=notice))
 
@@ -251,18 +259,20 @@ class ChannelSettingsDialog:
         if op not in get_args(cards.ChannelOp):
             return await self._picker(actor, subject)
         op = cast("cards.ChannelOp", op)
-        typed = data.get("channel_id") if actor.is_admin else None
+        typed = (
+            data.get("channel_id") if actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS) else None
+        )
         channel_id = _channel(typed or data.get("channel"))
         if channel_id is None:
             return await self._picker(actor, subject, UNKNOWN_CHANNEL)
         audit_op = _AUDIT_OPS.get(op)
-        if not actor.is_admin:
+        if not actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS):
             if audit_op is not None:
                 await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
             return dialog_message(await self._need_admin())
         if audit_op is None:
             return await self._settings(actor, subject, channel_id)
-        if audit_op != "environment" and not actor.is_admin:
+        if audit_op != "environment" and not actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS):
             await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
             return dialog_message(await with_admin_team(self._runtime, ADMIN_ONLY))
         if audit_op == "environment":

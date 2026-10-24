@@ -5,7 +5,7 @@ shows (the member cache, else one member fetch each under a short shared
 timeout, else the name stored when they were last seen, else their account's
 own name), assembles a BillingPanelState.
 
-`is_guild_admin` is Discord-native: manage_guild | administrator | owner_id.
+`is_platform_admin` is Discord-native: manage_guild | administrator | owner_id.
 Gating on a daimon-DB role would block legitimate guild admins, so we resolve
 permissions from Discord at click time instead.
 """
@@ -53,7 +53,7 @@ _TOP_MEMBERS_CAP = 25  # same number as _PICKER_CAP, different semantics
 NAME_FETCH_TIMEOUT_S = 1.5
 
 
-def is_guild_admin(interaction: BotInteraction) -> bool:
+def is_platform_admin(interaction: BotInteraction) -> bool:
     """Discord-native admin check: owner OR manage_guild OR administrator.
 
     Resolves at every render/click (not cached) so role flips take effect

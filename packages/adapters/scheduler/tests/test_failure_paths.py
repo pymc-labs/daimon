@@ -78,7 +78,11 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
         if case == "heal_edit_then_fail":
             async with db_session_factory.begin() as session:
                 await update_routine(
-                    session, row.id, tenant_id=row.tenant_id, trigger_message="new configuration"
+                    session,
+                    row.id,
+                    tenant_id=row.tenant_id,
+                    trigger_message="new configuration",
+                    edited_by="123",
                 )
         if case in ("heal_then_fail", "heal_edit_then_fail"):
             raise TurnError(kind="upstream", message="provider failed")

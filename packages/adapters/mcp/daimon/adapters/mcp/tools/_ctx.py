@@ -7,8 +7,10 @@ from datetime import UTC, datetime
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
+from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.adapters.mcp.tools._words import admin_noun, space_noun
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
@@ -18,7 +20,6 @@ from daimon.core.permissions import agent_permissions, any_agent_rules, any_own_
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import Role
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
@@ -48,13 +49,13 @@ async def _auth(ctx: Context) -> AuthIdentity:  # pyright: ignore[reportUnusedFu
     return identity
 
 
-def _require_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedFunction]
+def _require_admin(auth: AuthIdentity, *, action: DelegatedAction | None = None) -> None:  # pyright: ignore[reportUnusedFunction]
     """Raise ToolError if the caller is not an admin.
 
     Call at the top of every mutating _*_impl to enforce admin chat gating.
     Reads (list_*/get_*/self_read*/self_list*) stay ungated.
     """
-    if not auth.is_admin:
+    if not auth.admin_for(action):
         raise ToolError(
             f"This operation requires {admin_noun(auth.platform)}. Tell the caller who can "
             "make the change and give them a sentence the admin can say, preserving "
@@ -109,6 +110,7 @@ async def _policy_gate(
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
             account = await get_account(session, auth.account_id)
+            admin_now = await current_admin(session, auth, action=DelegatedAction.HUB_PIN_EXEMPTION)
     except AccessPolicyUnreadable as exc:
         refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
@@ -127,12 +129,10 @@ async def _policy_gate(
             tenant_id=auth.tenant_id,
             user_id=auth.platform_user_id,
             require_fresh=require_fresh,
+            action=DelegatedAction.HUB_PIN_EXEMPTION,
         )
     hub_admin = (
-        pin_exempt
-        and auth.platform_user_id is not None
-        and account is not None
-        and account.role is Role.ADMIN
+        pin_exempt and auth.platform_user_id is not None and account is not None and admin_now
     )
     if live_subject is not None:
         hub_admin = pin_exempt and live_subject.is_admin
@@ -149,22 +149,20 @@ async def _policy_gate(
             async with sessionmaker() as session:
                 policy = await load_access_policy(session, tenant_id=auth.tenant_id)
                 account = await get_account(session, auth.account_id)
+                admin_now = await current_admin(
+                    session, auth, action=DelegatedAction.HUB_PIN_EXEMPTION
+                )
         except AccessPolicyUnreadable as exc:
             refused(TerminationReason.ADMISSION_DENIED)
             raise ToolError(f"TERMINAL ERROR: {exc}.") from exc
         hub_admin = (
-            pin_exempt
-            and auth.platform_user_id is not None
-            and account is not None
-            and account.role is Role.ADMIN
+            pin_exempt and auth.platform_user_id is not None and account is not None and admin_now
         )
         if live_subject is not None:
             hub_admin = pin_exempt and live_subject.is_admin
         gated = any_agent_rules(policy) or any_own_readers(policy)
     is_discord = auth.platform == "discord" or bool(policy.invoker_role_ids)
-    is_admin = (
-        auth.is_admin or (account is not None and account.role is Role.ADMIN)
-    ) and not is_discord
+    is_admin = admin_now and not is_discord
     subject = mcp_subject(auth, is_admin=is_admin)
     if auth.platform_user_id is not None and is_discord:
         subject = (
@@ -176,6 +174,7 @@ async def _policy_gate(
                 tenant_id=auth.tenant_id,
                 user_id=auth.platform_user_id,
                 require_fresh=require_fresh,
+                action=DelegatedAction.HUB_PIN_EXEMPTION,
             )
         )
     if live_subject is not None:
@@ -191,7 +190,7 @@ async def _policy_gate(
                     platform_user_id=auth.platform_user_id,
                 )
                 if pin_exempt
-                else mcp_subject(auth)
+                else mcp_subject(auth, is_admin=subject.is_admin)
             ),
             action=Action.RUN_AGENT,
             surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
@@ -423,3 +422,12 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
         tool_name=tool_name,
         agent_names=None if agent_names is None else names,
     )
+
+
+def _require_platform_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Money and delegation require live platform authority, never a delegated role."""
+    if auth.is_platform_admin is not True or not auth.is_personal_user:
+        raise ToolError(
+            "This operation requires a live platform admin acting directly "
+            "with a personal user credential."
+        )

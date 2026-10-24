@@ -6,6 +6,7 @@ import uuid
 
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
 from daimon.core.channel_rules import set_channel_rule
 from daimon.core.errors import DaimonError
@@ -25,7 +26,7 @@ class MakeConfidentialView(discord.ui.View):
     async def make_confidential(
         self, interaction: discord.Interaction, button: discord.ui.Button[MakeConfidentialView]
     ) -> None:
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.CHANNEL_PERMISSIONS):  # pyright: ignore[reportArgumentType]
             return
         await interaction.response.defer(ephemeral=True)
         async with self.runtime.sessionmaker.begin() as session:

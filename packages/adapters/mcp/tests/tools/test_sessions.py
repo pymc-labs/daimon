@@ -305,7 +305,14 @@ async def test_list_sessions_returns_only_tenant_scoped_sessions() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
+        token_kind="cli",
+    )
     result = await _list_sessions_impl(_runtime(client), auth, page=None, agent_name=None)
 
     assert len(result) == 1, "should drain one session for the tenant's only agent"
@@ -323,7 +330,14 @@ async def test_list_sessions_with_unknown_agent_name_raises() -> None:
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
+        token_kind="cli",
+    )
     with pytest.raises(ToolError, match="not found"):
         await _list_sessions_impl(_runtime(client), auth, page=None, agent_name="nope")
 
@@ -359,7 +373,14 @@ async def test_get_session_raises_when_session_belongs_to_other_tenant() -> None
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
+        token_kind="cli",
+    )
     with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), auth, "ses_x")
 
@@ -396,7 +417,14 @@ async def test_get_session_returns_session_info_when_owned() -> None:
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
+        token_kind="cli",
+    )
     result = await _get_session_impl(_runtime(client), auth, "ses_1")
 
     assert isinstance(result, SessionInfo), "should return a SessionInfo"
@@ -447,7 +475,14 @@ async def test_list_session_events_returns_page_envelope() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
+        token_kind="cli",
+    )
     result = await _list_session_events_impl(
         _runtime(client), auth, "ses_1", page=None, limit=None, order=None
     )
@@ -531,7 +566,14 @@ async def test_list_session_events_never_returns_a_turn_origin_id() -> None:
         lambda _r, _m: httpx.Response(200, json={"data": [user_event, tool_event]}),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
+        token_kind="cli",
+    )
 
     result = await _list_session_events_impl(
         _runtime(client), auth, "ses_1", page=None, limit=None, order=None
@@ -605,7 +647,12 @@ async def test_get_session_refuses_another_members_session_even_for_an_admin() -
     client = build_fake_anthropic(router.dispatch)
 
     admin = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
 
     with pytest.raises(ToolError, match="conversation not found"):
@@ -650,7 +697,14 @@ async def test_list_sessions_hides_other_members_sessions() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=mine, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = AuthIdentity(
+        account_id=mine,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
+        is_admin=Role.ADMIN is Role.ADMIN,
+        token_kind="cli",
+    )
     results = await _list_sessions_impl(_runtime(client), auth, None, None)
 
     assert [r.id for r in results] == ["ses_mine"], (
@@ -672,6 +726,8 @@ def test_private_session_stamp_is_not_account_or_admin_authority(private_stamp, 
         tenant_id=uuid.uuid4(),
         role=Role.ADMIN if admin else Role.USER,
         is_admin=admin,
+        is_platform_admin=admin,
+        token_kind="cli",
         slack_turn_context_id=uuid.uuid4(),
     )
     session = ma_session(
@@ -731,6 +787,9 @@ async def test_session_reads_do_not_cross_executing_agent(role, claim, agent_nam
             account_id=account,
             tenant_id=tenant,
             role=role,
+            is_platform_admin=role is Role.ADMIN,
+            is_admin=role is Role.ADMIN,
+            token_kind="cli",
             **{claim: derive_agent_uuid(tenant_id=tenant, ma_agent_id=own.id)},
         )
         runtime = _runtime(client)

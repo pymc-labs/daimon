@@ -19,10 +19,12 @@ from daimon.adapters.discord.bot import (
     log_anthropic_overload,
 )
 from daimon.adapters.discord.checks import (
+    is_member_daimon_admin,
     is_member_guild_admin,
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
@@ -467,11 +469,18 @@ class DirectMessageCog(commands.Cog):
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
         try:
             member = await guild.fetch_member(interaction.user.id)
-            is_admin = is_member_guild_admin(member, guild_owner_id=guild.owner_id)
+            is_admin = await is_member_daimon_admin(
+                member, runtime=self.bot.runtime, action=DelegatedAction.AGENT_SETTINGS
+            )
             if action in {"enable", "disable", "agent", "clear-agent"}:
-                if not is_admin:
+                permitted = (
+                    is_member_guild_admin(member, guild_owner_id=guild.owner_id)
+                    if action in {"enable", "disable"}
+                    else is_admin
+                )
+                if not permitted:
                     await interaction.followup.send(
-                        "Only a server admin can turn Daimon DMs on or off here.", ephemeral=True
+                        "Only a platform admin can turn Daimon DMs on or off here.", ephemeral=True
                     )
                     return
                 if action in {"agent", "clear-agent"}:

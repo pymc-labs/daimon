@@ -36,6 +36,7 @@ __all__ = [
 PANEL_PAGE_SIZE: Final = 20
 
 PanelViewName = Literal[
+    "admins",
     "agents",
     "details",
     "routing",
@@ -58,6 +59,7 @@ PanelExpansion = Literal["keys", "skills", "connections"]
 
 _PANEL_VIEW_NAMES: Final[frozenset[str]] = frozenset(
     {
+        "admins",
         "agents",
         "details",
         "routing",

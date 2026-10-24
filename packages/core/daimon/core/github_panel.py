@@ -7,10 +7,8 @@ from datetime import datetime
 
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
-from daimon.core.native_admins import AdminCaller, read_stored_admin
+from daimon.core.native_admins import AdminCaller, load_live_subject, read_stored_admin
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
     SERVER_WIDE_GRANT_MESSAGE,
     InstallationLimitError,
@@ -19,7 +17,6 @@ from daimon.core.stores.github_access import (
 )
 from daimon.core.stores.github_connect import (
     PINNED_AGENT_MESSAGE,
-    admin_account_for_platform_user,
     expire_pending_invitation,
     latest_pending_invitation,
     mint_invitation,
@@ -68,8 +65,10 @@ async def can_manage_agent_github(
     is_daimon_managed: bool,
     default: DeploymentDefault,
 ) -> bool:
-    """Only a server admin can connect, grant and remove repos for an agent."""
-    return caller.is_server_admin
+    """Only a platform admin can connect, grant and remove repos for an agent."""
+    return (
+        await load_live_subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+    ).is_admin
 
 
 async def requester_manages_agent(
@@ -85,7 +84,7 @@ async def requester_manages_agent(
     is_daimon_managed: bool | None,
     other_names: tuple[str | None, ...] = (),
 ) -> bool:
-    """Use the stored native admin role for an out-of-turn GitHub save."""
+    """Use the bound aggregate admin snapshot for an out-of-turn GitHub save."""
     if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
     stored = await read_stored_admin(
@@ -104,15 +103,14 @@ async def sync_connect_admin(
     tenant_id: uuid.UUID,
     platform: str,
     platform_user_id: str,
-    verified_tenant_admin: bool,
+    is_platform_admin: bool,
 ) -> None:
-    """Record a live platform admin check before a connect entry point mints a link."""
-    if not verified_tenant_admin:
-        raise ValueError("Only an admin can connect GitHub.")
-    principal = await get_or_create_platform_principal(
+    """Ensure a verified platform caller has a principal; never persist authority."""
+    if is_platform_admin is not True:
+        raise ValueError("Only a platform admin can connect GitHub.")
+    await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
-    await set_role(session, principal.account_id, Role.ADMIN)
 
 
 _PUBLIC_ERRORS = frozenset(
@@ -228,10 +226,14 @@ async def connect_link(
         raise ValueError("GitHub connection is not configured here.")
     for_agent = agent_id is not None and agent_name is not None
     if verified_tenant_admin:
-        account_id = await admin_account_for_platform_user(
-            session, tenant_id=tenant_id, external_id=platform_user_id
+        await sync_connect_admin(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            platform_user_id=platform_user_id,
+            is_platform_admin=True,
         )
-    elif for_agent and verified_agent_manager:
+    if verified_tenant_admin or (for_agent and verified_agent_manager):
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
         )
@@ -262,7 +264,7 @@ async def connect_link(
         agent_id=agent_id,
         agent_name=agent_name,
         agent_ma_id=agent_ma_id,
-        agent_manager_verified=verified_agent_manager,
+        agent_manager_verified=verified_tenant_admin or verified_agent_manager,
         origin_platform=platform,
         origin_parent_channel_id=origin_parent_channel_id,
         origin_thread_id=origin_thread_id,

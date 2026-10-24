@@ -213,7 +213,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 tenant_id=request.tenant_id,
                 platform="discord",
                 platform_user_id=str(interaction.user.id),
-                verified_tenant_admin=True,
+                is_platform_admin=True,
             )
             principal = await find_platform_principal(
                 session,
@@ -440,7 +440,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 tenant_id=request.tenant_id,
                 platform="discord",
                 platform_user_id=str(member.id),
-                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+                is_platform_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
             )
             url = await connect_link(
                 session,

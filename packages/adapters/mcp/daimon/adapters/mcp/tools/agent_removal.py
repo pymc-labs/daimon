@@ -99,7 +99,7 @@ async def _detach_mcp_server_impl(
         expected_ma_agent_id=expected_ma_agent_id,
         location_channel_id=origin_channel_id(origin),
     )
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None, action=None)
     # `mcp_remove` sits in `decide_operation`'s attachment family, not the spec
     # family `_reject_system_agent` enforces: the token form attaches a server
     # to the seeded agent for any member, and the defaults reconciler unions
@@ -118,7 +118,7 @@ async def _detach_mcp_server_impl(
         ma_agent_id=str(agent.id),
         is_daimon_managed=is_daimon_managed,
     )
-    outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
+    outcome = decide_operation("mcp_remove", is_admin=auth.admin_for(), target=facts)
     if outcome != "allow":
         raise ToolError(
             f"Disconnecting '{server_name}' from '{agent_name}' needs {admin_noun(auth.platform)}, "
@@ -315,7 +315,7 @@ async def _remove_agent_key_impl(
         expected_ma_agent_id=expected_ma_agent_id,
         location_channel_id=origin_channel_id(origin),
     )
-    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+    await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None, action=None)
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     # Every name the agent answers to, live thread bindings and personal
     # defaults: a removal followed by a fresh add is a replacement, so it
@@ -328,7 +328,7 @@ async def _remove_agent_key_impl(
         ma_agent_id=str(agent.id),
         is_daimon_managed=is_daimon_managed,
     )
-    outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
+    outcome = decide_operation("key_remove", is_admin=auth.admin_for(), target=facts)
     if outcome != "allow":
         raise ToolError(
             f"Removing {key} from '{agent_name}' needs {admin_noun(auth.platform)}, and the "

@@ -266,6 +266,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
             account_id=account.id,
             role=Role.ADMIN if admin else Role.USER,
             is_admin=admin,
+            is_platform_admin=admin,
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_daimon"),

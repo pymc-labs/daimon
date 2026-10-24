@@ -59,7 +59,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_admin, resolve_is_platform_admin
 from daimon.adapters.slack.agent_policy import (
     refuse_unless_allowed_for_agent_name,
     refuse_unless_pin_allows,
@@ -122,6 +122,7 @@ from daimon.adapters.slack.setup_conversations import (
     setup_reply_button,
 )
 from daimon.core import channel_backend
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import (
     CUSTOM_PICTURES_OFF,
     identity_enabled_for,
@@ -309,7 +310,9 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 
         # Slow path (off the 3s window): tenant, role, roster, attributions.
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+        is_admin = await resolve_is_admin(
+            client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.AGENT_SETTINGS
+        )
 
         async with runtime.sessionmaker() as session:
             roster = await load_panel_roster(
@@ -336,6 +339,15 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
             )
 
         if payload.get("command") == "/github":
+            is_admin = await resolve_is_platform_admin(client, user_id=user_id)
+            if not is_admin:
+                await post_ephemeral(
+                    client,
+                    channel_id=channel_id or user_id,
+                    user_id=user_id,
+                    text="Only a platform admin can configure GitHub.",
+                )
+                return
             rendered = await github_home_view(
                 runtime, tenant_id=tenant_id, meta=meta, user_id=user_id, is_admin=is_admin
             )
@@ -345,6 +357,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 page=paginate(roster.rows, page=0, page_size=PANEL_PAGE_SIZE),
                 meta=meta,
                 is_admin=is_admin,
+                is_platform_admin=await resolve_is_platform_admin(client, user_id=user_id),
                 attributions=attributions,
                 channel_id=channel_id,
                 routed_agent_names=routed_agent_names(answering_map),
@@ -505,12 +518,18 @@ async def load_agents_view(
     tenant_id: uuid.UUID,
     meta: PanelMetadata,
     is_admin: bool,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the Agents view for `meta`'s page.
 
     Shared with the new-agent submission, which re-renders this same view on
     the root once the created agent exists.
     """
+    platform_admin = False
+    if user_id is not None:
+        client = await resolve_web_client(runtime, team_id=meta.team_id)
+        if client is not None:
+            platform_admin = await resolve_is_platform_admin(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -538,6 +557,7 @@ async def load_agents_view(
         page=page,
         meta=meta.with_page(page.page),
         is_admin=is_admin,
+        is_platform_admin=platform_admin,
         attributions=attributions,
         channel_id=meta.channel_id,
         routed_agent_names=routed_agent_names(answering_map),
@@ -558,6 +578,9 @@ async def load_routing_view(
 
     `user_id` identifies the caller; workspace admins may select an environment.
     """
+    platform_admin = user_id is not None and await resolve_is_platform_admin(
+        client, user_id=user_id
+    )
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
             session,
@@ -569,7 +592,7 @@ async def load_routing_view(
         )
         operator_tokens = (
             await list_panel_operator_tokens(session, tenant_id=tenant_id, now=datetime.now(UTC))
-            if is_admin and runtime.settings.mcp.jwt_secret is not None
+            if platform_admin and runtime.settings.mcp.jwt_secret is not None
             else None
         )
         policy = await load_access_policy(session, tenant_id=tenant_id)
@@ -636,6 +659,7 @@ async def load_routing_view(
         outsider_lines=visibility.lines(readers=readers) if visibility else (),
         outsider_warning=bool(visibility and visibility.outsiders_can_view and readers != "own"),
         operator_tokens=operator_tokens,
+        is_platform_admin=platform_admin,
         channel_skills=channel_skills,
     )
 
@@ -647,8 +671,14 @@ async def load_details_view(
     meta: PanelMetadata,
     agent_name: str,
     is_admin: bool,
+    user_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Build the Details view for `agent_name`, or None when it is gone."""
+    platform_admin = False
+    if user_id is not None:
+        client = await resolve_web_client(runtime, team_id=meta.team_id)
+        if client is not None:
+            platform_admin = await resolve_is_platform_admin(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -709,6 +739,7 @@ async def load_details_view(
         details,
         meta=meta.with_view("details", agent_name=agent_name),
         is_admin=is_admin,
+        is_platform_admin=platform_admin,
         coding_tools_available=coding_tools_available(runtime),
         channel_id=meta.channel_id,
         attribution=attributions.get(details.created_by_account_id)
@@ -752,7 +783,9 @@ async def _update_paged_view(
             runtime, client, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
         )
         if meta.view == "routing"
-        else await load_agents_view(runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin)
+        else await load_agents_view(
+            runtime, tenant_id=tenant_id, meta=target, is_admin=is_admin, user_id=user_id
+        )
     )
     try:
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -806,7 +839,9 @@ async def _dispatch_panel_action(
     view_id: str = str(view_info.get("id") or "")
     view_hash: str = str(view_info.get("hash") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(
+        client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.AGENT_SETTINGS
+    )
 
     if action_id in {
         panel_views.ACTION_BACKEND_SELECT,
@@ -841,6 +876,7 @@ async def _dispatch_panel_action(
                 meta=meta.with_view("details", agent_name=name),
                 agent_name=name,
                 is_admin=True,
+                user_id=user_id,
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -917,7 +953,9 @@ async def _dispatch_panel_action(
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
             )
-        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+        is_admin = await resolve_is_admin(
+            client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.AGENT_SETTINGS
+        )
         actor = channel_backend.BackendActor(
             tenant_id=tenant_id,
             account_id=principal.account_id,
@@ -973,6 +1011,7 @@ async def _dispatch_panel_action(
             meta=meta.with_view("details", agent_name=name),
             agent_name=name,
             is_admin=is_admin,
+            user_id=user_id,
         )
         if view is not None:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -1003,6 +1042,24 @@ async def _dispatch_panel_action(
         )
         return
 
+    if action_id in {
+        panel_views.ACTION_GITHUB_CONNECT,
+        panel_views.ACTION_GITHUB_BACK,
+        panel_views.ACTION_GITHUB_PERSONAL_LINK,
+        github_repos_view.ACTION_OPEN,
+        github_repos_view.ACTION_BACK,
+        github_repos_view.ACTION_CONNECT_LINK,
+    }:
+        is_admin = await resolve_is_platform_admin(client, user_id=user_id)
+        if not is_admin:
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text="Only a platform admin can configure GitHub.",
+            )
+            return
+
     if await handle_github_repos(
         runtime,
         client,
@@ -1030,7 +1087,7 @@ async def _dispatch_panel_action(
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    verified_tenant_admin=True,
+                    is_platform_admin=True,
                 )
                 url = await connect_link(
                     session,
@@ -1079,7 +1136,7 @@ async def _dispatch_panel_action(
 
     if action_id == panel_views.ACTION_GITHUB_BACK:
         roster_view = await load_agents_view(
-            runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin
+            runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
         )
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id, view=roster_view
@@ -1091,11 +1148,16 @@ async def _dispatch_panel_action(
         if not agent_name:
             return
         details_view = await load_details_view(
-            runtime, tenant_id=tenant_id, meta=meta, agent_name=agent_name, is_admin=is_admin
+            runtime,
+            tenant_id=tenant_id,
+            meta=meta,
+            agent_name=agent_name,
+            is_admin=is_admin,
+            user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
-                runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin
+                runtime, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
@@ -1152,6 +1214,7 @@ async def _dispatch_panel_action(
             meta=meta.toggled(expansion),
             agent_name=agent_name,
             is_admin=is_admin,
+            user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
@@ -1159,6 +1222,7 @@ async def _dispatch_panel_action(
                 tenant_id=tenant_id,
                 meta=meta.with_view("agents"),
                 is_admin=is_admin,
+                user_id=user_id,
             )
             details_view = _with_stale_notice(stale_view, agent_name=agent_name)
         try:
@@ -1421,6 +1485,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
     """
     team_info: dict[str, Any] = payload.get("team") or {}
     team_id: str = team_info.get("id") or payload.get("team_id") or ""  # type: ignore[assignment]
+    verified_team_id = team_id
     user_info: dict[str, Any] = payload.get("user") or {}
     user_id: str = user_info.get("id") or ""
     actions: list[dict[str, Any]] = payload.get("actions") or []
@@ -1448,6 +1513,21 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
 
     try:
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+
+        from daimon.adapters.slack.agent_setup.admins import ACTIONS, handle_admin_action
+
+        if action_id in ACTIONS:
+            if panel_meta is not None:
+                await handle_admin_action(
+                    runtime,
+                    client,
+                    payload=payload,
+                    meta=panel_meta,
+                    user_id=user_id,
+                    team_id=verified_team_id,
+                    action_id=action_id,
+                )
+            return
 
         # Revoke is the one panel action clicked on an ephemeral rather than
         # inside a view, so it carries no panel metadata and is routed first.

@@ -8,10 +8,19 @@ import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qsl
 
 import httpx
+import pytest
+import pytest_asyncio
+from daimon.adapters.mcp.auth.verifier import (
+    CHAT_EXECUTION_CLAIM,
+    TOKEN_KIND_CLAIM,
+    TOKEN_LABEL_CLAIM,
+)
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core.admin_authority import AdminAuthority
 from daimon.core.billing import BillingConfig
 from daimon.core.config import (
     AnthropicSettings,
@@ -20,6 +29,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.mcp_auth import mint_operator_mcp_token
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,6 +40,23 @@ from .harness import registered_account_token, seed_server_admin
 
 _VALID_TOKEN = "bearer-test-token"
 _TENANT_ID: uuid.UUID = uuid.uuid4()
+_ACCOUNT_ID = uuid.uuid4()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def platform_authority(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> AsyncMock:
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=_TENANT_ID)
+        account = await make_account(session, tenant=tenant, id=_ACCOUNT_ID)
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform="discord", external_id="user"
+        )
+    attestation = AsyncMock(return_value=AdminAuthority(platform_admin=True, daimon_admin=True))
+    monkeypatch.setattr("daimon.adapters.mcp.checkout.resolve_authority", attestation)
+    return attestation
+
 
 # Canned Checkout Session response from Stripe API.
 _CANNED_SESSION: dict[str, Any] = {
@@ -122,6 +149,7 @@ def _build_billing_config() -> BillingConfig:
 def _build_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     stripe_http_client: _FakeStripeHTTPClient | None = None,
+    verified_claims: dict[str, Any] | None = None,
 ) -> Starlette:
     return create_mcp_app(
         settings=Settings(
@@ -131,7 +159,15 @@ def _build_app(
         ),
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(
-            tokens={_VALID_TOKEN: {"client_id": "test", "tenant_id": str(_TENANT_ID)}}
+            tokens={
+                _VALID_TOKEN: {
+                    "client_id": "test",
+                    "tenant_id": str(_TENANT_ID),
+                    "sub": str(_ACCOUNT_ID),
+                    TOKEN_KIND_CLAIM: "cli",
+                    **(verified_claims or {}),
+                }
+            }
         ),
         billing_config=_build_billing_config(),
         stripe_http_client=stripe_http_client or _FakeStripeHTTPClient(_CANNED_SESSION),
@@ -363,3 +399,99 @@ async def test_checkout_refuses_an_operator_token(
 
     assert refused.status_code == 403, f"an operator token cannot buy credit: {refused.text}"
     assert admin.status_code == 200, f"the same admin's own token still can: {admin.text}"
+
+
+async def test_checkout_refuses_delegated_admin_before_stripe(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    platform_authority: AsyncMock,
+) -> None:
+    from daimon.core.stores.daimon_admins import change_grant
+
+    async with sessionmaker.begin() as session:
+        await change_grant(
+            session,
+            tenant_id=_TENANT_ID,
+            platform="discord",
+            subject_kind="user",
+            subject_id="user",
+            actor_user_id="owner",
+            is_platform_admin=True,
+        )
+    platform_authority.return_value = AdminAuthority(daimon_admin=True, platform_admin=False)
+    stripe = _FakeStripeHTTPClient(_CANNED_SESSION)
+    app = _build_app(sessionmaker, stripe)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/billing/checkout",
+            json={"amount": 10},
+            headers={"Authorization": f"Bearer {_VALID_TOKEN}"},
+        )
+    assert response.status_code == 403
+    assert stripe.last_post_data is None, "a delegated admin cannot create a checkout directly"
+    platform_authority.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("chat", "platform", "external", "expected"),
+    [
+        (True, True, False, 403),
+        (True, False, False, 403),
+        (False, True, False, 403),
+        (True, True, True, 403),
+    ],
+)
+async def test_checkout_distinguishes_verified_chat_from_external_agent_keys(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    platform_authority: AsyncMock,
+    chat: bool,
+    platform: bool,
+    external: bool,
+    expected: int,
+) -> None:
+    platform_authority.return_value = AdminAuthority(platform_admin=platform, daimon_admin=True)
+    stripe = _FakeStripeHTTPClient(_CANNED_SESSION)
+    claims: dict[str, Any] = {
+        TOKEN_KIND_CLAIM: "agent",
+        CHAT_EXECUTION_CLAIM: chat,
+        "chat_agent_id": str(uuid.uuid4()),
+    }
+    if external:
+        claims["agent_id"] = str(uuid.uuid4())
+    app = _build_app(sessionmaker, stripe, verified_claims=claims)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/billing/checkout",
+            json={"amount": 10},
+            headers={"Authorization": f"Bearer {_VALID_TOKEN}"},
+        )
+    assert response.status_code == expected
+    assert (stripe.last_post_data is not None) is (expected == 200)
+
+
+@pytest.mark.parametrize("kind,label,expected", [(None, None, 403), ("cli", "billing-panel", 200)])
+async def test_checkout_accepts_only_registered_human_checkout_credentials(
+    sessionmaker, kind, label, expected
+) -> None:
+    stripe = _FakeStripeHTTPClient(_CANNED_SESSION)
+    app = _build_app(
+        sessionmaker,
+        stripe,
+        verified_claims={
+            TOKEN_KIND_CLAIM: kind,
+            TOKEN_LABEL_CLAIM: label,
+        },
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/billing/checkout",
+            json={"amount": 10},
+            headers={"Authorization": f"Bearer {_VALID_TOKEN}"},
+        )
+    assert response.status_code == expected
+    assert (stripe.last_post_data is not None) is (expected == 200)

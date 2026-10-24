@@ -486,6 +486,8 @@ class DiscordDriver:
             external_id=workspace_id,
             platform_user_id=user_id,
             is_admin=True,
+            is_platform_admin=True,
+            token_kind="cli",
         )
         return runtime, auth
 
@@ -682,6 +684,7 @@ class DiscordDriver:
             external_id=workspace_id,
             platform_user_id=user_id,
             is_admin=True,
+            is_platform_admin=True,
         )
         # The tools refuse to mint for an agent they cannot pin by MA id, and
         # take that id off the origin's configuration target when the caller

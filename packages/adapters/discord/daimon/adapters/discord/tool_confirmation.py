@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
@@ -426,11 +427,29 @@ def discord_confirmation_hook(
             if tenant_id is None or account_id is None:
                 raise ValueError("Backend confirmation requires an admitted account and tenant")
 
-            async def current_admin(clicker: str) -> bool:
+            async def current_platform_admin(clicker: str) -> bool:
                 if not isinstance(channel, (discord.Thread, discord.TextChannel)):
                     return False
                 role, _ = await requester_role(channel.guild, clicker)
                 return role is Role.ADMIN
+
+            async def current_admin(clicker: str) -> bool:
+                if not isinstance(channel, (discord.Thread, discord.TextChannel)):
+                    return False
+                role, _roles = await requester_role(channel.guild, clicker)
+                async with runtime.sessionmaker() as session:
+                    subject = await load_live_subject(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="discord",
+                        caller=AdminCaller(
+                            platform_user_id=clicker,
+                            is_server_admin=role is Role.ADMIN,
+                            role_ids=tuple(_roles),
+                        ),
+                        action=DelegatedAction.AGENT_SETTINGS,
+                    )
+                return subject.is_admin
 
             from daimon.core.turn.admission import capture_admitted_backend_source
 
@@ -452,6 +471,7 @@ def discord_confirmation_hook(
                 tenant_id=tenant_id,
                 account_id=account_id,
                 current_admin=current_admin,
+                current_platform_admin=current_platform_admin,
                 answering_agent_name=(
                     getattr(getattr(admission, "config", None), "agent_name", None)
                 ),
@@ -518,7 +538,9 @@ def discord_confirmation_hook(
                 caller=AdminCaller(
                     platform_user_id=clicker,
                     is_server_admin=role is Role.ADMIN,
+                    role_ids=tuple(_roles),
                 ),
+                action=DelegatedAction.TOOL_RULES,
             )
 
     async def _qa_auto_approve(

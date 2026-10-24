@@ -738,14 +738,21 @@ async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
         await asyncio.gather(waiting, return_exceptions=True)
 
 
-async def test_runtime_hook_reuses_live_guild_admin_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_runtime_hook_reuses_live_guild_admin_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory,
+) -> None:
     from uuid import uuid4
 
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
+    from daimon.testing.factories import make_tenant
 
-    tenant, account = uuid4(), uuid4()
+    async with db_session_factory.begin() as session:
+        tenant_row = await make_tenant(session)
+    tenant, account = tenant_row.id, uuid4()
     runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
     channel = MagicMock(spec=discord.TextChannel)
     channel.guild.owner_id = 999

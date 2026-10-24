@@ -53,9 +53,7 @@ def _poster(
 ) -> tuple[Any, MagicMock]:
     client = MagicMock()
     client.chat_postMessage = AsyncMock()
-    client.users_info = AsyncMock(
-        return_value={"user": {"id": "U1", "team_id": "T_ROUTINES", "deleted": False}}
-    )
+    client.users_info = AsyncMock(return_value={"user": {"id": "U1", "team_id": "T_ROUTINES"}})
     client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_CREATOR"}})
     client.conversations_info = AsyncMock(
         side_effect=lambda channel: {"channel": {"id": channel, "is_private": False}}

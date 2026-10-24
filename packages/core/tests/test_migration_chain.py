@@ -74,7 +74,10 @@ RECRUITMENT_HEAD = "0145_recruitment"
 REMOVAL_HEAD = "0146_remove_recruitment"
 
 
-HEAD = "0147_long_jobs"
+LONG_JOBS_HEAD = "0147_long_jobs"
+
+
+HEAD = "0148_daimon_admins"
 
 
 CHAIN = [
@@ -93,6 +96,7 @@ CHAIN = [
     SANDBOX_HEAD,
     RECRUITMENT_HEAD,
     REMOVAL_HEAD,
+    LONG_JOBS_HEAD,
     HEAD,
 ]
 
@@ -109,6 +113,7 @@ SANDBOX_COLUMNS = {
 
 
 TABLES = {
+    "daimon_admins",
     "selfhosted_agents",
     "selfhosted_environments",
     "selfhosted_resource_operations",
@@ -169,13 +174,16 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             SANDBOX_HEAD,
             RECRUITMENT_HEAD,
             REMOVAL_HEAD,
+            LONG_JOBS_HEAD,
             HEAD,
         )
         else {name for name in TABLES if not name.startswith("lead_")}
     )
-    if expected != HEAD:
+    if expected not in (LONG_JOBS_HEAD, HEAD):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
-    if expected not in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, HEAD):
+    if expected != HEAD:
+        compared_tables = compared_tables - {"daimon_admins"}
+    if expected not in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, HEAD):
         compared_tables = compared_tables - {"routine_sandbox_history"}
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
@@ -199,6 +207,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             SANDBOX_HEAD,
             RECRUITMENT_HEAD,
             REMOVAL_HEAD,
+            LONG_JOBS_HEAD,
             HEAD,
         ):
             return name not in SANDBOX_COLUMNS
@@ -211,7 +220,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     inspector = inspect(connection)
     constraints = {c["name"] for c in inspector.get_check_constraints("routines")}
     assert {"ck_routines_destination_kind", "ck_routines_dm_owner"} <= constraints
-    if expected in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, HEAD):
+    if expected in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, HEAD):
         # compare_metadata does not compare CHECK constraints.
         [via] = [
             c
@@ -346,10 +355,15 @@ async def test_deployed_upgrade_and_downgrade_paths(
             with pytest.raises(NotImplementedError, match="Recruitment evidence"):
                 command.downgrade(config, SANDBOX_HEAD)
             _assert_head(sync, RECRUITMENT_HEAD)
-            command.upgrade(config, "head")
-            _assert_head(sync)
+            command.upgrade(config, LONG_JOBS_HEAD)
+            _assert_head(sync, LONG_JOBS_HEAD)
             with pytest.raises(NotImplementedError, match="long-job execution evidence"):
                 command.downgrade(config, RECRUITMENT_HEAD)
+            _assert_head(sync, LONG_JOBS_HEAD)
+            command.upgrade(config, "head")
+            _assert_head(sync)
+            with pytest.raises(NotImplementedError, match="Delegation audit history"):
+                command.downgrade(config, LONG_JOBS_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

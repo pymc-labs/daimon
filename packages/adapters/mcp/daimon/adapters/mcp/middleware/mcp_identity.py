@@ -30,19 +30,24 @@ from typing import TypedDict, cast
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import (
+    CHAT_EXECUTION_CLAIM,
     FOREIGN_HOME_CLAIM,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
+    TOKEN_LABEL_CLAIM,
 )
 from daimon.adapters.mcp.middleware.held_tools import held_tool_refusal, narrow_to_held_tools
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
+from daimon.core.admin_authority import resolve_authority
 from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
 from daimon.core.channel_backend import is_selfhosted_channel
+from daimon.core.config import Settings
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import McpTokenKind, Role
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -134,9 +139,11 @@ class IdentityMiddleware(Middleware):
         operator_rate_limiter: RateLimiter | None = None,
         tool_safety: ToolSafetyPolicy | None = None,
         public_url: str | None = None,
+        settings: Settings | None = None,
     ) -> None:
         # Agent-wide `deny` rules on Daimon's own tools are enforced here; see
         # `tool_rule_backstop`. Both unset (the default) leaves that off.
+        self._settings = settings
         self._tool_safety = tool_safety
         self._public_url = public_url
         self._sessionmaker = sessionmaker
@@ -321,27 +328,68 @@ class IdentityMiddleware(Middleware):
             except ValueError:
                 return None
 
+        # Dropping a malformed execution marker would make it look like a
+        # personal credential. Reject its shape before constructing identity.
+        if _token is not None:
+            for binding in ("chat_agent_id", "routine_id", "execution_id", "slack_turn_context_id"):
+                if _token.claims.get(binding) is not None and signed_uuid(binding) is None:
+                    raise AuthorizationError("malformed execution binding")
+            raw_session = _token.claims.get("chat_session_id")
+            if raw_session is not None and (not isinstance(raw_session, str) or not raw_session):
+                raise AuthorizationError("malformed chat session binding")
+
         # Keep chat execution identity separate from external agent credentials:
         # agent_id controls tool visibility and several authorization gates.
         chat_agent_id = signed_uuid("chat_agent_id")
+        chat_execution = _token is not None and _token.claims.get(CHAT_EXECUTION_CLAIM) is True
+        if chat_execution and (chat_agent_id is None or raw_agent_id is not None):
+            raise AuthorizationError("malformed chat execution binding")
         agent_id: uuid.UUID | None
         if raw_agent_id is None:
+            if (
+                _token is not None
+                and _token.claims.get(TOKEN_KIND_CLAIM) == "agent"
+                and not chat_execution
+            ):
+                raise AuthorizationError("agent credential missing agent_id")
             agent_id = None
         else:
             try:
                 agent_id = uuid.UUID(raw_agent_id)
             except (ValueError, TypeError):
-                # Malformed claim is treated as absent.
-                # Fail-closed downstream at the gcloud provider via NoBindingError.
-                agent_id = None
+                raise AuthorizationError("malformed agent_id after verifier") from None
         is_admin_claim = (await self._is_admin_resolver(context)) == "true"
         internal_claim = (await self._internal_resolver(context)) == "true"
-        # Admin gate: a Discord vault token's baked is_admin claim alone
-        # MUST NOT elevate a non-admin caller. The internal discriminator distinguishes
-        # historical internal claims (jti-less tokens are refused by the verifier)
-        # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
-        # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
+        # Local operator roles remain valid. Platform accounts are rebound and
+        # attested below; their stored role and signed internal claims never elevate.
         is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
+        is_platform_admin = False
+        verified_role_ids: tuple[str, ...] = ()
+        # Platform callers never inherit authority from a baked internal claim.
+        # Bind to a current principal before the live attestation, also for agent keys.
+        async with self._sessionmaker() as session:
+            current = await get_account_with_tenant(session, account_id=account_id)
+        if current is not None and current.platform in {"discord", "slack", "teams"}:
+            platform, external_id = current.platform, current.external_id
+            platform_user_id = current.platform_user_id
+            is_admin = False
+            if (
+                self._settings is not None
+                and current.tenant_id == tenant_id
+                and platform_user_id is not None
+            ):
+                authority = await resolve_authority(
+                    self._sessionmaker,
+                    self._settings,
+                    tenant_id=tenant_id,
+                    platform_user_id=platform_user_id,
+                )
+                is_admin, is_platform_admin = authority.daimon_admin, authority.platform_admin
+                verified_role_ids = authority.role_ids
+            role = Role.ADMIN if is_admin else Role.USER
+        elif platform in {"discord", "slack", "teams"}:
+            is_admin = False
+            role = Role.USER
         hold = _hold_from_claims(_token.claims if _token else {})
         raw_foreign_home = _token.claims.get(FOREIGN_HOME_CLAIM) if _token else None
         foreign_home_id = raw_foreign_home if isinstance(raw_foreign_home, str) else None
@@ -349,6 +397,8 @@ class IdentityMiddleware(Middleware):
             # The stored role is never relied on for a held credential or for a
             # principal verified to belong to another organisation.
             is_admin = False
+            is_platform_admin = False
+            role = Role.USER
         slack_turn_context_id = (
             None if internal_claim or agent_id is not None else signed_uuid("slack_turn_context_id")
         )
@@ -383,6 +433,8 @@ class IdentityMiddleware(Middleware):
             is_admin=is_admin,
             hold=hold,
             foreign_home_id=foreign_home_id,
+            is_platform_admin=is_platform_admin,
+            verified_role_ids=verified_role_ids,
             # Set by the verifier from the token's row; an agent key's only.
             bound_channel_id=(
                 raw_bound_channel
@@ -515,7 +567,9 @@ def _hold_from_claims(claims: Mapping[str, object]) -> TurnHold | None:
 
 
 class _TokenFields(TypedDict):
+    is_chat_execution: bool
     token_kind: McpTokenKind | None
+    token_label: str | None
     token_jti: uuid.UUID | None
     scopes: frozenset[str]
 
@@ -528,8 +582,11 @@ def _token_fields(claims: Mapping[str, object]) -> _TokenFields:
     kind = claims.get(TOKEN_KIND_CLAIM)
     jti = claims.get(TOKEN_JTI_CLAIM)
     scopes = claims.get(SCOPES_CLAIM)
+    label = claims.get(TOKEN_LABEL_CLAIM)
     return _TokenFields(
+        is_chat_execution=claims.get(CHAT_EXECUTION_CLAIM) is True,
         token_kind=_TOKEN_KINDS.get(kind) if isinstance(kind, str) else None,
+        token_label=label if isinstance(label, str) else None,
         token_jti=_uuid_or_none(jti) if isinstance(jti, str) else None,
         scopes=(
             frozenset(s for s in cast("list[object]", scopes) if isinstance(s, str))

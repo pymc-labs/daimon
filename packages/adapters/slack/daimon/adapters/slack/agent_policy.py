@@ -37,9 +37,10 @@ from typing import Final
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
+from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin, resolve_is_platform_admin
 from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.authz import Place, Subject
@@ -51,6 +52,7 @@ from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
     decide_operation,
+    delegated_action_for_operation,
     needs_reachability_read,
 )
 from slack_sdk.web.async_client import AsyncWebClient
@@ -166,7 +168,23 @@ async def refuse_unless_allowed(
     ephemeral), False to proceed. `caller_account_id` leaves the caller's own
     live sessions out of the sharing read; None counts them.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(
+        client,
+        user_id=user_id,
+        host_team_id=team_id,
+        action=delegated_action_for_operation(operation),
+    )
+    if operation == "repo_bind":
+        is_admin = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
+        if not is_admin:
+            await _post_refusal(
+                client,
+                channel_id=channel_id,
+                user_id=user_id,
+                thread_ts=thread_ts,
+                text="Only a platform admin can bind GitHub repos.",
+            )
+            return True
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
         return False
 
@@ -237,7 +255,23 @@ async def refuse_unless_allowed_for_agent_name(
     the sharing read; None counts them. `agent`, when the caller holds a fresh
     read, is decided as it is rather than looked up again by name.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(
+        client,
+        user_id=user_id,
+        host_team_id=team_id,
+        action=delegated_action_for_operation(operation),
+    )
+    if operation == "repo_bind":
+        is_admin = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
+        if not is_admin:
+            await _post_refusal(
+                client,
+                channel_id=channel_id,
+                user_id=user_id,
+                thread_ts=thread_ts,
+                text="Only a platform admin can bind GitHub repos.",
+            )
+            return True
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
         return False
 
@@ -301,7 +335,11 @@ async def refuse_unless_pin_allows(
 
         async def live_subject() -> Subject:
             return await load_live_subject(
-                session, tenant_id=tenant_id, platform="slack", caller=caller
+                session,
+                tenant_id=tenant_id,
+                platform="slack",
+                caller=caller,
+                action=DelegatedAction.CHANNEL_PERMISSIONS,
             )
 
         refusal = await pin_refusal(

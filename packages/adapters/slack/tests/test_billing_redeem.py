@@ -83,7 +83,7 @@ def _submission(code: str) -> dict[str, Any]:
 def _slack(fake: Any, *, admin: bool) -> Iterator[None]:
     with (
         patch(f"{_MODULE}.resolve_web_client", new_callable=AsyncMock, return_value=fake.client),
-        patch(f"{_MODULE}.resolve_is_admin", new_callable=AsyncMock, return_value=admin),
+        patch(f"{_MODULE}.resolve_is_platform_admin", new_callable=AsyncMock, return_value=admin),
     ):
         yield
 
@@ -108,7 +108,7 @@ def test_the_redeem_button_shows_while_a_code_the_viewer_may_redeem_is_redeemabl
     assert _action_ids(no_code) == ["billing_topup", "billing_lookup"], (
         "no redeemable code should hide the button"
     )
-    assert _action_ids(member) == ["billing_redeem_open"], "a member gets it for a channel code"
+    assert _action_ids(member) == [], "only platform admins redeem channel codes too"
     assert "billing_redeem_open" not in _action_ids(member_no_code), "and not without one"
 
 
@@ -283,7 +283,7 @@ def _conversations(fake: Any, **kinds: dict[str, bool]) -> None:
         )
 
 
-async def test_a_member_redeems_a_channel_code_into_a_real_channel_only(
+async def test_a_platform_admin_redeems_a_channel_code_into_a_real_channel_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -331,10 +331,10 @@ async def test_a_member_redeems_a_channel_code_into_a_real_channel_only(
                 decision=submission(code, channel_id),
             )
 
-    await submit("team-room-2026", "C1")
-    await submit("TEAM-ROOM-2026", "G0PRIVATE")
-    await submit("TEAM-ROOM-2026", "G024BE91L")
-    await submit("TEAM-ROOM-2026", "D1")
+    await submit("team-room-2026", "C1", admin=True)
+    await submit("TEAM-ROOM-2026", "G0PRIVATE", admin=True)
+    await submit("TEAM-ROOM-2026", "G024BE91L", admin=True)
+    await submit("TEAM-ROOM-2026", "D1", admin=True)
     await submit("WELCOME-2026", "C1")
     await submit("WELCOME-2026", "G024BE91L", admin=True)
 
@@ -345,7 +345,7 @@ async def test_a_member_redeems_a_channel_code_into_a_real_channel_only(
     assert "Added *$10.00* to <#G0PRIVATE>'s budget" in private, "a private channel counts"
     assert "not a DM" in group_dm, "a group DM has no channel to credit"
     assert "not a DM" in dm
-    assert "Only an admin can redeem that code" in server_code
+    assert "Only a platform admin can redeem that code" in server_code
     assert "Added *$10.00* of credit" in admin, "an admin's server-wide code still lands"
     db_session.expire_all()
     limits = {

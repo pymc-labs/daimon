@@ -170,9 +170,9 @@ def test_the_skills_dialog_says_when_more_exist_than_it_can_tick() -> None:
 
 
 async def test_a_server_admin_picks_a_channel_and_changes_environment_and_rule(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         picker = json.dumps(await post_activity(service, _open(ADMIN)))
         opened = await post_activity(service, _submit(ADMIN, "pick", channel=LEGAL))
         saved = await post_activity(
@@ -189,29 +189,29 @@ async def test_a_server_admin_picks_a_channel_and_changes_environment_and_rule(
     assert "Who can read it" in form, "and sees the rule control"
     assert "science environment" in json.dumps(saved)
     assert "Made legal, a copy of analyst, for this channel." in json.dumps(kept)
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         scope = await get_scope(session, scope=ChannelScopeRef(tenant_id=TENANT, channel_id=LEGAL))
         policy = await load_access_policy(session, tenant_id=TENANT)
     assert scope is not None and scope.environment_name == "science"
     assert policy.channel_rules == {LEGAL: ChannelRule(readers="own", writers="own")}
     assert policy.agent_rules == {"legal": AgentRule(runs_in=(LEGAL,))}, "a copy named after it"
-    assert await _events(db_session_factory) == [
+    assert await _events(service_session_factory) == [
         ("panel:environment", "allowed", "completed"),
         ("panel:channel_rule", "allowed", "completed"),
     ], "every write is audited"
 
 
 async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     """The form has no confirm step, so it writes nothing and points at chat, which asks."""
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         await set_access_policy(
             session,
             tenant_id=TENANT,
             policy=TenantAccessPolicy(channel_rules={GROWTH: ChannelRule(readers="inside")}),
         )
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         held = await post_activity(
             service, _submit(ADMIN, "environment", channel=GROWTH, environment="env:science")
         )
@@ -219,14 +219,16 @@ async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
     assert "Ask me in chat to make this change for #Growth, then confirm when I ask." in json.dumps(
         held
     ), json.dumps(held)
-    assert await _events(db_session_factory) == [("panel:environment", "denied", "needs_confirm")]
+    assert await _events(service_session_factory) == [
+        ("panel:environment", "denied", "needs_confirm")
+    ]
 
 
 async def test_a_member_gets_no_dialog_and_no_button(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     member = "dddddddd-eeee-ffff-0000-111111111111"
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         refused = await post_activity(service, _open(member))
         routing = {
             user: json.dumps(

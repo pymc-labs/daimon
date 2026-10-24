@@ -1960,7 +1960,7 @@
     }),
     'create_promo_code': dict({
       'description': '''
-        Create a promo code any workspace can redeem for credit. Operator-only.
+        Unavailable over MCP: issue deployment-wide promos with the human operator CLI.
         <blank line>
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
@@ -5318,11 +5318,9 @@
       'description': '''
         Show a channel's spending budget: its limit, window and what it has spent.
         <blank line>
-        For the channel this turn is in (in a private chat, the channel it was moved
-        from), omit ``channel_id`` and pass this turn's
-        ``origin_context_id``. For another channel, pass its id; a
-        thread id resolves to its parent channel. Any member may read the
-        budget of a channel they can see. ``budget`` is null when the
+        Pass the channel id; a thread id resolves to its parent channel. Only a
+        platform admin acting directly with a personal CLI
+        credential may read budgets; chat and routines are refused. ``budget`` is null when the
         channel has none. Read ``summary`` back to the user.
       ''',
       'parameters': dict({
@@ -5621,7 +5619,7 @@
     }),
     'get_tenant_summary': dict({
       'description': '''
-        Summarize this workspace: balance, funding mode and each channel. Admin-only.
+        Read billing and configuration with a personal platform-admin CLI credential.
         <blank line>
         Lists every channel with its own agent or environment setting, a
         apply there, the roles and members administering it, and the budget's
@@ -5795,6 +5793,36 @@
             'default': None,
           }),
         }),
+        'type': 'object',
+      }),
+    }),
+    'grant_admin': dict({
+      'description': '''
+        Granted admins can change what agents do, including agents platform admins use.
+        <blank line>
+        Grant Daimon admin to a user or a supported role (platform admins only).
+        Only live platform admins using a personal CLI credential may grant.
+        Chat, routines and all agent-run credentials are refused. Delegates cannot delegate.
+        Configuration changes only; billing and spend caps remain platform-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'subject_id': dict({
+            'type': 'string',
+          }),
+          'subject_kind': dict({
+            'default': 'user',
+            'enum': list([
+              'user',
+              'role',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'subject_id',
+        ]),
         'type': 'object',
       }),
     }),
@@ -6294,6 +6322,20 @@
         'type': 'object',
       }),
     }),
+    'list_admins': dict({
+      'description': '''
+        List this tenant's explicit Daimon admin grants (any member).
+        <blank line>
+        Platform admins always have Daimon authority live and are not stored in
+        this list. A role grant applies only while the member holds it.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_agent_keys': dict({
       'description': '''
         What keys does an agent have? List its stored API key names, never values.
@@ -6415,7 +6457,7 @@
       }),
     }),
     'list_channel_budgets': dict({
-      'description': 'List every channel budget in this workspace with its spend. Admin-only.',
+      'description': 'List channel budgets with a personal platform-admin CLI credential.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -6669,7 +6711,7 @@
       }),
     }),
     'list_promo_codes': dict({
-      'description': 'List every promo code on this deployment, newest first. Operator-only.',
+      'description': 'Unavailable over MCP: list deployment-wide promos with the human operator CLI.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -7621,14 +7663,14 @@
     }),
     'redeem_promo_code': dict({
       'description': '''
-        Redeem a promo code for credit on this workspace.
+        Redeem credit with a direct personal platform-admin CLI credential.
         For example, apply the code someone was given to add credit to the balance.
         <blank line>
         Case, spaces and dashes in ``code`` do not matter. Each code works once
         per workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
         end. Repeated wrong codes pause redemption for a few minutes. Requires
-        an admin.
+        a live platform admin acting directly; chat and routines are refused.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8233,10 +8275,10 @@
     }),
     'request_fleet_config': dict({
       'description': '''
-        Configure this agent's fleet of worker agents, with owner/admin confirmation.
+        Change worker spending limits with a personal CLI credential and live platform authority.
         <blank line>
         Every agent already has a fleet with default limits (4 workers, $2 a run);
-        call this only when the agent's owner or an admin asks to change or turn off
+        call this only when a platform admin asks to change or turn off
         those limits. Never use it to get around a fleet refusal or a limit someone
         else hit: tell them the limit and who can change it instead.
         <blank line>
@@ -8246,7 +8288,7 @@
         max_workers, budget_usd and max_worker_seconds (required for a new fleet).
         On edits, every omitted field keeps its saved value, including expiry,
         provider caps, token limits and worker selection. Explicit null removes an
-        optional cap; the card marks removals. A current-settings read returns the
+        optional cap; the preview marks removals. A current-settings read returns the
         complete saved config, so it can be edited without reconstructing defaults.
         Use fleet_agents to list eligible workers. Each worker runs AS that
         agent, using its own prompt, model, tools and skills; model choices
@@ -8259,8 +8301,9 @@
         partial map prevents omitted providers from spending.
         Omit config to show the current settings; revoke=true turns fleet off.
         Preview first. Then pass the exact returned config, expected_revision
-        and preview_digest to show the requesting owner's/admin's Confirm card.
-        Pass this turn's origin_context_id. A stale preview changes nothing.
+        and preview_digest to save using the same personal credential.
+        Chat, routine, continuation, watch and external agent credentials are refused.
+        A stale preview changes nothing.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -8786,9 +8829,38 @@
         'type': 'object',
       }),
     }),
+    'revoke_admin': dict({
+      'description': '''
+        Revoke an explicit Daimon admin grant immediately (platform admins only).
+        <blank line>
+        Requires a personal CLI credential; chat and routines are refused.
+        Deletes the grant and records its audit atomically; delegated authority is never cached.
+        Platform authority cannot be revoked; remaining grants still apply.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'subject_id': dict({
+            'type': 'string',
+          }),
+          'subject_kind': dict({
+            'default': 'user',
+            'enum': list([
+              'user',
+              'role',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'subject_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'revoke_promo_code': dict({
       'description': '''
-        Stop a promo code from being redeemed again. Operator-only.
+        Unavailable over MCP: revoke deployment-wide promos with the human operator CLI.
         <blank line>
         Credit already redeemed stays, including timed credit that has not started.
       ''',

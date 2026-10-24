@@ -16,6 +16,16 @@ from fastmcp.exceptions import ToolError
 from .test_backend_switch import active_chat as active_chat
 
 
+def personal(auth):
+    return replace(
+        auth,
+        token_kind="cli",
+        is_chat_execution=False,
+        chat_agent_id=None,
+        chat_session_id=None,
+    )
+
+
 def config(**changes):
     return FleetConfigInput.model_validate(
         {
@@ -42,12 +52,11 @@ def gates(payload, frozen):
 async def test_fleet_preview_confirm_read_replay_and_revoke(active_chat):
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, _ = active_chat
     gates(payload, frozen)
-    gate()
     agent()
     before = datetime.now(UTC)
     preview = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=config(),
         origin_context_id=str(origin.id),
@@ -68,44 +77,39 @@ async def test_fleet_preview_confirm_read_replay_and_revoke(active_chat):
         preview_digest=preview.preview_digest,
         origin_context_id=str(origin.id),
     )
-    gate()
     agent()
     agent()
-    changed = await _request_fleet_config_impl(runtime, auth, **args)
+    changed = await _request_fleet_config_impl(runtime, personal(auth), **args)
     assert changed.status == "changed"
     stored = await service.read_fleet_grant(auth.tenant_id, agent_id, now=datetime.now(UTC))
     assert stored and stored.max_workers == 4 and stored.worker_agents == "any"
-    gate()
     agent()
     agent()
     with pytest.raises(ToolError, match="changed"):
-        await _request_fleet_config_impl(runtime, auth, **args)
-    gate()
+        await _request_fleet_config_impl(runtime, personal(auth), **args)
     agent()
     current = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         origin_context_id=str(origin.id),
     )
     assert current.status == "current" and any(
         "Shared across providers" in line for line in current.details
     )
-    gate()
     agent()
     revoke = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         revoke=True,
         origin_context_id=str(origin.id),
     )
-    gate()
     agent()
     agent()
     done = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         revoke=True,
         origin_context_id=str(origin.id),
@@ -158,8 +162,6 @@ async def test_fleet_mutation_requires_admin_chat_and_gated_session(active_chat,
         auth = replace(auth, is_admin=False)
     elif blocked == "agent_key":
         auth = replace(auth, agent_id=auth.chat_agent_id)
-    else:
-        gate()
     with pytest.raises(ToolError):
         await _request_fleet_config_impl(
             runtime,
@@ -175,21 +177,19 @@ async def test_fleet_mutation_requires_admin_chat_and_gated_session(active_chat,
 async def test_invalid_provider_sum_refused_and_partial_map_explained(active_chat):
     runtime, auth, origin, _, trace, payload, frozen, gate, agent, _ = active_chat
     gates(payload, frozen)
-    gate()
     agent()
     with pytest.raises(ToolError, match="add up to more"):
         await _request_fleet_config_impl(
             runtime,
-            auth,
+            personal(auth),
             agent_name="Researcher",
             config=config(provider_limits_usd={"openai": "3"}),
             origin_context_id=str(origin.id),
         )
-    gate()
     agent()
     preview = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=config(provider_limits_usd={"openai": "2"}),
         origin_context_id=str(origin.id),
@@ -201,24 +201,22 @@ async def test_invalid_provider_sum_refused_and_partial_map_explained(active_cha
 async def test_named_worker_agents_resolve_to_scoped_ids_and_card_binds_scope(active_chat):
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, _ = active_chat
     gates(payload, frozen)
-    gate()
     agent()
     agent()
     preview = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=config(worker_agents=("Researcher",)),
         origin_context_id=str(origin.id),
     )
     assert any("Worker agents: Researcher" in line for line in preview.details)
-    gate()
     agent()
     agent()
     agent()
     await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=preview.config,
         expected_revision=preview.expected_revision,
@@ -229,11 +227,10 @@ async def test_named_worker_agents_resolve_to_scoped_ids_and_card_binds_scope(ac
         auth.tenant_id, auth.chat_agent_id, now=datetime.now(UTC)
     )
     assert tuple(map(str, grant.worker_agents)) == (str(auth.chat_agent_id),)
-    gate()
     agent()
     agent()
     current = await _request_fleet_config_impl(
-        runtime, auth, agent_name="Researcher", origin_context_id=str(origin.id)
+        runtime, personal(auth), agent_name="Researcher", origin_context_id=str(origin.id)
     )
     assert current.config.worker_agents == ("Researcher",)
     assert any("Worker agents: Researcher" in line for line in current.details)
@@ -254,25 +251,15 @@ async def test_owner_can_configure_fleet_but_cannot_change_provider_allowlist(ac
             owner_account_id=auth.account_id,
             source="created",
         )
-    auth = replace(auth, is_admin=False, role=Role.USER)
-    gate()
-    agent()
-    preview = await _request_fleet_config_impl(
-        runtime, auth, agent_name="Researcher", config=config(), origin_context_id=str(origin.id)
-    )
-    gate()
-    agent()
-    agent()
-    changed = await _request_fleet_config_impl(
-        runtime,
-        auth,
-        agent_name="Researcher",
-        config=preview.config,
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        origin_context_id=str(origin.id),
-    )
-    assert changed.status == "changed"
+    auth = replace(auth, is_admin=False, is_platform_admin=False, role=Role.USER)
+    with pytest.raises(ToolError, match="personal user credential"):
+        await _request_fleet_config_impl(
+            runtime,
+            auth,
+            agent_name="Researcher",
+            config=config(),
+            origin_context_id=str(origin.id),
+        )
     with pytest.raises(ToolError):
         await _request_provider_allowlist_impl(
             runtime, auth, providers=("anthropic",), origin_context_id=str(origin.id)
@@ -321,8 +308,7 @@ async def test_pre_config_recorded_session_cannot_gate_the_new_tools(active_chat
             identity_fingerprint=fingerprint_identity(snapshot),
             mutable_fingerprint=fingerprint_mutable(snapshot),
         )
-    gate()
-    with pytest.raises(ToolError, match="cannot verify"):
+    with pytest.raises(ToolError, match="personal user credential"):
         await _request_fleet_config_impl(
             runtime,
             auth,
@@ -376,32 +362,29 @@ async def test_natural_model_name_applies_to_agent_settings_and_leaves_fleet_unc
 async def test_budget_edit_does_not_widen_legacy_worker_eligibility(active_chat):
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, _ = active_chat
     gates(payload, frozen)
-    gate()
     agent()
     preview = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=config(worker_agents=None),
         origin_context_id=str(origin.id),
     )
-    gate()
     agent()
     agent()
     await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=preview.config,
         expected_revision=preview.expected_revision,
         preview_digest=preview.preview_digest,
         origin_context_id=str(origin.id),
     )
-    gate()
     agent()
     edited = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=config(budget_usd="3"),
         origin_context_id=str(origin.id),
@@ -426,12 +409,15 @@ async def test_current_config_partial_edit_and_explicit_cap_removal(active_chat)
     )
 
     async def request(**args):
-        gate()
         agent()
         if args.get("preview_digest"):
             agent()
         return await _request_fleet_config_impl(
-            runtime, auth, agent_name="Researcher", origin_context_id=str(origin.id), **args
+            runtime,
+            personal(auth),
+            agent_name="Researcher",
+            origin_context_id=str(origin.id),
+            **args,
         )
 
     async def confirm(preview):
@@ -493,11 +479,10 @@ async def test_fleet_preview_checks_the_target_agent_not_the_channel_default(
 
     monkeypatch.setattr(admission, "capture_backend_source", spy)
     gates(payload, frozen)
-    gate()
     agent()
     preview = await _request_fleet_config_impl(
         runtime,
-        auth,
+        personal(auth),
         agent_name="Researcher",
         config=config(),
         origin_context_id=str(origin.id),

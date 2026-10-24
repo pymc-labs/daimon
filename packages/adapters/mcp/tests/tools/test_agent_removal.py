@@ -175,7 +175,14 @@ async def test_detach_mcp_server_impl_removes_server_and_matching_toolset(
         ],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     result = await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -206,7 +213,14 @@ async def test_detach_mcp_server_impl_raises_when_not_attached_and_issues_no_upd
         mcp_servers=[{"name": "other", "type": "url", "url": "https://other.example/mcp"}],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     with pytest.raises(ToolError, match="other"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -225,7 +239,12 @@ async def test_detach_mcp_server_impl_rejects_reserved_server_before_any_request
     )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     with pytest.raises(ToolError, match="reserved"):
         await _detach_mcp_server_impl(
@@ -250,7 +269,12 @@ async def test_detach_mcp_server_impl_lets_an_admin_detach_from_the_seeded_agent
     )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -316,7 +340,14 @@ async def test_detach_mcp_server_impl_forgets_the_shared_token_for_that_url(
         plaintext_token="ntn_rejected",
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -428,7 +459,14 @@ async def test_detach_mcp_server_impl_retries_once_on_version_conflict(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     result = await _detach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -459,7 +497,14 @@ async def test_remove_skill_impl_detaches_by_raw_skill_id_preserving_others(
         ],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     result = await _remove_skill_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -539,7 +584,14 @@ async def test_remove_skill_impl_detaches_by_resolved_display_name(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     result = await _remove_skill_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -562,7 +614,14 @@ async def test_remove_skill_impl_raises_when_nothing_matches_listing_attached(
         skills=[{"type": "anthropic", "skill_id": "skill_x", "version": "1"}],
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     with pytest.raises(ToolError, match="skill_x"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -584,7 +643,12 @@ async def test_remove_skill_impl_rejects_system_agent_no_daimon_account(
     )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     with pytest.raises(ToolError, match="system agent"):
         await _remove_skill_impl(
@@ -652,7 +716,12 @@ async def test_remove_skill_impl_refuses_a_built_in_agent_even_for_an_admin(
         managed=True,
     )
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     with pytest.raises(ToolError, match="fork_agent"):
         await _remove_skill_impl(
@@ -693,7 +762,14 @@ async def test_remove_skill_impl_forgets_a_skill_added_by_hand(
             source="upload",
         )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     await _remove_skill_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -936,7 +1012,12 @@ async def test_remove_agent_key_impl_removes_existing_key(
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     runtime = _runtime(client, session_factory=db_session_factory)
     result = await _remove_agent_key_impl(runtime, auth, agent_name="demo", key="API_KEY")
@@ -945,7 +1026,12 @@ async def test_remove_agent_key_impl_removes_existing_key(
     assert result.key == "API_KEY"
 
     admin = AuthIdentity(
-        account_id=auth.account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=auth.account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     remaining = await _list_agent_keys_impl(runtime, admin, agent_name="demo")
     assert remaining == [], "a follow-up listing must no longer contain the removed key"
@@ -960,7 +1046,12 @@ async def test_remove_agent_key_impl_is_idempotent_when_key_absent(
     )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -1029,7 +1120,14 @@ async def test_remove_agent_key_impl_refuses_non_admin_on_default_agent_and_dele
     with pytest.raises(ToolError, match="needs an admin"):
         await _remove_agent_key_impl(runtime, auth, agent_name="scoped-agent", key="SHARED_KEY")
 
-    admin = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    admin = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     assert await _list_agent_keys_impl(runtime, admin, agent_name="scoped-agent") == [
         "SHARED_KEY"
     ], "a refused removal must leave the stored key exactly where it was"
@@ -1046,7 +1144,14 @@ async def test_remove_agent_key_impl_allows_admin_on_default_agent(
         tenant_id=tenant_id, agent_name="scoped-agent", agent_id="ag_scoped3", account_id=account_id
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -1113,7 +1218,12 @@ async def test_remove_agent_key_impl_succeeds_against_seeded_agent_with_no_daimo
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     result = await _remove_agent_key_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -1158,14 +1268,24 @@ async def test_remove_agent_key_impl_isolates_between_agents_in_same_tenant(
         )
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     runtime = _runtime(client, session_factory=db_session_factory)
     result = await _remove_agent_key_impl(runtime, auth, agent_name="agent-a", key="SHARED")
     assert result.removed is True
 
     admin = AuthIdentity(
-        account_id=auth.account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=auth.account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
     )
     remaining = await _list_agent_keys_impl(runtime, admin, agent_name="agent-b")
     assert remaining == ["SHARED"], "removing from agent-a must not affect agent-b's SHARED key"

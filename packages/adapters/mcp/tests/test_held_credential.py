@@ -267,7 +267,7 @@ async def test_held_identity_is_never_admin_whatever_the_stored_role(
     names = {t["name"] for t in listed["result"]["tools"]}  # type: ignore[index]
 
     (identity,) = seen
-    assert identity.role is Role.ADMIN, "the stored role is kept as stored"
+    assert identity.role is Role.USER, "held execution has no effective admin role"
     assert identity.is_admin is False
     assert identity.hold == HOLD
     assert identity.client is True
@@ -300,6 +300,7 @@ async def _search_names(app: ASGIApp, token: str, query: str) -> set[str]:
     return {line[4:].strip() for line in text.splitlines() if line.startswith("### ")}
 
 
+@pytest.mark.usefixtures("platform_admin_edge")
 async def test_held_session_lists_and_searches_only_allowlisted_tools(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

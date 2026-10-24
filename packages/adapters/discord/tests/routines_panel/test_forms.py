@@ -4,6 +4,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -29,8 +30,10 @@ from daimon.core.stores.routines import (
 from daimon.testing.factories import make_tenant
 
 
-def interaction(*, admin=True, user_id=42):
+def interaction(*, admin=True, user_id=42, runtime=None):
     result = MagicMock(spec=discord.Interaction)
+    if runtime is not None:
+        result.client.runtime = runtime
     result.user = MagicMock(spec=discord.Member)
     result.user.id = user_id
     result.user.guild_permissions.administrator = admin
@@ -57,6 +60,7 @@ async def setup_panel(db_session_factory, monkeypatch, stub_anthropic):
     runtime.settings = SimpleNamespace()
     runtime.sessionmaker = db_session_factory
     runtime.anthropic = stub_anthropic
+    monkeypatch.setitem(globals(), "interaction", partial(interaction, runtime=runtime))
     state = RoutinesPanelState.initial(rows=[], over_cap_count=0, agent_name_map={})
     view = panel.RoutinesPanelView(state, runtime=runtime, allowed_user_id=42)
     refresh = AsyncMock()
@@ -369,3 +373,30 @@ async def test_creation_refuses_unverified_source(setup_panel, db_session_factor
         assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
     resolver.assert_not_awaited()
     refresh.assert_not_awaited()
+
+
+async def test_delegate_new_routine_modal_rechecks_grant_at_submit(setup_panel, db_session_factory):
+    from daimon.core.stores.daimon_admins import change_grant
+
+    view, tenant, _, _ = setup_panel
+    grant = dict(
+        tenant_id=tenant.id,
+        platform="discord",
+        subject_kind="user",
+        subject_id="42",
+        actor_user_id="999",
+        is_platform_admin=True,
+    )
+    async with db_session_factory.begin() as session:
+        await change_grant(session, **grant)
+    click = interaction(admin=False)
+    click.client.runtime = view.runtime
+    modal = await open_modal(view, click)
+    async with db_session_factory.begin() as session:
+        await change_grant(session, **grant, revoke=True)
+    submit = interaction(admin=False)
+    submit.client.runtime = view.runtime
+    await modal.on_submit(submit)
+    submit.response.send_message.assert_awaited_once_with(embeds.ADMIN_ONLY, ephemeral=True)
+    async with db_session_factory() as session:
+        assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []

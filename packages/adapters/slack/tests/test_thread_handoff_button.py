@@ -224,7 +224,17 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
     )
     fake_slack_web_client.mock.get(
         re.compile(r"https://slack.com/api/users.info.*"),
-        payload={"ok": True, "user": {"id": "U_CLICKER", "name": "Clicker", "is_admin": False}},
+        payload={
+            "ok": True,
+            "user": {
+                "id": "U_CLICKER",
+                "name": "Clicker",
+                "team_id": _TEAM,
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": False,
+            },
+        },
         repeat=True,
     )
     fake_slack_web_client.mock.get(

@@ -32,13 +32,14 @@ from daimon.core.config import (
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.platform_words import words_for
 from daimon.core.scope import TenantScopeRef
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.asgi import mcp_session
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import (
@@ -166,6 +167,7 @@ def _make_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     platform: str,
+    personal: bool = False,
     role: str = "admin",
     tenant_id: uuid.UUID | None = None,
     account_id: uuid.UUID | None = None,
@@ -195,7 +197,11 @@ def _make_app(
                     "tenant_id": str(tenant_id or uuid.uuid4()),
                     "role": role,
                     "client_id": "test",
-                    "chat_session_id": "test-session",
+                    **(
+                        {"daimon_token_kind": "cli"}
+                        if personal
+                        else {"chat_session_id": "test-session"}
+                    ),
                     "platform": platform,
                     "external_id": "T_TEST" if platform == "slack" else "111",
                     "platform_user_id": "U_TEST" if platform == "slack" else "42",
@@ -213,6 +219,9 @@ def _result_text(response: dict[str, object]) -> str:
     return "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
 
 
+pytestmark = pytest.mark.usefixtures("platform_admin_edge")
+
+
 @pytest.fixture(scope="module")
 def search_apps(db_engine: AsyncEngine) -> dict[str, Starlette]:
     """One real MCP app per platform for every ranking case.
@@ -225,7 +234,13 @@ def search_apps(db_engine: AsyncEngine) -> dict[str, Starlette]:
     """
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
     return {
-        platform: _make_app(sessionmaker, platform=platform)
+        platform: _make_app(
+            sessionmaker,
+            platform=platform,
+            personal=True,
+            tenant_id=uuid.uuid5(uuid.NAMESPACE_URL, "search-tenant:" + platform),
+            account_id=uuid.uuid5(uuid.NAMESPACE_URL, "search-account:" + platform),
+        )
         for platform in ("discord", "slack", "teams")
     }
 
@@ -235,9 +250,28 @@ def search_apps(db_engine: AsyncEngine) -> dict[str, Starlette]:
 @pytest.mark.usefixtures("db_clean")
 async def test_setup_query_ranks_tool_and_siblings(
     search_apps: dict[str, Starlette],
+    db_session: AsyncSession,
     platform: str,
     case: SearchCase,
 ) -> None:
+    tenant = await make_tenant(
+        db_session,
+        id=uuid.uuid5(uuid.NAMESPACE_URL, "search-tenant:" + platform),
+        platform=platform,
+        workspace_id="T_TEST" if platform == "slack" else "111",
+    )
+    account = await make_account(
+        db_session, tenant=tenant, id=uuid.uuid5(uuid.NAMESPACE_URL, "search-account:" + platform)
+    )
+    await make_platform_principal(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform=platform,
+        external_id="U_TEST" if platform == "slack" else "42",
+    )
+    await set_role(db_session, account.id, Role.ADMIN)
+    await db_session.commit()
     expected = {case.top_hit} if isinstance(case.top_hit, str) else case.top_hit
     if platform == "teams" and (expected | case.co_surface) & _TEAMS_HIDDEN:
         pytest.skip("the case names a tool Teams hides on purpose")
@@ -303,6 +337,9 @@ async def test_member_default_agent_edit_refuses_with_admin_handoff(
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform=platform)
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform=tenant.platform, external_id="U_TEST"
+        )
         await set_fields(
             session,
             scope=TenantScopeRef(tenant_id=tenant.id),
@@ -383,6 +420,9 @@ async def test_member_can_request_new_key_on_managed_agent(
     async with committing_sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform="slack", workspace_id="T_TEST")
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform=tenant.platform, external_id="U_TEST"
+        )
         await upsert_slack_bot_token(
             session, team_id="T_TEST", encrypted_token=encrypt_token(fernet, "xoxb-test")
         )
@@ -498,6 +538,9 @@ async def test_member_cannot_attach_mcp_through_token_request_on_managed_default
     async with committing_sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform="slack", workspace_id="T_TEST")
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform=tenant.platform, external_id="U_TEST"
+        )
         await set_fields(
             session,
             scope=TenantScopeRef(tenant_id=tenant.id),

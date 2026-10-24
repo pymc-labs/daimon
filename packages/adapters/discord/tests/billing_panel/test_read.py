@@ -1,6 +1,6 @@
 """DB-backed tests for billing_panel.read.
 
-Covers load_billing_snapshot, is_guild_admin, resolve_shown_names.
+Covers load_billing_snapshot, is_platform_admin, resolve_shown_names.
 Uses real Postgres via the `db_session` fixture.
 """
 
@@ -19,7 +19,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.adapters.discord.billing_panel.read import (
     invoking_channel_id,
-    is_guild_admin,
+    is_platform_admin,
     load_billing_snapshot,
     resolve_shown_names,
 )
@@ -261,7 +261,7 @@ async def test_the_admin_snapshot_names_spenders_and_remembers_live_names(
     )
 
 
-# ---- is_guild_admin ----
+# ---- is_platform_admin ----
 
 
 def _make_interaction(
@@ -291,32 +291,32 @@ def _make_interaction(
     return interaction
 
 
-def test_is_guild_admin_true_for_owner() -> None:
-    assert is_guild_admin(_make_interaction(is_member=True, is_owner=True)), (
+def test_is_platform_admin_true_for_owner() -> None:
+    assert is_platform_admin(_make_interaction(is_member=True, is_owner=True)), (
         "guild owner should always be admin"
     )
 
 
-def test_is_guild_admin_true_for_manage_guild_perm() -> None:
-    assert is_guild_admin(_make_interaction(is_member=True, manage_guild=True)), (
+def test_is_platform_admin_true_for_manage_guild_perm() -> None:
+    assert is_platform_admin(_make_interaction(is_member=True, manage_guild=True)), (
         "manage_guild perm should grant admin view"
     )
 
 
-def test_is_guild_admin_true_for_administrator_perm() -> None:
-    assert is_guild_admin(_make_interaction(is_member=True, administrator=True)), (
+def test_is_platform_admin_true_for_administrator_perm() -> None:
+    assert is_platform_admin(_make_interaction(is_member=True, administrator=True)), (
         "administrator perm should grant admin view"
     )
 
 
-def test_is_guild_admin_false_for_regular_member() -> None:
-    assert not is_guild_admin(_make_interaction(is_member=True)), (
+def test_is_platform_admin_false_for_regular_member() -> None:
+    assert not is_platform_admin(_make_interaction(is_member=True)), (
         "member without manage_guild/administrator/owner should NOT be admin"
     )
 
 
-def test_is_guild_admin_false_for_non_member_user() -> None:
-    assert not is_guild_admin(_make_interaction(is_member=False)), (
+def test_is_platform_admin_false_for_non_member_user() -> None:
+    assert not is_platform_admin(_make_interaction(is_member=False)), (
         "non-Member interaction.user (DM context) should NOT be admin"
     )
 

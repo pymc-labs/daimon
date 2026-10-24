@@ -2421,13 +2421,13 @@ registered and expire too, while older jti-less ones keep working.
 
 | Scope | Tools |
 | --- | --- |
-| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
+| `tenant:read` | `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
+| `channels:write` | `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
 | `agents:archive` | `archive_channel_copy` |
-| `promo:redeem` | `redeem_promo_code` |
-| `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
+| `promo:redeem` | Refused: promo redemption requires a direct personal user credential |
+| `promo:create` | Refused: deployment-wide issuing remains on the local operator CLI |
 
-`get_tenant_summary` lists every channel with a default, a budget, admins or
+`get_tenant_summary` requires a direct personal platform-admin credential and lists every channel with a default, a budget, admins or
 a rule, and `channels[].own_agents_only` says whether its readers are `own`.
 Its read is `daimon.core.tenant_summary`, which `daimon channels list
 PLATFORM WORKSPACE_ID [--json]` prints too, with the same JSON plus each
@@ -2862,3 +2862,56 @@ checked when readers is not `own`. Failed or incomplete sharing reads show
 `/here` renders only fixed current-channel visibility facts against the stored
 reading rule, with no admin controls or unrelated channel details. A bot missing
 from a private channel still gets the invite-the-bot card with the skipped note.
+
+### Tenant admin delegation
+
+`core/native_admins.py` combines live platform authority with uncached,
+tenant-scoped `daimon_admins` grants. The single `DelegatedAction` allow-list
+limits which admin gates accept delegation. Adapter boundaries pass their
+live verdict into configuration services and stores. Unnamed actions,
+credentials, MCP connections, GitHub connect/approval/repo binding and DM
+toggles require platform authority.
+
+Discord interaction gates are asynchronous; Slack binds each per-event Web
+API client to its verified workspace; Teams resolves grants at its runtime
+admin boundary. MCP independently attests platform authority and current
+grants on each request. The verifier distinguishes chat execution from
+external agent keys. Authority changes and money require a directly clicked,
+live-checked platform panel or a registered personal CLI credential with live
+platform attestation. Every execution binding and operator credential is
+refused for those operations, including an attended admin chat. Billing-panel
+tokens are dedicated checkout HTTP credentials and cannot exercise personal
+user authority or MCP money tools.
+
+Account roles have exactly three write sites: turn admission and the
+Discord/Slack GitHub connect commands, all from live platform facts. Operator
+panels refuse minting until an admin turn has recorded that platform snapshot,
+with an actionable message. This prevents minting a token already barred by
+the verifier’s native-role check. GitHub
+link helpers, removal notices and operator-token minting never write roles.
+Turn-origin roles also record platform authority; `effective_role` is
+rendered separately for the model. The hub retains its platform-only
+transcript exception. Its live delegated agent-pin exemption grants no
+transcript access. Revocation removes only the grant, with an atomic audit.
+
+Granted admins can change what agents do, including agents platform admins use.
+Their changes to instructions, skills, environments and tool rules also affect
+platform admins’ routines and attended chats that use those agents.
+
+Discord's Permissions panel and Slack's Who answers where panel link to
+Admins. The screen lists grants and gives platform admins grant/revoke
+controls; every mutation rechecks platform authority. Teams uses CLI/MCP.
+The CLI uses authenticated MCP calls. Slack notice handlers check platform
+authority internally and hide GitHub/operator-token controls from delegates.
+Grant/revoke audits record actor, subject and timestamp; privacy erasure
+removes user grants and scrubs attribution.
+
+Material routine edits transfer the execution author in the core store,
+with atomic audit, revision checks and output/delivery erasure. Scheduler
+credential selection and private delivery follow the new author.
+Pause/resume/delete retain authority.
+
+Worker spending-limit MCP tools require a registered personal CLI credential and
+live platform authority. Configuration confirmation cards carry a separate live
+platform check for provider policy, channel-pin clearing and worker limits;
+delegated model/settings and tool-rule checks remain explicit actions.

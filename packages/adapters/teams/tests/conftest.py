@@ -40,6 +40,7 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.asgi import asgi_lifespan
+from daimon.testing.db import build_test_engine
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_committing_engine as db_committing_engine
 from daimon.testing.db import db_committing_pool as db_committing_pool
@@ -55,7 +56,7 @@ from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 # Synthetic identifiers only.
 ENTRA_TENANT_ID = str(uuid.UUID(int=1))
@@ -743,3 +744,28 @@ def status_log_on(_status_log_off: None) -> Iterator[None]:
 
     with status_log_override(True):
         yield
+
+
+@pytest.fixture
+async def service_session_factory(
+    db_engine: AsyncEngine,
+    db_schema: str,
+    db_clean: None,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Independent pooled transactions for services and background demotions.
+
+    Preparation opens another authorization read while holding its fence. The
+    shared fixture connection cannot model this concurrency, and its pool
+    reserves one of only two slots for the fixture itself.
+    """
+    engine = build_test_engine(
+        db_engine.url.render_as_string(hide_password=False),
+        db_schema,
+        pool_size=4,
+        max_overflow=2,
+        pool_timeout=10,
+    )
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()

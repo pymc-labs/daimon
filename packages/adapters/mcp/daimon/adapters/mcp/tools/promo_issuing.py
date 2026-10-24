@@ -1,11 +1,8 @@
-"""Promo code issuing for operator tokens: create, list and revoke deployment-wide codes.
+"""Deployment-wide promo issuance requires the human operator CLI.
 
-Any tenant may redeem a promo code, so issuing one acts on the whole
-deployment. These tools are open only to an operator token holding
-``promo:create``, which only the CLI mints; server admins never see them.
-A token minted with an issuing ceiling may grant at most that much credit
-in total, counting ``amount_usd × max_redemptions`` per code. The terms,
-code generation and storage are the ones ``daimon promo`` uses.
+An operator bearer does not establish human money authority, and a personal
+tenant credential does not establish deployment-wide issuer scope. These
+handlers require both and refuse MCP issuance without either proof.
 """
 
 from __future__ import annotations
@@ -18,7 +15,10 @@ from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._ctx import (
+    _auth,  # pyright: ignore[reportPrivateUsage]
+    _require_platform_admin,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools._scopes import require_operator_scope, scope_tags
 from daimon.core.operator_tokens import issue_refusal
 from daimon.core.promo_codes import (
@@ -112,6 +112,9 @@ async def _create_promo_code_impl(
     note: str | None = None,
 ) -> CreatedPromoCode:
     """Validate, check the ceiling and insert in one transaction: a refusal leaves no code."""
+    # Human money authority and deployment-wide issuer authority are distinct;
+    # an operator bearer cannot substitute for direct human intent.
+    _require_platform_admin(auth)
     require_operator_scope(auth, "promo:create")
     try:
         terms = build_promo_code_terms(
@@ -172,6 +175,7 @@ async def _create_promo_code_impl(
 
 
 async def _list_promo_codes_impl(runtime: McpRuntime, auth: AuthIdentity) -> list[PromoCodeSummary]:
+    _require_platform_admin(auth)
     require_operator_scope(auth, "promo:create")
     async with runtime.session_factory() as session:
         rows = await promo_store.list_promo_codes(session)
@@ -181,6 +185,7 @@ async def _list_promo_codes_impl(runtime: McpRuntime, auth: AuthIdentity) -> lis
 async def _revoke_promo_code_impl(
     runtime: McpRuntime, auth: AuthIdentity, promo_code_id: str
 ) -> PromoCodeSummary:
+    _require_platform_admin(auth)
     require_operator_scope(auth, "promo:create")
     try:
         code_id = uuid.UUID(promo_code_id.strip())
@@ -210,7 +215,7 @@ def register_promo_issuing_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         max_redemptions: int | None = None,
         note: str | None = None,
     ) -> CreatedPromoCode:
-        """Create a promo code any workspace can redeem for credit. Operator-only.
+        """Unavailable over MCP: issue deployment-wide promos with the human operator CLI.
 
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
@@ -235,14 +240,14 @@ def register_promo_issuing_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags=tags)
     async def list_promo_codes(ctx: Context) -> list[PromoCodeSummary]:  # pyright: ignore[reportUnusedFunction]
-        """List every promo code on this deployment, newest first. Operator-only."""
+        """Unavailable over MCP: list deployment-wide promos with the human operator CLI."""
         return await _list_promo_codes_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags=tags)
     async def revoke_promo_code(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, promo_code_id: str
     ) -> PromoCodeSummary:
-        """Stop a promo code from being redeemed again. Operator-only.
+        """Unavailable over MCP: revoke deployment-wide promos with the human operator CLI.
 
         Credit already redeemed stays, including timed credit that has not started.
         """

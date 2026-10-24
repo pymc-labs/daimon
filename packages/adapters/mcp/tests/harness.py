@@ -53,6 +53,9 @@ def make_identity(
         account_id=account_id or uuid.uuid4(),
         tenant_id=tenant_id or uuid.uuid4(),
         role=role,
+        is_platform_admin=role is Role.ADMIN,
+        is_admin=role is Role.ADMIN,
+        token_kind="cli",
     )
 
 

@@ -23,6 +23,7 @@ import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.external_access import host_only_notice
 from daimon.adapters.slack.gating import is_external_interactive
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
@@ -160,9 +161,19 @@ class SlackConfirmationCards:
                 if tenant_id is None or account_id is None:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
 
+                async def current_platform_admin(clicker: str) -> bool:
+                    from daimon.adapters.slack.admin import resolve_is_platform_admin
+
+                    return team_id is not None and await resolve_is_platform_admin(
+                        client, user_id=clicker, host_team_id=team_id
+                    )
+
                 async def current_admin(clicker: str) -> bool:
                     return team_id is not None and await resolve_is_admin(
-                        client, user_id=clicker, host_team_id=team_id
+                        client,
+                        user_id=clicker,
+                        host_team_id=team_id,
+                        action=DelegatedAction.AGENT_SETTINGS,
                     )
 
                 from functools import partial
@@ -187,6 +198,7 @@ class SlackConfirmationCards:
                     tenant_id=tenant_id,
                     account_id=account_id,
                     current_admin=current_admin,
+                    current_platform_admin=current_platform_admin,
                     answering_agent_name=(
                         getattr(getattr(admission, "config", None), "agent_name", None)
                     ),
@@ -211,14 +223,18 @@ class SlackConfirmationCards:
             if runtime is None or tenant_id is None:
                 return Subject()
             admin = team_id is not None and await resolve_is_admin(
-                client, user_id=clicker, host_team_id=team_id
+                client, user_id=clicker, host_team_id=team_id, action=DelegatedAction.TOOL_RULES
             )
             caller = await admin_caller(
                 runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
             )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
-                    session, tenant_id=tenant_id, platform="slack", caller=caller
+                    session,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    caller=caller,
+                    action=DelegatedAction.TOOL_RULES,
                 )
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:

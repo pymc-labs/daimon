@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 157 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 160 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -36,6 +36,16 @@ A caller does not necessarily receive this list in one response: the server appl
 BM25 search transform, so an ordinary session discovers tools by searching the catalogue
 rather than listing it in full. Sessions narrowed to agent-chat tools or to an operator
 token's scopes skip the transform and see their tools directly.
+
+## `admins`
+
+Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `grant_admin` | admin only | Granted admins can change what agents do, including agents platform admins use. |
+| `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
+| `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
 
 ## `agent_chat`
 
@@ -94,13 +104,13 @@ Agent tools: list / get / create / update / fork / archive.
 
 ## `channel_budgets`
 
-Channel budget tools: read a channel's spending budget; admins set, clear and list them.
+Channel budgets for platform admins acting directly with personal user credentials.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
 | `get_channel_budget` | Discord callers, Slack callers, Teams callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
-| `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this workspace with its spend. |
+| `list_channel_budgets` | admin only, operator tokens with tenant:read | List channel budgets with a personal platform-admin CLI credential. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
 ## `channel_copies`
@@ -210,7 +220,7 @@ Chat configuration over the fleet-grant and tenant-provider service owners.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
-| `request_fleet_config` | all callers | Configure this agent's fleet of worker agents, with owner/admin confirmation. |
+| `request_fleet_config` | all callers | Change worker spending limits with a personal CLI credential and live platform authority. |
 | `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
 
 ## `github_app`
@@ -352,17 +362,17 @@ Promo code tools: redeem an operator-issued code for the caller's server or work
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this workspace. |
+| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem credit with a direct personal platform-admin CLI credential. |
 
 ## `promo_issuing`
 
-Promo code issuing for operator tokens: create, list and revoke deployment-wide codes.
+Deployment-wide promo issuance requires the human operator CLI.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_promo_code` | operator tokens with promo:create | Create a promo code any workspace can redeem for credit. |
-| `list_promo_codes` | operator tokens with promo:create | List every promo code on this deployment, newest first. |
-| `revoke_promo_code` | operator tokens with promo:create | Stop a promo code from being redeemed again. |
+| `create_promo_code` | operator tokens with promo:create | Unavailable over MCP: issue deployment-wide promos with the human operator CLI. |
+| `list_promo_codes` | operator tokens with promo:create | Unavailable over MCP: list deployment-wide promos with the human operator CLI. |
+| `revoke_promo_code` | operator tokens with promo:create | Unavailable over MCP: revoke deployment-wide promos with the human operator CLI. |
 
 ## `propagation`
 
@@ -455,11 +465,11 @@ Conversational task handoff and fresh start.
 
 ## `tenant_summary`
 
-Tenant summary: the balance, funding mode and every configured channel in one read.
+Billing and tenant configuration summaries for direct personal platform admins.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this workspace: balance, funding mode and each channel. |
+| `get_tenant_summary` | admin only, operator tokens with tenant:read | Read billing and configuration with a personal platform-admin CLI credential. |
 
 ## `thread_model`
 

@@ -131,7 +131,7 @@ def test_a_dm_scope_is_outside_every_pin() -> None:
 
 
 async def _seed(session: AsyncSession, *, policy: TenantAccessPolicy | None = None) -> TenantRow:
-    tenant = await make_tenant(session)
+    tenant = await make_tenant(session, platform="slack")
     # research-bot answers in C2, so it is reachable in the workspace.
     await set_fields(
         session,

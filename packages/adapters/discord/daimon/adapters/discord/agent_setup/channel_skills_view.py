@@ -19,6 +19,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -146,14 +147,14 @@ class ChannelSkillsView(PanelViewBase):
         await self.swap_to(interaction, routing)
 
     async def _on_add(self, interaction: discord.Interaction) -> None:
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.SKILLS):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await self.audit(interaction)(outcome="denied", reason="needs_admin")
             return
         await interaction.response.send_modal(AddChannelSkillModal(self))
 
     async def _on_remove(self, interaction: discord.Interaction) -> None:
         audit = self.audit(interaction)
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.SKILLS):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await audit(outcome="denied", reason="needs_admin")
             return
         await interaction.response.defer()
@@ -192,7 +193,7 @@ class AddChannelSkillModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         view, state = self._view, self._view.state
         audit = view.audit(interaction)
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_admin(interaction, action=DelegatedAction.SKILLS):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await audit(outcome="denied", reason="needs_admin")
             return
         try:

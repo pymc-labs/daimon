@@ -37,6 +37,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     resolve_setup_agent,
 )
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
     find_attach_mount_collision,
@@ -213,7 +214,7 @@ async def _sync_impl(
     expected_ma_agent_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> SkillSyncResult:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.SKILLS)
     agent_id: uuid.UUID | None = None
     if agent_name is not None:
         agent = await resolve_setup_agent(
@@ -407,7 +408,7 @@ async def _delete_impl(
     auth: AuthIdentity,
     name: str,
 ) -> None:
-    _require_admin(auth)
+    _require_admin(auth, action=DelegatedAction.SKILLS)
     # A seeded skill is mounted by the seeded agents, and deleting a skill an
     # agent references fails every one of that agent's turns.
     async with runtime.session_factory() as session:

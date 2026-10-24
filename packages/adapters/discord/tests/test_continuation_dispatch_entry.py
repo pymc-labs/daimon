@@ -14,6 +14,7 @@ controls the follow-up runs with, not the session-preparation pipeline.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -83,6 +84,9 @@ def _make_guild(
     """
     guild = MagicMock(spec=discord.Guild)
     guild.owner_id = 1
+    guild.unavailable = False
+    if member is not None:
+        member.guild = guild
     guild.get_member = MagicMock(return_value=cached_member)
     if member is not None:
         guild.fetch_member = AsyncMock(return_value=member)
@@ -97,6 +101,7 @@ def _make_guild(
 def _make_member(*, admin: bool) -> MagicMock:
     member = MagicMock(spec=discord.Member)
     member.id = 555
+    member.roles = []
     member.guild_permissions.administrator = admin
     member.guild_permissions.manage_guild = False
     return member
@@ -404,6 +409,16 @@ async def _run_continuation(
 
     bot = make_bot(_make_runtime(db_session_factory))
     thread = _make_thread(guild=guild)
+    bot.get_guild = MagicMock(return_value=thread.guild)
+    bot.fetch_guild = AsyncMock(return_value=thread.guild)
+    if guild is not None:
+        from daimon.adapters.discord.membership import GatewayMembershipResolver
+
+        bot.membership_resolver = GatewayMembershipResolver(bot)
+        bot.runtime = replace(
+            bot.runtime,
+            turn_deps=replace(bot.runtime.turn_deps, membership_resolver=bot.membership_resolver),
+        )
     row = _make_continuation_row(
         tenant_id=tenant.id,
         account_id=account.id,
@@ -572,34 +587,55 @@ async def test_continuation_turn_runs_as_admin_when_requester_is_a_guild_admin(
 
 
 @pytest.mark.parametrize(
-    ("workspace_id", "guild"),
+    ("workspace_id", "guild", "member_present"),
     [
         pytest.param(
-            "710000020", _make_guild(member=_make_member(admin=False)), id="non-admin-member"
+            "710000020", _make_guild(member=_make_member(admin=False)), True, id="non-admin-member"
         ),
-        pytest.param("710000021", _make_guild(), id="requester-left-the-guild"),
+        pytest.param("710000021", _make_guild(), False, id="requester-left-the-guild"),
         pytest.param(
             "710000023",
             _make_guild(member=_make_member(admin=False), cached_member=_make_member(admin=True)),
+            True,
             id="stale-cached-admin-lost-the-role",
         ),
         pytest.param(
             "710000024",
             _make_guild(cached_member=_make_member(admin=True)),
+            False,
             id="stale-cached-admin-left-the-guild",
         ),
         pytest.param(
             "710000022",
             _make_guild(fetch_error=discord.HTTPException(MagicMock(status=503), "unavailable")),
+            False,
             id="discord-lookup-failed",
         ),
     ],
 )
 async def test_continuation_turn_never_runs_as_admin_without_a_live_admin_requester(
-    db_session_factory: async_sessionmaker[AsyncSession], workspace_id: str, guild: MagicMock
+    db_session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    guild: MagicMock,
+    member_present: bool,
 ) -> None:
     """A non-admin's form never produces an admin continuation -- even when
     the requester's account was admin on an earlier turn."""
+    if not member_present:
+        from daimon.core.ma_identity import derive_tenant_uuid
+        from daimon.core.turn.errors import AdmissionDenied
+
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await _run_continuation(
+                db_session_factory,
+                workspace_id=workspace_id,
+                reason="private_input_applied",
+                guild=guild,
+                prior_role=Role.ADMIN,
+            )
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=workspace_id)
+        assert await _requester_account_role(db_session_factory, tenant_id) == Role.USER
+        return
     controls, tenant_id = await _run_continuation(
         db_session_factory,
         workspace_id=workspace_id,

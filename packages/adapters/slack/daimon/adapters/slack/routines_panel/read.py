@@ -11,6 +11,7 @@ import uuid
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.routines_panel.state import RoutineEntry
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.routines import derive_glyph, panel_rows, routine_for_reader, routine_label
 from daimon.core.stores.routines import list_routines_for_tenant
@@ -76,5 +77,10 @@ async def routines_viewer(client: AsyncWebClient, *, user_id: str, team_id: str)
 
     A failed admin lookup counts as not admin, so it narrows rather than widens.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
-    return None if is_admin else user_id
+    return (
+        None
+        if await resolve_is_admin(
+            client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.ROUTINES
+        )
+        else user_id
+    )

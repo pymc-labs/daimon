@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import (
     Action,
@@ -72,7 +73,7 @@ from daimon.core.continuity.handoff import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
-from daimon.core.native_admins import AdminCaller
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
@@ -267,8 +268,11 @@ async def _subject(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: HandoffCaller
 ) -> Subject:
     who = caller.admin
+    live = await load_live_subject(
+        session, tenant_id=tenant_id, platform=platform, caller=who, action=DelegatedAction.ROUTING
+    )
     return build_subject(
-        is_admin=who.is_server_admin,
+        is_admin=live.is_admin,
         platform_user_id=who.platform_user_id,
         via_agent_key=caller.via_agent_key,
     )

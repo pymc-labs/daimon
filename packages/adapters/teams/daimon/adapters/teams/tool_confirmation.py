@@ -27,6 +27,7 @@ from daimon.adapters.teams.card_actions import (
 from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deployment_admin
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
@@ -107,7 +108,12 @@ EDIT_TIMEOUT_S = 2.0
 MAX_DETAIL_BLOCKS = 12
 
 
-async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
+async def _is_admin_now(
+    runtime: TeamsRuntime,
+    clicker: str,
+    *,
+    action: DelegatedAction | None = DelegatedAction.TOOL_RULES,
+) -> bool:
     """A live admin check at a click: a revoked team ownership counts at once.
 
     The cached owners answer first and only a yes is read again, so a click
@@ -118,7 +124,9 @@ async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
         return False
     for fresh in (False, True):
         owners = admin_team_owners(runtime, fresh=fresh)
-        if not await is_deployment_admin(settings, owners, user_id=clicker):
+        if not await is_deployment_admin(
+            settings, owners, user_id=clicker, runtime=runtime, action=action
+        ):
             return False
     return True
 
@@ -261,8 +269,13 @@ class TeamsConfirmationCards:
                 if tenant_id is None or account_id is None:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
 
+                async def current_platform_admin(clicker: str) -> bool:
+                    return await _is_admin_now(runtime, clicker, action=None)
+
                 async def current_admin(clicker: str) -> bool:
-                    return await _is_admin_now(runtime, clicker)
+                    return await _is_admin_now(
+                        runtime, clicker, action=DelegatedAction.AGENT_SETTINGS
+                    )
 
                 from functools import partial
 
@@ -286,6 +299,7 @@ class TeamsConfirmationCards:
                     tenant_id=tenant_id,
                     account_id=account_id,
                     current_admin=current_admin,
+                    current_platform_admin=current_platform_admin,
                     answering_agent_name=(
                         getattr(getattr(admission, "config", None), "agent_name", None)
                     ),
@@ -314,7 +328,11 @@ class TeamsConfirmationCards:
             )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
-                    session, tenant_id=tenant_id, platform="teams", caller=caller
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    caller=caller,
+                    action=DelegatedAction.TOOL_RULES,
                 )
 
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:

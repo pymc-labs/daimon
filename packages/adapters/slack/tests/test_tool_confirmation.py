@@ -48,7 +48,10 @@ def _client() -> MagicMock:
 
 
 def _click(action_id: str, user: str) -> dict[str, Any]:
-    return {"actions": [{"action_id": action_id}], "user": {"id": user}}
+    return {
+        "actions": [{"action_id": action_id}],
+        "user": {"id": user},
+    }
 
 
 async def _post(
@@ -718,7 +721,16 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
     client = _client()
     client.users_info = AsyncMock(
-        return_value={"ok": True, "user": {"is_admin": True, "team_id": "T_HOST"}}
+        return_value={
+            "ok": True,
+            "user": {
+                "id": "U1",
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": True,
+                "team_id": "T_HOST",
+            },
+        }
     )
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
@@ -737,7 +749,13 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     assert await check("U1") is True
     client.users_info.return_value = {
         "ok": True,
-        "user": {"is_admin": False, "team_id": "T_HOST"},
+        "user": {
+            "id": "U1",
+            "deleted": False,
+            "is_bot": False,
+            "is_admin": False,
+            "team_id": "T_HOST",
+        },
     }
     assert await check("U1") is False
     assert client.users_info.await_count == 2

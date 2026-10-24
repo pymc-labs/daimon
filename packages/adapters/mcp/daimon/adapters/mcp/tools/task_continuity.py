@@ -288,7 +288,11 @@ async def _hand_off_task_impl(
     )
 
     # Queued work reaches only a destination that can read the caller's session.
-    admin = AdminCaller(platform_user_id=auth.platform_user_id, is_server_admin=auth.is_admin)
+    admin = AdminCaller(
+        platform_user_id=auth.platform_user_id,
+        is_server_admin=auth.is_platform_admin,
+        role_ids=auth.verified_role_ids,
+    )
     recorded = (
         await recorded_thread_sessions(
             runtime.client,

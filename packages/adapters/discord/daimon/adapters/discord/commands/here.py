@@ -7,6 +7,7 @@ from typing import cast
 
 from daimon.adapters.discord.checks import (
     is_guild_admin,
+    is_platform_admin,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
@@ -15,6 +16,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.outsiders import channel_outsiders
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import Approvals
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.approval_admin import approval_admin
@@ -235,7 +237,7 @@ class HereCog(commands.Cog):
                     public_mcp_url=str(runtime.settings.mcp.public_url)
                     if runtime.settings.mcp.public_url is not None
                     else None,
-                    is_admin=is_guild_admin(interaction),
+                    is_admin=await is_guild_admin(interaction, action=DelegatedAction.ROUTING),
                     caller_account_id=principal.account_id if principal else None,
                     visible_channel_ids=visible_ids,
                     bot_can_view=bot_view,
@@ -263,7 +265,11 @@ class HereCog(commands.Cog):
                         visibility.outsiders_can_view and card.effective_readers != "own"
                     ),
                 )
-                if is_guild_admin(interaction)
+                if is_platform_admin(interaction)
+                else MakeConfidentialView(runtime, tenant_id, str(channel.id))
+                if visibility.outsiders_can_view
+                and card.effective_readers != "own"
+                and await is_guild_admin(interaction, action=DelegatedAction.CHANNEL_PERMISSIONS)
                 else None
             )
             await interaction.edit_original_response(

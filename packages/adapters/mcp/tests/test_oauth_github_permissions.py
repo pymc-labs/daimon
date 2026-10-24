@@ -492,14 +492,13 @@ async def test_teams_uses_live_admin_team_owners(
         }
     )
     user_id = "00000000-0000-0000-0000-000000000003"
-    requester = AccountIdentityRow(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
-        platform="teams",
-        external_id=tenant_external_id,
-        platform_user_id=user_id,
-    )
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="teams", workspace_id=tenant_external_id)
+        principal = await make_platform_principal(
+            session, tenant=tenant, platform="teams", external_id=user_id
+        )
+        requester = await get_account_with_tenant(session, account_id=principal.account_id)
+    assert requester is not None
 
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.host == "login.microsoftonline.com":

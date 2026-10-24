@@ -124,7 +124,7 @@ async def test_clearing_requires_an_admin_chat_and_a_gated_session(active_chat, 
     if blocked == "non_admin":
         gates(payload, frozen)
         gate()
-        auth = replace(auth, is_admin=False)
+        auth = replace(auth, is_admin=False, is_platform_admin=False)
     elif blocked == "agent_key":
         gates(payload, frozen)
         gate()

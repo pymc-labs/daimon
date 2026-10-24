@@ -13,7 +13,7 @@ import uuid
 from typing import Any, Final
 
 import structlog
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.agent_setup.actions import (
     OPERATOR_TOKENS_NEED_ADMIN_MESSAGE,
     load_routing_view,
@@ -111,7 +111,7 @@ async def run_operator_token_submission(
     reply = functools.partial(
         post_ephemeral, client, channel_id=meta.channel_id or user_id, user_id=user_id
     )
-    if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
+    if not await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id):
         await audit(outcome="denied", reason="needs_admin")
         await reply(text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE)
         return
@@ -126,6 +126,7 @@ async def run_operator_token_submission(
                 tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
                 platform="slack",
                 platform_user_id=user_id,
+                is_platform_admin=True,
                 scopes=submission.scopes,
                 label=submission.label,
                 secret=secret.get_secret_value().encode(),
@@ -161,7 +162,7 @@ async def handle_operator_token_revoke(
     reply = functools.partial(
         post_ephemeral, client, channel_id=meta.channel_id or user_id, user_id=user_id
     )
-    if not is_admin:
+    if not await resolve_is_platform_admin(client, user_id=user_id):
         await audit(outcome="denied", reason="needs_admin", token_jti=jti)
         await reply(text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE)
         return

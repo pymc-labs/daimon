@@ -717,7 +717,11 @@ async def test_routine_dm_does_not_replace_an_active_private_conversation(
 
         async with db_session_factory.begin() as session:
             updated = await update_routine(
-                session, routine.id, tenant_id=routine.tenant_id, destination_kind="dm"
+                session,
+                routine.id,
+                edited_by=routine.created_by_user_id,
+                tenant_id=routine.tenant_id,
+                destination_kind="dm",
             )
             await set_dm_enabled(session, tenant_id=routine.tenant_id, enabled=True)
         assert updated is not None
@@ -747,7 +751,11 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     row = await _routine(db_session)
     async with db_session_factory.begin() as session:
         updated = await update_routine(
-            session, row.id, tenant_id=row.tenant_id, destination_kind="dm"
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
         )
         await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=mode != "tenant_disabled")
     assert updated is not None
@@ -761,7 +769,13 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
                 policy=TenantAccessPolicy(channel_rules={"456": ChannelRule(readers="inside")}),
             )
             # The policy may change after creation, before delivery.
-            await update_routine(session, row.id, tenant_id=row.tenant_id, trigger_message="go")
+            await update_routine(
+                session,
+                row.id,
+                edited_by=row.created_by_user_id,
+                tenant_id=row.tenant_id,
+                trigger_message="go",
+            )
         updated = updated.model_copy(update={"channel_id": "456", "source_channel_id": "456"})
     fetch = AsyncMock(side_effect=AssertionError("a recipient is not a channel"))
     dms = _Dms(fail=mode == "blocked")
@@ -806,7 +820,13 @@ async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
             channel_id="456" if stop == "thread_sealed" else None,
         )
     async with db_session_factory.begin() as session:
-        row = await update_routine(session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        row = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
         assert row is not None
         await record_result(session, row.id, tail="private " * 900, error=None, delivery="pending")
     sends = []
@@ -837,6 +857,7 @@ async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
                     await update_routine(
                         session,
                         row.id,
+                        edited_by=row.created_by_user_id,
                         tenant_id=row.tenant_id,
                         destination_kind="channel",
                         destination_id="555",
@@ -889,7 +910,13 @@ async def test_dm_delivery_rechecks_all_live_agent_names(db_session_factory, age
     async with db_session_factory() as session:
         row = await _routine(session)
     async with db_session_factory.begin() as session:
-        row = await update_routine(session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        row = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
         assert row is not None
         await set_access_policy(
             session,
@@ -951,7 +978,13 @@ async def test_generated_files_share_the_at_most_once_outbox(
     )
     async with db_session_factory.begin() as session:
         if destination == "dm":
-            await update_routine(session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+            await update_routine(
+                session,
+                row.id,
+                edited_by=row.created_by_user_id,
+                tenant_id=row.tenant_id,
+                destination_kind="dm",
+            )
         await record_result(
             session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
         )
@@ -1046,6 +1079,7 @@ async def test_destination_change_between_text_and_file_cancels_payload(
             await update_routine(
                 session,
                 row.id,
+                edited_by=row.created_by_user_id,
                 tenant_id=row.tenant_id,
                 destination_kind="channel",
                 destination_id="777",

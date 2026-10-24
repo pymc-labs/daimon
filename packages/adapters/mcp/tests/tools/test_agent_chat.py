@@ -298,7 +298,7 @@ async def _tools_list_via_http(app: ASGIApp, token: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
+async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools(sessionmaker) -> None:
     """With an agent_id-claim token, tools/list returns only agent-chat tools.
 
     Verifies that admin/CRUD tools are excluded from the visible set and that only
@@ -317,7 +317,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
-    mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
+    mock_sessionmaker = sessionmaker
 
     mcp = FastMCP(
         name="narrowing-test",
@@ -374,7 +374,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _full_stack_mcp(token: str, claims: dict[str, str]) -> FastMCP:
+def _full_stack_mcp(token: str, claims: dict[str, str], sessionmaker) -> FastMCP:
     """Assemble the prod transform stack: both Visibility baselines + the
     agent-chat-aware BM25 search transform + IdentityMiddleware narrowing.
 
@@ -383,7 +383,7 @@ def _full_stack_mcp(token: str, claims: dict[str, str]) -> FastMCP:
     collapses the listing to search_tools/call_tool, which the per-agent
     match_all disable then hides — the subclass must yield to the narrowing.
     """
-    mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
+    mock_sessionmaker = sessionmaker
     mcp = FastMCP(name="full-stack-181", auth=StaticTokenVerifier(tokens={token: claims}))
     mcp.add_middleware(
         IdentityMiddleware(
@@ -418,7 +418,7 @@ def _full_stack_mcp(token: str, claims: dict[str, str]) -> FastMCP:
     return mcp
 
 
-async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() -> None:
+async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform(sessionmaker) -> None:
     """A narrowed agent token's tools/list returns exactly the agent-chat tools
     even with the BM25 search transform in the stack (issue #181).
 
@@ -436,7 +436,9 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() 
         "client_id": "test",
     }
 
-    tool_names = await _tools_list_via_http(_full_stack_mcp(token, claims).http_app(), token)
+    tool_names = await _tools_list_via_http(
+        _full_stack_mcp(token, claims, sessionmaker).http_app(), token
+    )
 
     expected = {
         "ask",
@@ -457,7 +459,7 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform() 
     )
 
 
-async def test_non_narrowed_token_still_gets_bm25_search_surface() -> None:
+async def test_non_narrowed_token_still_gets_bm25_search_surface(sessionmaker) -> None:
     """A non-narrowed (no agent_id) token still gets the collapsed search surface.
 
     Guards against the fix over-reaching: only per-agent sessions bypass the
@@ -472,7 +474,9 @@ async def test_non_narrowed_token_still_gets_bm25_search_surface() -> None:
         "client_id": "test",
     }
 
-    tool_names = await _tools_list_via_http(_full_stack_mcp(token, claims).http_app(), token)
+    tool_names = await _tools_list_via_http(
+        _full_stack_mcp(token, claims, sessionmaker).http_app(), token
+    )
 
     assert set(tool_names) == {"search_tools", "call_tool"}, (
         "non-narrowed token should get the BM25 search/call surface, not a full "
@@ -1823,7 +1827,7 @@ async def test_describe_agent_returns_none_repo_url_for_unbound_agent(
 # ---------------------------------------------------------------------------
 
 
-async def test_list_events_admits_thread_status_events_through_fastmcp() -> None:
+async def test_list_events_admits_thread_status_events_through_fastmcp(sessionmaker) -> None:
     """list_events must return a transcript containing session.thread_status_idle
     (a variant the pinned SDK's event union does NOT model) without a FastMCP
     output-validation error.
@@ -1865,7 +1869,7 @@ async def test_list_events_admits_thread_status_events_through_fastmcp() -> None
         lambda _r, _m: httpx.Response(200, json=_session_json(status="idle")),
     )
 
-    mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
+    mock_sessionmaker = sessionmaker
     mcp = FastMCP(name="list-events-schema", auth=StaticTokenVerifier(tokens={token: claims}))
     mcp.add_middleware(
         IdentityMiddleware(
@@ -1922,6 +1926,13 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
             session, platform="discord", workspace_id=str(tenant_id), id=tenant_id
         )
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session,
+            tenant=tenant,
+            account=account,
+            platform="discord",
+            external_id="discord-user-over-balance",
+        )
 
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_MA_AGENT_ID)
     token = "over-balance-agent-token"
@@ -3598,6 +3609,9 @@ async def test_turn_tools_refuse_an_invoker_outside_the_allowlist_before_creatin
             session, platform="discord", workspace_id=str(tenant_id), id=tenant_id
         )
         account = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=account, platform="discord", external_id="guest"
+        )
         await set_access_policy(
             session, tenant_id=tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("staff",))
         )

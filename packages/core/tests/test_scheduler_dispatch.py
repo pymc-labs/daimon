@@ -116,6 +116,7 @@ async def test_slow_routine_does_not_block_next_tick_or_overlap_itself(
             await update_routine(
                 session,
                 slow.id,
+                edited_by=slow.created_by_user_id,
                 tenant_id=slow.tenant_id,
                 cron_expr="0 */5 * * *",
                 next_fire_at=edited_next,

@@ -542,6 +542,7 @@ async def run_wizard_submit_turn_observed(
                     )
                 )
             return
+        is_admin = admission.is_admin
 
         agent = admission.agent
         session_account_id = admission.account_id

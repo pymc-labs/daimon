@@ -317,7 +317,7 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
     ), "only an accepted press is recorded, with who pressed it"
     if not admin:
         click.response.send_message.assert_awaited_once_with(
-            "Only the person who started this fleet, or someone with Manage Server, can stop it.",
+            "Only the person who started this fleet, or a Daimon admin, can stop it.",
             ephemeral=True,
         )
 

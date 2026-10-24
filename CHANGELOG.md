@@ -7,11 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep long-job policy and worker spending-limit administration platform-only.
+  Worker spending tools require a personal CLI credential; chat and routine
+  execution cannot change caps. Foreign and held callers receive no admin authority.
+
 - Discord `/routines` now supports admin creation and confirmed creator-or-admin
   deletion, with schedule validation and agent policy checks. Pause and resume
   also recognize server owners and Administrator permissions. Thread-created
   routines retain verified parent/thread provenance and use the parent channel's
   budget; unresolved sources are refused.
+- Clarify that granted admins can change what agents do, including agents platform
+  admins use. Refuse operator-token minting until the platform role is recorded,
+  with instructions to refresh it, and require platform admins to mint coding-tool keys.
+
+- Transfer routine execution authority to the editor of its behavior, confine
+  role snapshots to platform admission/connect commands, and keep credential,
+  MCP-connection and DM-toggle administration platform-only. Human authority
+  requires a registered personal CLI token; billing-panel tokens are checkout-only.
+
+- Require direct human platform-admin authority for admin delegation and money
+  controls; refuse agent-run credentials, keep GitHub platform-only, and apply
+  delegated configuration through an explicit action allow-list.
+- Platform admins can delegate tenant-wide Daimon admin to users, or Discord roles,
+  from the Discord and Slack Admins screens, authenticated MCP tools, or
+  `daimon admins list|grant|revoke`. Delegated admins can configure Daimon but
+  cannot delegate, change billing or spending caps. Revocation applies to open
+  panels and existing MCP credentials immediately; changes are audited.
+  Promo redemption, including channel codes, and operator-token minting require
+  a live platform admin. Delegated admins do not acquire the hub exception for
+  reading other people’s sessions or sealed transcripts.
+
 
 - Add opt-in server-admin overrides for third-party MCP write approvals at
   server, channel and thread scope, through audited native `/here` controls on

@@ -80,6 +80,8 @@ def _auth(tenant: TenantRow, account_id: uuid.UUID, *, admin: bool) -> AuthIdent
         role=Role.ADMIN if admin else Role.USER,
         platform="discord",
         is_admin=admin,
+        is_platform_admin=admin,
+        token_kind="cli",
     )
 
 

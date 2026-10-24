@@ -14,9 +14,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Final
 
 import httpx
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.authz import Subject, build_subject
 from daimon.core.errors import DaimonError
-from daimon.core.stores.accounts import get_account
+from daimon.core.membership import Membership
+from daimon.core.stores.accounts import get_account, get_account_with_tenant
 from daimon.core.stores.domain import Role
 from pydantic import BaseModel, ConfigDict, StringConstraints, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -64,13 +66,13 @@ class AdminAttestationUnavailable(DaimonError):
     """Current platform admin authority could not be read safely."""
 
 
-async def attest_discord_admin(
+async def attest_discord_membership(
     *,
     guild_id: str,
     platform_user_id: str,
     settings: Settings,
     http_client: httpx.AsyncClient | None = None,
-) -> bool:
+) -> Membership:
     """Read current guild authority without consulting or changing a stored role."""
     from mux.drivers import isolated_ssl_context
 
@@ -84,7 +86,7 @@ async def attest_discord_admin(
     if not token:
         raise AdminAttestationUnavailable("discord token unavailable")
 
-    async def attest(client: httpx.AsyncClient) -> bool:
+    async def attest(client: httpx.AsyncClient) -> Membership:
         async def read(path: str) -> object:
             response = await client.get(
                 f"https://discord.com/api/v10/guilds/{guild_id}{path}",
@@ -113,11 +115,15 @@ async def attest_discord_admin(
         permissions = by_id[guild_id]
         for role in member.roles:
             permissions |= by_id[role]
-        return is_guild_admin_by_permissions(
-            user_id=int(platform_user_id),
-            owner_id=int(guild.owner_id),
-            administrator=bool(permissions & (1 << 3)),
-            manage_guild=bool(permissions & (1 << 5)),
+        return Membership(
+            is_member=True,
+            role_ids=tuple(r for r in member.roles if r != guild_id),
+            is_admin=is_guild_admin_by_permissions(
+                user_id=int(platform_user_id),
+                owner_id=int(guild.owner_id),
+                administrator=bool(permissions & (1 << 3)),
+                manage_guild=bool(permissions & (1 << 5)),
+            ),
         )
 
     try:
@@ -132,6 +138,23 @@ async def attest_discord_admin(
         raise AdminAttestationUnavailable("discord lookup failed") from exc
 
 
+async def attest_discord_admin(
+    *,
+    guild_id: str,
+    platform_user_id: str,
+    settings: Settings,
+    http_client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Platform-only authority, for gates that must never admit delegated admins."""
+    facts = await attest_discord_membership(
+        guild_id=guild_id,
+        platform_user_id=platform_user_id,
+        settings=settings,
+        http_client=http_client,
+    )
+    return facts.is_admin
+
+
 async def verify_backend_actor(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -139,6 +162,7 @@ async def verify_backend_actor(
     platform_user_id: str,
     settings: Settings,
     http_client: httpx.AsyncClient | None = None,
+    action: DelegatedAction | None = None,
 ) -> BackendActor:
     """Read fresh guild authority for an existing principal; never create or promote it."""
     from daimon.core.channel_backend import AgentBackendRefused, BackendActor
@@ -171,7 +195,7 @@ async def verify_backend_actor(
     guild_id, account_id = await identity()
 
     try:
-        admin = await attest_discord_admin(
+        facts = await attest_discord_membership(
             guild_id=guild_id,
             platform_user_id=platform_user_id,
             settings=settings,
@@ -179,6 +203,16 @@ async def verify_backend_actor(
         )
     except AdminAttestationUnavailable:
         raise AgentBackendRefused("admin_attestation_unavailable") from None
+    async with sessionmaker() as session:
+        admin = await is_daimon_admin(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            platform_user_id=platform_user_id,
+            is_platform_admin=facts.is_admin,
+            role_ids=(*facts.role_ids, guild_id),
+        )
+    admin = admin_for_action(platform_admin=facts.is_admin, daimon_admin=admin, action=action)
     if not admin:
         raise AgentBackendRefused("admin_required")
     if await identity() != (guild_id, account_id):
@@ -299,17 +333,36 @@ class AdminCaller(BaseModel):
     model_config = ConfigDict(frozen=True)
     platform_user_id: str | None
     is_server_admin: bool = False
+    role_ids: tuple[str, ...] = ()
 
 
 async def load_live_subject(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: AdminCaller
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    caller: AdminCaller,
+    action: DelegatedAction | None = None,
 ) -> Subject:
-    """Build a subject from the caller's live platform admin status."""
-    return build_subject(is_admin=caller.is_server_admin, platform_user_id=caller.platform_user_id)
+    """Build a subject from current platform evidence and uncached tenant grants."""
+    admin = await is_daimon_admin(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        platform_user_id=caller.platform_user_id,
+        is_platform_admin=caller.is_server_admin,
+        role_ids=caller.role_ids,
+    )
+    return build_subject(
+        is_admin=admin_for_action(
+            platform_admin=caller.is_server_admin and admin, daimon_admin=admin, action=action
+        ),
+        platform_user_id=caller.platform_user_id,
+    )
 
 
 class StoredAdmin(BaseModel):
-    """The account's stored server admin role."""
+    """A platform-admin account snapshot; delegation never enters stored authority."""
 
     model_config = ConfigDict(frozen=True)
     is_admin: bool
@@ -327,10 +380,20 @@ async def read_stored_admin(
     account_id: uuid.UUID,
     platform_user_id: str | None,
 ) -> StoredAdmin:
-    """Read only the account's stored native admin role."""
+    """Read a bound platform-admin snapshot. Delegates never gain transcript exceptions."""
     account = await get_account(session, account_id)
+    identity = await get_account_with_tenant(session, account_id=account_id)
+    bound = (
+        identity is not None
+        and identity.tenant_id == tenant_id
+        and (platform is None or identity.platform == platform)
+        and identity.platform_user_id == platform_user_id
+    )
     return StoredAdmin(
-        is_admin=account is not None and account.role is Role.ADMIN,
+        is_admin=bound
+        and account is not None
+        and account.tenant_id == tenant_id
+        and account.role is Role.ADMIN,
         platform_user_id=platform_user_id,
     )
 
@@ -351,3 +414,33 @@ async def load_stored_subject(
         platform_user_id=platform_user_id,
     )
     return stored.subject()
+
+
+async def is_daimon_admin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str | None,
+    is_platform_admin: bool,
+    role_ids: Sequence[str] = (),
+) -> bool:
+    """Live platform authority or an uncached grant scoped to this registered tenant."""
+    from daimon.core.stores.daimon_admins import has_grant
+    from daimon.core.stores.tenants import get_tenant
+
+    tenant = await get_tenant(session, tenant_id)
+    if (
+        tenant is None
+        or tenant.platform != platform
+        or tenant.archived_at is not None
+        or not platform_user_id
+    ):
+        return False
+    return is_platform_admin is True or await has_grant(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        user_id=platform_user_id,
+        role_ids=role_ids,
+    )
