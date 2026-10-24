@@ -13,6 +13,7 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.add_column("direct_message_policies", sa.Column("dm_agent_name", sa.Text(), nullable=True))
 
 
