@@ -102,6 +102,10 @@ Slot arithmetic lives in `packages/core/daimon/core/cron.py`, whose
 `next_slot_at_or_after` converts into the routine's zone, steps one second
 past the reference instant so it cannot land on it, and returns UTC.
 
+Concurrent runs for the same owner reuse one platform principal and account,
+including when the owner's enrollment is still committing. An enrollment
+conflict leaves no extra account behind; other database errors still fail the run.
+
 Routines whose saved channel or delivery destination selects the self-hosted
 backend stop before provider resolution, with
 `last_error=selfhosted_routines_unsupported`. Headless routines currently require
