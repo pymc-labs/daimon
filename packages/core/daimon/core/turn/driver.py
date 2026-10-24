@@ -1655,25 +1655,54 @@ async def _consume_with_reconnect(
         # stream is idle (no events arriving). `cancel.is_set()` checked
         # pre-loop for the already-set case.
         stream_iter = stream.__aiter__()
+        # A provider whose stream can end a turn without reporting it (no native
+        # event replay, keep-alive frames hide the silence: J4 acb5cd66) opts into
+        # asking for the session's status whenever the stream yields nothing for
+        # this long. Managed Agents does not, so its turns are unchanged.
+        idle_check_s = cast("float | None", getattr(io, "idle_check_s", None))
         while True:
             if cancel.is_set():
                 raise _InterruptInConsume()
-            next_coro = cast(Any, stream_iter).__anext__()
-            next_task = asyncio.create_task(
-                next_coro,
-                name="turn.stream_next",
-            )
+            # A new fetch only once the last one's result was taken: a fetch that
+            # finished during a status check still holds its event.
+            if next_task is None:
+                next_coro = cast(Any, stream_iter).__anext__()
+                next_task = asyncio.create_task(
+                    next_coro,
+                    name="turn.stream_next",
+                )
             done, _pending = await asyncio.wait(
                 {next_task, cancel_task},
+                timeout=idle_check_s,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            if not done:
+                # Only keep-alives for `idle_check_s`: the same status-checked path
+                # as a clean close. Still running keeps waiting on the same fetch.
+                try:
+                    status = await io.status()
+                except (*_CONNECTION_LOST, _anthropic.APIError, ProviderError) as error:
+                    # A lost connection or a 429/5xx on the check is no verdict, so it
+                    # never ends the turn: keep waiting, and the turn's deadline still
+                    # bounds it. A scope violation still propagates.
+                    log.warning(
+                        "turn.idle_check_failed",
+                        session_id=session_id,
+                        error_type=type(error).__name__,
+                    )
+                    continue
+                if status in {"running", "rescheduling"}:
+                    continue
+                log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
+                raise _EventlessCycle(reason="read_timeout")
             if cancel_task in done:
                 next_task.cancel()
                 with _suppress_task_exc():
                     await next_task
                 raise _InterruptInConsume()
+            fetched, next_task = next_task, None
             try:
-                item = next_task.result()
+                item = fetched.result()
                 event = item.native
             except StopAsyncIteration:
                 # Clean close, no terminal event: not itself completion.

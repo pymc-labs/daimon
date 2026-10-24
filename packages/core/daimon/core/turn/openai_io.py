@@ -186,6 +186,12 @@ class _OpenAIStream(AsyncIterator[TurnEvent]):
 
 
 class OpenAITurnIO:
+    #: OpenAI's event stream replays nothing: a turn that ended before it connected,
+    #: or between a reconcile and it, is never reported there, and keep-alive frames
+    #: hide the silence (probe 2026-10-23). The driver asks for the session status
+    #: whenever the stream yields nothing for this long (J4 acb5cd66).
+    idle_check_s: float = 15.0
+
     def __init__(
         self,
         backend: ManagedAgents,
