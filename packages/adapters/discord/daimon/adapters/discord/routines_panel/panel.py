@@ -1,8 +1,4 @@
-"""RoutinesPanelView (LayoutView) + picker + pause/resume button.
-
-The panel is read-mostly: the only write is a Pause/Resume toggle gated on
-creator-or-manage_guild at click time (TOCTOU-safe refetch inside the
-session.begin() block).
+"""RoutinesPanelView with routine creation, deletion and run controls.
 
 V2 Components format: the panel is a Container with ActionRows for controls
 appended inside the card, no embed.
@@ -16,8 +12,9 @@ from datetime import UTC, datetime
 import anthropic
 import sentry_sdk
 import structlog
-from daimon.adapters.discord import layout
+from daimon.adapters.discord import checks, layout
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
+from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState, state_label
 from daimon.adapters.discord.routines_panel.write import (
@@ -207,10 +204,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
             async with runtime.sessionmaker() as session, session.begin():
 
                 async def allowed(row: RoutineRow) -> bool:
-                    member = interaction.user
-                    is_admin = (
-                        isinstance(member, discord.Member) and member.guild_permissions.manage_guild
-                    )
+                    is_admin = checks.is_guild_admin(interaction)
                     is_creator = (
                         row.created_by_user_id is not None
                         and row.created_by_user_id == str(interaction.user.id)
@@ -350,6 +344,7 @@ class RoutinesPanelView(discord.ui.LayoutView):
         container.add_item(layout.hairline())
         container.add_item(picker_row)
         container.add_item(discord.ui.ActionRow(_DestinationPicker(state)))
+        container.add_item(discord.ui.ActionRow(NewButton(), DeleteButton(state)))
         container.add_item(buttons_row)
         self.add_item(container)
 
