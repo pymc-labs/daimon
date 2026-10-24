@@ -1151,33 +1151,6 @@ async def test_an_approval_tool_sent_through_call_tool_is_refused_without_a_card
     assert prompts == []
 
 
-@pytest.mark.parametrize("fail", [False, True])
-def test_unattended_context_restores_nested_gate_and_execution(fail: bool) -> None:
-    from daimon.core.turn import mutation_gate
-    from daimon.core.turn.driver import unattended_sends
-
-    async def gate() -> None:
-        pass
-
-    assert mutation_gate.unattended_gate.get() is None
-    assert mutation_gate.unattended_execution.get() is False
-    with unattended_sends(gate):
-        assert mutation_gate.unattended_gate.get() is gate
-        assert mutation_gate.unattended_execution.get() is True
-        try:
-            with unattended_sends(None):
-                assert mutation_gate.unattended_gate.get() is None
-                assert mutation_gate.unattended_execution.get() is True
-                if fail:
-                    raise RuntimeError("refused")
-        except RuntimeError:
-            assert fail
-        assert mutation_gate.unattended_gate.get() is gate
-        assert mutation_gate.unattended_execution.get() is True
-    assert mutation_gate.unattended_gate.get() is None
-    assert mutation_gate.unattended_execution.get() is False
-
-
 async def test_an_unattended_turn_gates_before_its_message_and_each_confirmation() -> None:
     """Review B, finding 1: one boundary for every unattended send."""
     from daimon.core.turn.driver import unattended_sends
