@@ -2590,12 +2590,19 @@ tokens are dedicated checkout HTTP credentials and cannot exercise personal
 user authority or MCP money tools.
 
 Account roles have exactly three write sites: turn admission and the
-Discord/Slack GitHub connect commands, all from live platform facts. GitHub
+Discord/Slack GitHub connect commands, all from live platform facts. Operator
+panels refuse minting until an admin turn has recorded that platform snapshot,
+with an actionable message. This prevents minting a token already barred by
+the verifier’s native-role check. GitHub
 link helpers, removal notices and operator-token minting never write roles.
 Turn-origin roles also record platform authority; `effective_role` is
 rendered separately for the model. The hub retains its platform-only
 transcript exception. Its live delegated agent-pin exemption grants no
 transcript access. Revocation removes only the grant, with an atomic audit.
+
+Granted admins can change what agents do, including agents platform admins use.
+Their changes to instructions, skills, environments and tool rules also affect
+platform admins’ routines and attended chats that use those agents.
 
 Discord's Permissions panel and Slack's Who answers where panel link to
 Admins. The screen lists grants and gives platform admins grant/revoke

@@ -104,8 +104,8 @@ GONE = "That agent is no longer available. It may have been deleted."
 NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
 #: The panel is outside channels, so minting requires a server admin.
 NEEDS_ADMIN = (
-    "You can't create this token.\n\n"
-    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only platform admins can create coding-tool keys, including channel-bound keys.\n\n"
+    'Ask a platform admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
 OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
@@ -769,7 +769,7 @@ class SetupPanel:
                     caller=AdminCaller(
                         platform_user_id=actor.user_id, is_server_admin=actor.is_platform_admin
                     ),
-                    action=DelegatedAction.AGENT_SETTINGS,
+                    action=None,
                 )
         except AccessPolicyUnreadable:
             return dialog_message(POLICY_UNREADABLE_REFUSAL)

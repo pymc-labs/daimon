@@ -8,6 +8,10 @@ owners and members with Administrator or Manage Server, Slack workspace
 admins and owners, and Teams owners of the configured admin team. Their
 platform authority cannot be revoked inside Daimon.
 
+Granted admins can change what agents do, including agents platform admins use.
+Their changes to instructions, skills, environments and tool rules also affect
+platform admins’ routines and attended chats that use those agents.
+
 Platform admins can grant Daimon admin to a user ID, or on Discord to a role
 ID. A role grant applies while the member holds that role. Delegated admins
 can administer only the actions in `DelegatedAction` in
@@ -53,7 +57,10 @@ follows the new author. Pause, resume and delete do not transfer authority.
 
 Account roles are written only by turn admission and the platform-checked
 `/github connect` commands. Setup notices, GitHub link helpers and operator-token
-panels never promote accounts. Slack hides GitHub/operator-token controls from
+panels never promote accounts. Operator-token minting requires an existing
+platform-admin snapshot as well as the live check. If the snapshot is missing,
+Daimon refuses before creating a token and asks the platform admin to send
+a message in the server/workspace and retry. Slack hides GitHub/operator-token controls from
 non-platform admins and checks platform authority inside removal notices.
 
 Legacy tokens with no registered kind and short-lived billing-panel tokens

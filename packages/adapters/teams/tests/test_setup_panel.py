@@ -281,6 +281,18 @@ async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(
 async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
     service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
+    from daimon.core.stores.daimon_admins import change_grant
+
+    async with service_session_factory.begin() as session:
+        await change_grant(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            subject_kind="user",
+            subject_id=OTHER_AAD_OBJECT_ID,
+            actor_user_id=AAD_OBJECT_ID,
+            is_platform_admin=True,
+        )
     fetch = {"dialog_id": "agent_coding_tools", "agent": "analyst"}
     admins = (AAD_OBJECT_ID,)
     with structlog.testing.capture_logs() as logs:
@@ -310,6 +322,8 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
     assert row is not None and row.revoked_at is not None
     async with service_session_factory() as session:
         events = await list_events(session, tenant_id=TENANT)
+    assert events[0].tool_name == "daimon_admins" and events[0].outcome == "allowed"
+    events = events[1:]
     assert [(e.tool_name, e.outcome, e.reason) for e in events] == [
         ("panel:coding_token_mint", "denied", "authz:admin_required"),
         ("panel:coding_token_mint", "allowed", "completed"),
@@ -326,6 +340,15 @@ PINNED, ELSEWHERE = "19:pinned@thread.tacv2", "19:elsewhere@thread.tacv2"
 async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_cannot(
     service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
+    from daimon.core.stores.accounts import set_role
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.identity import get_or_create_platform_principal
+
+    async with service_session_factory.begin() as session:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=TENANT, platform="teams", external_id=AAD_OBJECT_ID
+        )
+        await set_role(session, principal.account_id, Role.ADMIN)
     dialog_id = setup_card.OPERATOR_DIALOG
     mint = {"action": dialog_id, "op": "mint", "scopes": "tenant:read,promo:redeem", "label": "ci"}
     async with _running(service_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):

@@ -85,7 +85,8 @@ class AdminsView(PanelViewBase):
         container.add_item(header("Daimon admins"))
         lines = [
             "Platform admins always have access. Only platform admins may grant or revoke. "
-            "Billing and caps remain platform-only."
+            "Billing and caps remain platform-only. "
+            "Granted admins can change what agents do, including agents platform admins use."
         ]
         lines.extend(
             f"{g.subject_kind}: {g.subject_id} · by {g.granted_by or 'erased'} "

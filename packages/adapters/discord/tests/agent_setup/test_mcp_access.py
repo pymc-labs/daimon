@@ -37,6 +37,7 @@ from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing import FIXED_TS, ma_agent
@@ -718,6 +719,7 @@ async def test_revoke_stops_the_view_so_the_timer_cannot_fire(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform_admin", [True, False])
 @pytest.mark.parametrize(
     ("in_thread", "channel_id", "bound"),
     [(False, 555, "555"), (True, 555, "555"), (False, 777, None)],
@@ -732,6 +734,7 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
     in_thread: bool,
     channel_id: int,
     bound: str | None,
+    platform_admin: bool,
 ) -> None:
     await _setup_tenant_and_account(
         db_session, tenant_id=tenant_id, account_id=account_id, external_id="guild-bound"
@@ -755,7 +758,17 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
         turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
     )
     entry = _entry("expert-bot")
-    interaction = _make_interaction()
+    interaction = _make_interaction(is_admin=platform_admin)
+    if not platform_admin:
+        await change_grant(
+            db_session,
+            tenant_id=tenant_id,
+            platform="discord",
+            subject_kind="user",
+            subject_id="42",
+            actor_user_id="owner",
+            is_platform_admin=True,
+        )
     if in_thread:
         interaction.channel = MagicMock(spec=discord.Thread, parent_id=channel_id)
         interaction.channel_id = 999
@@ -769,6 +782,11 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
         allowed_user_id=42,
     )
 
+    if not platform_admin:
+        refusal = interaction.response.send_message.call_args.args[0]
+        assert "Only platform admins" in refusal
+        assert await count_tokens_for_account(db_session, account_id=account_id) == 0
+        return
     content: str = interaction.response.send_message.call_args.kwargs["content"]
     jwt_token = content[content.index("Bearer ") + len("Bearer ") :].split()[0].strip("`\"'")
     claims = pyjwt.decode(jwt_token, _JWT_SECRET_BYTES, algorithms=["HS256"])

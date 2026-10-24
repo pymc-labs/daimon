@@ -441,3 +441,37 @@ def test_legacy_or_billing_panel_identity_is_never_a_personal_credential() -> No
         assert not denied.is_personal_user
         with pytest.raises(ToolError):
             _require_platform_admin(denied)
+
+
+async def test_panel_operator_mint_refuses_user_snapshot_then_verifies_after_admin_turn(
+    db_session, db_session_factory
+) -> None:
+    tenant = await make_tenant(db_session)
+    principal = await make_platform_principal(
+        db_session, tenant=tenant, platform="discord", external_id="111111111111111111"
+    )
+    arguments = dict(
+        tenant_id=tenant.id,
+        platform="discord",
+        platform_user_id=principal.external_id,
+        is_platform_admin=True,
+        scopes=["tenant:read"],
+        label="panel",
+        secret=SECRET,
+        now=datetime.now(UTC),
+    )
+    with pytest.raises(OperatorTokenError, match="Send Daimon a message"):
+        await mint_panel_operator_token(db_session, **arguments)
+    from daimon.core.stores.mcp_tokens import list_mcp_tokens
+
+    assert await list_mcp_tokens(db_session, tenant_id=tenant.id, now=datetime.now(UTC)) == []
+    account = await get_account(db_session, principal.account_id)
+    assert account is not None and account.role is Role.USER
+    # Emulate the native role snapshot recorded by admission, never by the panel.
+    await set_role(db_session, principal.account_id, Role.ADMIN)
+    minted = await mint_panel_operator_token(db_session, **arguments)
+    await db_session.commit()
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=db_session_factory)
+    assert await verifier.verify_token(minted.token) is not None
+    account = await get_account(db_session, principal.account_id)
+    assert account is not None and account.role is Role.ADMIN

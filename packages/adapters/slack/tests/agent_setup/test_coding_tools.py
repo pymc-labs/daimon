@@ -22,6 +22,7 @@ import pytest
 import structlog.testing
 import yarl
 from aioresponses import aioresponses as AioResponsesMock
+from daimon.adapters.slack.admin import WorkspaceWebClient, resolve_is_admin
 from daimon.adapters.slack.agent_setup.coding_tools import (
     NEEDS_ADMIN_MESSAGE,
     NOT_CONFIGURED_MESSAGE,
@@ -33,12 +34,14 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
 from daimon.adapters.slack.agent_setup.panel_views import ACTION_REVOKE_TOKEN
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
@@ -66,6 +69,9 @@ def _users_info_payload(*, is_admin: bool) -> dict[str, Any]:
         "ok": True,
         "user": {
             "id": _USER_ID,
+            "team_id": _TEAM_ID,
+            "deleted": False,
+            "is_bot": False,
             "name": "admin" if is_admin else "member",
             "is_admin": is_admin,
             "is_owner": False,
@@ -194,21 +200,43 @@ async def test_coding_tools_click_posts_the_one_liner_and_never_logs_the_token(
     )
 
 
+@pytest.mark.parametrize("delegated", [False, True])
 async def test_coding_tools_click_by_a_member_refuses_and_mints_nothing(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    delegated: bool,
 ) -> None:
-    """The button is visible to everyone; the mint is not. Hiding is not gating."""
+    """The button is visible to everyone; live platform authority decides the mint."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM_ID)
+    if delegated:
+        await change_grant(
+            db_session,
+            tenant_id=tenant.id,
+            platform="slack",
+            subject_kind="user",
+            subject_id=_USER_ID,
+            actor_user_id="owner",
+            is_platform_admin=True,
+        )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(sealed_channel_ids=(_CHANNEL_ID,)),
+    )
     await db_session.commit()
     runtime = _build_runtime(db_session_factory, tenant_id=tenant.id)
 
     with AioResponsesMock() as mock:
         mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=False), repeat=True)  # pyright: ignore[reportUnknownMemberType]
         mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+        client = WorkspaceWebClient(token="xoxb-test").bind_workspace(runtime, _TEAM_ID)
+        assert (
+            await resolve_is_admin(client, user_id=_USER_ID, action=DelegatedAction.TOOL_RULES)
+            is delegated
+        )
         await handle_coding_tools_click(
             runtime,
-            AsyncWebClient(token="xoxb-test"),
+            client,
             team_id=_TEAM_ID,
             tenant_id=tenant.id,
             agent_name=_AGENT_NAME,
@@ -218,12 +246,15 @@ async def test_coding_tools_click_by_a_member_refuses_and_mints_nothing(
         )
         posted = _ephemerals(mock)
 
+    assert await list_mcp_tokens(db_session, now=datetime.now(UTC), tenant_id=tenant.id) == []
+    assert "Only platform admins" in posted[0]["text"]
     assert len(posted) == 1, "a refused click is explained, never silent"
     assert posted[0]["text"] == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
     assert "Bearer" not in json.dumps(posted[0]), "a refused click mints nothing"
-    assert await _audited(db_session_factory, tenant.id) == [
+    expected = [("daimon_admins", "allowed")] if delegated else []
+    assert await _audited(db_session_factory, tenant.id) == expected + [
         ("panel:coding_token_mint", "denied")
-    ], "the refusal is audited"
+    ], "the grant and the mint refusal are audited"
 
 
 async def test_coding_tools_click_when_unconfigured_posts_a_note(

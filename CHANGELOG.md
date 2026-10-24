@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Clarify that granted admins can change what agents do, including agents platform
+  admins use. Refuse operator-token minting until the platform role is recorded,
+  with instructions to refresh it, and require platform admins to mint coding-tool keys.
+
 - Transfer routine execution authority to the editor of its behavior, confine
   role snapshots to platform admission/connect commands, and keep credential,
   MCP-connection and DM-toggle administration platform-only. Human authority

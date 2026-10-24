@@ -51,6 +51,7 @@ def admins_grant(
     token: Annotated[str, typer.Option(envvar="DAIMON_ADMINS_TOKEN", hide_input=True)],
     role: Annotated[bool, typer.Option(help="Grant a Discord role instead of a user.")] = False,
 ) -> None:
+    """Granted admins can change what agents do, including agents platform admins use."""
     _call(
         url,
         token,

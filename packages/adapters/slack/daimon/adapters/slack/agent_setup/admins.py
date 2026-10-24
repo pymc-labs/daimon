@@ -38,7 +38,9 @@ async def admins_view(
                 "text": (
                     "Platform admins always have access. "
                     "Only platform admins may grant or revoke. "
-                    "Billing and caps stay platform-only."
+                    "Billing and caps stay platform-only. "
+                    "Granted admins can change what agents do, "
+                    "including agents platform admins use."
                 ),
             },
         },

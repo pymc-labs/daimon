@@ -42,7 +42,7 @@ Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `grant_admin` | admin only | Grant Daimon admin to a user or Discord role (platform admins only). |
+| `grant_admin` | admin only | Granted admins can change what agents do, including agents platform admins use. |
 | `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
 | `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
 

@@ -55,8 +55,8 @@ log = structlog.get_logger()
 
 #: What a member sees instead of a token. Minting needs Manage Server.
 CODING_TOOLS_REFUSAL = (
-    "You can't create this token.\n\n"
-    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only platform admins can create coding-tool keys, including channel-bound keys.\n\n"
+    'Ask a platform admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 

@@ -4,7 +4,8 @@ The panel offers only the tenant scopes; `promo:create` acts for the whole
 deployment, so only `daimon mcp mint-operator-token` mints it, and a token
 carrying it is neither listed nor revoked here. The adapter
 checks live platform authority before calling in. Minting never changes
-account roles; the token verifier independently enforces the platform snapshot.
+account roles and requires the native snapshot the verifier enforces; a
+missing snapshot is refused before a token exists.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from daimon.core.operator_tokens import (
     OperatorTokenError,
     parse_operator_scopes,
 )
-from daimon.core.stores.domain import McpTokenRow
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.domain import McpTokenRow, Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens, revoke_mcp_token
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,6 +82,13 @@ async def mint_panel_operator_token(
     principal = await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
+    account = await get_account(session, principal.account_id)
+    if account is None or account.role is not Role.ADMIN:
+        raise OperatorTokenError(
+            "Your platform admin role has not been recorded yet. "
+            "Send Daimon a message in this server or workspace, then try minting again. "
+            "No operator token was created"
+        )
     token = await mint_operator_mcp_token(
         session,
         account_id=principal.account_id,

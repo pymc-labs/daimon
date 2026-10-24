@@ -34,7 +34,6 @@ from daimon.adapters.slack.agent_setup.read import (
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import AgentRef, Decision, build_agent_ref
 from daimon.core.ma_identity import derive_agent_uuid
@@ -78,8 +77,8 @@ TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
 
 #: Minting requires a workspace admin.
 NEEDS_ADMIN_MESSAGE: Final[str] = (
-    "You can't create this token.\n\n"
-    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only platform admins can create coding-tool keys, including channel-bound keys.\n\n"
+    'Ask a platform admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 
@@ -173,7 +172,7 @@ async def handle_coding_tools_click(
         )
         return
 
-    is_admin = await resolve_is_admin(client, user_id=user_id, action=DelegatedAction.TOOL_RULES)
+    is_admin = await resolve_is_admin(client, user_id=user_id, action=None)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -377,7 +376,7 @@ async def _authorize_mint(
             tenant_id=tenant_id,
             platform="slack",
             caller=caller,
-            action=DelegatedAction.TOOL_RULES,
+            action=None,
         )
     agent = AgentRef.of(target.name)
     if channel_id is not None and any_agent_rules(policy):

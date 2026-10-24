@@ -72,8 +72,9 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         subject_id: str,
         subject_kind: SubjectKind = "user",
     ) -> str:
-        """Grant Daimon admin to a user or Discord role (platform admins only).
+        """Granted admins can change what agents do, including agents platform admins use.
 
+        Grant Daimon admin to a user or Discord role (platform admins only).
         Only live platform admins using a personal CLI credential may grant.
         Chat, routines and all agent-run credentials are refused. Delegates cannot delegate.
         This grants configuration access; billing and spend caps remain platform-only.
