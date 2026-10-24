@@ -15,6 +15,7 @@ from functools import partial
 from typing import Any, Final, Literal, cast
 
 import anthropic
+import anyio
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
@@ -724,6 +725,8 @@ async def _create_agent_impl(
     backend: tuple[Provider, str] | None = None,
 ) -> AgentInfo:
     """Create `spec`; `backend` (from `_create_model`) starts it on another provider."""
+    from daimon.core.turn.notices import provider_name
+
     if spec.skills:
         raise ToolError(
             "create_agent: skills must be empty. To add skills, either sync a "
@@ -781,27 +784,40 @@ async def _create_agent_impl(
             ) from exc
         if outcome.anthropic_id is None:
             raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
-        if owner and outcome.action == ReconcileAction.CREATED:
-            # The person who created it owns it: they may edit it without an admin.
-            await record_agent_creator(
-                runtime.session_factory,
-                tenant_id=auth.tenant_id,
-                agent_id=derive_agent_uuid(
-                    tenant_id=auth.tenant_id, ma_agent_id=outcome.anthropic_id
-                ),
-                account_id=auth.account_id,
-            )
-        if backend is not None and outcome.action == ReconcileAction.CREATED:
-            created_id = outcome.anthropic_id
-            try:
+        created = outcome.action == ReconcileAction.CREATED
+        # From here on an agent on another provider exists only as the Claude record its
+        # definition is saved with: anything that stops it starting there (a refusal,
+        # an error, a cancellation) removes it, so it never runs or bills on Claude.
+        try:
+            if owner and created:
+                # The person who created it owns it: they may edit it without an admin.
+                await record_agent_creator(
+                    runtime.session_factory,
+                    tenant_id=auth.tenant_id,
+                    agent_id=derive_agent_uuid(
+                        tenant_id=auth.tenant_id, ma_agent_id=outcome.anthropic_id
+                    ),
+                    account_id=auth.account_id,
+                )
+            if backend is not None and created:
                 started = await _start_on_backend(
                     runtime, auth, origin, spec.name, backend[0], backend[1]
                 )
-            finally:
-                if started is None:
-                    # Never left behind on a provider it couldn't start on (or on
-                    # the Claude source model it was only saved with).
-                    await _discard_created(runtime, auth, created_id)
+        except BaseException as exc:
+            if backend is None or not created:
+                raise
+            # Shielded: a cancellation (anyio's re-cancels every await) must not cancel
+            # the removal too; it completes, then the cancellation goes on.
+            removed = False
+            with anyio.CancelScope(shield=True):
+                removed = await _discard_created(runtime, auth, outcome.anthropic_id)
+            if not removed and isinstance(exc, Exception):
+                raise ToolError(
+                    f"{spec.name} couldn't start on {provider_name(backend[0])}, and removing "
+                    "it failed too, so it may still exist on Claude. Ask an admin to archive "
+                    f"{spec.name}."
+                ) from exc
+            raise
     queue_agent_face(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -844,8 +860,9 @@ async def _create_agent_impl(
     return await _with_answering_note(runtime, auth, info)
 
 
-async def _discard_created(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str) -> None:
-    """Archive an agent create_agent made in this call and couldn't finish."""
+async def _discard_created(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str) -> bool:
+    """Archive an agent create_agent made in this call and couldn't finish; False when
+    the archive itself failed (logged at error: the agent may still be live)."""
     try:
         await archive_agent(
             runtime.client,
@@ -859,6 +876,8 @@ async def _discard_created(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id:
             error_type=type(exc).__name__,
             exc_info=True,
         )
+        return False
+    return True
 
 
 def _reject_reserved_servers(
@@ -2119,8 +2138,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Required: ``name`` and ``model``. Use ``"claude-sonnet-5-5"`` when the user
         asks for Sonnet and ``"claude-opus-5-5"`` when they ask for Opus — always
-        the current generation. Only pass an older id (``claude-sonnet-5``,
-        ``claude-opus-5``, …) when the user names that version themselves.
+        the current generation. For the cheapest Claude, use ``"claude-haiku-5-5"``:
+        Haiku is the cheapest current generation, never ``claude-haiku-4-5``. Only
+        pass an older id (``claude-sonnet-5``, ``claude-opus-5``, …) when the user
+        names that version themselves.
         Any other provider's model works the same way, by name: ``"flash"``,
         ``"argon"``, ``"luna"``, ``"astra"`` (or its id). The agent is created on that
         provider directly: never create it on Claude first, and nothing else is needed
@@ -2168,8 +2189,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Change an agent's system prompt or switch its model; add existing skills such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
 
-        Prefer current-generation ``claude-sonnet-5-5`` for Sonnet and ``claude-opus-5-5``
-        for Opus unless an older version is explicitly requested. List fields
+        Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
+        ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest
+        Claude unless an older version is explicitly requested. List fields
         (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
         lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
         Daimon requires ``fork_agent`` first. Needs the agent's owner (whoever created it

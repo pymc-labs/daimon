@@ -10,10 +10,12 @@ the Claude record its definition is saved with. Any refusal here is a product bu
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from dataclasses import replace
 
+import anyio
 import httpx
 import pytest
 from daimon.adapters.mcp.tools.agents import (
@@ -176,24 +178,12 @@ async def test_j4_a_flash_agent_and_a_luna_agent_made_from_chat_run_as_a_fleet(
     assert collected["status"] == "ready" and len(collected["results"]) == 2
 
 
-async def test_a_create_whose_provider_start_fails_leaves_no_live_agent(j10_root, monkeypatch):
-    """The record exists before its backend is set: a refusal there archives it, so no
-    agent is left on the Claude record it was only saved with."""
-    from daimon.core import channel_backend
+@contextlib.asynccontextmanager
+async def member_chat(j10_root):
+    """A member's chat turn in the fixture's thread: (runtime, auth, origin)."""
     from daimon.core.turn_origin import turn_origin
 
     deps, prepared, _, _, seed, *_ = j10_root
-    transport = j10_root[7]
-    created = stateful_agents(
-        transport,
-        prepared.admission.agent.model_dump(mode="json"),
-        prepared.admission.environment,
-    )
-
-    async def refused(self, *args, **kwargs):
-        raise channel_backend.AgentBackendRefused("stale_revision")
-
-    monkeypatch.setattr(channel_backend.AgentBackendService, "set_backend", refused)
     async with turn_origin(
         deps.sessionmaker,
         tenant_id=seed.tenant_id,
@@ -208,9 +198,115 @@ async def test_a_create_whose_provider_start_fails_leaves_no_live_agent(j10_root
         shared_channel=False,
     ) as origin:
         runtime_, auth = member_of(deps, origin, prepared)
-        with pytest.raises(ToolError, match="Nothing was created"):
-            await create_from_chat(runtime_, auth, origin, "flash-agent", "flash")
-    assert created and all(agent["archived_at"] is not None for agent in created.values())
+        yield runtime_, auth, origin
+
+
+@pytest.mark.parametrize("failure", ("refused", "owner_error", "cancelled", "archive_fails"))
+async def test_a_create_that_stops_after_its_record_exists_leaves_no_live_agent(
+    j10_root, monkeypatch, failure
+):
+    """The record exists before its backend is set. Anything that stops it starting on
+    its provider (a refusal, an error recording its owner, a cancellation) archives it,
+    so it never runs or bills on the Claude record it was only saved with; an archive
+    that fails too is said plainly, never "Nothing was created"."""
+    from daimon.adapters.mcp.tools import agents as agents_tools
+    from daimon.core import channel_backend
+
+    deps, prepared, *_ = j10_root
+    transport = j10_root[7]
+    created = stateful_agents(
+        transport,
+        prepared.admission.agent.model_dump(mode="json"),
+        prepared.admission.environment,
+    )
+
+    async def refused(self, *args, **kwargs):
+        raise channel_backend.AgentBackendRefused("stale_revision")
+
+    scope = anyio.CancelScope()
+
+    async def cancelled(self, *args, **kwargs):
+        # Cancelled mid-write, the way the MCP server's anyio scope cancels a tool
+        # call: level-triggered, so every later unshielded await is cancelled too.
+        scope.cancel()
+        await anyio.sleep(1)
+
+    async def owner_error(*args, **kwargs):
+        raise RuntimeError("owner row write failed")
+
+    real_archive = agents_tools.archive_agent
+
+    async def archive_over_the_network(*args, **kwargs):
+        # A real archive is a network call: it yields, so a cancelled scope reaches it.
+        await anyio.sleep(0.01)
+        return await real_archive(*args, **kwargs)
+
+    monkeypatch.setattr(agents_tools, "archive_agent", archive_over_the_network)
+    if failure == "owner_error":
+        monkeypatch.setattr(agents_tools, "record_agent_creator", owner_error)
+    else:
+        monkeypatch.setattr(
+            channel_backend.AgentBackendService,
+            "set_backend",
+            cancelled if failure == "cancelled" else refused,
+        )
+    if failure == "archive_fails":
+        transport.router.routes[:0] = [
+            (
+                "POST",
+                re.compile(r"/v1/agents/([^/]+)/archive"),
+                lambda call, match: httpx.Response(500, json={"type": "error"}),
+            )
+        ]
+    async with member_chat(j10_root) as (runtime_, auth, origin):
+        if failure == "cancelled":
+            with scope:
+                await create_from_chat(runtime_, auth, origin, "flash-agent", "flash")
+            assert scope.cancelled_caught
+        elif failure == "archive_fails":
+            with pytest.raises(ToolError) as said:
+                await create_from_chat(runtime_, auth, origin, "flash-agent", "flash")
+            assert "removing it failed too" in str(said.value)
+            assert "Nothing was created" not in str(said.value)
+        else:
+            with pytest.raises((ToolError, RuntimeError)):
+                await create_from_chat(runtime_, auth, origin, "flash-agent", "flash")
+    assert created, "the record was made before the failure"
+    live = [agent for agent in created.values() if agent["archived_at"] is None]
+    # Archived, or (only when the archive itself failed) said plainly above.
+    assert bool(live) == (failure == "archive_fails")
+
+
+async def test_an_agent_key_for_an_agent_on_another_provider_is_refused_plainly(j10_root):
+    """Agent keys and the hub open Managed Agents sessions: a Flash agent made in chat
+    is refused there, never answered and billed on its Claude record."""
+    from daimon.adapters.mcp.tools.agent_chat import (
+        _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    deps, prepared, *_ = j10_root
+    transport = j10_root[7]
+    stateful_agents(
+        transport,
+        prepared.admission.agent.model_dump(mode="json"),
+        prepared.admission.environment,
+    )
+    async with member_chat(j10_root) as (runtime_, auth, origin):
+        made = await create_from_chat(runtime_, auth, origin, "flash-agent", "flash")
+    before = len(transport.requests)
+    key = replace(
+        auth,
+        chat_agent_id=None,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=made.id),
+    )
+    with pytest.raises(ToolError, match="flash-agent runs on Gemini") as refused:
+        await _start_turn_impl(runtime_, key, "hi")
+    assert "Nothing was started" in str(refused.value)
+    # Refused before any Managed Agents session is opened.
+    assert not any(
+        request.method == "POST" and request.path.startswith("/v1/sessions")
+        for request in transport.requests[before:]
+    )
 
 
 async def test_a_provider_this_deployment_has_off_is_refused_before_anything_is_made(
@@ -292,7 +388,7 @@ async def test_a_member_cannot_create_on_a_provider_this_server_turned_off(j10_r
         runtime_, auth = member_of(deps, origin, prepared)
         with pytest.raises(ToolError, match="Nothing was created"):
             await create_from_chat(runtime_, auth, origin, "flash-agent", "flash")
-    assert all(agent["archived_at"] is not None for agent in created.values())
+    assert created and all(agent["archived_at"] is not None for agent in created.values())
 
 
 def test_create_names_models_on_any_provider_and_never_says_claude_first():

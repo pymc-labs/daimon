@@ -853,8 +853,10 @@
         <blank line>
         Required: ``name`` and ``model``. Use ``"claude-sonnet-5-5"`` when the user
         asks for Sonnet and ``"claude-opus-5-5"`` when they ask for Opus — always
-        the current generation. Only pass an older id (``claude-sonnet-5``,
-        ``claude-opus-5``, …) when the user names that version themselves.
+        the current generation. For the cheapest Claude, use ``"claude-haiku-5-5"``:
+        Haiku is the cheapest current generation, never ``claude-haiku-4-5``. Only
+        pass an older id (``claude-sonnet-5``, ``claude-opus-5``, …) when the user
+        names that version themselves.
         Any other provider's model works the same way, by name: ``"flash"``,
         ``"argon"``, ``"luna"``, ``"astra"`` (or its id). The agent is created on that
         provider directly: never create it on Claude first, and nothing else is needed
@@ -6100,8 +6102,9 @@
         Change an agent's system prompt or switch its model; add existing skills such as
         build-models. Scalar ``model``, ``description`` and ``system`` fields replace.
         <blank line>
-        Prefer current-generation ``claude-sonnet-5-5`` for Sonnet and ``claude-opus-5-5``
-        for Opus unless an older version is explicitly requested. List fields
+        Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
+        ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest
+        Claude unless an older version is explicitly requested. List fields
         (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
         lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
         Daimon requires ``fork_agent`` first. Needs the agent's owner (whoever created it
