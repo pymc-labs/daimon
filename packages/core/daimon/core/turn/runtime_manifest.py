@@ -2921,20 +2921,61 @@ def _with_skills_dropped(target: AgentSpec, source_system: str | None) -> AgentS
     )
 
 
+def _with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+    """`target` as a consent recorded before a template kept the source's tools names it.
+
+    That consent (before #1483) declared `tools` a whole loss: no tools on the
+    target, `tools` among its drops, and none of today's granular web losses except
+    OpenAI's `builtin_tool:web_fetch`, which it already named. Only that difference
+    is rebuilt; the copy then runs with its tools from now on.
+    """
+    if "tools" in target.declared_drops or not target.tools:
+        return None
+    from mux.profiles.openai import PERSISTENT_WORKSPACE
+
+    granular: set[str] = {"builtin_tool:web_search"}
+    if target.model.provider != PERSISTENT_WORKSPACE.provider:
+        granular.add("builtin_tool:web_fetch")
+    drops = tuple(sorted({*target.declared_drops, "tools"} - granular))
+    return target.model_copy(
+        update={
+            "tools": (),
+            "declared_drops": drops,
+            "system": compose_source_instructions(
+                _without_losses_line(target, source_system),
+                "Unavailable capabilities: " + ", ".join(drops) + ".",
+            ),
+        }
+    )
+
+
 def _consented_before(
     target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
 ) -> bool:
-    """A consent recorded before the switch tool or the skill tools were offered.
+    """A consent recorded before a template kept the source's tools (#1483), its
+    skills (J6 b) or offered the switch tool (#1438).
 
-    Either difference alone, or both, is rebuilt; anything else still needs a
-    fresh confirmation.
+    Each of those differences alone, or together, is rebuilt; anything else still
+    needs a fresh confirmation.
     """
-    without_skills = _with_skills_dropped(target, source_system)
-    candidates = (
-        _with_switch_tool_dropped(target, _without_losses_line(target, source_system)),
-        without_skills,
-        _with_switch_tool_dropped(without_skills, source_system) if without_skills else None,
-    )
+    candidates: list[AgentSpec] = []
+    for tools in (False, True):
+        for skills in (False, True):
+            for switch in (False, True):
+                if not (tools or skills or switch):
+                    continue
+                candidate = _with_tools_dropped(target, source_system) if tools else target
+                if skills and candidate is not None:
+                    candidate = _with_skills_dropped(candidate, source_system)
+                if switch and candidate is not None:
+                    # Without skills, the skill line is gone with them; otherwise the
+                    # candidate's own instructions, less its losses line.
+                    base = (
+                        source_system if skills else _without_losses_line(candidate, source_system)
+                    )
+                    candidate = _with_switch_tool_dropped(candidate, base)
+                if candidate is not None:
+                    candidates.append(candidate)
     return any(_consented(candidate, consent) for candidate in candidates)
 
 
