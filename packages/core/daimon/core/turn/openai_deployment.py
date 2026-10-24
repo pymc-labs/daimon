@@ -48,7 +48,7 @@ from daimon.core.turn.runtime_manifest import (
 )
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
-from mux.contracts.resources import EnvironmentSpec, SessionSpec
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
 from mux.drivers.openai import SessionControls, Transport
 from mux.drivers.openai.mcp_auth import KEY as MCP_METADATA_KEY
 from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
@@ -104,6 +104,11 @@ class OpenAIDeployment(BaseModel):
     source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
     counterpart_catalog_id: Nonblank | None = None
     counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
+    # A template's capability: "mcp" represents the source's Daimon MCP toolset
+    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    template_capabilities: Literal["mcp"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     source_capabilities: SourceCapabilities | None = None
     mcp_credential_file: Path | None = Field(default=None, repr=False)
 
@@ -131,6 +136,12 @@ class OpenAIDeployment(BaseModel):
                 raise ValueError("an agent template carries no operator capability inputs")
             if self.spend_limit_usd_cents is None:
                 raise ValueError("an agent template serves every switched agent: cap its spend")
+        if self.template_capabilities is not None and (
+            not self.root_materialization
+            or self.profile != PROFILE
+            or self.mcp_credential_file is not None
+        ):
+            raise ValueError("template capabilities belong to a persistent-workspace template")
         if self.source_capabilities is not None:
             if (
                 self.profile != PROFILE
@@ -342,6 +353,25 @@ class OpenAIDeployment(BaseModel):
         return environment
 
 
+#: Registry label of a per-turn credential minted for an OpenAI agent-template turn
+#: (readability only; what the server refuses follows the row's `provider_turn` surface).
+OPENAI_TEMPLATE_MCP_LABEL = "openai-agent-turn"
+
+
+def template_mcp_matches(request: ProviderPreparationRequest, target: AgentSpec) -> bool:
+    """The target's MCP is exactly the captured Daimon MCP representation, nothing more."""
+    from daimon.core.turn.runtime_manifest import represented_source
+
+    source = request.source
+    represented = represented_source(source, target) if source is not None else None
+    return (
+        represented is not None
+        and target.mcp_servers == represented.target.mcp_servers
+        and not target.skills
+        and not any(tool.kind != "mcp_toolset" for tool in target.tools or ())
+    )
+
+
 def load_deployment(request: ProviderPreparationRequest) -> OpenAIDeployment:
     origin = request.admission.backend_revision_origin
     if fixed_plan_origin_allowed(origin):
@@ -434,6 +464,10 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     root_agent: ResourceRef | None = None
     allocating = False
     counterpart_verified = False
+    from daimon.core.turn.template_mcp import TemplateMCPCredential, template_mcp_kept
+
+    mcp_template = deployment.template_capabilities == "mcp"
+    template_mcp = TemplateMCPCredential(request, scope, label=OPENAI_TEMPLATE_MCP_LABEL)
 
     def check(config: ConfigRevision, authorized: Scope) -> None:
         if config != revision or authorized != scope:
@@ -541,6 +575,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal counterpart_verified
         counterpart_verified = False
+        template_mcp.catalogue = None
         validate_counterpart_request(
             deployment, preparation, worker_materialization=deployment.worker_materialization
         )
@@ -569,6 +604,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             operation_key="counterpart-read",
         )
         checked = await deployment.read_counterpart(preparation, source=source, resources=resources)
+        # A template that keeps the agent's MCP serves one whose switch dropped it
+        # (or could not represent it) with none: never more than the consent allows.
+        if mcp_template and template_mcp_kept(preparation.target_spec):
+            from daimon.core.turn.template_mcp import consented_catalogue
+
+            template_mcp.catalogue = consented_catalogue(source, preparation.target_spec)
         counterpart_verified = True
         return checked
 
@@ -609,13 +650,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     async def materialize_root(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal allocating, root_agent
         target = preparation.target_spec
-        if (
-            target is None
-            or any(tool.kind == "custom" for tool in target.tools or ())
-            or target.mcp_servers
-        ):
-            # Nothing executes a template's custom tools, and a template has no
-            # caller MCP credential: refuse before any native write.
+        if target is None or any(tool.kind == "custom" for tool in target.tools or ()):
+            # Nothing executes a template's custom tools: refuse before any native write.
+            raise AdmissionDenied(reason="backend_unsupported")
+        if target.mcp_servers and not template_mcp_matches(preparation, target):
+            # Only the source's own Daimon MCP, exactly as captured, with the per-turn
+            # caller credential; any other server would have no credential.
             raise AdmissionDenied(reason="backend_unsupported")
         resources = NeutralResourceHost(
             driver(runtime, revision, scope),
@@ -672,7 +712,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         price=provider_prices(deployment.profile).get((revision.backend, revision.model)),
         session_plan=plan,
         authorization=authorize,
-        mcp_secrets=resolve_mcp if deployment.source_capabilities is not None else None,
+        mcp_secrets=resolve_mcp
+        if deployment.source_capabilities is not None
+        else template_mcp.resolve
+        if mcp_template
+        else None,
+        end_of_turn=template_mcp.finalize if mcp_template else None,
         controls=SessionControls(
             model=revision.model,
             multi_agent_enabled=False,

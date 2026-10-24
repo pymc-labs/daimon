@@ -638,3 +638,14 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
     assert not run_module._PENDING_FINALIZERS  # pyright: ignore[reportPrivateUsage]
     events = [entry["event"] for entry in logs]
     assert "turn.finalize_timeout" in events and "turn.finalize_failed" in events
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_gemini_root_offers_and_runs_the_hand_off_tools(template):
+    """J6: a Gemini root has the same switch and hand-off tools as a GPT one."""
+    from .test_openai_template_mcp import handoff_mcp, live_token, offered_and_run
+
+    request, quote, *_ = template
+    assert "mcp" not in quote.declared_drops
+    async with handoff_mcp(request) as app:
+        await offered_and_run(app, await live_token(request))

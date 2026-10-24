@@ -148,6 +148,45 @@ def test_an_openai_agent_turn_waits_for_its_tenants_environment(
     assert plan.root_materialization and plan.environment_id == "envtmpl_1"
     assert plan.spend_limit_usd_cents == OPENAI_SPEND_LIMIT_CENTS
     assert plan.project_header is False
+    assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools (J6)"
+
+
+def test_capture_sees_both_agent_templates_before_any_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source capture reads template capabilities only, for every keyed provider."""
+    from daimon.core.turn.runtime_defaults import capture_template_rows
+
+    assert capture_template_rows(str(TENANT)) == []
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
+    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
+    rows = capture_template_rows(str(TENANT))
+    assert {row["profile"] for row in rows} == {
+        "gemini.inline_reuse",
+        "openai.persistent_workspace",
+    }
+    assert all(row["root_materialization"] is True for row in rows)
+    assert all(row["template_capabilities"] == "mcp" for row in rows)
+    assert all(row["tenant_id"] == str(TENANT) for row in rows)
+    assert all("environment_id" not in row for row in rows)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"root_materialization": False, "agent_id": "agent_1"},
+        {"profile": "openai.conversation_only", "environment_id": None},
+        {"mcp_credential_file": "/tmp/credential"},
+    ],
+)
+def test_template_capabilities_belong_to_a_persistent_workspace_template(changes) -> None:
+    from pydantic import ValidationError
+
+    from .test_openai_agent_template import template_row
+
+    OpenAIDeployment.model_validate(template_row("t", template_capabilities="mcp"))
+    with pytest.raises(ValidationError):
+        OpenAIDeployment.model_validate(template_row("t", template_capabilities="mcp", **changes))
 
 
 def test_a_channel_pinned_to_gemini_runs_from_the_code_default(

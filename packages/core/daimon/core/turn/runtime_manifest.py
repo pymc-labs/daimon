@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, replace
@@ -1607,6 +1608,10 @@ async def capture_preparation_source(
     )
 
 
+#: A connector name a declared `mcp_server:<name>` loss can spell (mux contracts).
+_CONNECTOR_NAME = re.compile(r"[A-Za-z0-9_.-]+")
+
+
 async def _capture_source_capabilities(
     request: ProviderPreparationRequest, source: BackendAgent, *, capability_preview: bool = False
 ) -> BackendAgent:
@@ -1624,7 +1629,7 @@ async def _capture_source_capabilities(
     from daimon.core.skills.ingest import retained_archive_files
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
-    from daimon.core.turn.runtime_defaults import default_rows
+    from daimon.core.turn.runtime_defaults import capture_template_rows
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
@@ -1659,9 +1664,8 @@ async def _capture_source_capabilities(
         *rows,
         *(
             row
-            for row in default_rows(tenant)
-            if row.get("root_materialization") is True
-            and str(row.get("profile")) not in operator_profiles
+            for row in capture_template_rows(tenant)
+            if str(row.get("profile")) not in operator_profiles
         ),
     ]
     revision = request.admission.backend_revision
@@ -1824,12 +1828,31 @@ async def _capture_source_capabilities(
                 )
             if frozenset(inputs.mcp_tools) != catalogue:
                 raise ValueError("MCP representation must preserve the exact source catalogue")
-            tools = tuple(spec.tools or ())
+            # A user's own connectors can't come along: each is a named loss, and
+            # the Daimon MCP server is represented without them.
+            connectors = frozenset(
+                server.name
+                for server in spec.mcp_servers or ()
+                if server.name != DAIMON_SERVER_NAME
+            )
+            if any(_CONNECTOR_NAME.fullmatch(name) is None for name in connectors):
+                # No named loss can spell it: represent nothing, so MCP drops whole.
+                raise ValueError("unrepresentable connector name")
+            connector_losses = tuple(f"mcp_server:{name}" for name in sorted(connectors))
+            tools = tuple(
+                tool
+                for tool in spec.tools or ()
+                if not (tool.kind == "mcp_toolset" and tool.name in connectors)
+            )
             permissions = {name: "auto" for name in catalogue}
             for extension in spec.extensions or ():
                 if extension.namespace == AGENT_TOOLS_NAMESPACE:
                     native = agent_tools(extension)
-                    mcps = [tool for tool in native.tools if isinstance(tool, MCPToolset)]
+                    mcps = [
+                        tool
+                        for tool in native.tools
+                        if isinstance(tool, MCPToolset) and tool.mcp_server_name not in connectors
+                    ]
                     if len(mcps) != 1 or mcps[0].mcp_server_name != DAIMON_SERVER_NAME:
                         raise ValueError("unrepresented MCP toolset")
                     permissions = mcp_permissions(mcps[0], catalogue)
@@ -1907,7 +1930,7 @@ async def _capture_source_capabilities(
             ):
                 raise ValueError("unrepresented MCP toolset")
             reference = f"caller-mcp:{source.tenant_id}:{scope.account_id}:{source.agent_id}"
-            servers = tuple(spec.mcp_servers or ())
+            servers = tuple(s for s in spec.mcp_servers or () if s.name not in connectors)
             if not servers:
                 # The composer supplies this caller-bound capability even when
                 # it is absent from the persistent source agent definition.
@@ -2045,7 +2068,7 @@ async def _capture_source_capabilities(
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=inputs.environment,
-                    unavailable_capabilities=template_losses,
+                    unavailable_capabilities=(*template_losses, *connector_losses),
                 )
             )
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
@@ -2475,6 +2498,16 @@ def classify_source_obligations(
         missing.add("mcp")
     if source.repository_sources and "repository" not in drops and not native_retained:
         missing.add("repository")
+    # Connectors the representation names as lost go with their credentials.
+    lost_servers: set[str] = (
+        {
+            item.removeprefix("mcp_server:")
+            for item in represented.unavailable_capabilities
+            if item.startswith("mcp_server:")
+        }
+        if represented is not None
+        else set()
+    )
     retained_servers = (target.mcp_servers or ()) if target is not None else ()
     retained_mcp = {server.name for server in retained_servers}
     retained_credentials = {binding.credential_ref for binding in resources} | {
@@ -2484,6 +2517,8 @@ def classify_source_obligations(
     for server in spec.mcp_servers or ():
         if server.credential_ref and not native_retained:
             if represented and server.credential_ref in represented.credential_refs:
+                continue
+            if server.name in lost_servers:
                 continue
             if server.name in retained_mcp or server.credential_ref in retained_credentials:
                 missing.add("credentials")
@@ -2507,6 +2542,8 @@ def classify_source_obligations(
         paired = _mcp_credential_servers(source, resource)
         if paired:
             if represented and resource.credential_ref in represented.credential_refs:
+                continue
+            if paired <= lost_servers:
                 continue
             if paired & retained_mcp or resource.credential_ref in retained_credentials:
                 missing.add("credentials")

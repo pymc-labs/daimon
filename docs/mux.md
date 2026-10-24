@@ -2383,8 +2383,9 @@ creation uses the catalog id as its key. Readback then verifies the entry like
 an operator-installed counterpart. A template row carries no operator
 capability inputs, so its turns run the agent's own instructions with the
 confirmed drops (tools, skills and connections are declared drops for now).
-An OpenAI template refuses a target with custom tools or MCP connections
-before any native write: nothing would run them.
+An OpenAI template refuses a target with custom tools, or with MCP connections
+other than its represented Daimon MCP, before any native write: nothing would
+run them.
 
 A template row may add `"template_capabilities": "mcp"` to keep the agent's
 Daimon tools. Capture then represents the source's daimon-mcp toolset from
@@ -2403,6 +2404,32 @@ interaction, the transport removes only that exact header and refuses any
 other trace of the token (`mcp_header_echo`, `mcp_token_echo`). The MCP
 service's runtime manifest needs the same row, since the switch preview there
 captures the representation the consent pins.
+
+Both code-default agent templates (Gemini and OpenAI, `runtime_defaults`) set
+`template_capabilities: "mcp"`. On OpenAI the bearer lives in the session's own
+vault, written once when the session is created, and the session binds its MCP
+tool to that credential's id (re-adding a credential under the same name is
+refused). So every later turn's first input replaces that credential's secret
+in place (`POST /vaults/{vault}/credentials/{credential}` with only
+`auth.token`) before it is sent, then the turn's end revokes it as on Gemini.
+Verified live against our OpenAI project on 2026-10-23. The same in-place write
+runs for any session with its own MCP vault, so a session from an operator row
+with `source_capabilities` now gets its credential file's current bearer at
+every turn too (the same bearer is written again; a rotated file takes effect
+from the next turn instead of never). A preparation that fails after minting
+a template turn's credential revokes it at once.
+
+Deploying this changes what a switch to GPT keeps (MCP, where it was a
+declared drop) and, for an agent with its own connectors, what a switch to
+Gemini keeps. Such an agent's stored consent no longer matches, so its next
+turn refuses with `re_confirm`: the person confirms the switch once more and
+nothing is gained silently.
+
+A user's own MCP connectors can't follow an agent to another provider. Each
+becomes a named loss, `mcp_server:<name>` ("its <name> connector" on the
+switch card), with its credentials; the Daimon MCP server is represented
+without them. Before, any extra server failed the whole representation and the
+switch dropped Daimon MCP too.
 
 Selection only offers a row to the turn origin it serves: an agent's turn
 considers template and source-pinned rows; a channel's turn considers fixed

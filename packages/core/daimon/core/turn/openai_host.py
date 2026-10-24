@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+import structlog
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import (
     TurnBackend,
@@ -388,6 +389,25 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     runtime = runtime_for(
         request.deps.turn_runtimes.get(revision.profile) if revision is not None else None, revision
     )
+    try:
+        return await _prepare_with_runtime(request, runtime)
+    except BaseException:
+        # A per-turn MCP credential minted before the turn existed (a template's
+        # session create) is revoked now, not left to its TTL.
+        if runtime.end_of_turn is not None:
+            try:
+                await runtime.end_of_turn()
+            except Exception:
+                structlog.get_logger(__name__).warning(
+                    "turn.mcp_credential_revoke_failed", exc_info=True
+                )
+        raise
+
+
+async def _prepare_with_runtime(
+    request: ProviderPreparationRequest, runtime: OpenAIHostRuntime
+) -> PreparedTurn:
+    revision = request.admission.backend_revision
     if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
         raise AdmissionDenied(reason="backend_unsupported")
     if (
@@ -614,6 +634,8 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         backend=backend,
         session_ref=ref,
         native_footer_cost=footer_cost,
+        # Revokes a template turn's per-turn MCP credential however the turn ends.
+        _finalize=runtime.end_of_turn,
     )
 
 

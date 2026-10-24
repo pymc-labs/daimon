@@ -9,8 +9,10 @@ tenant's default never serves another.
 
 Served: Gemini agent, channel and worker turns; OpenAI workers; and an OpenAI
 agent's own turn once its tenant's hosted environment is known
-(`request.openai_environment_id`). A channel pinned to OpenAI needs a native agent
-of its own, so it still needs an operator row.
+(`request.openai_environment_id`). Both agent templates keep the agent's Daimon
+MCP tools (`template_capabilities: "mcp"`), with a per-turn caller credential.
+A channel pinned to OpenAI needs a native agent of its own, so it still needs an
+operator row.
 """
 
 from __future__ import annotations
@@ -141,19 +143,22 @@ def _openai_rows(
     environment = getattr(request, "openai_environment_id", None)
     if isinstance(environment, str) and environment:
         # The tenant's own hosted environment, provisioned on its first GPT turn.
-        rows.append(
-            {
-                **_scope(tenant_id, PERSISTENT_WORKSPACE.profile_id),
-                **common,
-                "spend_limit_usd_cents": limit,
-                "configuration_grant": _grant(
-                    PERSISTENT_WORKSPACE.profile_id, selectable_models(OPENAI)
-                ),
-                "environment_id": environment,
-                "root_materialization": True,
-            }
-        )
+        rows.append({**_openai_root(tenant_id, common, limit), "environment_id": environment})
     return rows
+
+
+def _openai_root(
+    tenant_id: str, common: dict[str, JsonValue], limit: int | None
+) -> dict[str, JsonValue]:
+    return {
+        **_scope(tenant_id, PERSISTENT_WORKSPACE.profile_id),
+        **common,
+        "spend_limit_usd_cents": limit,
+        "configuration_grant": _grant(PERSISTENT_WORKSPACE.profile_id, selectable_models(OPENAI)),
+        "root_materialization": True,
+        # Keeps the agent's Daimon MCP tools with a per-turn caller credential.
+        "template_capabilities": "mcp",
+    }
 
 
 def template_rows(
@@ -169,3 +174,19 @@ def default_rows(
     """This tenant's code-default rows for every provider the deployment keys."""
     keyed = {DEFAULT_KEY_ENV[p] for p in DEFAULT_KEY_ENV if provider_key_present(p)}
     return [row for row in template_rows(tenant_id, request) if row["api_key_env"] in keyed]
+
+
+def capture_template_rows(tenant_id: str) -> list[dict[str, JsonValue]]:
+    """This tenant's code-default agent templates, as source capture reads them.
+
+    Capture reads only a template's scope, grant and capabilities, before any turn.
+    The OpenAI one serves a turn only once the tenant's hosted environment is known,
+    so it is listed here without one; selection still requires it.
+    """
+    keyed = {DEFAULT_KEY_ENV[p] for p in DEFAULT_KEY_ENV if provider_key_present(p)}
+    common: dict[str, JsonValue] = {"api_key_env": DEFAULT_KEY_ENV[OPENAI], "project_header": False}
+    rows = [
+        *(row for row in _gemini_rows(tenant_id) if row.get("root_materialization") is True),
+        _openai_root(tenant_id, common, OPENAI_SPEND_LIMIT_CENTS),
+    ]
+    return [row for row in rows if row["api_key_env"] in keyed]
