@@ -113,20 +113,7 @@ Five-step parity procedure (run only after King's merge, setup and redeploy):
 Run one migrator at a time per database. Alembic does not acquire an application
 advisory lock or retry concurrent migrations. A second manual invocation can fail
 with an ordinary PostgreSQL DDL conflict; let the first invocation finish, then
-retry. The legacy preview stamp repair is part of the same migration transaction.
-Main revision IDs receive no repair writes. Only online upgrade and downgrade
-may repair legacy preview stamps. Inspection never performs implicit writes,
-even on an empty database. Explicit `stamp` and `ensure_version` bookkeeping
-retain normal Alembic behavior on empty, main and canonical databases; stored
-legacy preview stamps must be upgraded before bookkeeping.
-
-A database carrying the historical `0122_recruitment` stamp already has the
-Preview schema. Online `alembic upgrade head` installs the missing main revisions
-and translates that stamp to `0145_recruitment` in the same transaction, without
-replaying Preview migrations or their retained-output cleanup. The repair builds
-the usage-observation tenant index without `CONCURRENTLY` so its DDL and stamp
-remain atomic. Ordinary main stamps follow the canonical chain normally. Schema
-downgrades across unsupported migrations remain unsupported.
+retry. Schema downgrades across unsupported migrations remain unsupported.
 
 The serializing deployment callers are:
 
