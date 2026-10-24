@@ -460,33 +460,6 @@ async def _run_continuation(
     return user_message, tenant.id
 
 
-async def test_a_busy_continuation_does_not_end_its_card_with_a_generic_error(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """J6g: a hand-off dispatched behind the copy's running turn binds busy.
-
-    Dispatch releases the row and retries it; the card must not become the
-    terminal "Something went wrong on our side" reply after the answer.
-    """
-    from types import SimpleNamespace
-
-    from daimon.core.turn.errors import SessionBusyError
-
-    bot = make_bot(_make_runtime(db_session_factory))
-    end_card = AsyncMock()
-    surface = SimpleNamespace(end_card=end_card, thread=None)
-    row = SimpleNamespace(reason="task_handoff")
-    await bot._end_continuation_card(  # pyright: ignore[reportPrivateUsage]
-        row,
-        SessionBusyError(
-            pending_reasons=("agent_identity",),
-            retry_after=datetime.now(UTC),
-        ),
-        surface,
-    )
-    end_card.assert_not_awaited()
-
-
 async def test_continuation_turn_omits_handoff_notice_for_private_input(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

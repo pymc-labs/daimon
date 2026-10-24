@@ -42,7 +42,7 @@ async def _dispatch_one(sessionmaker: async_sessionmaker[AsyncSession], anthropi
         live = await get_live_thread_session(session, tenant_id=row.tenant_id, platform='discord', thread_id=row.thread_id, account_id=row.requester_account_id)
     active_turn = live is not None and live.active_turn_message_id is not None
     decision = await decide_continuation(sessionmaker, anthropic, request=request, now=now(), latest_user_message_at=latest_user_message_at, active_turn=active_turn)
-    if decision.action == 'skip_turn_running' and (row.available_at is not None or row.reason == 'task_handoff'):
+    if decision.action == 'skip_turn_running' and row.available_at is not None:
         await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
         return
     if decision.action != 'dispatch':

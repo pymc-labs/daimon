@@ -526,16 +526,10 @@ async def test_skip_copy_reaches_only_a_thread_the_agent_may_post_in(
     )
 
     row = await _read(db_session_factory, request.idempotency_key)
+    assert row.status == "skipped", "the row settles whether or not anything is posted"
     posts = fake_slack_web_client.mock.requests.get(
         ("POST", yarl.URL("https://slack.com/api/chat.postMessage")), []
     )
-    if path == "turn_running":
-        # J6g: a hand-off behind its own running turn waits and runs after it; nobody
-        # is told to send another message.
-        assert row.status == "pending" and row.available_at is not None
-        assert posts == []
-        return
-    assert row.status == "skipped", "the row settles whether or not anything is posted"
     if target == "open":
         assert posts, "an open thread still gets the skip copy"
     else:
