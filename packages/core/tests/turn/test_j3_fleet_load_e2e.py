@@ -154,7 +154,9 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
 
     def text(sql: str, *args, **kwargs):
         if sql == watch_lock:
-            sql = "SELECT pg_advisory_xact_lock(hashtextextended(:key || '|watch-busy', 0))"
+            sql = sql.replace(
+                "hashtextextended(:key, 0)", "hashtextextended(:key || '|watch-busy', 0)"
+            )
         return real_text(sql, *args, **kwargs)
 
     holders = itertools.count(10_000)
@@ -198,18 +200,11 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
 @pytest.mark.parametrize(
     "lock",
     [
-        # Load + timeouts: green on main.
+        # Load + timeouts.
         "free",
-        # Smoke-5's metering kill under load: red on main. On the OWNER 3 fix the kill is
-        # gone, but a watch lock held for the whole run still slows the worker turn after
-        # bind past this leg's budget: ROOT item 3, owned by nc-fleet, flips it green.
-        pytest.param(
-            "busy",
-            marks=pytest.mark.xfail(
-                strict=False,
-                reason="the watch parks a pooled connection on a busy lock; follow-up: watch try-lock (nc-click), ROOT item 3; flaky until try-lock",
-            ),
-        ),
+        # Smoke-5's metering kill under load, and the watch parking a pooled connection
+        # on a held lock (ROOT item 3): red on main, green with the short lock wait.
+        "busy",
     ],
 )
 async def test_three_fleets_of_three_finish_well_under_their_deadline(
@@ -217,6 +212,28 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
 ):
     request, root, _, resolved, prices, _, wire, _, _ = worker_root
     import mux.drivers.openai as native_transport
+    from daimon.core.stores import mux_state
+    from daimon.testing.db import build_test_engine, isolated_test_schema
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    # The product's pool (pool_size 5 + max_overflow 10): 9 concurrent workers and 3
+    # watches on the shared test engine's 2 connections isn't a shape the product runs.
+    shared = request.deps.sessionmaker.kw["bind"]
+    engine = build_test_engine(
+        shared.url.render_as_string(hide_password=False),
+        isolated_test_schema(shared),
+        pool_size=5,
+        max_overflow=10,
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    request = replace(
+        request,
+        deps=replace(
+            request.deps,
+            sessionmaker=sessions,
+            state_store=mux_state.PostgresStateStore(sessions),
+        ),
+    )
 
     native = MultiWorkerNative(
         owned.wire, {owned.retained.agent.ref.id: owned.wire.agent}, wire.expected_spend_limit
@@ -302,6 +319,7 @@ async def test_three_fleets_of_three_finish_well_under_their_deadline(
                 pytest.fail(f"workers still unfinished at half the run deadline: {states}")
         finally:
             await ports.close()
+            await engine.dispose()
     outcomes = sorted(
         (str(row.run_id)[:8], row.ordinal, row.status, row.error_code) for row in ended
     )

@@ -64,6 +64,7 @@ class _Session:
 
     async def execute(self, statement: object, params: object = None) -> None:
         if self._lock_busy and "pg_advisory_xact_lock" in str(statement):
+            # The watch's queued lock attempt ends in Postgres's lock timeout.
             raise DBAPIError(str(statement), params, _LockTimeout())
 
     def begin_nested(self) -> contextlib.AbstractAsyncContextManager[None]:

@@ -2917,3 +2917,77 @@ async def test_a_slow_or_failed_cost_read_says_not_available_never_zero(monkeypa
     assert fleet_cost_sentence(None) == "This cost isn't available yet."
     assert fleet_cost_sentence(Decimal("0.001911")) == "This cost less than $0.01."
     assert fleet_cost_sentence(Decimal("0.425")) == "This cost $0.43."
+
+
+async def test_a_held_tenant_lock_never_makes_the_watch_park_a_pooled_connection(
+    db_engine, sm, monkeypatch
+):
+    """ROOT item 3 (#1471): under a held tenant lock the watch queued up to 1.5 s per
+    locked attempt while holding a pooled connection, so every other caller on that
+    pool waited behind it (smoke-5/6 timeouts; the J3 bisect's p99 checkout wait 1.6 s).
+
+    Deterministic: one pooled connection shared by the watch and a prober, the real
+    tenant lock held throughout by another engine. The prober's waits are the watch's
+    holds: about 1.5 s per attempt on the old wait, at most ~150 ms on the new one.
+    """
+    from daimon.testing.db import build_test_engine, isolated_test_schema
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    url = db_engine.url.render_as_string(hide_password=False)
+    schema = isolated_test_schema(db_engine)
+    tight = build_test_engine(url, schema, pool_size=1, max_overflow=0)
+    holder = build_test_engine(url, schema, pool_size=1, max_overflow=0)
+    tight_sm = async_sessionmaker(tight, expire_on_commit=False)
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        async with holder.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"fleet:{UUID(parent.fleet.scope.tenant_id)}"},
+            )
+            held.set()
+            await release.wait()
+
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    waits: list[float] = []
+    holding = asyncio.create_task(hold())
+    await held.wait()
+    watch = asyncio.create_task(
+        watch_fleet_budget(
+            sessionmaker=tight_sm,
+            parent=parent,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled=cancelled,
+            finished=finished,
+            poll_interval=0.05,
+            # A locked attempt on (almost) every poll, so each one's hold shows.
+            locked_refresh_s=0.05,
+        )
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        until = loop.time() + 4.0
+        while loop.time() < until:
+            started = loop.time()
+            async with tight_sm() as db:
+                await db.execute(text("SELECT 1"))
+            waits.append(loop.time() - started)
+            await asyncio.sleep(0.02)
+    finally:
+        finished.set()
+        await asyncio.wait_for(watch, 10)
+        release.set()
+        await holding
+        await tight.dispose()
+        await holder.dispose()
+    waits.sort()
+    p99 = waits[int(len(waits) * 0.99)]
+    assert not cancelled[a.id].is_set()
+    # ~1.5 s per locked attempt on the old wait, <= ~150 ms (+ a short snapshot read)
+    # on the new one: a 500 ms bound keeps a wide margin both ways.
+    assert p99 < 0.5, f"the watch parked the pool's connection: p99 {p99 * 1000:.0f} ms"
