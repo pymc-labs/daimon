@@ -59,6 +59,7 @@ from daimon.core.stores.watches import (
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from daimon.core.turn.approvals import agent_rule_lookup
 from pydantic import JsonValue, TypeAdapter
+from sqlalchemy.exc import DBAPIError
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -315,6 +316,8 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 db,
                 watch_id,
                 lease,
+                capped=isinstance(exc, DBAPIError)
+                and getattr(exc.orig, "sqlstate", None) == "54000",
                 revoked=isinstance(
                     exc,
                     (

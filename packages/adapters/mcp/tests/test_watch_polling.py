@@ -644,3 +644,146 @@ async def test_poll_honors_agents_own_live_os_toolset(runtime_watch, mode):
         source.assert_not_called()
     async with runtime.session_factory() as db:
         assert (await watches.get_watch(db, watch.id)).status == "paused"
+
+
+async def test_daily_cap_keeps_normal_poll_interval_and_error_count(runtime_watch):
+    runtime, watch, _ = runtime_watch
+    source = AsyncMock(
+        return_value=SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "first"}]}
+        )
+    )
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.return_value = SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "second"}]}
+        )
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        async with runtime.session_factory.begin() as db:
+            await db.execute(
+                text("UPDATE watches SET max_turns_per_day=1, consecutive_errors=3 WHERE id=:id"),
+                {"id": watch.id},
+            )
+            await db.execute(text("UPDATE task_continuations SET status='delivered'"))
+        source.return_value = SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "third"}]}
+        )
+        before = datetime.now(UTC)
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+        after = datetime.now(UTC)
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+        assert current.status == "active"
+        assert current.consecutive_errors == 3
+        assert current.backoff_until is None
+        assert (
+            before + timedelta(seconds=60) <= current.next_check_at <= after + timedelta(seconds=60)
+        )
+        assert current.lease_owner is None and current.lease_expires_at is None
+        assert len(await watches.list_evidence(db, watch.id)) == 1
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [
+        "access_revoked",
+        "cap_reached",
+        "expired",
+        "Watch paused: owner can no longer view the reporting channel.",
+    ],
+)
+async def test_lifecycle_change_sends_one_owner_notice(runtime_watch, transition):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    runtime, watch, _ = runtime_watch
+    if transition == "cap_reached":
+        source = AsyncMock()
+        with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+            for content in ("first", "second"):
+                source.return_value = SimpleNamespace(
+                    model_dump=lambda content=content, **_: {
+                        "rows": [{"role": "user", "content": content}]
+                    }
+                )
+                assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+    async with runtime.session_factory.begin() as db:
+        if transition == "access_revoked":
+            token = await lease(runtime, watch)
+            await watches.poll_failed(db, watch.id, token, revoked=True, now=datetime.now(UTC))
+            await watches.pause_watch(db, watch.id, reason="access_revoked")
+        elif transition == "cap_reached":
+            await db.execute(
+                text("UPDATE watches SET max_fires=2, fire_count=2 WHERE id=:id"), {"id": watch.id}
+            )
+        elif transition == "expired":
+            await db.execute(
+                text("UPDATE watches SET expires_at=now()-interval '1 second' WHERE id=:id"),
+                {"id": watch.id},
+            )
+        else:
+            await watches.pause_watch(db, watch.id, reason=transition)
+    deliver = AsyncMock(return_value=True)
+    if transition == "expired":
+        await poll_watch_notices(runtime.session_factory, deliver=deliver)
+        deliver.assert_not_awaited()
+        async with runtime.session_factory.begin() as db:
+            assert (await watches.get_watch(db, watch.id)).status == "active"
+            await watches.claim_poll_watches(db)
+    async with runtime.session_factory() as db:
+        before = await watches.get_watch(db, watch.id)
+    await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+    recipient, workspace, message = deliver.await_args.args
+    assert recipient.id == watch.id and recipient.owner_external_id == watch.owner_external_id
+    assert workspace and watch.instructions in message
+    if transition == "cap_reached":
+        assert "firing limit: fired 2 times" in message
+    elif transition == "access_revoked":
+        assert "paused: owner access was revoked" in message
+    elif transition.startswith("Watch paused:"):
+        assert transition in message
+    else:
+        assert "expired" in message
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+        assert (current.status, current.revision, current.fire_count) == (
+            before.status,
+            before.revision,
+            before.fire_count,
+        )
+        if transition == "cap_reached":
+            assert current.status == "active"
+            assert current.source_state["notice_state"] == "cap_reached"
+            evidence = (await watches.list_evidence(db, watch.id))[0]
+            assert (
+                await get_continuation(db, idempotency_key=evidence.wake_key)
+            ).status == "pending"
+
+    if transition == "access_revoked":
+        async with runtime.session_factory.begin() as db:
+            # Key rotation can change revision without changing the paused state.
+            await db.execute(
+                text("UPDATE watches SET revision=revision+1 WHERE id=:id"), {"id": watch.id}
+            )
+        await poll_watch_notices(runtime.session_factory, deliver=deliver)
+        deliver.assert_awaited_once()
+        async with runtime.session_factory.begin() as db:
+            await watches.resume_watch(db, watch.id, now=datetime.now(UTC))
+            await watches.pause_watch(db, watch.id, reason="access_revoked")
+        await poll_watch_notices(runtime.session_factory, deliver=deliver)
+        await poll_watch_notices(runtime.session_factory, deliver=deliver)
+        assert deliver.await_count == 2
+
+
+@pytest.mark.parametrize("reason", ["owner_paused", "key_delivery_failed"])
+async def test_owner_and_key_delivery_pauses_send_no_lifecycle_notice(runtime_watch, reason):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    runtime, watch, _ = runtime_watch
+    async with runtime.session_factory.begin() as db:
+        await watches.pause_watch(db, watch.id, reason=reason)
+    deliver = AsyncMock(return_value=True)
+    await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    deliver.assert_not_awaited()

@@ -575,7 +575,14 @@ async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
             raise ValueError("Issue a fresh page signing key before resuming")
     row.status = "active"
     row.revision += 1
-    row.source_state = {**row.source_state, "reason": None}
+    row.source_state = {
+        **row.source_state,
+        "reason": None,
+        "notice_state": None,
+        "notice_pending": False,
+        "notice_lease": None,
+        "notice_lease_until": None,
+    }
     row.next_check_at = now
     row.backoff_until = None
     await session.flush()
@@ -721,6 +728,7 @@ async def poll_failed(
     *,
     revoked: bool,
     now: datetime,
+    capped: bool = False,
 ) -> None:
     # Invalid capabilities never contend on the global firing lock.
     current = await get_watch(session, watch_id)
@@ -733,12 +741,15 @@ async def poll_failed(
     if revoked:
         await pause_watch(session, watch_id, reason="access_revoked")
         return
-    row.consecutive_errors += 1
-    delay = min(
-        86400, int(row.source_state.get("interval", 60)) * 2 ** min(row.consecutive_errors, 10)
-    )
-    row.backoff_until = now + timedelta(seconds=delay)
-    row.next_check_at = row.backoff_until
+    interval = int(row.source_state.get("interval", 60))
+    if capped:
+        row.backoff_until = None
+        row.next_check_at = now + timedelta(seconds=interval)
+    else:
+        row.consecutive_errors += 1
+        delay = min(86400, interval * 2 ** min(row.consecutive_errors, 10))
+        row.backoff_until = now + timedelta(seconds=delay)
+        row.next_check_at = row.backoff_until
     row.lease_owner = None
     row.lease_expires_at = None
     await session.flush()
@@ -874,12 +885,36 @@ async def confirm_import(
 async def claim_import_notice(
     session: AsyncSession, *, now: datetime
 ) -> tuple[WatchRow, str] | None:
-    """Claim a private migration notice on the existing adapter notice cadence."""
+    """Claim import and lifecycle notices on the existing adapter notice cadence."""
+    reason = Watch.source_state["reason"].astext
+    pending = Watch.source_state["notice_pending"].as_boolean().is_(True)
+    lifecycle = or_(
+        Watch.status == "expired",
+        (Watch.status == "paused")
+        & or_(reason.in_(("access_revoked", "cap_reached")), reason.startswith("Watch paused:")),
+    )
+    capped = (
+        (Watch.status == "active")
+        & Watch.max_fires.is_not(None)
+        & (Watch.fire_count >= Watch.max_fires)
+    )
     row = await session.scalar(
         select(Watch)
         .where(
             Watch.platform == "discord",
-            Watch.source_state["notice_pending"].as_boolean().is_(True),
+            or_(
+                pending & (reason == "source_unmapped"),
+                lifecycle
+                & or_(
+                    pending,
+                    Watch.source_state["notice_state"].astext.is_distinct_from(Watch.status),
+                ),
+                capped
+                & or_(
+                    pending,
+                    Watch.source_state["notice_state"].astext.is_distinct_from("cap_reached"),
+                ),
+            ),
             or_(
                 Watch.source_state["notice_lease_until"].astext.is_(None),
                 Watch.source_state["notice_lease_until"].astext <= now.isoformat(),
@@ -898,6 +933,8 @@ async def claim_import_notice(
     token = str(uuid.uuid4())
     row.source_state = {
         **state,
+        "notice_pending": True,
+        "notice_state": "cap_reached" if row.status == "active" else row.status,
         "notice_lease": token,
         "notice_lease_until": (now + timedelta(minutes=2)).isoformat(),
     }
@@ -915,8 +952,10 @@ async def settle_import_notice(
     delivered: bool,
 ) -> None:
     row = await session.scalar(select(Watch).where(Watch.id == notice.id).with_for_update())
-    if row is None or row.source_state.get("notice_lease") != notice.source_state.get(
-        "notice_lease"
+    if (
+        row is None
+        or row.status != notice.status
+        or row.source_state.get("notice_lease") != notice.source_state.get("notice_lease")
     ):
         return
     row.source_state = {
