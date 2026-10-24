@@ -11,7 +11,7 @@ from daimon.core.stores.turn_origins import (
     list_active_origins,
 )
 from daimon.testing.factories import make_account, make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 
 @pytest.mark.parametrize("mismatch", ["caller", "tenant", "platform", "expired", "unknown"])
@@ -255,3 +255,76 @@ async def test_an_origin_records_whether_its_channel_is_shared(
     )
     assert origin.shared_channel is shared
     assert read is not None and read.shared_channel is shared
+
+
+async def test_stale_holder_cannot_bind_or_clear_successors_origin_grant(
+    db_committing_engine: AsyncEngine,
+    db_clean: None,
+) -> None:
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.stores.turn_origins import bind_origin_session, get_session_origin
+    from mux.contracts.ids import ChannelRef, ThreadRef
+    from mux.state.lease import Slot, StaleFence
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        origins = [
+            await create_origin(
+                db,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                parent_channel_id="parent",
+                thread_id="thread",
+                responder_ma_agent_id="agent_daimon",
+                responder_name="Daimon",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=Role.USER,
+                attended=attended,
+                sender_foreign=False,
+                shared_channel=False,
+                now=now,
+                expires_at=now + timedelta(hours=1),
+            )
+            for attended in (False, True)
+        ]
+    slot = Slot(
+        thread=ThreadRef(
+            channel=ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="parent"),
+            thread_id="thread",
+        ),
+        account_id=str(account.id),
+    )
+    store = PostgresStateStore(sessions)
+    old = await store.acquire_lease(
+        slot, holder="old", turn_id="old", now=now, ttl=timedelta(minutes=5)
+    )
+    grant = str(uuid.uuid4())
+    async with sessions.begin() as db:
+        await bind_origin_session(db, origin_id=origins[0].id, chat_session_id=grant, lease=old)
+    await store.release_lease(old)
+    current = await store.acquire_lease(
+        slot, holder="current", turn_id="current", now=now, ttl=timedelta(minutes=5)
+    )
+    async with sessions.begin() as db:
+        await bind_origin_session(db, origin_id=origins[1].id, chat_session_id=grant, lease=current)
+    with pytest.raises(StaleFence):
+        async with sessions.begin() as db:
+            await bind_origin_session(db, origin_id=origins[0].id, chat_session_id=grant, lease=old)
+    async with sessions.begin() as db:
+        await bind_origin_session(db, origin_id=origins[0].id, chat_session_id=None)
+        active = await get_session_origin(
+            db,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            chat_session_id=grant,
+            now=now,
+        )
+        assert active is not None and active.id == origins[1].id and active.attended
+    await store.release_lease(current)

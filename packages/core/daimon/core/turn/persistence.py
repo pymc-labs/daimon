@@ -8,6 +8,7 @@ import json
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
+from contextlib import AbstractAsyncContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -130,6 +131,7 @@ class TurnPersistence:
         send_timeout_s: float = 120.0,
         lease_wait: LeaseWait | None = None,
         retry: MutationRetry | None = None,
+        execution_context: Callable[[Lease], AbstractAsyncContextManager[None]] | None = None,
     ) -> None:
         slot = binding_slot(binding) if binding is not None else slot
         if slot is None:
@@ -167,6 +169,7 @@ class TurnPersistence:
             deadline=time.monotonic() + lease_wait.timeout_s if lease_wait is not None else None,
             cancel=lease_wait.cancel if lease_wait is not None else None,
         )
+        self._execution_context = execution_context
         self.lease_acquired = False
 
     @property
@@ -238,14 +241,24 @@ class TurnPersistence:
         give_up = loop.time() + wait.timeout_s if wait is not None else 0.0
         delay = wait.poll_initial_s if wait is not None else 0.0
         while True:
+            if wait is not None:
+                if wait.cancel is not None and wait.cancel.is_set():
+                    raise LeaseWaitCancelled(self.operation_key)
+                if loop.time() >= give_up:
+                    raise TimeoutError(f"{self._slot.describe()} stayed leased by another turn")
             try:
-                return await self.store.acquire_lease(
+                acquired = await self.store.acquire_lease(
                     self._slot,
                     holder=self._holder,
                     turn_id=self.operation_key,
                     now=self._now(),
                     ttl=self._ttl,
                 )
+                if wait is not None and loop.time() >= give_up:
+                    with contextlib.suppress(StaleFence):
+                        await self.store.release_lease(acquired)
+                    raise TimeoutError(f"{self._slot.describe()} exceeded its lease wait")
+                return acquired
             except LeaseBusy:
                 if wait is None:
                     raise
@@ -266,15 +279,33 @@ class TurnPersistence:
             await asyncio.wait_for(cancel.wait(), timeout=delay)
 
     async def run[T](self, pump: Callable[[], Coroutine[Any, Any, T]]) -> T:
+        async def execute() -> T:
+            # Origin authority belongs to execution, never to lease waiters.
+            # Its cleanup runs before the acquired lease is released, including
+            # cancellation, provider failure and lease-renewal failure.
+            context = (
+                self._execution_context(self._fence())
+                if self._execution_context is not None
+                else contextlib.nullcontext()
+            )
+            async with context:
+                return await pump()
+
         await self._check_binding()
         self._lease = await self._acquire_lease()
-        self.lease_acquired = True
         work: asyncio.Task[T] | None = None
         renew: asyncio.Task[None] | None = None
         try:
             # A binding CAS while acquisition waited must not route a stale turn.
             await self._check_binding(queued=self._lease_wait is not None)
-            work = asyncio.create_task(pump(), name="turn.mux_pump")
+            if (
+                self._lease_wait is not None
+                and self._lease_wait.cancel is not None
+                and self._lease_wait.cancel.is_set()
+            ):
+                raise LeaseWaitCancelled(self.operation_key)
+            self.lease_acquired = True
+            work = asyncio.create_task(execute(), name="turn.mux_pump")
             renew = asyncio.create_task(self._renew(), name="turn.mux_lease")
             done, _ = await asyncio.wait((work, renew), return_when=asyncio.FIRST_COMPLETED)
             if renew in done:

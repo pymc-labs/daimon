@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 
 from daimon.core.errors import SessionRetired
 from daimon.core.stores import mux_state
@@ -16,7 +18,7 @@ from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import BindingConflict, ScopeViolation
 from mux.profiles import get_profile
-from mux.state.lease import Slot
+from mux.state.lease import Lease, Slot
 from mux.state.store import ERA_REF, adopted_identity
 
 
@@ -34,6 +36,7 @@ async def prepared_persistence(
     scope: Scope | None = None,
     fleet_capture: bool = False,
     lease_wait: LeaseWait | None = None,
+    execution_context: Callable[[Lease], AbstractAsyncContextManager[None]] | None = None,
 ) -> TurnPersistence:
     """Adopt existing native ids; publish ownership through put_binding only.
 
@@ -90,6 +93,7 @@ async def prepared_persistence(
             session_ref=session_ref,
             fleet_capture=fleet_capture,
             lease_wait=lease_wait,
+            execution_context=execution_context,
         )
     channel_id = admission.origin_channel_id or ""
     if mapping_id is not None:
@@ -198,4 +202,5 @@ async def prepared_persistence(
         session_ref=session_ref,
         fleet_capture=fleet_capture,
         lease_wait=lease_wait,
+        execution_context=execution_context,
     )

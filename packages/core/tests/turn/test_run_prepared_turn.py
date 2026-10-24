@@ -4041,9 +4041,11 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
     "kind,origin_attended,caller_attended",
     [("chat", True, True), ("chat", True, False), ("chat", False, True), ("worker", True, False)],
 )
+@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    path: str,
     kind: str,
     origin_attended: bool,
     caller_attended: bool,
@@ -4115,7 +4117,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         ),
     )
     deps = dataclasses.replace(
-        _deps(sessionmaker=db_session_factory, router=router), turn_path="legacy"
+        _deps(sessionmaker=db_session_factory, router=router), turn_path=path
     )
     admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
     prepared = _prepared_turn(
@@ -4515,3 +4517,238 @@ async def test_a_card_posted_inside_the_turn_never_shows_a_time_past_its_deadlin
     assert prompt.expires_at <= deadline - CARD_TURN_MARGIN
     assert prompt.expires_at > deadline - CARD_TURN_MARGIN - timedelta(seconds=5)
     assert current_turn_deadline.get() is None
+
+
+@pytest.mark.parametrize("waiter_end", ["acquire", "stop", "cancel"])
+async def test_queued_attended_turn_cannot_borrow_or_revoke_unattended_holders_grant(
+    db_committing_engine: AsyncEngine,
+    db_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+    waiter_end: str,
+) -> None:
+    """Two real mux executions share a Postgres slot and a signed session grant."""
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_created_session,
+    )
+    from daimon.core.stores import mux_state
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.thread_sessions import record_snapshot
+    from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
+    from daimon.core.turn_origin import current_execution_origin_id, turn_origin
+    from mux.state.lease import LeaseBusy
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions.begin() as db_session:
+        tenant = await make_tenant(db_session)
+        account = await make_account(db_session, tenant=tenant)
+        grant = str(uuid.uuid4())
+        row = await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=account,
+            platform="discord",
+            thread_id="thread-1",
+            ma_session_id="sess_1",
+        )
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        snapshot = snapshot_from_created_session(
+            ma_session(id="sess_1", agent=agent, metadata={"daimon_chat_session_id": grant}),
+            env_sha256=None,
+            env_file_id=None,
+            repo_token_issued_at=None,
+            vault_id="vlt_own",
+            sent_skills=(),
+        )
+        await record_snapshot(
+            db_session,
+            id=row.id,
+            snapshot=snapshot,
+            identity_fingerprint=fingerprint_identity(snapshot),
+            mutable_fingerprint=fingerprint_mutable(snapshot),
+        )
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids=set(), sent_batches=sent)
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_1",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
+        ),
+    )
+    deps = dataclasses.replace(_deps(sessionmaker=sessions, router=router), turn_path="mux")
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    running = {name: asyncio.Event() for name in ("holder", "waiter")}
+    finish = {name: asyncio.Event() for name in running}
+    ids: dict[str, uuid.UUID] = {}
+    queued = asyncio.Event()
+    stop = asyncio.Event()
+    real_acquire = mux_state.PostgresStateStore.acquire_lease
+    real_release = mux_state.PostgresStateStore.release_lease
+    released: list[uuid.UUID] = []
+
+    async def observe_acquire(self: Any, slot: Any, **kwargs: Any) -> Any:
+        assert current_execution_origin_id.get() is None
+        try:
+            return await real_acquire(self, slot, **kwargs)
+        except LeaseBusy:
+            queued.set()
+            raise
+
+    async def observe_release(self: Any, lease: Any) -> None:
+        # Revocation must precede release, not happen later in the outer shell.
+        assert current_execution_origin_id.get() is None
+        name = "holder" if lease.turn_id.endswith(":holder") else "waiter"
+        async with sessions() as db:
+            origin = await get_active_origin(
+                db,
+                origin_id=ids[name],
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert origin is not None and origin.chat_session_id is None
+        released.append(origin.id)
+        await real_release(self, lease)
+
+    monkeypatch.setattr(mux_state.PostgresStateStore, "acquire_lease", observe_acquire)
+    monkeypatch.setattr(mux_state.PostgresStateStore, "release_lease", observe_release)
+
+    async def assert_grant(name: str) -> None:
+        async with sessions() as db:
+            active = await get_session_origin(
+                db,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                chat_session_id=grant,
+                now=datetime.now(UTC),
+            )
+            own = await get_active_origin(
+                db,
+                origin_id=ids[name],
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+            if name == "holder" and "waiter" in ids:
+                waiter = await get_active_origin(
+                    db,
+                    origin_id=ids["waiter"],
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+                assert waiter is None or waiter.chat_session_id is None
+        assert own is not None and own.chat_session_id == grant
+        assert active is not None and active.id == ids[name]
+        assert active.attended is (name == "waiter")
+
+    async def run(name: str) -> RunOutcome:
+        async with turn_origin(
+            sessions,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="C1",
+            thread_id="thread-1",
+            responder_ma_agent_id=agent.id,
+            responder_name="daimon",
+            role=Role.USER,
+            attended=name == "waiter",
+            sender_foreign=False,
+            shared_channel=False,
+        ) as origin:
+            ids[name] = origin.id
+
+            async def before_send() -> None:
+                assert current_execution_origin_id.get() == ids[name]
+                await assert_grant(name)
+                running[name].set()
+                await finish[name].wait()
+
+            return await run_prepared_turn(
+                deps,
+                prepared,
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="thread-1",
+                external_user_id="user-1",
+                user_message=name,
+                lifecycle=RecordingLifecycle(),
+                cancel=stop if name == "waiter" else asyncio.Event(),
+                reseed_user_message=_reseed,
+                recovery_lifecycle=_recovery_lifecycle,
+                attended=name == "waiter",
+                origin="chat",
+                operation_key=name,
+                render_interval_s=0.001,
+                before_send=before_send,
+            )
+
+    tasks = [asyncio.create_task(run("holder"))]
+    try:
+        await asyncio.wait_for(running["holder"].wait(), timeout=30)
+        tasks.append(asyncio.create_task(run("waiter")))
+        await asyncio.wait_for(queued.wait(), timeout=30)
+        assert not running["waiter"].is_set()
+        await assert_grant("holder")
+        assert sent == [], "neither blocked pump has sent input"
+        if waiter_end == "acquire":
+            finish["holder"].set()
+            assert (await asyncio.wait_for(tasks[0], timeout=30)).state.error is None
+            await asyncio.wait_for(running["waiter"].wait(), timeout=30)
+            await assert_grant("waiter")
+            assert released == [ids["holder"]]
+            finish["waiter"].set()
+            assert (await asyncio.wait_for(tasks[1], timeout=30)).state.error is None
+            assert released == [ids["holder"], ids["waiter"]]
+            assert len(sent) == 2
+        else:
+            if waiter_end == "stop":
+                stop.set()
+                outcome = await asyncio.wait_for(tasks[1], timeout=30)
+                assert outcome.state.termination == TerminationReason.INTERRUPTED
+            else:
+                tasks[1].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[1]
+            assert not running["waiter"].is_set()
+            assert released == [], "a waiter never releases the holder's lease"
+            await assert_grant("holder")
+            assert sent == []
+            finish["holder"].set()
+            assert (await asyncio.wait_for(tasks[0], timeout=30)).state.error is None
+            assert released == [ids["holder"]]
+            assert len(sent) == 1
+        async with sessions() as db:
+            assert (
+                await get_session_origin(
+                    db,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    chat_session_id=grant,
+                    now=datetime.now(UTC),
+                )
+                is None
+            )
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

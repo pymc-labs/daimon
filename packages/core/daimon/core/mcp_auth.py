@@ -149,6 +149,8 @@ async def resolve_agent_mcp_credential(
         origin_id = current_execution_origin_id.get()
         if origin_id is not None:
             # Send-time native runtimes resolve inside the executing turn.
+            # run_prepared_turn exposes execution_origin only inside the acquired
+            # lease; its execution cleanup also revokes this origin-unique grant.
             # Derive a grant from that trusted context, keeping the SAME registry
             # owner, expiry and revocation as the validated source credential.
             async with sessionmaker.begin() as db:

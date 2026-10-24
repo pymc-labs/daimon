@@ -374,6 +374,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bind signed session-origin authority only while a turn owns its conversation lease, so queued or stopped attended turns cannot replace an unattended holder’s grant or attendance.
+
 - Close recruitment boundaries for unresolved Discord channel forms, lead intake
   and recovery, saved channel routines, persistent wizard controls and channel
   metadata. Require explicit source authority at the core turn driver and gate

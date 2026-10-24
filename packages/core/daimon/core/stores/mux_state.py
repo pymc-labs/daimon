@@ -537,6 +537,14 @@ async def _check_fence(
     leases.check_target(state, target, fence, await clock(session))
 
 
+async def require_lease(session: AsyncSession, lease: Lease) -> None:
+    """Fence host authorization writes in the same transaction as their lease check.
+
+    The shared row lock prevents a takeover until the authorized write commits.
+    """
+    await _check_fence(session, lease.slot, lease, database_clock)
+
+
 async def acquire_lease(
     session: AsyncSession,
     slot: Slot,

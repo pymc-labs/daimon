@@ -133,6 +133,7 @@ from mux.drivers.anthropic import SESSION_READS_NAMESPACE, SessionReads
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import MANAGED_AGENTS, get_profile
 from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
+from mux.state.lease import Lease
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -1139,39 +1140,57 @@ async def run_prepared_turn_impl(
         scope: Scope | None = None,
     ) -> AsyncIterator[ToolConfirmation]:
         origin_id = current_origin_id.get() if origin != "worker" else None
-        if origin_id is not None:
-            async with deps.sessionmaker.begin() as db:
-                mapping = (
-                    await get_thread_session_by_id(db, id=mapping_id)
-                    if mapping_id is not None
-                    else None
-                )
-                grant = (
-                    mapping.effective_config.chat_session_id
-                    if mapping is not None
-                    and mapping.ma_session_id == session_id
-                    and mapping.tenant_id == tenant_id
-                    and mapping.account_id == admission.account_id
-                    and mapping.effective_config is not None
-                    else None
-                )
-                if (
-                    mapping_id is None
-                    and session_id == prepared.ma_session_id
-                    and admission == prepared.admission
-                    and prepared.session_ref is not None
-                    and prepared.session_ref.tenant_id == str(tenant_id)
-                    and prepared.session_ref.account_id == str(admission.account_id)
-                ):
-                    grant = prepared.native_chat_session_id
-                await bind_origin_session(
-                    db, origin_id=origin_id, chat_session_id=grant, attended=not unattended
-                )
-        try:
+
+        @contextlib.asynccontextmanager
+        async def origin_grant(lease: Lease | None = None) -> AsyncIterator[None]:
+            with execution_origin(origin_id):
+                if origin_id is None:
+                    yield
+                    return
+                try:
+                    async with deps.sessionmaker.begin() as db:
+                        mapping = (
+                            await get_thread_session_by_id(db, id=mapping_id)
+                            if mapping_id is not None
+                            else None
+                        )
+                        grant = (
+                            mapping.effective_config.chat_session_id
+                            if mapping is not None
+                            and mapping.ma_session_id == session_id
+                            and mapping.tenant_id == tenant_id
+                            and mapping.account_id == admission.account_id
+                            and mapping.effective_config is not None
+                            else None
+                        )
+                        if (
+                            mapping_id is None
+                            and session_id == prepared.ma_session_id
+                            and admission == prepared.admission
+                            and prepared.session_ref is not None
+                            and prepared.session_ref.tenant_id == str(tenant_id)
+                            and prepared.session_ref.account_id == str(admission.account_id)
+                        ):
+                            grant = prepared.native_chat_session_id
+                        await bind_origin_session(
+                            db,
+                            origin_id=origin_id,
+                            chat_session_id=grant,
+                            attended=not unattended,
+                            lease=lease,
+                        )
+                    yield
+                finally:
+                    # Clear only this origin. If its lease was lost and a successor
+                    # already bound the grant, never revoke the successor's authority.
+                    async with deps.sessionmaker.begin() as db:
+                        await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
+
+        # Preparation/queueing cannot borrow an ambient parent execution.
+        with execution_origin(None):
             selected_path = deps.turn_path or load_turn_settings().path
             posture = confirmation
             async with contextlib.AsyncExitStack() as stack:
-                stack.enter_context(execution_origin(origin_id))
                 if unattended:
                     revision = admission.backend_revision
                     managed = revision is None or revision.profile == MANAGED_AGENTS.profile_id
@@ -1316,7 +1335,8 @@ async def run_prepared_turn_impl(
                         else:
                             stack.enter_context(unattended_sends(None))
                 if selected_path == "legacy":
-                    yield posture
+                    async with origin_grant():
+                        yield posture
                     return
                 persistence = await prepared_persistence(
                     deps,
@@ -1330,6 +1350,7 @@ async def run_prepared_turn_impl(
                     session_ref=session_ref,
                     scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
                     fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
+                    execution_context=origin_grant,
                     lease_wait=LeaseWait(
                         timeout_s=remaining_s(effective_deadline, now=now()),
                         cancel=attempt_cancel,
@@ -1338,10 +1359,6 @@ async def run_prepared_turn_impl(
                 active_persistence_cell[0] = persistence
                 with persistence.activate():
                     yield posture
-        finally:
-            if origin_id is not None:
-                async with deps.sessionmaker.begin() as db:
-                    await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
 
     root_intent = turn_card_intent_id if deps.fleet_enabled and origin != "worker" else None
 
