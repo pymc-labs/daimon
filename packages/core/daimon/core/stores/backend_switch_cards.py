@@ -113,6 +113,7 @@ async def waiting_for(
     requester_platform_user_id: str,
     matching: dict[str, str],
     now: datetime,
+    channel_id: str | None = None,
 ) -> bool:
     """Whether this requester already has an unanswered, unexpired card like this one.
 
@@ -125,6 +126,7 @@ async def waiting_for(
             BackendSwitchCard.tenant_id == tenant_id,
             BackendSwitchCard.requester_platform_user_id == requester_platform_user_id,
             BackendSwitchCard.reference.contains(matching),
+            *((BackendSwitchCard.channel_id == channel_id,) if channel_id is not None else ()),
             BackendSwitchCard.status.in_(("pending", "claimed")),
             BackendSwitchCard.expires_at > now,
         )
