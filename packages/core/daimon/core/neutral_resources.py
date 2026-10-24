@@ -1526,9 +1526,15 @@ def _with_root_model(
 def _root_ceiling(
     source: BackendAgent, *, account_id: str
 ) -> tuple[AgentSpec, tuple[ResourceBinding, ...]]:
-    """The captured source's worker ceiling and the resources it carries, memory included."""
+    """The captured source's worker ceiling and the resources it carries, memory included.
+
+    Workers share the root's memory store only where its sessions' own mount carries
+    over exactly (memory_mount_retained). Otherwise they run without the root's memory,
+    declared, rather than the agent being unable to run a fleet at all (staging
+    2026-10-24: "its memory can't be shared with fleet workers").
+    """
     from daimon.core.memory_resource import memory_mount
-    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+    from daimon.core.turn.runtime_manifest import memory_mount_retained, worker_source_ceiling
 
     actual = source.source
     if actual is None or source.effective_spec is None:
@@ -1538,30 +1544,35 @@ def _root_ceiling(
     except ValueError:
         raise WorkerSpecRefused("tools", "unsupported") from None
     # The complete capture remains the input to the existing obligation classifier.
-    assert ceiling.effective_spec is not None
+    spec = ceiling.effective_spec
+    assert spec is not None
     resources = ceiling.resource_requirements
     read_only = source.memory_read_only is not False
-    if source.memory_store_id is not None:
+    if source.memory_store_id is not None and "memory" not in spec.declared_drops:
         mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
-        resources += (
-            ResourceBinding(
-                id=source.memory_store_id,
-                kind="native",
-                resource=actual.ref.model_copy(
-                    update={
-                        "kind": "memory_store",
-                        "id": source.memory_store_id,
-                        "account_id": account_id,
-                    }
-                ),
-                native=ExtensionConfig(
-                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
-                    version=1,
-                    value={"resource": mount},
-                ),
+        memory = ResourceBinding(
+            id=source.memory_store_id,
+            kind="native",
+            resource=actual.ref.model_copy(
+                update={
+                    "kind": "memory_store",
+                    "id": source.memory_store_id,
+                    "account_id": account_id,
+                }
+            ),
+            native=ExtensionConfig(
+                namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
+                version=1,
+                value={"resource": mount},
             ),
         )
-    return ceiling.effective_spec, resources
+        if memory_mount_retained(ceiling, (*resources, memory)):
+            resources += (memory,)
+        else:
+            spec = spec.model_copy(
+                update={"declared_drops": tuple(sorted({*spec.declared_drops, "memory"}))}
+            )
+    return spec, resources
 
 
 #: Why an agent's own setup keeps it from running a fleet, in plain words.
@@ -1587,24 +1598,28 @@ def fleet_root_obstacle_text(obstacle: str) -> str:
     return f"This agent can't run a fleet yet: {reason}."
 
 
-def fleet_root_obstacle(source: BackendAgent) -> str | None:
-    """What in an agent's own setup keeps its source from becoming fleet worker authority.
+#: Most actionable first: what a person can change before what only code can.
+_OBSTACLE_ORDER = ("credentials", "mcp", "repository", "files", "tools")
+
+
+def fleet_root_obstacles(source: BackendAgent) -> tuple[str, ...]:
+    """Everything in an agent's own setup that keeps its source from becoming fleet
+    worker authority, most actionable first (see FLEET_ROOT_OBSTACLES).
 
     A projected capture's ceiling and resources, classified the way freezing the
     root does. It checks a subset of what the freeze checks (no grant, origin or
-    backend facts), so a None here can still be refused at the turn; a value is
-    a definite obstacle. Returns an obligation name (see FLEET_ROOT_OBSTACLES).
+    backend facts), so an empty result can still be refused at the turn.
     """
     from daimon.core.turn.runtime_manifest import classify_source_obligations
 
     if source.resource_scope is None or source.environment is None:
-        return None
+        return ()
     try:
         spec, resources = _root_ceiling(source, account_id=source.resource_scope.account_id)
     except WorkerSpecRefused as error:
-        return error.field
+        return (error.field,)
     if any(tool.permission != "auto" for tool in spec.tools or ()):
-        return "tools"
+        return ("tools",)
     missing = classify_source_obligations(
         source,
         spec,
@@ -1615,10 +1630,14 @@ def fleet_root_obstacle(source: BackendAgent) -> str | None:
     if source.memory_store_id is None:
         # An agent gets its memory store on its first session; that is no obstacle.
         missing = missing - {"memory"}
-    for name in ("credentials", "mcp", "repository", "files", "tools"):
-        if name in missing:
-            return name
-    return sorted(missing)[0] if missing else None
+    ordered = [name for name in _OBSTACLE_ORDER if name in missing]
+    return (*ordered, *sorted(missing - set(_OBSTACLE_ORDER)))
+
+
+def fleet_root_obstacle(source: BackendAgent) -> str | None:
+    """The most actionable of `fleet_root_obstacles`, or None: the one a person sees."""
+    obstacles = fleet_root_obstacles(source)
+    return obstacles[0] if obstacles else None
 
 
 def _is_current_default(grant: AgentFleetGrant, policy: TenantAccessPolicy) -> bool:

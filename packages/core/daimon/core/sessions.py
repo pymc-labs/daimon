@@ -149,6 +149,11 @@ _log = structlog.get_logger(__name__)
 __all__ = ["create_session", "create_isolated_session"]
 
 
+#: The opaque binding standing for the caller's own private carry (a DM, a seal, a Slack
+#: turn context, a held vault): it belongs to the caller, never to a fleet worker.
+CALLER_RESOURCES_ID = "caller-resources"
+
+
 async def _session_app_mode(
     session_factory: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> bool:
@@ -398,7 +403,7 @@ async def project_session_resources(
         or (app_mode and agent_github_app is not None and repos)
     ):
         # Opaque carry resources and private credentials are not absent obligations.
-        requirements.append(ResourceBinding(id="caller-resources", kind="native"))
+        requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))
     effective = agent_spec(payload)
     if source.source is not None:
         # Classify the complete session skill list before neutral projection loses
