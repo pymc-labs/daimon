@@ -33,6 +33,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
     _list_events_impl,  # pyright: ignore[reportPrivateUsage]
     _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import (
@@ -41,8 +42,10 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_PRIVATE_DM,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_tool_rules, session_settle_state
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
 from daimon.testing import ma_agent, ma_environment, with_coordinator, with_hidden_capability
 from daimon.testing.factories import make_tenant
@@ -1395,3 +1398,48 @@ async def test_a_channel_ask_beats_an_agent_wide_allow_for_routines(
         await _continue_turn_impl(runtime, auth, _SESSION, "hi")
         await _settle(runtime)
         assert [c["result"] for c in fake.confirmations] == [expected]
+
+
+@pytest.mark.parametrize("revocation", ["membership", "allowlist"])
+async def test_revocation_between_confirmations_leaves_the_second_unanswered(
+    factory: async_sessionmaker[AsyncSession], revocation: str
+) -> None:
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID, platform="discord", workspace_id="g1")
+        await set_access_policy(
+            db, tenant_id=_TENANT_ID, policy=TenantAccessPolicy(invoker_user_ids=("u1",))
+        )
+    fake = FakeSession(script=[[("linear", "get_issue", {})], [("linear", "get_issue", {})]])
+    member = True
+
+    async def fetch(tenant_id: uuid.UUID, guild_id: str, user_id: str) -> Membership:
+        return Membership(is_member=member)
+
+    runtime = replace(
+        _runtime(fake, factory, _ENABLED), membership_resolver=CachedMembershipResolver(fetch)
+    )
+    auth = replace(_auth(platform="discord"), platform_user_id="u1")
+    boundary = fake.pause()
+
+    # Change admission after the first confirmation, before the next answer.
+    original = safety._answer  # pyright: ignore[reportPrivateUsage]
+
+    async def answer(*args: Any, **kwargs: Any) -> None:
+        nonlocal member
+        await original(*args, **kwargs)
+        if revocation == "membership":
+            member = False
+        else:
+            async with factory.begin() as db:
+                await set_access_policy(
+                    db,
+                    tenant_id=_TENANT_ID,
+                    policy=TenantAccessPolicy(invoker_user_ids=("someone-else",)),
+                )
+
+    with patch.object(safety, "_answer", answer):
+        worker = safety.watch_turn(
+            runtime, auth, _SESSION, turn_event_id=boundary, rules_channel_id=None
+        )
+        assert await asyncio.wait_for(worker, timeout=5) is False
+    assert [c["result"] for c in fake.confirmations] == ["allow"]

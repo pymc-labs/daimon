@@ -29,6 +29,7 @@ from daimon.adapters.mcp.resource_ports import (
     retrieve_session,
 )
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._ctx import _policy_gate  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._session_access import hub_access_mode
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -356,6 +357,15 @@ async def _answer(
     decisions = [
         (call.tool_use_id, await posture.decide(call)) for call in tool_calls_for(turn.state, ids)
     ]
+    await _policy_gate(
+        auth,
+        sessionmaker=runtime.session_factory,
+        membership_resolver=runtime.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
+        pin_exempt=False,
+        require_fresh=True,
+    )
     # The session port carries only messages and interrupts; confirmations go
     # through the turn transport the routine driver answers with.
     await LegacyTurnIO(single_attempt(runtime), session.id, scope=mcp_scope(auth)).send(

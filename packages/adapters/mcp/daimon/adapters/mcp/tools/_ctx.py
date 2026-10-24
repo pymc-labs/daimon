@@ -313,8 +313,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       security gate, not a billing one: it is enforced for no-platform bearer
       and agent-key identities too, before the unbilled return below, with no
       admin exemption. Only the hub passes ``pin_exempt``, for a caller
-      whose stored native admin role qualifies (`_session_access.load_hub_subject`);
-      its reply reaches only them.
+      who is an admin (`_session_access.load_hub_subject`, with fresh
+      membership and admin evidence for Discord); its reply reaches only them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``, then the channel

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
@@ -154,11 +156,15 @@ async def test_list_daimons_leaves_out_only_a_tenant_whose_policy_cant_be_read(
         )
 
 
+@pytest.mark.parametrize("stored_admin", [False, True])
 async def test_hub_never_lists_or_resolves_an_isolated_channels_own_agent(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stored_admin: bool,
 ) -> None:
     hub = await _two_tenant_hub(db_session)
     t1 = hub.tenants[0]
+    await set_role(db_session, t1.account_id, Role.ADMIN if stored_admin else Role.USER)
     await set_fields(
         db_session,
         scope=ChannelScopeRef(tenant_id=t1.tenant_id, channel_id="room"),
@@ -268,7 +274,13 @@ async def test_hub_member_lists_only_workspace_responder_while_admin_sees_drafts
             }
         ).dispatch
     )
-    runtime = _runtime(client, db_session_factory)
+
+    async def fetch(tenant_id: uuid.UUID, guild_id: str, user_id: str) -> Membership:
+        return Membership(is_member=True, is_admin=admin)
+
+    runtime = replace(
+        _runtime(client, db_session_factory), membership_resolver=CachedMembershipResolver(fetch)
+    )
     listed = await _list_daimons_impl(runtime, hub)
     assert {agent.name for agent in listed} == ({"helper", "draft"} if admin else {"helper"})
     hidden = str(derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id="ag_draft"))

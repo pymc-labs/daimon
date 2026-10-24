@@ -72,6 +72,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.native_admins import read_stored_admin
 from daimon.core.permissions import agent_permissions
 from daimon.core.scope import ScopeContext
@@ -148,7 +149,17 @@ async def _agents_by_tenant(
         except AccessPolicyUnreadable:
             log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
             continue
-        subject = stored.subject()
+        subject = (
+            await resolve_subject(
+                runtime.session_factory,
+                runtime.membership_resolver,
+                tenant_id=tenant.tenant_id,
+                user_id=hub.platform_user_id,
+                require_fresh=True,
+            )
+            if hub.platform == "discord"
+            else stored.subject()
+        )
         agents = by_id[tenant.tenant_id]
         out.append(
             (tenant, [a for a in agents if _hub_sees(policy, subject, a, config.agent_name)])
@@ -278,11 +289,11 @@ def register_hub_tools(
     async def _admitted(
         ctx: Context, daimon_id: str, tool_name: str
     ) -> tuple[AuthIdentity, Subject, Callable[[], Awaitable[None]]]:
-        """Admit a hub turn; returns the identity, the caller's stored rights,
+        """Admit a hub turn; returns the identity, the caller's native rights,
         and the re-check the turn runs right before its create and send.
 
-        One read per call serves both the pin exemption (server admins only)
-        and sealed-session access; the re-check reads the stored role again.
+        Discord rights use fresh membership evidence; other platforms use
+        stored roles. The re-check runs the current admission policy again.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         subject = await load_hub_subject(runtime, auth)
