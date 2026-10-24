@@ -27,7 +27,9 @@ class OutputAuthorization:
                 # Cancelling a progress render is not evidence of revoked access.
                 # This output stays cancelled; the next output must check again.
                 raise
-            except BaseException:
+            except AdmissionDenied:
+                # Only proved denial persists; transport errors refuse this
+                # output and leave later delivery free to check again.
                 self.failed = True
                 raise
 

@@ -168,3 +168,62 @@ async def test_watch_authority_is_entirely_rest(db_session_factory, monkeypatch,
         if mode in {"former_owner_removed", "stale_manager", "stale_admin"}:
             rest.http.get_thread_member.assert_awaited_once_with(4242, 555)
     rest.http.get_guild.assert_awaited_once_with(710000099, with_counts=False)
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize(
+    "failure", [503, 403, 404, "reset", "timeout", "parent_changed", "member_changed"]
+)
+async def test_watch_transport_failure_only_pauses_proved_denial(
+    db_session_factory, monkeypatch, failure
+):
+    from daimon.core.turn.output import OutputAuthorization
+
+    factory, _, _, _, _, watch, key = await enrolled_page_watch(db_session_factory, monkeypatch)
+    async with factory() as db:
+        row = await get_continuation(db, idempotency_key=key)
+    client = discord.Client(intents=discord.Intents.none())
+    rest = WatchDiscordRest(client)
+    if failure in {"parent_changed", "member_changed"}:
+        error = ValueError("binding changed")
+    elif failure == "reset":
+        error = OSError("connection reset")
+    elif failure == "timeout":
+        error = TimeoutError()
+    else:
+        exception = {403: discord.Forbidden, 404: discord.NotFound}.get(
+            failure, discord.HTTPException
+        )
+        error = exception(MagicMock(status=failure, reason="failed"), "failed")
+    if failure == "parent_changed":
+        channel = rest.channel
+
+        def moved_channel(channel_id):
+            payload = channel(channel_id)
+            if channel_id == 4242:
+                payload["parent_id"] = "9999"
+            return payload
+
+        rest.http.get_channel.side_effect = moved_channel
+    elif failure == "member_changed":
+        member = rest.member(710000099, 555)
+        member["user"]["id"] = "9999"
+        rest.http.get_member.side_effect = lambda *_: member
+    else:
+        rest.guild_error = error
+
+    async def authorize():
+        await require_watch_thread_access(factory, row, client)
+
+    delivery = OutputAuthorization(authorize)
+    proved_denial = failure in {403, 404, "parent_changed", "member_changed"}
+    with pytest.raises(AdmissionDenied if proved_denial else type(error)):
+        await delivery.check()
+    async with factory() as db:
+        current = await watches.get_watch(db, watch.id)
+    assert (current.status == "paused") == proved_denial
+    assert delivery.failed == proved_denial
+    if not proved_denial:
+        # Refusing this output must not poison the final answer or next tick.
+        rest.guild_error = None
+        await delivery.check()

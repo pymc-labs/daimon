@@ -367,6 +367,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Watch turns show their status card until the answer is posted; a brief Discord outage no longer pauses the watch.
 - Concurrent routines for the same owner reuse their platform identity when enrollment is still committing, instead of failing with a duplicate-principal error.
 
 - Bind signed session-origin authority only while a turn owns its conversation lease, so queued or stopped attended turns cannot replace an unattended holder’s grant or attendance.

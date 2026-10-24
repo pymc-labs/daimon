@@ -43,6 +43,7 @@ from .watch_fixtures import (
         "private_removed_during_turn",
         "history_revoked_during_turn",
         "category_moved_during_turn",
+        "transient_before_final",
     ],
 )
 async def test_review_revocation_before_final_delivery(db_session_factory, mode, monkeypatch):
@@ -127,6 +128,10 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
                 ]
             ).content
             await asyncio.sleep(0.1)
+            if mode == "transient_before_final":
+                rest.guild_error = discord.HTTPException(
+                    MagicMock(status=503, reason="unavailable"), "unavailable"
+                )
             if mode == "revoked_during_turn":
                 async with db_session_factory.begin() as db:
                     await watches.revoke_capabilities(db, watch.id, now=datetime.now(UTC))
@@ -216,7 +221,9 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
         wake = await get_continuation(db, idempotency_key=key)
         assert len(await watches.list_evidence(db, watch.id)) == 1
         current_watch = await watches.get_watch(db, watch.id)
-        if mode != "revoked_during_turn":
+        if mode == "transient_before_final":
+            assert current_watch.status == "active"
+        elif mode != "revoked_during_turn":
             assert current_watch.status == "paused"
             assert current_watch.source_state["reason"].startswith("Watch paused:")
     assert wake is not None

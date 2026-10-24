@@ -343,23 +343,48 @@ class _DeferredFailureLifecycle:
 
     inner: TurnLifecycle
     _held: tuple[TurnState, Exception] | None = None
-    may_render: Callable[[], Awaitable[None]] | None = None
+    authorize_final: Callable[[], Awaitable[None]] | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
         await acknowledge(self.inner, phase)
 
     async def on_render(self, state: TurnState) -> None:
-        if self.may_render is not None:
-            await self.may_render()
+        if self.authorize_final is not None:
+            # Watches keep their initial card until the final post. Streaming
+            # renders would either poll Discord on every tick or deliver stale
+            # authorization after access was revoked.
+            return
         await self.inner.on_render(state)
 
-    async def on_terminal_success(self, state: TurnState) -> None:
-        if self.may_render is not None:
+    async def _may_finish(self) -> bool:
+        if self.authorize_final is None:
+            return True
+        for delay in (1, 2, None):
             try:
-                await self.may_render()
-            except Exception:
-                return
-        await self.inner.on_terminal_success(state)
+                await self.authorize_final()
+                return True
+            except Exception as err:
+                if not isinstance(err, AdmissionDenied) and delay is not None:
+                    await asyncio.sleep(delay)
+                    continue
+                await self._output_refused(err)
+                break
+        return False
+
+    async def _output_refused(self, err: Exception) -> None:
+        log.warning("turn.final_output_refused", error_type=type(err).__name__)
+        cleanup = getattr(self.inner, "on_output_refused", None)
+        if cleanup is not None:
+            await cast(Callable[[], Awaitable[None]], cleanup)()
+
+    async def on_terminal_success(self, state: TurnState) -> None:
+        if await self._may_finish():
+            try:
+                await self.inner.on_terminal_success(state)
+            except Exception as err:
+                if self.authorize_final is None or isinstance(err, AdmissionDenied):
+                    raise
+                await self._output_refused(err)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         self._held = (state, err)
@@ -393,12 +418,13 @@ class _DeferredFailureLifecycle:
         self._held = None
         if termination is not None:
             state = replace(state, termination=termination)
-        if self.may_render is not None:
+        if await self._may_finish():
             try:
-                await self.may_render()
-            except Exception:
-                return
-        await self.inner.on_terminal_failure(state, err)
+                await self.inner.on_terminal_failure(state, err)
+            except Exception as delivery_error:
+                if self.authorize_final is None or isinstance(delivery_error, AdmissionDenied):
+                    raise
+                await self._output_refused(delivery_error)
 
 
 async def _mirror_cancel(cancel: asyncio.Event, fresh_cancel: asyncio.Event) -> None:
@@ -1604,7 +1630,7 @@ async def run_prepared_turn_impl(
                 await authorize_watch(prepared.admission, ma_session_id)
             except asyncio.CancelledError:
                 raise
-            except BaseException:
+            except AdmissionDenied:
                 cancel.set()
                 raise
 
@@ -1614,7 +1640,7 @@ async def run_prepared_turn_impl(
             if install is not None:
                 cast(Callable[[OutputAuthorization], None], install)(delivery)
         first_attempt = _DeferredFailureLifecycle(
-            inner=lifecycle, may_render=delivery.check if delivery is not None else None
+            inner=lifecycle, authorize_final=delivery.check if delivery is not None else None
         )
         superseded: BindingSuperseded | None = None
         try:

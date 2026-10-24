@@ -645,6 +645,8 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         AsyncMock(return_value=snapshot),
     )
 
+    lifecycle = RecordingLifecycle()
+
     async def run_driver(**kwargs):
         from daimon.core.tool_safety import ToolCall
 
@@ -688,8 +690,12 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
             # The installed gate is the one the driver uses for confirmation sends.
             with pytest.raises(AdmissionDenied):
                 await gate()
-            with pytest.raises(AdmissionDenied):
-                await kwargs["lifecycle"].on_render(TurnState())
+            # Watch ticks stay silent; terminal delivery still rechecks spend.
+            await kwargs["lifecycle"].on_render(TurnState())
+            assert not lifecycle.renders
+            await kwargs["lifecycle"].on_terminal_success(TurnState())
+            assert not lifecycle.terminal_success
+            assert kwargs["cancel"].is_set()
             return TurnState()
         async with db_session_factory.begin() as db:
             await watches.revoke_capabilities(db, registered.id, now=datetime.now(UTC))
@@ -728,7 +734,7 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         thread_id=registered.thread_id,
         external_user_id=registered.owner_external_id,
         user_message="Report.",
-        lifecycle=RecordingLifecycle(),
+        lifecycle=lifecycle,
         cancel=asyncio.Event(),
         reseed_user_message=AsyncMock(return_value="Report."),
         recovery_lifecycle=MagicMock(),
