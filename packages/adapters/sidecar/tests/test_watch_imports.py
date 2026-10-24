@@ -297,13 +297,13 @@ async def test_import_confirmation_cannot_activate_self_reporting_source(
             "discord_read_messages",
             {"channel_or_thread_id": "4343", "limit": 10, "before": "1234"},
             None,
-            "Unsupported discord_read_messages arguments",
+            "Unsupported imported message-read arguments",
         ),
         (
             "discord_read_channel_since",
             {"channel_id": "4343", "since": "2026-10-01", "before": "2026-10-02"},
             None,
-            "Unsupported discord_read_channel_since arguments",
+            "Unsupported imported channel-history arguments",
         ),
         (
             "discord_read_channel_since",
@@ -315,7 +315,7 @@ async def test_import_confirmation_cannot_activate_self_reporting_source(
             "discord_read_channel_since",
             {"channel_id": "4343", "since": "2026-10-01", "before_message_id": 1234},
             None,
-            "Unsupported discord_read_channel_since arguments",
+            "Unsupported imported channel-history arguments",
         ),
     ],
 )

@@ -37,7 +37,7 @@ def map_poll_source(name: str, arguments: dict[str, JsonValue]) -> tuple[str, di
     """Translate only representable internal arguments; native validation still applies."""
     if name == "discord_read_messages":
         if set(arguments) - {"channel_or_thread_id", "limit"}:
-            raise ValueError("Unsupported discord_read_messages arguments")
+            raise ValueError("Unsupported imported message-read arguments")
         name = "read_thread"
         arguments = {
             "thread_id": arguments.get("channel_or_thread_id"),
@@ -46,7 +46,7 @@ def map_poll_source(name: str, arguments: dict[str, JsonValue]) -> tuple[str, di
         }
     elif name == "discord_read_channel_since":
         if set(arguments) - {"channel_id", "since", "limit"}:
-            raise ValueError("Unsupported discord_read_channel_since arguments (including paging)")
+            raise ValueError("Unsupported imported channel-history arguments (including paging)")
         name = "read_channel"
         # Native polling diffs its saved baseline; since is not a live-read filter.
         # This maps channel messages only, not archived history or child threads.
