@@ -24,22 +24,39 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+#: session.info key: the transaction in which this session inserted a ledger row.
+_LEDGER_SHARE_TAKEN = "tenant_ledger_share_taken"
+
 
 async def lock_funds(
     session: AsyncSession, *, tenant_id: uuid.UUID, financial: bool = True
 ) -> uuid.UUID | None:
     """Fence one tenant's append-only funds inside the caller's transaction.
 
-    Ledger inserts already take KEY SHARE on this parent through their foreign
-    key. FOR UPDATE waits for those inserts and fences subsequent ones until
-    commit, without changing writers or blocking another tenant's ledger.
+    A funds check takes FOR NO KEY UPDATE on the tenant row: exclusive against every
+    other funds check, and against every ledger insert, which takes FOR SHARE on the
+    same row first (`insert_entry`). It waits for in-flight inserts and fences later
+    ones until commit, without blocking another tenant's ledger.
+
+    It deliberately no longer conflicts with the foreign-key KEY SHARE every OTHER
+    tenant-scoped insert takes (journal, operations, tokens, outcomes...): FOR UPDATE
+    did, so every write in a busy tenant queued behind each funds check (bind
+    latency, lockwatch a1d991fb). The ledger is the only money table a funds check
+    reads, and its one writer takes the explicit share lock.
+
     Passive refresh takes KEY SHARE instead, protecting tenant lifetime without
-    fencing ordinary writes. Acquire before actor and reservation rows, and
-    never hold over native I/O.
+    fencing ordinary writes. Acquire before actor and reservation rows, and before
+    any ledger insert in the same transaction (SHARE then NO KEY UPDATE would be an
+    upgrade two such transactions deadlock on; refused below). Never hold over native
+    I/O.
     """
+    if financial and session.info.get(_LEDGER_SHARE_TAKEN) is session.get_transaction():
+        raise RuntimeError(
+            "lock a tenant's funds before inserting into its ledger in one transaction"
+        )
     statement = select(Tenant.id).where(Tenant.id == tenant_id)
     statement = (
-        statement.with_for_update()
+        statement.with_for_update(key_share=True)
         if financial
         else statement.with_for_update(read=True, key_share=True)
     )
@@ -64,6 +81,13 @@ async def insert_entry(
     ``occurred_at`` dates the entry by when it happened (a model call's own
     time) rather than when it was written; the database clock is the default.
     """
+    # The money fence: a funds check (lock_funds, FOR NO KEY UPDATE) excludes this
+    # share lock, so a ledger row never lands between a funds check and its decision.
+    # The foreign key's own KEY SHARE no longer does that job.
+    await session.execute(
+        select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(read=True)
+    )
+    session.info[_LEDGER_SHARE_TAKEN] = session.get_transaction()
     dated = {} if occurred_at is None else {"occurred_at": occurred_at}
     stmt = (
         pg_insert(TenantLedger)

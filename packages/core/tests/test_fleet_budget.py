@@ -3209,3 +3209,160 @@ async def test_a_held_tenant_lock_never_makes_the_watch_park_a_pooled_connection
     # ~1.5 s per locked attempt on the old wait, <= ~150 ms (+ a short snapshot read)
     # on the new one: a 500 ms bound keeps a wide margin both ways.
     assert p99 < 0.5, f"the watch parked the pool's connection: p99 {p99 * 1000:.0f} ms"
+
+
+async def _times_out(sm, action) -> bool:
+    """Whether `action(session)` waits past a 1 s lock_timeout in its own transaction."""
+    from sqlalchemy.exc import DBAPIError
+
+    try:
+        async with sm() as db, db.begin():
+            await db.execute(text("SET LOCAL lock_timeout = '1s'"))
+            await action(db)
+    except DBAPIError as error:
+        if fleet.lock_timed_out(error):
+            return True
+        raise
+    return False
+
+
+async def test_a_funds_check_still_excludes_another_funds_check_and_every_ledger_insert(sm):
+    """LOCK-FUNDS-NARROW: the money fence is unchanged. Two funds checks never overlap
+    (no over-spend between a balance read and its reservation), a ledger row never
+    lands while a funds check holds, and a funds check waits for an open ledger insert."""
+    _, run = await setup(sm)
+    tenant = run.tenant_id
+
+    async def funds(db):
+        await tenant_ledger.lock_funds(db, tenant_id=tenant)
+
+    async def ledger(db):
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant,
+            delta_usd=Decimal("-0.01"),
+            reason="usage",
+            idempotency_key=f"narrow:{uuid4()}",
+        )
+
+    async with sm() as holder, holder.begin():
+        await funds(holder)
+        assert await _times_out(sm, funds)
+        assert await _times_out(sm, ledger)
+    async with sm() as inserting, inserting.begin():
+        await ledger(inserting)
+        assert await _times_out(sm, funds)
+
+
+async def test_a_funds_check_no_longer_stalls_the_tenants_unrelated_writes(sm):
+    """Bind latency (lockwatch a1d991fb): FOR UPDATE on the tenant row also blocked
+    every tenant-scoped insert through its foreign key (journal, operations, tokens,
+    runs...), so binds queued behind each funds check. Now only the ledger waits."""
+    parent, run = await setup(sm)
+
+    async def unrelated(db):
+        await fleet.create_run(
+            db,
+            tenant_id=run.tenant_id,
+            orchestrator_account_id=parent.fleet.account_id,
+            orchestrator_session_id=run.orchestrator_session_id,
+            orchestrator_binding_id=run.orchestrator_binding_id,
+            platform=run.platform,
+            channel_id=run.channel_id,
+            thread_id=run.thread_id,
+            operation_key=f"unrelated:{uuid4()}",
+            total_budget_usd=Decimal(1),
+            deadline_at=run.deadline_at,
+            max_workers=1,
+            created_by="host",
+        )
+
+    async with sm() as holder, holder.begin():
+        await tenant_ledger.lock_funds(holder, tenant_id=run.tenant_id)
+        assert not await _times_out(sm, unrelated)
+
+
+async def test_a_ledger_insert_before_a_funds_check_in_one_transaction_is_refused(sm):
+    """SHARE (insert_entry) then NO KEY UPDATE (lock_funds) in one transaction is a
+    lock upgrade two such transactions deadlock on: refused loudly. Funds first is fine."""
+    _, run = await setup(sm)
+    tenant = run.tenant_id
+    with pytest.raises(RuntimeError, match="before inserting into its ledger"):
+        async with sm() as db, db.begin():
+            await tenant_ledger.insert_entry(
+                db,
+                tenant_id=tenant,
+                delta_usd=Decimal("-0.01"),
+                reason="usage",
+                idempotency_key=f"upgrade:{uuid4()}",
+            )
+            await tenant_ledger.lock_funds(db, tenant_id=tenant)
+    async with sm() as db, db.begin():
+        await tenant_ledger.lock_funds(db, tenant_id=tenant)
+        assert await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant,
+            delta_usd=Decimal("-0.01"),
+            reason="usage",
+            idempotency_key=f"ordered:{uuid4()}",
+        )
+    # A later transaction on the same session starts clean.
+    async with sm() as db:
+        async with db.begin():
+            await tenant_ledger.insert_entry(
+                db,
+                tenant_id=tenant,
+                delta_usd=Decimal("-0.01"),
+                reason="usage",
+                idempotency_key=f"first:{uuid4()}",
+            )
+        async with db.begin():
+            await tenant_ledger.lock_funds(db, tenant_id=tenant)
+
+
+async def test_every_ledger_insert_takes_the_tenant_share_lock_first(sm):
+    """The guard: the ledger's only writer takes FOR SHARE on the tenant row before its
+    INSERT, and no other module writes the ledger (a new writer must go through it)."""
+    import pathlib
+    import re
+    import subprocess
+
+    _, run = await setup(sm)
+    statements: list[str] = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = sm.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        async with sm() as db, db.begin():
+            await tenant_ledger.insert_entry(
+                db,
+                tenant_id=run.tenant_id,
+                delta_usd=Decimal("1"),
+                reason="topup",
+                idempotency_key=f"guard:{uuid4()}",
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    share = next(i for i, s in enumerate(statements) if "FROM tenants" in s and "FOR SHARE" in s)
+    insert = next(
+        i for i, s in enumerate(statements) if s.lstrip().startswith("INSERT INTO tenant_ledger")
+    )
+    assert share < insert
+    files = subprocess.run(
+        ["git", "ls-files", "packages"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    writers = sorted(
+        name
+        for name in files
+        if name.endswith(".py")
+        and "/tests/" not in name
+        and name != "packages/core/daimon/core/stores/tenant_ledger.py"
+        and re.search(
+            r"(insert|update|delete)\(\s*TenantLedger\b|(INSERT INTO|UPDATE|DELETE FROM)\s+tenant_ledger",
+            pathlib.Path(name).read_text(),
+        )
+    )
+    assert writers == [], writers
