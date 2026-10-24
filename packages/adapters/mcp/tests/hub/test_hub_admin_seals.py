@@ -26,6 +26,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.rule_views import routine_origin
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_seal import origin_stamp
@@ -60,6 +61,13 @@ class _Hub:
         self.account_id = account_id
         self.sessions: dict[str, dict[str, Any]] = {}
         self.sent: list[str] = []
+        self.live_admin = False
+
+        async def fetch(tenant_id: uuid.UUID, guild_id: str, user_id: str) -> Membership:
+            assert (tenant_id, guild_id, user_id) == (self.tenant_id, "g1", "u1")
+            return Membership(is_member=True, is_admin=self.live_admin)
+
+        self.membership_resolver = CachedMembershipResolver(fetch)
 
     def add_session(
         self, session_id: str, *, account: uuid.UUID | None = None, **stamps: str
@@ -123,6 +131,7 @@ class _Hub:
         runtime = _runtime(build_fake_anthropic(router.dispatch), self.sessionmaker)
         runtime = replace(
             runtime,
+            membership_resolver=self.membership_resolver,
             deployment_default=DeploymentDefault(
                 agent_name="acme-project", environment_name="test-env"
             ),
@@ -168,6 +177,7 @@ async def hub(
 async def _as(hub: _Hub, role: Role) -> None:
     await set_role(hub.db, hub.account_id, role)
     await hub.db.commit()
+    hub.live_admin = role is Role.ADMIN
 
 
 async def test_an_admin_lists_and_reads_any_sealed_conversation_from_the_hub(hub: _Hub) -> None:
@@ -229,17 +239,18 @@ async def test_a_member_never_reads_a_sealed_conversation_from_the_hub(hub: _Hub
     assert theirs.get("isError") and _TOPIC not in str(theirs)
 
 
-async def test_a_demoted_admin_loses_hub_access_when_their_stored_role_changes(
+async def test_a_demoted_admin_loses_hub_read_access_without_another_platform_turn(
     hub: _Hub,
 ) -> None:
-    """The stored role decides; a platform turn records the live one."""
-    hub.add_session("ses_sealed", daimon_channel=_SEALED, daimon_thread="thr-1")
+    hub.add_session("ses_sealed", account=uuid.uuid4(), daimon_channel=_SEALED)
     await _as(hub, Role.ADMIN)
     assert _TOPIC in str(await hub.call("list_events", handle="ses_sealed"))
 
-    await _as(hub, Role.USER)
+    # Keep both the stored role and the resolver's completed cache entry admin.
+    hub.live_admin = False
     events = await hub.call("list_events", handle="ses_sealed")
     assert events.get("isError") and _TOPIC not in str(events)
+    assert "ses_sealed" not in str(await hub.call("list_my_sessions"))
 
 
 async def _map_thread(hub: _Hub, session_id: str, thread_id: str) -> None:

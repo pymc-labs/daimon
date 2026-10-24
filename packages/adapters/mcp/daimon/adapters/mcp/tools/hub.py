@@ -278,11 +278,11 @@ def register_hub_tools(
     async def _admitted(
         ctx: Context, daimon_id: str, tool_name: str
     ) -> tuple[AuthIdentity, Subject, Callable[[], Awaitable[None]]]:
-        """Admit a hub turn; returns the identity, the caller's stored rights,
+        """Admit a hub turn; returns the identity, the caller's native rights,
         and the re-check the turn runs right before its create and send.
 
-        One read per call serves both the pin exemption (server admins only)
-        and sealed-session access; the re-check reads the stored role again.
+        Discord rights use fresh membership evidence; other platforms use
+        stored roles. The re-check runs the current admission policy again.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         subject = await load_hub_subject(runtime, auth)
