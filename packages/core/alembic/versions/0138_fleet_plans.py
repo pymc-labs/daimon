@@ -50,17 +50,24 @@ def upgrade() -> None:
         ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("accepted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint(
-            "status IN ('pending', 'accepted', 'cancelled')", name="ck_fleet_plans_status"
+        sa.Column(
+            "claimed",
+            postgresql.JSONB(),
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
         ),
+        sa.Column("spent_usd", sa.Numeric(12, 4), nullable=False, server_default=sa.text("0")),
+        sa.Column("run_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.CheckConstraint(
+            "status IN ('pending', 'accepted', 'used', 'cancelled')", name="ck_fleet_plans_status"
+        ),
+        sa.CheckConstraint("spent_usd >= 0", name="ck_fleet_plans_spent"),
     )
-    op.create_index(
-        "ix_fleet_plans_thread",
-        "fleet_plans",
-        ["tenant_id", "platform", "channel_id", "thread_id"],
-    )
+    op.create_index("ix_fleet_plans_account_id", "fleet_plans", ["account_id"])
+    op.create_index("ix_fleet_plans_expires_at", "fleet_plans", ["expires_at"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_fleet_plans_thread", table_name="fleet_plans")
+    op.drop_index("ix_fleet_plans_expires_at", table_name="fleet_plans")
+    op.drop_index("ix_fleet_plans_account_id", table_name="fleet_plans")
     op.drop_table("fleet_plans")

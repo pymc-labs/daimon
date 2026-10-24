@@ -11,7 +11,7 @@ one-shot. Cheap models only (the root's own Haiku).
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -83,7 +83,7 @@ async def _spawn(bridge, caller, origin, key: str, **kwargs):
     return dict(
         await bridge.spawn(
             caller,
-            run_id=None,
+            run_id=kwargs.pop("run_id", None),
             origin_context_id=origin.id,
             operation_key=key,
             role=kwargs.pop("role", "worker"),
@@ -97,7 +97,7 @@ async def _spawn(bridge, caller, origin, key: str, **kwargs):
             deadline=None,
             max_turns=kwargs.pop("max_turns", None),
             result_contract=None,
-            reviewer_of=None,
+            reviewer_of=kwargs.pop("reviewer_of", None),
             task="Say which model you run on, in one sentence.",
             **kwargs,
         )
@@ -158,8 +158,8 @@ async def test_j10_an_accepted_plan_is_what_every_worker_gets(j10_root):
                 tenant_id=caller.tenant_id,
                 account_id=caller.account_id,
                 plan=edited,
-                caps=caps,
                 now=datetime.now(UTC),
+                ttl=timedelta(minutes=30),
             )
         async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
             assert not await accept_plan(
@@ -168,8 +168,8 @@ async def test_j10_an_accepted_plan_is_what_every_worker_gets(j10_root):
                 tenant_id=caller.tenant_id,
                 account_id=caller.account_id,
                 plan=edited,
-                caps=caps,
                 now=datetime.now(UTC),
+                ttl=timedelta(minutes=30),
             ), "accepting is one-shot: a double tap accepts one plan"
         reply = await _spawn(bridge, caller, origin, "W1", plan_id=plan_id)
         assert reply["status"] == "pending"
@@ -219,3 +219,265 @@ def test_a_plans_values_stay_inside_the_fleets_caps():
         build_plan(caps, (*workers, workers[0]))
     with pytest.raises(PlanRefused, match="isn't one of this fleet's models"):
         build_plan(caps, (PlannedWorker(role="x", task="t", model="claude-opus-5-5"),))
+
+
+async def _accepted(bridge, caller, origin, workers: int, **edits):
+    """A plan of `workers` task workers on the root's own model, accepted as edited."""
+    import uuid
+
+    made = dict(
+        await bridge.plan(
+            caller,
+            workers=[PlanWorker(role=f"w{i}", task="t") for i in range(workers)],
+            origin_context_id=origin.id,
+        )
+    )
+    plan_id = uuid.UUID(str(made["plan_id"]))
+    async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
+        plan, caps = await pending_plan(
+            session,
+            plan_id=plan_id,
+            tenant_id=caller.tenant_id,
+            account_id=caller.account_id,
+            now=datetime.now(UTC),
+        )
+        assert await accept_plan(
+            session,
+            plan_id=plan_id,
+            tenant_id=caller.tenant_id,
+            account_id=caller.account_id,
+            plan=edit_plan(plan, caps, **edits),
+            now=datetime.now(UTC),
+            ttl=timedelta(minutes=30),
+        )
+    return plan_id
+
+
+async def test_j10_an_accepted_plan_runs_its_workers_once_and_no_more(j10_root):
+    """#1546 review 1: a plan isn't reusable forever. Past its workers a new spawn is
+    refused; a retry of a started one is the same spawn."""
+    origin_cm, origin, root, ports, bridge, caller = await _fleet(j10_root, require_plan=True)
+    try:
+        plan_id = await _accepted(bridge, caller, origin, 1)
+        assert (await _spawn(bridge, caller, origin, "W1", plan_id=plan_id))["status"] == "pending"
+        again = await _spawn(bridge, caller, origin, "W1", plan_id=plan_id)
+        assert again["status"] in {"pending", "starting", "running", "succeeded"}, (
+            "a retry of the same operation is the same spawn, never refused by the plan"
+        )
+        with pytest.raises(ToolError, match="isn't accepted|workers of the accepted fleet plan"):
+            await _spawn(bridge, caller, origin, "W2", plan_id=plan_id)
+        _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert len(rows) == 1
+    finally:
+        await ports.close()
+        await origin_cm.__aexit__(None, None, None)
+
+
+async def test_j10_an_expired_or_someone_elses_plan_starts_nothing(j10_root):
+    """#1546 review 1: an accepted plan expires; one accepted by another account (or in
+    another thread) isn't this conversation's."""
+    from sqlalchemy import text
+
+    origin_cm, origin, root, ports, bridge, caller = await _fleet(j10_root, require_plan=True)
+    try:
+        expired = await _accepted(bridge, caller, origin, 1)
+        async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
+            await session.execute(
+                text(
+                    "UPDATE fleet_plans SET expires_at = now() - interval '1 minute' WHERE id = :i"
+                ),
+                {"i": expired},
+            )
+        with pytest.raises(ToolError, match="isn't accepted"):
+            await _spawn(bridge, caller, origin, "W1", plan_id=expired)
+        theirs = await _accepted(bridge, caller, origin, 1)
+        async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
+            await session.execute(
+                text("UPDATE fleet_plans SET thread_id = 'another-thread' WHERE id = :i"),
+                {"i": theirs},
+            )
+        with pytest.raises(ToolError, match="isn't accepted"):
+            await _spawn(bridge, caller, origin, "W2", plan_id=theirs)
+        _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert not rows
+    finally:
+        await ports.close()
+        await origin_cm.__aexit__(None, None, None)
+
+
+async def test_j10_two_taps_at_once_accept_one_plan(j10_root):
+    """#1546 review: a concurrent double accept accepts exactly one (a row lock)."""
+    import asyncio
+    import uuid
+
+    origin_cm, origin, root, ports, bridge, caller = await _fleet(j10_root, require_plan=True)
+    try:
+        made = dict(
+            await bridge.plan(
+                caller, workers=[PlanWorker(role="w", task="t")], origin_context_id=origin.id
+            )
+        )
+        plan_id = uuid.UUID(str(made["plan_id"]))
+        async with bridge._plan_sessions()() as session:  # pyright: ignore[reportPrivateUsage]
+            plan, _ = await pending_plan(
+                session,
+                plan_id=plan_id,
+                tenant_id=caller.tenant_id,
+                account_id=caller.account_id,
+                now=datetime.now(UTC),
+            )
+
+        async def tap() -> bool:
+            async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
+                return await accept_plan(
+                    session,
+                    plan_id=plan_id,
+                    tenant_id=caller.tenant_id,
+                    account_id=caller.account_id,
+                    plan=plan,
+                    now=datetime.now(UTC),
+                    ttl=timedelta(minutes=30),
+                )
+
+        assert sorted(await asyncio.gather(tap(), tap())) == [False, True]
+    finally:
+        await ports.close()
+        await origin_cm.__aexit__(None, None, None)
+
+
+async def test_j10_accepting_rechecks_the_stored_caps_and_workers(j10_root):
+    """#1546 review 4: the plan a caller hands to accept is checked against what was
+    stored, so it can't widen the caps or swap the workers."""
+    import uuid
+
+    origin_cm, origin, root, ports, bridge, caller = await _fleet(j10_root, require_plan=True)
+    try:
+        made = dict(
+            await bridge.plan(
+                caller, workers=[PlanWorker(role="w", task="t")], origin_context_id=origin.id
+            )
+        )
+        plan_id = uuid.UUID(str(made["plan_id"]))
+        async with bridge._plan_sessions().begin() as session:  # pyright: ignore[reportPrivateUsage]
+            plan, caps = await pending_plan(
+                session,
+                plan_id=plan_id,
+                tenant_id=caller.tenant_id,
+                account_id=caller.account_id,
+                now=datetime.now(UTC),
+            )
+            wider = plan.model_copy(update={"budget_usd": caps.budget_usd * 10})
+            with pytest.raises(PlanRefused, match="more than this fleet's"):
+                await accept_plan(
+                    session,
+                    plan_id=plan_id,
+                    tenant_id=caller.tenant_id,
+                    account_id=caller.account_id,
+                    plan=wider,
+                    now=datetime.now(UTC),
+                    ttl=timedelta(minutes=30),
+                )
+            swapped = plan.model_copy(
+                update={
+                    "workers": (
+                        *plan.workers,
+                        PlannedWorker(role="x", task="t", model=plan.workers[0].model),
+                    )
+                }
+            )
+            with pytest.raises(PlanRefused, match="workers are fixed"):
+                await accept_plan(
+                    session,
+                    plan_id=plan_id,
+                    tenant_id=caller.tenant_id,
+                    account_id=caller.account_id,
+                    plan=swapped,
+                    now=datetime.now(UTC),
+                    ttl=timedelta(minutes=30),
+                )
+    finally:
+        await ports.close()
+        await origin_cm.__aexit__(None, None, None)
+
+
+async def test_j10_a_clone_or_a_reviewer_is_checked_against_the_plan(j10_root):
+    """#1546 review 2 and 5: a clone under a plan names its model; a reviewer spends from
+    its run's plan (and a run started without one can't be reviewed under one)."""
+    import uuid
+
+    from mux.contracts.ids import ResourceRef
+
+    origin_cm, origin, root, ports, bridge, caller = await _fleet(j10_root, require_plan=True)
+    try:
+        plan_id = await _accepted(bridge, caller, origin, 1)
+        clone = ResourceRef.model_validate(
+            {
+                "tenant_id": str(caller.tenant_id),
+                "provider": "anthropic",
+                "kind": "agent",
+                "id": "some-agent",
+                "account_id": str(caller.account_id),
+                "account_scope_id": "default",
+            }
+        )
+        with pytest.raises(ToolError, match="names its model"):
+            await bridge.spawn(
+                caller,
+                run_id=None,
+                origin_context_id=origin.id,
+                operation_key="C1",
+                role="clone",
+                backend=None,
+                agent=None,
+                clone=clone,
+                clone_revision=None,
+                overrides=None,
+                session=None,
+                budget_usd=None,
+                deadline=None,
+                max_turns=None,
+                result_contract=None,
+                reviewer_of=None,
+                plan_id=plan_id,
+            )
+        with pytest.raises(ToolError, match="wasn't started under an accepted plan"):
+            await _spawn(
+                bridge,
+                caller,
+                origin,
+                "R1",
+                # This turn's run, started without a plan.
+                reviewer_of=uuid.uuid4(),
+                budget_usd=Decimal("0.01"),
+            )
+    finally:
+        await ports.close()
+        await origin_cm.__aexit__(None, None, None)
+
+
+async def test_with_plans_off_the_tools_are_unchanged_and_routines_never_need_one():
+    """#1546 review 3 and 7: with plans off there's no fleet_plan tool and no plan_id
+    on fleet_spawn. With them on, only a person's chat turn needs a plan: agent keys and
+    the hub carry no chat credential, and routine turns keep no fleet root at all."""
+    from daimon.adapters.mcp.tools.fleet import register_fleet_tools
+    from fastmcp import FastMCP
+
+    for on in (False, True):
+        base = runtime()
+        settings = base.settings.model_copy(update={"fleet": FleetSettings(require_plan=on)})
+        mcp = FastMCP("guard")
+        register_fleet_tools(mcp, replace(base, settings=settings), enabled=True)
+        names = {tool.name for tool in await mcp.list_tools()}
+        spawn = await mcp.get_tool("fleet_spawn")
+        assert ("fleet_plan" in names) is on
+        assert ("plan_id" in (spawn.parameters.get("properties") or {})) is on
+        bridge = HostFleetToolService(
+            FleetOrchestrator(None),  # type: ignore[arg-type]
+            runtime=replace(base, settings=settings),
+        )
+        headless = replace(AUTH, chat_agent_id=None)
+        assert bridge._plan_required(headless) is False, "no chat credential: never a plan"  # pyright: ignore[reportPrivateUsage]
+        chat = replace(AUTH, chat_agent_id=AUTH.account_id, agent_id=None)
+        assert bridge._plan_required(chat) is on  # pyright: ignore[reportPrivateUsage]
+        key = replace(chat, agent_id=AUTH.account_id)
+        assert bridge._plan_required(key) is False, "an agent key never needs a plan"  # pyright: ignore[reportPrivateUsage]

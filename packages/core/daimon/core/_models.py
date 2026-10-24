@@ -2221,10 +2221,13 @@ class FleetPlan(Base):
 
     __tablename__ = "fleet_plans"
     __table_args__ = (
-        Index("ix_fleet_plans_thread", "tenant_id", "platform", "channel_id", "thread_id"),
+        # The purge cascade and the expiry sweep; reads are by id.
+        Index("ix_fleet_plans_account_id", "account_id"),
+        Index("ix_fleet_plans_expires_at", "expires_at"),
         CheckConstraint(
-            "status IN ('pending', 'accepted', 'cancelled')", name="ck_fleet_plans_status"
+            "status IN ('pending', 'accepted', 'used', 'cancelled')", name="ck_fleet_plans_status"
         ),
+        CheckConstraint("spent_usd >= 0", name="ck_fleet_plans_spent"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -2246,6 +2249,16 @@ class FleetPlan(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Spawns made under it, by operation key ({key: {"budget_usd": str, "worker": bool}}):
+    # a retry of one is the same spawn, never a second one.
+    claimed: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    spent_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, server_default=text("0")
+    )
+    # The run its first spawn started: a reviewer of that run spends from this plan.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
 
 class SlackEventDedup(Base):

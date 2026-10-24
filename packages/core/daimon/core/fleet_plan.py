@@ -70,7 +70,8 @@ class Plan(BaseModel):
     result_contract: str | None = Field(default=None, max_length=2000)
 
 
-def _within(plan: Plan, caps: PlanCaps) -> Plan:
+def check_within(plan: Plan, caps: PlanCaps) -> Plan:
+    """`plan` if it stays inside `caps`; else PlanRefused naming the cap it passes."""
     if len(plan.workers) > caps.max_workers:
         raise PlanRefused(
             f"This fleet can run at most {caps.max_workers} workers; the plan has "
@@ -110,7 +111,7 @@ def build_plan(
         raise PlanRefused(
             f"${caps.budget_usd} can't be shared among {len(workers)} workers; plan fewer."
         )
-    return _within(
+    return check_within(
         Plan(
             workers=workers,
             budget_usd=share,
@@ -147,7 +148,7 @@ def edit_plan(
         update["max_turns"] = max_turns
     if result_contract is not None:
         update["result_contract"] = result_contract.strip() or None
-    return _within(plan.model_copy(update=update), caps)
+    return check_within(plan.model_copy(update=update), caps)
 
 
 def plan_digest(plan: Plan) -> str:
