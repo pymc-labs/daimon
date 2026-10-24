@@ -209,7 +209,7 @@ async def poll_loop(sessions: async_sessionmaker[AsyncSession], settings: Sideca
                     if settings.executor_secret
                     else None,
                 )
-            except (DBAPIError, ClientError, TimeoutError) as exc:
+            except (DBAPIError, ClientError, OSError) as exc:
                 log.warning("sidecar.poll_failed", error_type=type(exc).__name__)
             await asyncio.sleep(settings.poll_interval_s)
 

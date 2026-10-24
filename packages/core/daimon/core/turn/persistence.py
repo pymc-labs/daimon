@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+_CLEANUP_TIMEOUT_S = 10.0
+
 # Kinds that never pass the root budget check, and so never count an input.
 _UNCOUNTED_KINDS = frozenset({"cancel", "archive", "recovery-interrupt"})
 
@@ -337,7 +339,8 @@ class TurnPersistence:
                     await self.store.release_lease(self._fence())
                 self._lease = None
 
-            await complete(cleanup())
+            # Bound the wait without cancelling grant revocation or lease release.
+            await complete(asyncio.wait_for(asyncio.shield(cleanup()), timeout=_CLEANUP_TIMEOUT_S))
 
     async def mutate[M: BaseModel](
         self,

@@ -1210,13 +1210,12 @@ async def run_prepared_turn_impl(
                 finally:
                     # Clear only this origin. If its lease was lost and a successor
                     # already bound the grant, never revoke the successor's authority.
-                    async def unbind(bound_origin_id: uuid.UUID) -> None:
+                    async def unbind() -> None:
+                        assert origin_id is not None
                         async with deps.sessionmaker.begin() as db:
-                            await bind_origin_session(
-                                db, origin_id=bound_origin_id, chat_session_id=None
-                            )
+                            await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
 
-                    await complete(unbind(origin_id))
+                    await complete(unbind())
 
         # Preparation/queueing cannot borrow an ambient parent execution.
         with execution_origin(None):

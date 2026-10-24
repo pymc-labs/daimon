@@ -1170,3 +1170,41 @@ async def test_repeated_cancellation_finishes_cleanup(
         finish.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_hung_pump_cleanup_has_a_bounded_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._CLEANUP_TIMEOUT_S", 0.01)
+    store = MemoryStateStore()
+    await store.put_binding(BINDING, expected_generation=0)
+    entered, finish, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    release = store.release_lease
+
+    async def release_lease(lease: Lease) -> None:
+        await release(lease)
+        released.set()
+
+    monkeypatch.setattr(store, "release_lease", release_lease)
+
+    async def pump() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await finish.wait()
+
+    task = asyncio.create_task(context(store).run(pump))
+    try:
+        async with asyncio.timeout(1):
+            await entered.wait()
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done
+        with pytest.raises(TimeoutError):
+            task.result()
+    finally:
+        finish.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        async with asyncio.timeout(1):
+            await released.wait()
+    assert next(iter(store.data.leases.values())).active is None
