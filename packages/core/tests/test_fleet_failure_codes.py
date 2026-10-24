@@ -47,6 +47,19 @@ def test_any_other_exception_is_a_setup_error_on_our_side(error, phase):
 
 
 @pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
+@pytest.mark.parametrize("busy", ["policy", "fence"])
+def test_a_busy_policy_fence_reads_as_try_again_without_a_reference(phase, busy):
+    # J10 6930b189: a worker that outwaits a policy writer was "a setup error".
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.stores.access_policy import PolicyBusyError
+
+    error = PolicyBusyError() if busy == "policy" else FenceUnavailable(0.0)
+    code = worker_failure_code(error, phase)
+    assert code == "preparation_deadline_exceeded"
+    assert worker_error_text(code, ref="6930b189") == ("it took too long to start; try again")
+
+
+@pytest.mark.parametrize("phase", ["preparation_refused", "dispatch_refused"])
 def test_a_raw_provider_or_transport_error_is_the_providers_not_ours(phase):
     import anthropic
     import httpx
