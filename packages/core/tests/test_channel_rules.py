@@ -1087,3 +1087,172 @@ async def test_an_agent_rule_naming_an_own_readers_channel_names_it_alone(
     with pytest.raises(ChannelRuleRefused) as home:
         await _agent_rule(client, db_session_factory, tenant.id, "local", None)
     assert home.value.reason == "agent_has_home", "released only through the channel's readers"
+
+
+def _on_gpt(monkeypatch: pytest.MonkeyPatch, *ma_agent_ids: str) -> None:
+    """These agents' backend revisions name OpenAI (gpt-6-luna)."""
+    from types import SimpleNamespace
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+
+    real = agent_backends.current
+
+    async def current(session: Any, tenant_id: uuid.UUID, agent_id: uuid.UUID, **kw: Any) -> Any:
+        if any(
+            agent_id == derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=i) for i in ma_agent_ids
+        ):
+            return SimpleNamespace(backend="openai", model="gpt-6-luna")
+        return await real(session, tenant_id, agent_id, **kw)
+
+    monkeypatch.setattr(agent_backends, "current", current)
+
+
+async def test_a_panel_copy_of_an_agent_on_gpt_is_refused_before_anything_is_made(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sweep item 3: a setup panel or the CLI can't start a copy on another provider, so
+    it never makes one that would answer (and bill) on Claude."""
+    tenant = await make_tenant(db_session)
+    client, state = _client(tenant.id, ("shared", False))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    _on_gpt(monkeypatch, "agent_0")
+
+    with pytest.raises(DaimonError, match="runs on OpenAI") as refused:
+        await _set_rule(client, db_session_factory, tenant.id, "c1", copy=True)
+    assert "Nothing was changed" in str(refused.value)
+    assert list(state.agents) == ["agent_0"], "no copy was made"
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.channel_rules == {}
+
+
+async def test_a_chat_copy_of_an_agent_on_gpt_is_started_there_before_the_channel_names_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    client, _ = _client(tenant.id, ("shared", False))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    _on_gpt(monkeypatch, "agent_0")
+    started: list[tuple[str, str, str, str]] = []
+
+    async def start_copy(source: str, source_id: str, copy: str, copy_id: str) -> None:
+        started.append((source, source_id, copy, copy_id))
+
+    change = await _set_rule(
+        client,
+        db_session_factory,
+        tenant.id,
+        "c1",
+        channel_label="Team Alpha",
+        copy=True,
+        start_copy=start_copy,
+    )
+    # The source by the id core already holds, never looked up again by name.
+    assert started and started[0][:3] == ("shared", "agent_0", change.agent_name)
+
+
+async def test_a_chat_copy_that_cant_start_on_its_sources_provider_is_archived(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    archived: list[str] = []
+
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    client = build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    _on_gpt(monkeypatch, "agent_0")
+
+    async def refused(source: str, source_id: str, copy: str, copy_id: str) -> None:
+        raise DaimonError("OpenAI isn't turned on here. Nothing was created.")
+
+    with pytest.raises(DaimonError, match="isn't turned on"):
+        await _set_rule(client, db_session_factory, tenant.id, "c1", copy=True, start_copy=refused)
+    assert len(archived) == 1, "the copy that couldn't start there is archived"
+    scope = await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"))
+    assert scope is not None and scope.agent_name == "shared", "the channel keeps its agent"
+
+
+@pytest.mark.parametrize("failure", ("archive_fails", "cancelled"))
+async def test_a_chat_copy_whose_start_and_archive_go_wrong_is_never_silent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """#1510 review 3: the archive after a failed start is shielded from cancellation
+    (an anyio scope re-cancels every await), and one that fails too says the copy may
+    still exist on Claude, never that nothing was made."""
+    import anyio
+
+    tenant = await make_tenant(db_session)
+    state = FakeMAState()
+    shared = ma_agent(id="agent_0", name="shared", tenant_id=tenant.id)
+    state.agents[shared.id] = shared.model_dump(mode="json")
+    archived: list[str] = []
+
+    def archive(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST" or not request.url.path.endswith("/archive"):
+            raise NotHandled
+        if failure == "archive_fails":
+            return httpx.Response(500, json={"type": "error", "error": {"type": "api_error"}})
+        agent_id = request.url.path.split("/")[-2]
+        archived.append(agent_id)
+        return httpx.Response(200, json=state.agents.pop(agent_id))
+
+    client = build_fake_anthropic(combine_handlers(archive, make_fake_ma_handler(state)))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+    _on_gpt(monkeypatch, "agent_0")
+    real_archive = channel_rules.archive_agent
+
+    async def archive_over_the_network(*args: Any, **kwargs: Any) -> Any:
+        await anyio.sleep(0.01)  # a real archive yields, so a cancelled scope reaches it
+        return await real_archive(*args, **kwargs)
+
+    monkeypatch.setattr(channel_rules, "archive_agent", archive_over_the_network)
+    scope = anyio.CancelScope()
+
+    async def start_copy(source: str, source_id: str, copy: str, copy_id: str) -> None:
+        if failure == "cancelled":
+            scope.cancel()
+            await anyio.sleep(1)
+        raise DaimonError("OpenAI isn't turned on here. Nothing was created.")
+
+    if failure == "cancelled":
+        with scope:
+            await _set_rule(
+                client, db_session_factory, tenant.id, "c1", copy=True, start_copy=start_copy
+            )
+        assert scope.cancelled_caught
+        assert len(archived) == 1, "the removal finished despite the cancellation"
+    else:
+        with pytest.raises(DaimonError, match="may still exist on Claude"):
+            await _set_rule(
+                client, db_session_factory, tenant.id, "c1", copy=True, start_copy=start_copy
+            )
+    scope_row = await get_scope(
+        db_session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1")
+    )
+    assert scope_row is not None and scope_row.agent_name == "shared", "the channel keeps its agent"

@@ -135,6 +135,32 @@ async def _set_channel_rule_impl(
         raise ToolError("Pass readers, writers or release_agents. Nothing was changed.")
     label = await _channel_label(runtime, auth, channel) if copy_from is not None else None
     public_url = runtime.settings.mcp.public_url
+
+    async def start_copy(
+        source_name: str, source_ma_agent_id: str, copy_name: str, copy_ma_agent_id: str
+    ) -> None:
+        """A channel's copy of an agent on GPT or Gemini starts there too (sweep item 3).
+
+        Called by core right after the fork, inside its archive-on-failure: any error
+        here (a failed read included) archives the copy before the channel names it.
+        """
+        from daimon.adapters.mcp.tools.agents import (
+            source_backend_for_copy,
+            start_copy_on_source_backend,
+        )
+
+        carry = await source_backend_for_copy(
+            runtime, auth, source_name=source_name, source_ma_agent_id=source_ma_agent_id
+        )
+        await start_copy_on_source_backend(
+            runtime,
+            auth,
+            carry=carry,
+            copy_name=copy_name,
+            copy_ma_agent_id=copy_ma_agent_id,
+            archive_on_failure=False,
+        )
+
     try:
         change = await set_channel_rule(
             runtime.client,
@@ -152,6 +178,7 @@ async def _set_channel_rule_impl(
             channel_label=label,
             public_url=str(public_url) if public_url is not None else None,
             release_agents=release_agents,
+            start_copy=start_copy,
         )
     except AccessPolicyUnreadable as exc:
         raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
