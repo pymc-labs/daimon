@@ -6138,6 +6138,7 @@
                   }),
                 ]),
                 'default': None,
+                'description': 'Verbatim quote from the enquiry containing the attribution value.',
               }),
               'attribution_value': dict({
                 'anyOf': list([
@@ -6149,6 +6150,7 @@
                   }),
                 ]),
                 'default': None,
+                'description': 'Exact HubSpot option value of the configured attribution property.',
               }),
               'classification': dict({
                 '$ref': '#/$defs/LeadClassification',

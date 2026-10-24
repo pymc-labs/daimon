@@ -171,12 +171,6 @@ def verify_lead_evidence(evidence: LeadEvidence) -> LeadEvidence:
             reason = "Company name is absent from the company evidence"
         elif email.rsplit("@", 1)[-1] != domain:
             reason = "Enquirer and company domains differ; human identity review required"
-        elif evidence.attribution_value and (
-            not evidence.attribution_evidence
-            or evidence.attribution_evidence not in source
-            or evidence.attribution_value.casefold() not in evidence.attribution_evidence.casefold()
-        ):
-            reason = "Attribution requires an explicit source quote supporting the value"
     return evidence.model_copy(
         update={"identity_verified": reason is None, "verification_notes": reason}
     )
@@ -314,8 +308,14 @@ class LeadDraft(BaseModel):
     company_domain: str | None = None
     enquirer_evidence: str | None = None
     company_evidence: str | None = None
-    attribution_value: str | None = None
-    attribution_evidence: str | None = None
+    attribution_value: str | None = Field(
+        default=None,
+        description="Exact HubSpot option value of the configured attribution property.",
+    )
+    attribution_evidence: str | None = Field(
+        default=None,
+        description="Verbatim quote from the enquiry containing the attribution value.",
+    )
 
 
 class LeadEffectState(BaseModel):

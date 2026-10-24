@@ -132,7 +132,13 @@ class IntakeService:
                 }
             ),
         )
-        if not config.attribution_property:
+        if (
+            not config.attribution_property
+            or not evidence.attribution_evidence
+            or evidence.attribution_evidence not in evidence.original_text
+            or (evidence.attribution_value or "").casefold()
+            not in evidence.attribution_evidence.casefold()
+        ):
             evidence = evidence.model_copy(
                 update={"attribution_value": None, "attribution_evidence": None}
             )

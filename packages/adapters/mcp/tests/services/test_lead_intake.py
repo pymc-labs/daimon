@@ -418,7 +418,17 @@ async def test_approved_crm_selection_cannot_be_replaced_by_recovery(
 
 
 @pytest.mark.parametrize(
-    "case", ["valid", "invalid", "hidden", "missing_quote", "unsupported", "disabled"]
+    "case",
+    [
+        "valid",
+        "invalid",
+        "hidden",
+        "missing_quote",
+        "unsupported",
+        "non_verbatim",
+        "disabled",
+        "identity_review",
+    ],
 )
 async def test_deal_preserves_only_source_supported_allowed_attribution(
     db_nullpool_engine: AsyncEngine, db_clean: None, case: str
@@ -453,23 +463,52 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
             company_name="Synthetic",
             company_domain="synthetic.example",
             enquirer_evidence="From: Ada <ada@synthetic.example>",
-            company_evidence="Ada, Synthetic synthetic.example",
+            company_evidence=(
+                "invented company quote"
+                if case == "identity_review"
+                else "Ada, Synthetic synthetic.example"
+            ),
             attribution_value="demand" if case == "invalid" else "forecasting",
             attribution_evidence=(
                 None
                 if case in {"missing_quote", "disabled"}
                 else "Ada, Synthetic synthetic.example"
-                if case == "unsupported"
+                if case in {"unsupported", "identity_review"}
+                else "I heard forecasting elsewhere"
+                if case == "non_verbatim"
                 else "Please scope a demand forecasting project."
             ),
         )
         result = await intake.submit(proposal, "7")
-        if case in {"valid", "disabled"}:
+        assert result.submission is not None
+        if case == "identity_review":
+            assert result.status == "review"
+            assert not result.submission.evidence.identity_verified
+            assert result.submission.evidence.verification_notes == (
+                "Company identity needs a verbatim source quote"
+            )
+            replay.objects["companies"].append({"id": "901", "properties": {}})
+            replay.objects["contacts"].append({"id": "902", "properties": {}})
+            result = await intake.resolve(
+                result.id,
+                IntakeResolution(
+                    company_id="901",
+                    contact_id="902",
+                    evidence="Verified company 901 and contact 902 by hand.",
+                ),
+                "7",
+            )
+        else:
+            assert result.submission.evidence.identity_verified
+        if case not in {"invalid", "hidden"}:
             assert result.status == "completed", result.error_code
             properties = replay.objects["deals"][0]["properties"]
             if case == "valid":
                 assert properties["how_they_heard_about_pymc_labs"] == "forecasting"
             else:
+                assert result.submission is not None
+                assert result.submission.evidence.attribution_value is None
+                assert result.submission.evidence.attribution_evidence is None
                 assert "how_they_heard_about_pymc_labs" not in properties
             assert properties["dealtype"] == "newbusiness"
             assert properties["channel"] == "Cold in-mail"
@@ -477,24 +516,18 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
             assert result.status == "review", result.error_code
             assert await store.effect(result.id, "deal") is None
             assert replay.objects["deals"] == []
-            if case in {"missing_quote", "unsupported"}:
-                assert result.submission is not None
-                assert result.submission.evidence.verification_notes == (
-                    "Attribution requires an explicit source quote supporting the value"
-                )
-            else:
-                assert result.progress.review_reason == (
-                    "Attribution is not a valid HubSpot option; review the explicit evidence"
-                )
-                replay.objects["deals"].append({"id": "900", "properties": {}})
-                resolved = await intake.resolve(
-                    result.id,
-                    IntakeResolution(deal_id="900", evidence="Verified existing deal 900 by hand."),
-                    "7",
-                )
-                assert resolved.status == "completed", resolved.error_code
-                assert resolved.progress.deal_id == "900"
-                assert len(replay.objects["deals"]) == 1
+            assert result.progress.review_reason == (
+                "Attribution is not a valid HubSpot option; review the explicit evidence"
+            )
+            replay.objects["deals"].append({"id": "900", "properties": {}})
+            resolved = await intake.resolve(
+                result.id,
+                IntakeResolution(deal_id="900", evidence="Verified existing deal 900 by hand."),
+                "7",
+            )
+            assert resolved.status == "completed", resolved.error_code
+            assert resolved.progress.deal_id == "900"
+            assert len(replay.objects["deals"]) == 1
 
 
 @pytest.mark.parametrize("case", ["company_domain", "company_name", "orphan", "opportunity"])
