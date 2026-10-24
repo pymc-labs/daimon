@@ -965,6 +965,16 @@ def backend_switch_callbacks(
         return turn_agent
 
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
+        try:
+            return await _prepared(prompt)
+        except CardRefusal:
+            raise
+        except ValueError as exc:
+            # Every refusal above is worded for the person: the model relays it
+            # instead of "the approval card couldn't be shown" (latent M30).
+            raise CardRefusal(str(exc)) from exc
+
+    async def _prepared(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
         if prompt.configuration is not None:
             action, details = await verified_configuration(
                 prompt, prompt.requester_platform_user_id
