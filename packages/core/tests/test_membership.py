@@ -94,10 +94,13 @@ async def test_rest_reads_member_roles_and_live_permissions(permission: str) -> 
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bot test-only"
         if request.url.path.endswith("members/2"):
-            return httpx.Response(200, json={"roles": ["1", "123"]})
+            return httpx.Response(200, json={"user": {"id": "2"}, "roles": ["1", "123"]})
         if request.url.path.endswith("/roles"):
-            return httpx.Response(200, json=[{"id": "123", "permissions": permission}])
-        return httpx.Response(200, json={"owner_id": "3"})
+            return httpx.Response(
+                200,
+                json=[{"id": "1", "permissions": "0"}, {"id": "123", "permissions": permission}],
+            )
+        return httpx.Response(200, json={"id": "1", "owner_id": "3"})
 
     resolver = DiscordRestMembershipResolver("test-only", transport=httpx.MockTransport(handle))
     facts = await resolver.resolve(uuid4(), "1", "2")
@@ -136,10 +139,12 @@ async def test_rest_rate_limit_waits_and_expired_timeout_fails_closed(
             attempts[0] += 1
             if attempts[0] == 1:
                 return httpx.Response(429, json={"retry_after": 0.25})
-            return httpx.Response(200, json={"roles": ["123"]})
+            return httpx.Response(200, json={"user": {"id": "2"}, "roles": ["123"]})
         if request.url.path.endswith("/roles"):
-            return httpx.Response(200, json=[{"id": "123", "permissions": "0"}])
-        return httpx.Response(200, json={"owner_id": "3"})
+            return httpx.Response(
+                200, json=[{"id": "1", "permissions": "0"}, {"id": "123", "permissions": "0"}]
+            )
+        return httpx.Response(200, json={"id": "1", "owner_id": "3"})
 
     resolver = DiscordRestMembershipResolver(
         "test", transport=httpx.MockTransport(handle), clock=lambda: now[0]

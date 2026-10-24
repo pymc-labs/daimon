@@ -269,9 +269,7 @@ async def test_an_unbound_agent_refuses_a_members_form(
     await view._on_add_skill(interaction)
 
     interaction.response.send_modal.assert_not_awaited()
-    assert (
-        "needs someone with Manage Server" in interaction.response.send_message.await_args.args[0]
-    )
+    assert "needs a Daimon admin" in interaction.response.send_message.await_args.args[0]
 
 
 async def test_a_built_in_agent_is_refused_with_the_fork_route(
@@ -296,7 +294,7 @@ async def test_a_server_default_needs_a_server_admin(
     member = _interaction()
     await _details_view(world, agent)._on_add_skill(member)
     member.response.send_modal.assert_not_awaited()
-    assert "needs someone with Manage Server" in member.response.send_message.await_args.args[0]
+    assert "needs a Daimon admin" in member.response.send_message.await_args.args[0]
 
     admin = _interaction(admin=True)
     await _details_view(world, agent)._on_add_skill(admin)

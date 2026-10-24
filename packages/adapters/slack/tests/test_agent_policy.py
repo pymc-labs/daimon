@@ -58,6 +58,8 @@ def _users_info_payload(*, is_admin: bool) -> dict[str, Any]:
     return {
         "ok": True,
         "user": {
+            "deleted": False,
+            "is_bot": False,
             "id": _USER_ID,
             "name": "admin" if is_admin else "member",
             "team_id": _TEAM_ID,
@@ -282,7 +284,7 @@ async def test_refuse_unless_allowed_refuses_when_the_agent_id_is_gone(
         refused = await refuse_unless_allowed(
             runtime,
             AsyncWebClient(token="xoxb-test"),
-            operation="repo_bind",
+            operation="agent_spec_edit",
             tenant_id=tenant.id,
             team_id=_TEAM_ID,
             agent_id=uuid.uuid4(),
@@ -373,8 +375,8 @@ async def test_credential_gate_reachable_limb_uses_decide_operation(
         )
 
         assert refused is True, "a member may not re-point a shared agent's working repo"
-        assert _ephemeral_texts(mock) == [SHARED_AGENT_MESSAGE], (
-            "the chat gate and the panel gate say the same thing"
+        assert _ephemeral_texts(mock) == ["Only a platform admin can bind GitHub repos."], (
+            "the GitHub adapter refuses before target lookup"
         )
 
 

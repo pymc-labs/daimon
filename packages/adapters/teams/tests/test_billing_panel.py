@@ -114,9 +114,9 @@ def _click(op: str, *, user: str = AAD_OBJECT_ID, **extra: str) -> dict[str, obj
 
 
 async def test_only_the_admin_view_offers_top_ups(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         member = await _command(service, teams_api_fake, OTHER_AAD_OBJECT_ID)
         admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
 
@@ -126,11 +126,11 @@ async def test_only_the_admin_view_offers_top_ups(
 
 
 async def test_top_up_clicks_recheck_admin_and_the_amount(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     posts: list[httpx.Request] = []
     mcp = httpx.MockTransport(lambda r: posts.append(r) or httpx.Response(500))
-    async with _running(db_session_factory, teams_api_fake, mcp) as service:
+    async with _running(service_session_factory, teams_api_fake, mcp) as service:
         member = await post_activity(
             service, _click("topup", user=OTHER_AAD_OBJECT_ID, amount="25")
         )
@@ -146,7 +146,7 @@ async def test_top_up_clicks_recheck_admin_and_the_amount(
 
 
 async def test_an_admin_top_up_links_to_checkout(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     posts: list[httpx.Request] = []
 
@@ -154,7 +154,9 @@ async def test_an_admin_top_up_links_to_checkout(
         posts.append(request)
         return httpx.Response(200, json={"url": CHECKOUT_URL})
 
-    async with _running(db_session_factory, teams_api_fake, httpx.MockTransport(checkout)) as svc:
+    async with _running(
+        service_session_factory, teams_api_fake, httpx.MockTransport(checkout)
+    ) as svc:
         response = await post_activity(svc, _click("topup", amount="25"))
 
     [post] = posts
@@ -165,9 +167,9 @@ async def test_an_admin_top_up_links_to_checkout(
 
 
 async def test_a_top_up_without_payments_says_so(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         response = await post_activity(service, _click("topup", amount="10"))
 
     assert json.dumps(NOT_CONFIGURED)[1:-1] in json.dumps(response), (
@@ -192,10 +194,10 @@ async def _promo(
 
 
 async def test_an_admin_redeems_a_promo_code_from_the_card(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    await _promo(db_session_factory, "SPRING-2026")
-    async with _running(db_session_factory, teams_api_fake) as service:
+    await _promo(service_session_factory, "SPRING-2026")
+    async with _running(service_session_factory, teams_api_fake) as service:
         member = await _command(service, teams_api_fake, OTHER_AAD_OBJECT_ID)
         admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
         forwarded = await post_activity(
@@ -212,25 +214,27 @@ async def test_an_admin_redeems_a_promo_code_from_the_card(
     assert "Added **$10.00** of credit" in card and "Top spenders" in card
 
 
-async def test_a_member_redeems_a_channel_code_into_the_channel_they_typed_in(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+async def test_a_platform_admin_redeems_a_channel_code_into_the_channel_they_typed_in(
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     """A channel code raises the budget of the channel `billing` was typed in, once per person."""
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None
         await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
-    await _promo(db_session_factory, "TEAM-ROOM-2026", channel_cap_usd=Decimal("20"))
-    member = OTHER_AAD_OBJECT_ID
-    async with _running(db_session_factory, teams_api_fake) as service:
+    await _promo(service_session_factory, "TEAM-ROOM-2026", channel_cap_usd=Decimal("20"))
+    member = AAD_OBJECT_ID
+    async with _running(service_session_factory, teams_api_fake) as service:
         await post_activity(service, make_channel_activity(text="billing", aad_object_id=member))
         async with asyncio.timeout(10):
             while not (chat := teams_api_fake.private_requests):
                 await asyncio.sleep(0.01)
         card = json.dumps(chat[0].body, ensure_ascii=False)
         found = re.search(r'"place": "([^"]+)"', card)
-        assert found is not None and '"op": "redeem"' in card, "a member is offered redemption"
+        assert found is not None and '"op": "redeem"' in card, (
+            "a platform admin is offered redemption"
+        )
         redeemed = await post_activity(
             service, _click("redeem", user=member, code="team-room-2026", place=found[1])
         )
@@ -243,14 +247,14 @@ async def test_a_member_redeems_a_channel_code_into_the_channel_they_typed_in(
     assert "Added **$10.00** to this channel's budget" in text and "**$15.00**" in text
     assert again["value"] == describe_refusal("already_redeemed_in_channel")
     assert in_chat["value"] == describe_refusal("needs_channel"), "no channel in a personal chat"
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         budget = await budget_store.get_channel_budget(
             session, tenant_id=tenant_id, platform="teams", channel_id=CHANNEL_ID
         )
         balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
     assert budget is not None and budget.limit_usd == Decimal("15"), "the limit rose by $10"
     assert balance >= Decimal("10"), "the credit is in the ledger"
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         events = await list_events(session, tenant_id=tenant_id)
     assert [(e.outcome, e.reason, e.target_channel_id) for e in events] == [
         ("allowed", "completed", CHANNEL_ID),
@@ -261,7 +265,7 @@ async def test_a_member_redeems_a_channel_code_into_the_channel_they_typed_in(
 
 
 async def test_a_redeem_that_fails_or_is_empty_is_audited(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    service_session_factory: async_sessionmaker[AsyncSession],
     teams_api_fake: TeamsApiFake,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -270,7 +274,7 @@ async def test_a_redeem_that_fails_or_is_empty_is_audited(
     async def lost(*_args: object, **_kwargs: object) -> None:
         raise OperationalError("SELECT 1", {}, ConnectionError("connection lost"))
 
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         await _command(service, teams_api_fake, AAD_OBJECT_ID)
         empty = await post_activity(service, _click("redeem", code=" "))
         monkeypatch.setattr(billing_panel, "redeem_promo_code", lost)
@@ -278,7 +282,7 @@ async def test_a_redeem_that_fails_or_is_empty_is_audited(
 
     assert empty["value"] == ENTER_CODE and isinstance(failed["value"], str)
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         events = await list_events(session, tenant_id=tenant_id)
     assert [(e.outcome, e.reason) for e in events] == [
         ("denied", "empty_code"),
@@ -360,11 +364,11 @@ TEAM_B = "19:team-b@thread.tacv2"
 
 
 async def test_the_admin_card_names_top_spenders_and_channels(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     gone, never = str(uuid.UUID(int=7)), str(uuid.UUID(int=8))
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         await record_teams_installation(
             session, tenant_id=tenant_id, team_id=TEAM_A, group_id="g", name="A"
         )
@@ -390,7 +394,7 @@ async def test_the_admin_card_names_top_spenders_and_channels(
     teams_api_fake.absent.update({gone, never})
     teams_api_fake.channels["19:research@thread.tacv2"] = "Research"
 
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
         await platform_names.settle()
 
@@ -410,7 +414,7 @@ async def test_the_admin_card_names_top_spenders_and_channels(
     assert looked_up == [f"{TEAM_A}/members/{OTHER_AAD_OBJECT_ID}", f"{TEAM_A}/members/{gone}"], (
         "each shown spender is looked up once, on the installed team's roster"
     )
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         stored = await get_user_names(
             session, tenant_id=tenant_id, platform="teams", user_ids=[OTHER_AAD_OBJECT_ID]
         )
@@ -422,14 +426,14 @@ async def test_the_admin_card_names_top_spenders_and_channels(
 
 
 async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its_typer(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None
         await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         await post_activity(service, make_channel_activity(text="billing"))
         async with asyncio.timeout(10):
             while not (chat := teams_api_fake.private_requests):
@@ -454,7 +458,7 @@ async def test_billing_typed_in_a_channel_shows_its_budget_on_every_click_of_its
 
 
 async def test_one_persons_billing_commands_never_drop_anothers_channel(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    service_session_factory: async_sessionmaker[AsyncSession],
     teams_api_fake: TeamsApiFake,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -464,7 +468,7 @@ async def test_one_persons_billing_commands_never_drop_anothers_channel(
     """
     monkeypatch.setattr(billing_panel, "_MAX_PLACES", 1)
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None
         await make_channel_budget(session, tenant=tenant, platform="teams", channel_id=CHANNEL_ID)
@@ -473,7 +477,7 @@ async def test_one_persons_billing_commands_never_drop_anothers_channel(
     def direct() -> list[Any]:
         return teams_api_fake.private_requests
 
-    async with _running(db_session_factory, teams_api_fake, admins=admins) as service:
+    async with _running(service_session_factory, teams_api_fake, admins=admins) as service:
         places: list[str] = []
         for n, user in enumerate((AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID)):
             activity = make_channel_activity(
@@ -500,11 +504,11 @@ async def test_one_persons_billing_commands_never_drop_anothers_channel(
 
 
 async def test_an_admin_looks_up_a_person_with_the_people_picker(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
     picked, idle = str(uuid.UUID(int=7)), str(uuid.UUID(int=8))
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         tenant = await get_tenant(session, tenant_id)
         assert tenant is not None
         await record_teams_installation(
@@ -514,7 +518,7 @@ async def test_an_admin_looks_up_a_person_with_the_people_picker(
     teams_api_fake.names[picked] = "Maya *Chen*"
     teams_api_fake.absent.add(idle)
 
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         admin = await _command(service, teams_api_fake, AAD_OBJECT_ID)
         found = json.dumps(await post_activity(service, _click("lookup", person=picked.upper())))
         nobody = json.dumps(await post_activity(service, _click("lookup", person=idle)))
@@ -535,24 +539,24 @@ async def test_an_admin_looks_up_a_person_with_the_people_picker(
 
 
 async def test_a_message_remembers_its_senders_name(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    service_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    async with db_session_factory.begin() as session:
+    async with service_session_factory.begin() as session:
         await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="teams", external_id=AAD_OBJECT_ID
         )
     activity = make_message_activity(text="billing")
     activity["from"] = {**cast(dict[str, Any], activity["from"]), "name": "Maya Chen"}
 
-    async with _running(db_session_factory, teams_api_fake) as service:
+    async with _running(service_session_factory, teams_api_fake) as service:
         await post_activity(service, activity)
         async with asyncio.timeout(10):
             while not teams_api_fake.activity_requests:
                 await asyncio.sleep(0.01)
         await platform_names.settle()
 
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         stored = await get_user_names(
             session, tenant_id=tenant_id, platform="teams", user_ids=[AAD_OBJECT_ID]
         )
@@ -560,7 +564,7 @@ async def test_a_message_remembers_its_senders_name(
 
 
 async def test_a_channel_message_remembers_the_channels_name(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    service_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
     inbound = TeamsInbound(
@@ -576,10 +580,10 @@ async def test_a_channel_message_remembers_the_channels_name(
         channel_name="Research",
     )
 
-    remember_inbound(db_session_factory, tenant_id, inbound)
+    remember_inbound(service_session_factory, tenant_id, inbound)
     await platform_names.settle()
 
-    async with db_session_factory() as session:
+    async with service_session_factory() as session:
         channels = await get_channel_names(
             session, tenant_id=tenant_id, platform="teams", channel_ids=[inbound.channel_id]
         )

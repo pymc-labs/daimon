@@ -233,5 +233,7 @@ async def test_approval_controls_preserve_confidential_action_and_its_admin_chec
     assert button.label == "Make confidential"
     interaction = MagicMock()
     await button.callback(interaction)
-    refuse.assert_awaited_once_with(interaction)
+    from daimon.core.admin_actions import DelegatedAction
+
+    refuse.assert_awaited_once_with(interaction, action=DelegatedAction.CHANNEL_PERMISSIONS)
     runtime.sessionmaker.assert_not_called()

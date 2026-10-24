@@ -2,6 +2,9 @@
 
 ## Approval gate overrides
 
+Approval gate overrides require live platform-admin authority. Delegated admins
+cannot change them; they are outside the delegated action allow-list.
+
 Server or workspace admins can change whether attended chat asks before a
 third-party MCP write, at server, channel or thread scope. Values are `on`
 (ask), `off` (allow without a card), and `inherit`. The most specific explicit
@@ -67,9 +70,103 @@ the policy unreadable and refuse
 that tenant's turns. Disabling deployment overrides alone does not remove those
 stored fields.
 
+
+## Who is a Daimon admin
+
+Daimon has one admin role per server or workspace, shared by all its agents
+and channels. Platform admins always have this role, checked live: Discord
+owners and members with Administrator or Manage Server, Slack workspace
+admins and owners, and Teams owners of the configured admin team. Their
+platform authority cannot be revoked inside Daimon.
+
+Granted admins can change what agents do, including agents platform admins use.
+Their changes to instructions, skills, environments and tool rules also affect
+platform admins’ routines and attended chats that use those agents.
+
+Platform admins can grant Daimon admin to a user ID, or on Discord to a role
+ID. A role grant applies while the member holds that role. Delegated admins
+can administer only the actions in `DelegatedAction` in
+`packages/core/daimon/core/admin_actions.py`:
+
+- `agent_settings`: agent instructions, identity, backend and settings.
+- `channel_permissions`: channel/agent rules and participation settings.
+- `routines`: routine configuration and management.
+- `skills`: agent/channel skills and skill environments’ attachments.
+- `environments`: agent/channel environments.
+- `model`: model selection.
+- `routing`: who answers where, channel defaults and handoff configuration.
+- `tool_rules`: agent/channel tool rules and their approval panels.
+- `agent_lifecycle`: agent copies and archiving.
+- `hub_pin_exemption`: the hub’s agent-pin exemption when starting a turn.
+
+Every other admin action is platform-only, including credentials, third-party
+MCP connections, credential-based skill-repository setup, coding-tool access
+and DM enable/disable. Long-job policy, worker spending limits, provider
+allow-lists and channel provider-pin clearing stay platform-only. Worker
+spending-limit tools require a personal CLI credential; chat execution cannot
+change them. Long jobs retain their explicit human command-approval card and
+owner permissions; their admin management exemption remains platform-only.
+GitHub connect,
+request approval and repository binding require platform admins at both the
+adapter and store boundaries. Delegates do not get the hub exception for
+reading other people’s sessions or sealed channel transcripts; that exception
+uses only the stored platform-admin role. The hub pin exemption above grants
+no transcript access. Agent ownership is separate from delegation: the owner
+permissions below still apply to that person’s own agent, and a grant never
+confers ownership. GitHub and money controls require platform authority even
+for owners.
+
+Authority changes and all money controls require a human acting directly:
+a platform panel/button rechecks live platform authority, and MCP requires a
+registered personal CLI credential (`token_kind=cli`) re-attested live as a platform admin.
+Chat execution (even an admin’s attended chat), routines, continuations,
+watches and external agent keys cannot grant/revoke admins, read or change
+billing/budgets/caps, redeem promos or create checkout sessions. Operator
+tokens cannot exercise these controls either. Deployment-wide promo issuing
+remains available through the local operator CLI; MCP issuing is refused.
+Delegated admin is never cached in account roles or turn origins. The model
+receives `effective_role` separately from the platform `current_role`; these
+controls describe the current turn and grant no additional authority.
+
+Routine execution authority follows the author of its behavior. If another
+person changes a routine’s message, agent or target, the routine transfers to
+that editor and uses their identity for future runs. The transfer is audited
+atomically, old output and pending delivery are cleared, and private delivery
+follows the new author. Pause, resume and delete do not transfer authority.
+
+Account roles are written only by turn admission and the platform-checked
+`/github connect` commands. Setup notices, GitHub link helpers and operator-token
+panels never promote accounts. Operator-token minting requires an existing
+platform-admin snapshot as well as the live check. If the snapshot is missing,
+Daimon refuses before creating a token and asks the platform admin to send
+a message in the server/workspace and retry. Slack hides GitHub/operator-token controls from
+non-platform admins and checks platform authority inside removal notices.
+
+Legacy tokens with no registered kind and short-lived billing-panel tokens
+are not personal credentials. Billing-panel tokens serve only the checkout
+HTTP hop after a live-checked button; they cannot grant/revoke or call the
+MCP money tools. Checkout re-attests the bound account as a platform admin.
+
+Open **Who answers where → Permissions → Admins** in Discord, or
+**Who answers where → Admins** in Slack. Each change checks platform
+authority again and records who changed which grant and when. Revocation
+takes effect on the next click or MCP request, including already-open
+panels and existing credentials. Platform authority and any remaining grants
+still apply. Erasing a user removes their grants and scrubs their attribution.
+
+MCP provides `list_admins` for members and `grant_admin` / `revoke_admin` for
+platform admins acting directly with registered personal CLI credentials
+(`token_kind=cli`). It rechecks platform authority live; every agent-run credential and operator
+token is refused. Teams uses MCP or the CLI.
+The CLI commands `daimon admins list`, `daimon admins grant USER_ID`, and
+`daimon admins revoke USER_ID` call these same authenticated tools. Set
+`DAIMON_ADMINS_URL` to the MCP endpoint and `DAIMON_ADMINS_TOKEN` to your
+platform-user MCP credential. Add `--role` for a Discord role ID. Local
+operator context or a supplied actor ID does not prove platform authority.
+
 ## Agent tool rules
 
-A current human workspace admin can set `allow`, `ask` or `deny` for one
+A current human Daimon admin can set `allow`, `ask` or `deny` for one
 third-party MCP tool on one agent with `daimon agents tool-rules` or the
 `set_agent_tool_rule` MCP tool. An agent-wide
 rule applies where the agent runs; a channel rule applies in its parent
@@ -151,7 +248,7 @@ can't use; the cause (`daimon_tool_rules`) is in the operator log under
 `turn.backend_unsupported`. Nothing runs before the refusal.
 
 With both settings on, a card for a third-party MCP write classified as needing
-approval also has **Always allow**. A current workspace admin can press it to
+approval also has **Always allow**. A current Daimon admin can press it to
 save an agent-wide `allow` rule for chat.
 The admin may be someone other than the requester. The click approves the
 pending call and saves the rule for that agent, tool and attached server URL.
@@ -276,7 +373,7 @@ agent defines it; custom tools are still removed.
 
 The operator CLI, `daimon routines sandbox-tools`, is the supported way to opt
 a routine in today. The `set_routine_sandbox_tools` MCP tool accepts only a
-live Discord server admin's own token, re-checked against the server on every
+live Discord Daimon admin's own token, re-checked against the server on every
 call; no Daimon surface issues such a token yet, and the tool is kept for a
 future admin surface. It refuses agent keys, agents acting in a conversation
 on an admin's behalf, operator tokens, legacy tokens without a token id, and
@@ -433,7 +530,7 @@ allow.
 
 ## Changing agent setup
 
-Server or workspace admins may change an agent's setup, and so may the
+Daimon admins may change an agent's setup, and so may the
 agent's **owner**. The owner is the person who created the agent, from chat
 or the setup panel's New agent button, or who copied it with `fork_agent`; a
 channel's own copy of an agent keeps that agent's owner. An admin can also
@@ -442,7 +539,7 @@ Agents created before owners existed have none and stay admin-only.
 
 The owner may change the agent's instructions, model, description, tools,
 skills, MCP server attachments (including token forms and OAuth connections),
-keys, model provider, its required capabilities, and its fleet, from chat and
+keys, model provider and its required capabilities, from chat and
 from the Discord, Slack and Teams setup panels. They see their agent's setup
 (its prompt and connections) and find it with `list_agents` (`mine=true`), even
 while it answers nowhere. An owner reaches their own agents past channel
@@ -459,6 +556,9 @@ again when a change is written, when a form is submitted and when a
 confirmation card is clicked, always for the person acting, so a change of
 owner applies at once. An agent key or a requester from another organisation
 is never the owner.
+
+Worker spending limits require a live platform admin acting directly with a
+personal CLI credential, including on an agent the caller owns.
 
 The owner may not change what the whole workspace shares: the provider
 allowlist, channel budgets, GitHub access (repo and skill-repo binds, grants),
@@ -525,9 +625,11 @@ bound to several channels still run, read and post inside a held channel.
 
 ## Exemptions
 
-- **Server admins** are exempt where the output reaches them alone: their own
-  DM and hub turns, and hub reads of sessions inside limited channels. They
-  configure agents with rules from anywhere and see every agent listed.
+- **Platform admins** retain the hub exception for reading sessions inside
+  limited channels, including other users’ sealed transcripts. Delegated
+  admins have only the live hub agent-pin exemption; their transcript reads
+  follow ordinary user access. Daimon admins configure agents with rules
+  from anywhere and see every agent listed.
   Discord cold-DM admission and all private Discord delivery enforce agent
   pins and isolation even for admins. Agent rules and `readers: own` still
   hold for them in channels, threads,
@@ -541,7 +643,7 @@ exemption applies to a held turn.
 
 ## Changing the rules
 
-Rules are server or workspace admins' calls, :
+Rules are Daimon admins' calls, :
 
 - chat: `set_channel_rule` and `set_agent_rule` ([MCP tools](mcp-tools.md));
 - panels: the channel's **Permissions** screen, from Who answers where in the

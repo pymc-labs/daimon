@@ -245,8 +245,20 @@ async def test_schedule_edits_pause_and_unchanged_values_keep_the_opt_in(
 ) -> None:
     row = await _opted_in(db_session, tenant_id)
 
-    await update_routine(db_session, row.id, tenant_id=tenant_id, cron_expr="0 10 * * *")
-    await update_routine(db_session, row.id, tenant_id=tenant_id, trigger_message="nightly")
+    await update_routine(
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=tenant_id,
+        cron_expr="0 10 * * *",
+    )
+    await update_routine(
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=tenant_id,
+        trigger_message="nightly",
+    )
     await pause_routine(db_session, row.id, tenant_id=tenant_id)
 
     after = await get_routine(db_session, row.id, tenant_id=tenant_id)
@@ -273,7 +285,13 @@ async def test_a_dm_routine_cannot_be_opted_in(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     row = await _dm_ready(db_session, tenant_id)
-    dm = await update_routine(db_session, row.id, tenant_id=tenant_id, destination_kind="dm")
+    dm = await update_routine(
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=tenant_id,
+        destination_kind="dm",
+    )
     assert dm is not None and dm.destination_kind == "dm"
 
     with pytest.raises(StoreError, match="DM routines can't use sandbox tools"):
@@ -397,14 +415,19 @@ async def test_purging_an_admin_erases_them_as_setter_but_keeps_the_log(
         }
         current = {
             row.id: (await get_routine(session, row.id, tenant_id=tenant.id)).sandbox_tools_set_by
-            for row in (by_mcp, by_panel_edit, kept)
+            for row in (by_mcp, kept)
         }
+        assert await get_routine(session, by_panel_edit.id, tenant_id=tenant.id) is None
+        from daimon.core.stores.security_audit import list_events
+
+        transfers = await list_events(session, tenant_id=tenant.id, tool_name="routines")
+        assert len(transfers) == 1 and transfers[0].platform_user_id is None
     assert setters == {
         by_mcp.id: [("erased", "mcp")],
         by_panel_edit.id: [("x", "mcp"), ("erased", "edit")],
         kept.id: [("other-admin", "mcp")],
     }
-    assert current == {by_mcp.id: "erased", by_panel_edit.id: "erased", kept.id: "other-admin"}
+    assert current == {by_mcp.id: "erased", kept.id: "other-admin"}
 
 
 async def test_an_opt_in_records_the_agent_version_and_environment_it_covers(
@@ -503,7 +526,13 @@ async def test_an_edit_that_clears_the_opt_in_forgets_its_pin(
 ) -> None:
     row = await _opted_in(db_session, tenant_id)
 
-    updated = await update_routine(db_session, row.id, tenant_id=tenant_id, trigger_message="new")
+    updated = await update_routine(
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=tenant_id,
+        trigger_message="new",
+    )
 
     assert updated is not None
     assert (updated.sandbox_agent_id, updated.sandbox_environment_id) == (None, None)

@@ -58,6 +58,7 @@ from daimon.adapters.mcp.tools import (
     time,
     vault,
 )
+from daimon.adapters.mcp.tools.admins import register_admin_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
@@ -382,6 +383,7 @@ def create_mcp_app(
         is_admin_resolver=effective_is_admin_resolver,
         internal_resolver=effective_internal_resolver,
         sessionmaker=effective_sessionmaker,
+        settings=effective_settings,
         operator_rate_limiter=RateLimiter(
             max_requests=effective_settings.mcp.operator_calls_per_minute,
             window=timedelta(minutes=1),
@@ -580,6 +582,7 @@ def create_mcp_app(
     register_publish_tools(mcp, runtime)  # report publish/delete (raises when unconfigured)
     register_propagation_tools(mcp, runtime)  # set/clear agent default
     register_here_tools(mcp, runtime)
+    register_admin_tools(mcp, runtime)
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
     register_channel_rule_tools(mcp, runtime)  # who reads and posts in a channel; where agents run
     register_channel_copy_tools(mcp, runtime)  # archive a closing channel's copy
@@ -673,6 +676,8 @@ def create_mcp_app(
                 stripe_client=stripe_client,
                 billing_config=effective_billing_config,
                 auth=effective_auth,
+                sessionmaker=effective_sessionmaker,
+                settings=effective_settings,
             ),
             methods=["POST"],
         )

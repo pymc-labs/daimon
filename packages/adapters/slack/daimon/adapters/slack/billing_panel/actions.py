@@ -6,7 +6,7 @@ these functions as background tasks. These are the background side of the ack.
 Pattern sequence for slash command:
   1. resolve_web_client → get per-event AsyncWebClient
   2. views.open(loading) → capture view_id
-  3. resolve_is_admin → bool (fail-closed)
+  3. resolve_is_platform_admin → bool (fail-closed)
   4. load_billing_snapshot → BillingPanelState
   5. views.update(view_id, billing modal)
 
@@ -35,7 +35,7 @@ from typing import Any, cast
 import httpx
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.billing_panel.names import lookup_name, name_shown_spenders
 from daimon.adapters.slack.billing_panel.views import (
     EXPIRY_OPEN_ACTION_ID,
@@ -107,7 +107,7 @@ async def handle_billing_command(
         view_id = open_view.get("id") or ""
 
         # Resolve admin status (fail-closed)
-        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+        is_admin = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
 
         # Load billing snapshot from DB
         now = datetime.now(UTC)
@@ -193,7 +193,7 @@ async def handle_topup_select(
 
     try:
         # Re-verify admin at click time (not cached)
-        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+        is_admin = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
         if not is_admin:
             log.warning(
                 "slack.billing_topup.non_admin_refused",
@@ -314,7 +314,7 @@ async def handle_panel_action(runtime: SlackRuntime, payload: dict[str, Any]) ->
             return
         if action_id != LOOKUP_ACTION_ID:
             return
-        if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
+        if not await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id):
             await client.views_push(  # pyright: ignore[reportUnknownMemberType]
                 trigger_id=trigger_id,
                 view={

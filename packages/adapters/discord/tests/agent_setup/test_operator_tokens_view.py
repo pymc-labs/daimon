@@ -20,11 +20,11 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.accounts import get_account_with_tenant, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import SecretStr
@@ -68,12 +68,18 @@ def _interaction(*, admin: bool) -> MagicMock:
     return interaction
 
 
-async def _view(factory: async_sessionmaker[AsyncSession]) -> OperatorTokensView:
+async def _view(
+    factory: async_sessionmaker[AsyncSession], *, recorded_admin: bool = True
+) -> OperatorTokensView:
     async with factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
-        account = await make_account(session, tenant=tenant)
+        principal = await make_platform_principal(
+            session, tenant=tenant, platform="discord", external_id="42"
+        )
+        if recorded_admin:
+            await set_role(session, principal.account_id, Role.ADMIN)
     state = PanelState(
-        roster=[], selected=None, account_id=account.id, is_admin=True, guild_id=GUILD_ID
+        roster=[], selected=None, account_id=principal.account_id, is_admin=True, guild_id=GUILD_ID
     )
     return OperatorTokensView(state, runtime=_runtime(factory), allowed_user_id=42, rows=[])
 
@@ -109,7 +115,7 @@ async def test_an_admin_mints_a_tenant_token_shown_once_then_revokes_it(
         identity = await get_account_with_tenant(session, account_id=row.account_id)
     assert set(row.scopes) == {"tenant:read", "channels:write"} and row.label == "ci"
     assert identity is not None and identity.role is Role.ADMIN, (
-        "the live admin check is stored, so the verifier admits the token"
+        "minting preserves the existing native role snapshot"
     )
     shown = admin.followup.send.call_args
     assert shown.kwargs == {"ephemeral": True} and "one time" in shown.args[0]
@@ -187,3 +193,14 @@ async def test_the_panel_never_mints_the_deployment_promo_scope(
     assert "can't be granted from here" in admin.followup.send.call_args.args[0]
     async with db_session_factory() as session:
         assert await list_mcp_tokens(session, now=dt.datetime.now(dt.UTC)) == []
+
+
+async def test_live_admin_with_user_snapshot_gets_refresh_message_and_no_token(db_session_factory):
+    view = await _view(db_session_factory, recorded_admin=False)
+    admin = _interaction(admin=True)
+    await _modal(view, ["tenant:read"]).on_submit(admin)
+    assert "Send Daimon a message" in admin.followup.send.call_args.args[0]
+    async with db_session_factory() as session:
+        assert await list_mcp_tokens(session, now=dt.datetime.now(dt.UTC), kind="operator") == []
+        identity = await get_account_with_tenant(session, account_id=view.state.account_id)
+    assert identity is not None and identity.role is Role.USER

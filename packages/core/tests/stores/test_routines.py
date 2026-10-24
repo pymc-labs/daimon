@@ -164,6 +164,7 @@ async def test_update_modifies_fields(db_session: AsyncSession, tenant_id: uuid.
         cron_expr="0 9 * * *",
         timezone_="Asia/Tokyo",
         trigger_message="changed",
+        edited_by="editor",
         enabled=False,
     )
     assert updated is not None, "update must return the new row"
@@ -192,6 +193,7 @@ async def test_update_agent_id_and_next_fire_at(
         row.id,
         tenant_id=tenant_id,
         agent_id="agent_b",
+        edited_by="editor",
         next_fire_at=new_fire_at,
     )
     assert updated is not None, "update must return the new row"
@@ -216,7 +218,9 @@ async def test_update_with_no_kwargs_returns_unchanged_row(
         timezone_="UTC",
         trigger_message="orig",
     )
-    returned = await update_routine(db_session, row.id, tenant_id=tenant_id)
+    returned = await update_routine(
+        db_session, row.id, edited_by=row.created_by_user_id, tenant_id=tenant_id
+    )
     assert returned is not None, "update with no kwargs must return the existing row"
     assert returned.id == row.id, "returned row must be the same row"
     assert returned.agent_id == "agent_a", "agent_id must remain unchanged"
@@ -655,7 +659,11 @@ async def test_paused_routine_not_claimed(db_session: AsyncSession, tenant_id: u
 
     # Re-arm next_fire_at so a second claim window applies, then pause.
     await update_routine(
-        db_session, row.id, tenant_id=tenant_id, next_fire_at=now - timedelta(minutes=1)
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=tenant_id,
+        next_fire_at=now - timedelta(minutes=1),
     )
     paused = await pause_routine(db_session, row.id, tenant_id=tenant_id)
     assert paused is not None, "pause must succeed"
@@ -756,14 +764,18 @@ async def test_update_routine_cross_tenant_returns_none_and_leaves_row_unchanged
         trigger_message="m",
     )
 
-    result = await update_routine(db_session, row.id, tenant_id=tenant_b.id, enabled=False)
+    result = await update_routine(
+        db_session, row.id, edited_by=row.created_by_user_id, tenant_id=tenant_b.id, enabled=False
+    )
     assert result is None, "update_routine with the wrong tenant_id must return None"
 
     unchanged = await get_routine(db_session, row.id, tenant_id=tenant_a.id)
     assert unchanged is not None
     assert unchanged.enabled is True, "cross-tenant update must not mutate the row"
 
-    updated = await update_routine(db_session, row.id, tenant_id=tenant_a.id, enabled=False)
+    updated = await update_routine(
+        db_session, row.id, edited_by=row.created_by_user_id, tenant_id=tenant_a.id, enabled=False
+    )
     assert updated is not None, "update_routine with the owning tenant_id must succeed"
     assert updated.enabled is False
 

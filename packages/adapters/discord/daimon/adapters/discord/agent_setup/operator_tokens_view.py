@@ -16,7 +16,7 @@ from typing import Final
 import structlog
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import refuse_if_not_admin
+from daimon.adapters.discord.checks import is_platform_admin, refuse_if_not_platform_admin
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -162,7 +162,7 @@ class OperatorTokensView(PanelViewBase):
         await self.swap_to(interaction, routing)
 
     async def _on_mint(self, interaction: discord.Interaction) -> None:
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_platform_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await self.audit(
                 interaction, op="operator_token_mint", outcome="denied", reason="needs_admin"
             )
@@ -173,7 +173,7 @@ class OperatorTokensView(PanelViewBase):
         self, interaction: discord.Interaction, *, select: discord.ui.Select[discord.ui.LayoutView]
     ) -> None:
         jti = uuid.UUID(select.values[0])
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_platform_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await self.audit(
                 interaction,
                 op="operator_token_revoke",
@@ -218,7 +218,7 @@ class MintOperatorTokenModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         view = self._view
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
+        if await refuse_if_not_platform_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             await view.audit(
                 interaction, op="operator_token_mint", outcome="denied", reason="needs_admin"
             )
@@ -237,6 +237,7 @@ class MintOperatorTokenModal(discord.ui.Modal):
                     tenant_id=_tenant_id(view.state),
                     platform="discord",
                     platform_user_id=str(interaction.user.id),
+                    is_platform_admin=is_platform_admin(interaction),
                     scopes=self.scopes.values,
                     label=self.label.value,
                     secret=secret.get_secret_value().encode(),

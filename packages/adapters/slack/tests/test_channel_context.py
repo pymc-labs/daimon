@@ -420,7 +420,7 @@ async def _first_turn(
     }
     if thread_id != _TRIGGER:
         event["thread_ts"] = thread_id
-    admission = MagicMock()
+    admission = MagicMock(is_admin=False, is_platform_admin=False)
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
     admission.agent.name = _AGENT

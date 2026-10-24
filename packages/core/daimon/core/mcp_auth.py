@@ -30,6 +30,7 @@ from pathlib import Path
 
 import jwt as pyjwt
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import BILLING_PANEL_TOKEN_LABEL
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -267,7 +268,7 @@ def mint_jwt(
 CHAT_TOKEN_TTL = dt.timedelta(hours=1)
 CHAT_TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=50)
 CHAT_TOKEN_LABEL_PREFIX = "vault-chat:"
-PANEL_TOKEN_LABEL = "billing-panel"
+PANEL_TOKEN_LABEL = BILLING_PANEL_TOKEN_LABEL
 EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 
 

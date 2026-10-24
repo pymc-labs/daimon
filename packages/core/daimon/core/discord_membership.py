@@ -63,25 +63,50 @@ class DiscordRestMembershipResolver(CachedMembershipResolver):
                 return Membership(is_member=False)
             member.raise_for_status()
             data = cast("dict[str, object]", member.json())
+            user = data.get("user")
+            if not isinstance(user, dict) or cast("dict[str, object]", user).get("id") != user_id:
+                return Membership()
             raw_roles = data.get("roles")
             if not isinstance(raw_roles, list):
                 return Membership()
             values = cast("list[object]", raw_roles)
-            if not all(isinstance(r, str) for r in values):
+            if not all(isinstance(r, str) and r.isascii() and r.isdecimal() for r in values):
+                return Membership()
+            if len(set(cast("list[str]", raw_roles))) != len(values):
                 return Membership()
             roles = tuple(r for r in cast("list[str]", raw_roles) if r != guild_id)
             guild = await _discord_get(client, f"guilds/{guild_id}")
             guild.raise_for_status()
             role_response = await _discord_get(client, f"guilds/{guild_id}/roles")
             role_response.raise_for_status()
+            guild_data = cast("dict[str, object]", guild.json())
+            if guild_data.get("id") != guild_id or not isinstance(guild_data.get("owner_id"), str):
+                return Membership()
             permissions = 0
-            for role in cast("list[dict[str, str]]", role_response.json()):
-                if role["id"] in (*roles, guild_id):
-                    permissions |= int(role["permissions"])
+            by_id: dict[str, int] = {}
+            for role in cast("list[dict[str, object]]", role_response.json()):
+                role_id = role["id"]
+                raw: object = role["permissions"]
+                if (
+                    not isinstance(role_id, str)
+                    or not role_id.isascii()
+                    or not role_id.isdecimal()
+                    or not isinstance(raw, str)
+                    or not raw.isascii()
+                    or not raw.isdecimal()
+                    or role_id in by_id
+                    or int(raw) >= 2**64
+                ):
+                    return Membership()
+                by_id[role_id] = int(raw)
+            if any(role not in by_id for role in (*roles, guild_id)):
+                return Membership()
+            for role_id in (*roles, guild_id):
+                permissions |= by_id[role_id]
             return Membership(
                 is_member=True,
                 role_ids=roles,
-                is_admin=guild.json().get("owner_id") == user_id or bool(permissions & (8 | 32)),
+                is_admin=guild_data.get("owner_id") == user_id or bool(permissions & (8 | 32)),
             )
 
 

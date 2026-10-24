@@ -31,8 +31,6 @@ from daimon.adapters.discord.agent_setup import authz as panel_authz
 from daimon.adapters.discord.agent_setup.state import RosterEntry
 from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat
 from daimon.adapters.discord.credential_repo_bind import (
-    _AGENT_GONE_MESSAGE,
-    _SHARED_AGENT_MESSAGE,
     _WRONG_GUILD_MESSAGE,
     refuse_if_shared_and_not_admin_for_request,
     resolve_repo_binding_credential,
@@ -202,11 +200,10 @@ async def test_defaults_managed_target_member_refuses_with_shared_agent_message(
     )
 
     assert refused is True, "a member must not bind a repo to a defaults-managed agent"
-    assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
-    assert _sent_message(interaction) == (
-        "Connecting a repo to this agent needs an admin.\n\n"
-        "Ask me to draft a request for an admin, or to make you a new agent."
-    ), "section 4's words, the same on every platform"
+    assert _sent_message(interaction) == "Only a platform admin can bind GitHub repos."
+    assert _sent_message(interaction) == ("Only a platform admin can bind GitHub repos."), (
+        "repo binding requires platform authority"
+    )
 
 
 async def test_unbound_target_remains_admin_only_after_its_default_is_removed(
@@ -236,7 +233,7 @@ async def test_unbound_target_remains_admin_only_after_its_default_is_removed(
         scoped_interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
     )
     assert refused_when_reachable is True, "the tenant-scoped default agent must refuse a member"
-    assert _sent_message(scoped_interaction) == _SHARED_AGENT_MESSAGE
+    assert _sent_message(scoped_interaction) == "Only a platform admin can bind GitHub repos."
 
     async with db_session_factory() as session, session.begin():
         await scoped_config_write.unset_fields(
@@ -247,7 +244,7 @@ async def test_unbound_target_remains_admin_only_after_its_default_is_removed(
         unscoped_interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
     )
     assert refused_when_unreachable is True, "unbound agents remain admin-only"
-    assert _sent_message(unscoped_interaction) == _SHARED_AGENT_MESSAGE
+    assert _sent_message(unscoped_interaction) == "Only a platform admin can bind GitHub repos."
 
 
 async def test_unbound_target_member_refused(
@@ -267,7 +264,7 @@ async def test_unbound_target_member_refused(
     )
 
     assert refused is True
-    assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
+    assert _sent_message(interaction) == "Only a platform admin can bind GitHub repos."
 
 
 async def test_admin_passes_on_defaults_managed_target_before_any_ma_request(
@@ -310,7 +307,7 @@ async def test_unknown_agent_uuid_refuses_with_agent_gone_message(
     )
 
     assert refused is True, "a derived agent uuid matching no MA agent must fail closed"
-    assert _sent_message(interaction) == _AGENT_GONE_MESSAGE
+    assert _sent_message(interaction) == "Only a platform admin can bind GitHub repos."
 
 
 async def test_wrong_guild_refuses_before_the_admin_check(

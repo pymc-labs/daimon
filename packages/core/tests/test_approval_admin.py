@@ -16,6 +16,7 @@ from daimon.core.config import (
     Settings,
     TeamsSettings,
 )
+from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
@@ -42,6 +43,16 @@ async def test_discord_uses_registered_guild_and_live_permissions(
 ) -> None:
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, workspace_id=GUILD)
+        if signal == "member":
+            await change_grant(
+                session,
+                tenant_id=tenant.id,
+                platform=tenant.platform,
+                subject_kind="user",
+                subject_id=USER,
+                actor_user_id="platform-owner",
+                is_platform_admin=True,
+            )
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -98,6 +109,16 @@ async def test_slack_does_not_trust_foreign_or_deleted_admins(
     key = Fernet.generate_key()
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="slack", workspace_id="T1")
+        if signal == "member":
+            await change_grant(
+                session,
+                tenant_id=tenant.id,
+                platform=tenant.platform,
+                subject_kind="user",
+                subject_id="U1",
+                actor_user_id="platform-owner",
+                is_platform_admin=True,
+            )
         await upsert_slack_bot_token(
             session, team_id="T1", encrypted_token=Fernet(key).encrypt(b"bot-token")
         )
@@ -140,6 +161,16 @@ async def test_teams_reads_current_admin_team_owners(
     org, team, user = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="teams", workspace_id=org)
+        if signal == "member":
+            await change_grant(
+                session,
+                tenant_id=tenant.id,
+                platform=tenant.platform,
+                subject_kind="user",
+                subject_id=user,
+                actor_user_id="platform-owner",
+                is_platform_admin=True,
+            )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "login.microsoftonline.com":

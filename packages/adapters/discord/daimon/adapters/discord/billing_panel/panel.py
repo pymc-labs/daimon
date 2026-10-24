@@ -33,7 +33,7 @@ import httpx
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.billing_panel.read import (
     invoking_channel_id,
-    is_guild_admin,
+    is_platform_admin,
     load_billing_snapshot,
 )
 from daimon.adapters.discord.billing_panel.redeem import RedeemCodeModal
@@ -43,7 +43,7 @@ from daimon.adapters.discord.billing_panel.state import (
     BillingPanelState,
     MemberRow,
 )
-from daimon.adapters.discord.checks import refuse_if_not_admin
+from daimon.adapters.discord.checks import refuse_if_not_platform_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.billing_panel import (
@@ -302,7 +302,7 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
             return
         # The view's is_admin decided whether this select rendered; it does not
         # decide whether the click may mint a checkout link.
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
+        if await refuse_if_not_platform_admin(interaction):  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
             return
         try:
             amount = int(self.values[0])
@@ -337,7 +337,7 @@ class _MemberLookupSelect(discord.ui.UserSelect["BillingPanelView"]):
             return
         # Per-member spend is exactly what load_billing_snapshot's member branch
         # withholds — the gate has to run before the usage reads, not at render.
-        if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
+        if await refuse_if_not_platform_admin(interaction):  # pyright: ignore[reportArgumentType]  # narrowing to the Bot-bound interaction inside our adapter
             return
         try:
             selected = self.values[0]
@@ -429,7 +429,7 @@ class BillingPanelView(_InvokerOnly):
         if is_admin:
             rows.append(discord.ui.ActionRow(_TopUpSelect(state)))
         actions: list[discord.ui.Button[BillingPanelView]] = []
-        if state.has_redeemable_promo_code:
+        if state.is_admin and state.has_redeemable_promo_code:
             actions.append(_RedeemButton())
         if state.timed_credit:
             actions.append(_ExpiryButton())
@@ -470,8 +470,7 @@ class _ExpiryButton(discord.ui.Button["BillingPanelView"]):
 class _RedeemButton(discord.ui.Button["BillingPanelView"]):
     """Opens the redeem-code modal while a code the viewer may redeem is redeemable.
 
-    Anyone the panel shows it to may open the modal; what a code may do is
-    decided on submit (a server-wide code needs a live admin).
+    Platform admins see it. The modal rechecks live platform authority on submit.
     """
 
     def __init__(self) -> None:
@@ -549,7 +548,7 @@ async def _rerender(
         await interaction.response.defer()
     now = datetime.now(UTC)
     since = datetime(now.year, now.month, 1, tzinfo=UTC)
-    is_admin = is_guild_admin(bot_interaction)
+    is_admin = is_platform_admin(bot_interaction)
     async with runtime.sessionmaker() as session:
         new_state = await load_billing_snapshot(
             session,

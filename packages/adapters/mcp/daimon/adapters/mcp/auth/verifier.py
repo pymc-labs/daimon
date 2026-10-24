@@ -41,8 +41,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Claim keys only this verifier writes, from the token's registry row. Any
 # value a token carries under them is dropped before verification.
+CHAT_EXECUTION_CLAIM = "daimon_chat_execution"
 TOKEN_KIND_CLAIM = "daimon_token_kind"
 TOKEN_JTI_CLAIM = "daimon_token_jti"
+TOKEN_LABEL_CLAIM = "daimon_token_label"
 SCOPES_CLAIM = "daimon_scopes"
 FOREIGN_HOME_CLAIM = "daimon_foreign_home"
 
@@ -233,8 +235,10 @@ class DaimonJWTVerifier(JWTVerifier):
         hold_claim = access.claims.pop(HOLD_CLAIM, None)
         # Only the registry row sets these, never a claim.
         for key in (
+            CHAT_EXECUTION_CLAIM,
             TOKEN_KIND_CLAIM,
             TOKEN_JTI_CLAIM,
+            TOKEN_LABEL_CLAIM,
             SCOPES_CLAIM,
             "bound_channel_id",
             "platform_role_ids",
@@ -317,7 +321,13 @@ class DaimonJWTVerifier(JWTVerifier):
             # Read live from the principal, so a client is restricted on every call.
             access.claims[FOREIGN_HOME_CLAIM] = identity_row.foreign_home_id
         if row is not None:
+            # This distinction is established only after validating the registry
+            # binding. A signed claim alone cannot turn an external key into chat.
+            access.claims[CHAT_EXECUTION_CLAIM] = (
+                row.kind == "agent" and access.claims.get("chat_agent_id") is not None
+            )
             access.claims[TOKEN_KIND_CLAIM] = row.kind
+            access.claims[TOKEN_LABEL_CLAIM] = row.label
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)
             if row.kind == "operator":
                 access.claims[SCOPES_CLAIM] = list(row.scopes)

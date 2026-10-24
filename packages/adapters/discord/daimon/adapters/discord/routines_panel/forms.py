@@ -14,6 +14,7 @@ from daimon.adapters.discord.routines_panel.write import (
     create_routine_via_panel,
     delete_routine_via_panel,
 )
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -36,7 +37,7 @@ class NewButton(discord.ui.Button["RoutinesPanelView"]):
     async def callback(self, interaction: discord.Interaction) -> None:
         if self.view is None:
             return
-        if not checks.is_guild_admin(interaction):
+        if not await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES):
             await interaction.response.send_message(embeds.ADMIN_ONLY, ephemeral=True)
             return
         try:
@@ -68,7 +69,9 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         from daimon.adapters.discord.routines_panel.panel import _rerender, _send_callback_error
 
-        if interaction.user.id != self.origin.user.id or not checks.is_guild_admin(interaction):
+        if interaction.user.id != self.origin.user.id or not await checks.is_guild_admin(
+            interaction, action=DelegatedAction.ROUTINES
+        ):
             await interaction.response.send_message(embeds.ADMIN_ONLY, ephemeral=True)
             return
         try:
@@ -170,7 +173,9 @@ class DeleteButton(discord.ui.Button["RoutinesPanelView"]):
             return
         row = self.view.state.selected.routine
         if not can_manage_routine(
-            row, user_id=str(interaction.user.id), is_admin=checks.is_guild_admin(interaction)
+            row,
+            user_id=str(interaction.user.id),
+            is_admin=await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES),
         ):
             await interaction.response.send_message(embeds.DELETE_REFUSED, ephemeral=True)
             return
@@ -227,7 +232,9 @@ class DeleteConfirmation(discord.ui.View):
                 if not can_manage_routine(
                     row,
                     user_id=str(interaction.user.id),
-                    is_admin=checks.is_guild_admin(interaction),
+                    is_admin=await checks.is_guild_admin(
+                        interaction, action=DelegatedAction.ROUTINES
+                    ),
                 ):
                     await interaction.response.send_message(embeds.DELETE_REFUSED, ephemeral=True)
                     return

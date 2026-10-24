@@ -405,6 +405,8 @@ class TeamsDriver:
             external_id=workspace_id,
             platform_user_id=user_id,
             is_admin=True,
+            is_platform_admin=True,
+            token_kind="cli",
         )
 
     async def delete_agent(

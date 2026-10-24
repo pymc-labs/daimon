@@ -23,6 +23,7 @@ async def test_a_missing_active_origin_never_resolves_or_previews(
         account_id=uuid4(),
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="123",
         chat_session_id="test-session",
@@ -187,6 +188,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             account_id=account.id,
             role=Role.ADMIN,
             is_admin=True,
+            is_platform_admin=True,
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
@@ -616,7 +618,7 @@ async def test_the_agents_owner_may_request_a_switch_and_a_member_may_not(active
     from daimon.core.stores import agent_owners
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
-    member = replace(auth, role=Role.USER, is_admin=False)
+    member = replace(auth, role=Role.USER, is_admin=False, is_platform_admin=False)
     gate()
     agent()
     with pytest.raises(ToolError, match="needs its owner or a server admin"):
@@ -705,7 +707,7 @@ async def test_an_owner_may_not_ask_to_share_threads(active_chat):
             owner_account_id=auth.account_id,
             source="admin_assigned",
         )
-    owner = replace(auth, role=Role.USER, is_admin=False)
+    owner = replace(auth, role=Role.USER, is_admin=False, is_platform_admin=False)
     gate()
     agent()
     with pytest.raises(ToolError, match="Sharing threads applies in every channel"):
@@ -828,6 +830,7 @@ def _admin_auth():
         account_id=uuid4(),
         role=Role.ADMIN,
         is_admin=True,
+        is_platform_admin=True,
         platform="discord",
         platform_user_id="123",
     )
@@ -968,7 +971,7 @@ async def test_a_member_who_doesnt_own_the_copy_is_refused_before_the_fallback(a
     copy = {**payload, "id": "agent_copy", "name": "Researcher-copy"}
     copy["metadata"] = {**payload["metadata"], "daimon_name": "Researcher-copy"}
     trace.router.add("GET", r"/v1/agents/agent_copy", lambda *_: httpx.Response(200, json=copy))
-    member = replace(auth, role=Role.USER, is_admin=False)
+    member = replace(auth, role=Role.USER, is_admin=False, is_platform_admin=False)
 
     def agent():
         trace.queue(ScriptedReply("GET", "/v1/agents", list_response([payload, copy])))
@@ -1235,7 +1238,7 @@ async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone
                 tenant_id=auth.tenant_id,
                 agent_name="Researcher",
             )
-    member = replace(auth, role=Role.USER, is_admin=False)
+    member = replace(auth, role=Role.USER, is_admin=False, is_platform_admin=False)
     switch = {
         "agent_name": "Researcher",
         "target_backend": "gemini",

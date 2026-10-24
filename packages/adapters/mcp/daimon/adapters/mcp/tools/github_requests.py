@@ -182,7 +182,7 @@ async def request_github_access_impl(
     grant_covers = grant is not None and grant.ceiling_access == "write"
     personal_case = grant_covers and not linked_login
     if (
-        auth.is_admin
+        auth.admin_for()
         and connected is not None
         and grant_covers
         and linked_login
@@ -208,7 +208,7 @@ async def request_github_access_impl(
                 status="unavailable", message="GitHub didn't answer. Try again in a minute."
             )
         # The answer for an unusable connected repo must not reveal whether it exists.
-    asker_is_admin = auth.is_admin
+    asker_is_admin = auth.admin_for()
     try:
         async with runtime.session_factory.begin() as session:
             request = await request_access(

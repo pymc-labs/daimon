@@ -15,14 +15,20 @@ from daimon.adapters.slack.gating import (
 
 class TestIsExternalInteractive:
     def test_returns_true_when_actor_home_team_differs_from_host(self) -> None:
-        payload = {"user": {"id": "U1", "team_id": "T_EXTERNAL"}, "team": {"id": "T_HOST"}}
+        payload = {
+            "user": {"id": "U1", "team_id": "T_EXTERNAL"},
+            "team": {"id": "T_HOST"},
+        }
         assert is_external_interactive(payload) is True, (
             "a block action whose actor's home workspace differs from the host "
             "must be flagged external (Slack Connect)"
         )
 
     def test_returns_false_when_actor_is_in_host_workspace(self) -> None:
-        payload = {"user": {"id": "U1", "team_id": "T_HOST"}, "team": {"id": "T_HOST"}}
+        payload = {
+            "user": {"id": "U1", "team_id": "T_HOST"},
+            "team": {"id": "T_HOST"},
+        }
         assert is_external_interactive(payload) is False, (
             "same-workspace actor must not be flagged external"
         )

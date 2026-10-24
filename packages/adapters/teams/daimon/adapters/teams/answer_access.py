@@ -21,6 +21,7 @@ from daimon.adapters.teams.admin_caller import admin_caller
 from daimon.adapters.teams.card_actions import Actor
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize, build_turn_place
 from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.permissions import readers_limited_at
@@ -86,7 +87,10 @@ def sealed_at(policy: TenantAccessPolicy, place: AnswerPlace) -> bool:
 async def clicker(runtime: TeamsRuntime, actor: Actor) -> AdminCaller:
     """The clicker with the grant-named teams they own. Network: call with no session open."""
     return await admin_caller(
-        runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
+        runtime,
+        tenant_id=actor.tenant_id,
+        user_id=actor.user_id,
+        is_admin=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS),
     )
 
 
@@ -99,7 +103,11 @@ async def may_start_turn_at(
 ) -> bool:
     """START_TURN at the answer's place, as admission decides it for a message there."""
     subject: Subject = await load_live_subject(
-        session, tenant_id=actor.tenant_id, platform="teams", caller=caller
+        session,
+        tenant_id=actor.tenant_id,
+        platform="teams",
+        caller=caller,
+        action=DelegatedAction.CHANNEL_PERMISSIONS,
     )
     turn_place = build_turn_place(channel_id=place.channel_id, thread_id=place.conversation_id)
     return bool(authorize(policy, subject=subject, action=Action.START_TURN, place=turn_place))

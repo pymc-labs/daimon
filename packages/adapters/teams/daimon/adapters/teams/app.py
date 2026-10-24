@@ -1762,7 +1762,7 @@ class TeamsApp:
             thread_id=inbound.thread_id,
             responder_ma_agent_id=str(admission.agent.id),
             responder_name=config.agent_name or admission.agent.name,
-            role=role,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
@@ -1776,12 +1776,13 @@ class TeamsApp:
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
+                effective_is_admin=admission.is_admin,
             )
             render = functools.partial(
                 render_user_message,
                 controls,
                 inbound,
-                is_admin=role is Role.ADMIN,
+                is_admin=admission.is_admin,
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),

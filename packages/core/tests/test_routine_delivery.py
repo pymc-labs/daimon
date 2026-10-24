@@ -540,7 +540,13 @@ async def test_clearing_the_destination_drops_a_pending_post(
             db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
         )
         assert len(claims) == 1 and claims[0].delivery_status == "claimed"
-    await update_routine(db_session, row.id, tenant_id=row.tenant_id, clear_destination=True)
+    await update_routine(
+        db_session,
+        row.id,
+        edited_by=row.created_by_user_id,
+        tenant_id=row.tenant_id,
+        clear_destination=True,
+    )
     after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
     assert after is not None
     assert after.delivery_payload is None and after.delivery_note is None

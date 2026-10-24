@@ -4,8 +4,9 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.discord import github_connect_button as button_module
@@ -20,7 +21,7 @@ class _Sessions:
 
 
 @pytest.mark.asyncio
-async def test_other_member_gets_the_link_while_requester_still_must_manage(
+async def test_member_is_refused_before_a_link_is_minted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     key = SecretStr(Fernet.generate_key().decode())
@@ -33,6 +34,7 @@ async def test_other_member_gets_the_link_while_requester_still_must_manage(
     requester = SimpleNamespace(id=456)
     interaction = AsyncMock()
     interaction.user.id = 999
+    interaction.response.is_done = lambda: False
     interaction.guild_id = 123
     interaction.channel_id = 789
     interaction.client.runtime = SimpleNamespace(
@@ -45,19 +47,11 @@ async def test_other_member_gets_the_link_while_requester_still_must_manage(
     interaction.guild = SimpleNamespace(owner_id=1, fetch_member=AsyncMock(return_value=requester))
     button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
     await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]
-    interaction.response.send_message.assert_not_awaited()
-    # The manager check is the requester's, not the clicker's.
-    interaction.guild.fetch_member.assert_awaited_once_with(456)
-    assert refusal.await_args is not None
-    assert refusal.await_args.args[1] is requester
-    assert bind.await_args is not None
-    assert bind.await_args.kwargs["requester_platform_user_id"] == "456"
-    assert bind.await_args.kwargs["requester_manages_agent"] is True
-    kwargs = interaction.followup.send.await_args.kwargs
-    assert kwargs["ephemeral"] is True
-    assert kwargs["view"].children[0].url == (
-        "https://mcp.test/oauth/github/connect/private-link-token"
-    )
+    interaction.response.send_message.assert_awaited_once()
+    assert "platform admin" in interaction.response.send_message.await_args.args[0]
+    interaction.guild.fetch_member.assert_not_awaited()
+    refusal.assert_not_awaited()
+    bind.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -77,7 +71,9 @@ async def test_requester_gets_ephemeral_link_and_click_sets_followup(
         sessionmaker=_Sessions(),
     )
     interaction = AsyncMock()
+    interaction.user = MagicMock(spec=discord.Member)
     interaction.user.id = 456
+    interaction.user.guild_permissions = discord.Permissions(administrator=True)
     interaction.guild_id = 123
     interaction.channel_id = 789
     interaction.application_id = 1234

@@ -76,7 +76,15 @@ def _register_host_member_users_info(mock: Any) -> None:
     """Re-register users.info after a ``mock.clear()``: the requester is a host member."""
     mock.get(
         re.compile(r"https://slack\.com/api/users\.info.*"),
-        payload={"ok": True, "user": {"id": "U_REQUESTER", "team_id": "T_CONT_ENTRY"}},
+        payload={
+            "ok": True,
+            "user": {
+                "id": "U_REQUESTER",
+                "deleted": False,
+                "is_bot": False,
+                "team_id": "T_CONT_ENTRY",
+            },
+        },
         repeat=True,
     )
 

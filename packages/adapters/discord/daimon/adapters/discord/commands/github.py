@@ -8,7 +8,7 @@ from daimon.adapters.discord.agent_setup.github_connect_card import connect_embe
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view, load_home
 from daimon.adapters.discord.agent_setup.hydrate import load_roster_state
 from daimon.adapters.discord.checks import (
-    is_guild_admin,
+    is_platform_admin,
     require_registered_guild,
     resolve_tenant_for_interaction,
 )
@@ -70,7 +70,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             runtime,
             interaction,
             tenant_id=tenant_id,
-            is_admin=is_guild_admin(interaction),  # pyright: ignore[reportArgumentType]
+            is_admin=is_platform_admin(interaction),  # pyright: ignore[reportArgumentType]
         )
         home = await load_home(state, runtime=runtime, user_id=interaction.user.id)
         message = await interaction.edit_original_response(
@@ -79,7 +79,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             allowed_mentions=discord.AllowedMentions.none(),
         )
         home.attach_message(message)
-        if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
+        if is_platform_admin(interaction):  # pyright: ignore[reportArgumentType]
             from daimon.adapters.discord.agent_setup.github_new_repo import (
                 send_pending_notice as send_pending_new_repo_notice,
             )
@@ -95,7 +95,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
     @require_registered_guild
     async def connect(self, interaction: BotInteraction, agent: str | None = None) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        if not is_guild_admin(interaction):
+        if not is_platform_admin(interaction):
             await interaction.followup.send(
                 "Only an admin can connect repos. Ask one to run /github.", ephemeral=True
             )
@@ -152,7 +152,11 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     platform="discord",
                     external_id=str(interaction.user.id),
                 )
-                await set_role(session, principal.account_id, Role.ADMIN)
+                await set_role(
+                    session,
+                    principal.account_id,
+                    Role.ADMIN if is_platform_admin(interaction) else Role.USER,
+                )
                 token = await mint_invitation(
                     session,
                     tenant_id=tenant_id,
@@ -160,6 +164,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     requester_label=str(interaction.user.id),
                     requester_platform_user_id=str(interaction.user.id),
                     agent_id=agent_id,
+                    agent_manager_verified=True,
                     agent_name=target_name,
                     agent_ma_id=target_ma_id,
                     origin_platform="discord",

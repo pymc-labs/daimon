@@ -786,7 +786,7 @@ async def test_github_link_from_channel_setup_posts_to_channel(
     _, fernet_key = await _seed_team(db_session)
     await db_session.commit()
     runtime = _build_runtime(fernet_key, db_session_factory, handler=_ma_handler([]))
-    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "resolve_is_platform_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(actions, "sync_connect_admin", AsyncMock())
     monkeypatch.setattr(actions, "connect_link", AsyncMock(return_value="https://github.test/link"))
 

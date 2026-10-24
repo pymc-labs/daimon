@@ -229,7 +229,13 @@ async def test_list_agents_impl_returns_tenant_agents(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _list_agents_impl(
         _runtime(client, session_factory=db_session_factory), auth, page=None
     )
@@ -262,7 +268,13 @@ async def test_get_agent_impl_returns_agent_info(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
     assert result.name == "a", "should return the requested agent"
     assert isinstance(result, AgentInfo), "should return an AgentInfo"
@@ -315,7 +327,13 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     assert [(s.name, s.url) for s in result.mcp_servers] == [
@@ -373,7 +391,13 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     rows = await _list_agents_impl(
         _runtime(client, session_factory=db_session_factory), auth, page=None
     )
@@ -396,7 +420,13 @@ async def test_get_agent_impl_raises_tool_error_not_found(
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "nope")
 
@@ -427,7 +457,13 @@ async def test_get_agent_impl_returns_system_prompt_to_admin_on_editable_agent(
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
@@ -440,7 +476,13 @@ async def test_get_agent_impl_returns_empty_string_for_admin_when_agent_has_no_p
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, None)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
@@ -481,7 +523,11 @@ async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_f
     tenant_id = uuid.uuid4()
     client = _get_one(tenant_id, metadata, "daimon prompt")
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
@@ -523,7 +569,13 @@ async def test_get_agent_impl_never_returns_another_tenants_agent_or_prompt(
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_a,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     with pytest.raises(ToolError) as excinfo:
         await _get_agent_impl(
@@ -542,7 +594,13 @@ async def test_list_agents_impl_never_returns_system_prompt(
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     result = await _list_agents_impl(
         _runtime(client, session_factory=db_session_factory), auth, page=None
@@ -585,7 +643,13 @@ async def test_create_agent_impl_calls_ma_create(
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _create_agent_impl(
         _runtime(client, session_factory=db_session_factory), auth, spec
     )
@@ -635,7 +699,13 @@ async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_t
             "mcp_servers": [{"type": "url", "name": "docs", "url": "https://docs.example/mcp"}],
         }
     )
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
@@ -655,7 +725,13 @@ async def test_create_agent_impl_rejects_non_empty_skills() -> None:
         model="claude-opus-4-5",
         skills=[SkillRef(type="custom", skill_id="x")],
     )
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="skills"):
         await _create_agent_impl(
             _runtime(MagicMock()),  # type: ignore[arg-type]
@@ -714,7 +790,13 @@ async def test_update_agent_impl_forwards_only_non_none_fields(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -772,7 +854,13 @@ async def test_update_agent_impl_returns_applies_for_model_change(
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -829,7 +917,13 @@ async def test_update_agent_impl_returns_applies_for_system_change(
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -890,7 +984,13 @@ async def test_update_agent_impl_returns_applies_for_model_then_instructions_whe
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -939,7 +1039,13 @@ async def test_update_agent_impl_rejects_empty_patch() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="at least one field"):
         await _update_agent_impl(
             _runtime(client),
@@ -998,7 +1104,13 @@ async def test_update_agent_impl_forwards_empty_list_to_clear(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -1056,7 +1168,13 @@ async def test_fork_agent_impl_creates_ma_agent_from_source_spec(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     result = await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1113,7 +1231,13 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1171,7 +1295,13 @@ async def test_fork_agent_impl_normalizes_stale_guidance_block(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1228,7 +1358,13 @@ async def test_fork_agent_impl_adds_guidance_when_source_has_none(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1297,7 +1433,13 @@ async def test_fork_agent_impl_skips_guidance_for_isolated_source(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1350,7 +1492,13 @@ async def test_archive_agent_impl_calls_ma_archive(
     router.add("POST", r"/v1/agents/([^/]+)/archive", on_archive)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
     assert archived == ["ag_d"], "should archive the correct MA agent"
@@ -1410,7 +1558,13 @@ async def test_archive_agent_impl_succeeds_when_store_archive_fails(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant.id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     # Must not raise despite the 500 from the memory-store archive.
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
@@ -1462,7 +1616,13 @@ async def test_archive_agent_clears_scope_rows_naming_the_agent(
     await db_session.commit()
 
     client = build_fake_anthropic(_archive_router(tenant.id, account_id).dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant.id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
@@ -1512,7 +1672,13 @@ async def test_archive_agent_clears_scope_rows_even_when_the_memory_store_archiv
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant.id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
@@ -1550,7 +1716,13 @@ async def test_create_agent_impl_stamps_daimon_account_when_called(
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
     assert len(created) == 1, "should call MA create exactly once"
     assert created[0].get("metadata", {}).get("daimon_account") == str(guild_account), (
@@ -1587,7 +1759,13 @@ async def test_create_agent_merges_daimon_mcp_when_public_url_set(
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _create_agent_impl(
         _runtime(client, public_url=public_url, session_factory=db_session_factory),
         auth,
@@ -1639,7 +1817,13 @@ async def test_create_agent_stamps_spec_hash_and_managed_false(
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
@@ -1694,7 +1878,13 @@ async def test_fork_agent_impl_stamps_daimon_account_on_clone(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1754,7 +1944,13 @@ async def test_fork_agent_impl_copies_source_skills(
     router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1840,7 +2036,11 @@ async def test_fork_agent_reports_the_skills_it_copied_even_when_its_reread_fail
     await db_session.commit()
     client = build_fake_anthropic(combine_handlers(handler, make_fake_ma_handler(state)))
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     info = await _fork_agent_impl(
@@ -1891,7 +2091,13 @@ async def test_fork_agent_merges_daimon_mcp_when_public_url_set(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, public_url=public_url, session_factory=db_session_factory, fernet=fernet),
@@ -1954,7 +2160,13 @@ async def test_fork_agent_skips_mcp_merge_when_public_url_none(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     # public_url=None (default) — no daimon-mcp merge expected
     await _fork_agent_impl(
@@ -2058,7 +2270,13 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided(
     client = build_fake_anthropic(router.dispatch)
 
     skills: list[dict[str, Any]] = [{"type": "anthropic", "skill_id": "cli-auth"}]
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2116,7 +2334,13 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2173,7 +2397,13 @@ async def test_update_agent_impl_accepts_skills_only_patch(
     client = build_fake_anthropic(router.dispatch)
 
     skills: list[dict[str, Any]] = [{"type": "anthropic", "skill_id": "cli-auth"}]
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     # All other fields are None — must not raise "at least one field" guard.
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -2247,7 +2477,13 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2307,7 +2543,13 @@ async def test_update_agent_impl_rejects_custom_skill_dict(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="raw skill ids"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -2372,7 +2614,13 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2422,7 +2670,13 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2437,7 +2691,11 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
 async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id = uuid.uuid4()
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    tenant_id = tenant.id
     account_id = uuid.uuid4()
 
     captured: dict[str, Any] = {}
@@ -2480,11 +2738,20 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        platform="discord",
+        platform_user_id="admin",
+    )
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
+        expected_ma_agent_id="ag_a",
         server_name="ctx7",
         url="https://NEW.example/mcp",
     )
@@ -2535,7 +2802,13 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2599,7 +2872,13 @@ async def test_update_agent_impl_rejects_system_agent_no_daimon_account(
         }
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="system agent"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -2644,7 +2923,13 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
         }
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="managed by defaults") as refused:
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -2708,7 +2993,13 @@ async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent(
     )
     router.add("POST", r"/v1/agents/ag_fork", on_update)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     info = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2771,7 +3062,11 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(
-        account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=caller_account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -2829,7 +3124,13 @@ async def test_update_agent_impl_allows_owned_agent(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2858,7 +3159,13 @@ async def test_attach_mcp_server_impl_rejects_system_agent_no_daimon_account(
         }
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="system agent"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -2921,7 +3228,11 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(
-        account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=caller_account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -2947,7 +3258,13 @@ async def test_archive_agent_impl_rejects_system_agent_no_daimon_account(
         }
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="system agent"):
         await _archive_agent_impl(
             _runtime(client, session_factory=db_session_factory), auth, "daimon"
@@ -2994,7 +3311,11 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(
-        account_id=caller_account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=caller_account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
     await _archive_agent_impl(
         _runtime(client, session_factory=db_session_factory), auth, "alices-agent"
@@ -3068,7 +3389,13 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3136,7 +3463,13 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3229,7 +3562,13 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3299,7 +3638,13 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3362,7 +3707,13 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3467,7 +3818,13 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3490,7 +3847,11 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Same name, different URL → mcp_server entry replaced, mcp_toolset entry not duplicated."""
-    tenant_id = uuid.uuid4()
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+    tenant_id = tenant.id
     account_id = uuid.uuid4()
 
     captured: dict[str, Any] = {}
@@ -3549,11 +3910,20 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        platform="discord",
+        platform_user_id="admin",
+    )
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
         agent_name="a",
+        expected_ma_agent_id="ag_a",
         server_name="ctx7",
         url="https://NEW.example/mcp",
     )
@@ -3575,7 +3945,13 @@ async def test_attach_mcp_server_impl_raises_when_agent_not_found(
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="agent 'missing-agent' not found"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -3668,7 +4044,13 @@ async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap(
     skills: list[dict[str, Any]] = [
         {"type": "anthropic", "skill_id": f"skill_{i}"} for i in range(24)
     ]
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="exceeds this organization"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -3724,7 +4106,13 @@ async def test_create_agent_impl_rejects_guild_stamped_name_collision() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="already exists"):
         await _create_agent_impl(_runtime(client), auth, spec)
 
@@ -3764,7 +4152,13 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="already exists"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -3813,7 +4207,11 @@ async def test_fork_agent_impl_new_copy_if_taken_takes_the_next_free_name(
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     result = await _fork_agent_impl(
@@ -3868,7 +4266,13 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="already exists"):
         await _create_agent_impl(_runtime(client), auth, spec)
 
@@ -3911,7 +4315,13 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="already exists"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -3985,7 +4395,13 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_a, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_a,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4038,7 +4454,13 @@ async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict(
     router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="raw skill ids"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4095,7 +4517,13 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     custom = next(s for s in result.skills if s.type == "custom")
@@ -4170,7 +4598,13 @@ async def test_attach_mcp_server_rejects_reserved_name() -> None:
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="reserved built-in daimon server"):
         await _attach_mcp_server_impl(
             _runtime(client),
@@ -4222,7 +4656,13 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     # Exact match
     with pytest.raises(ToolError, match="Daimon's own connection"):
         await _attach_mcp_server_impl(
@@ -4289,7 +4729,13 @@ async def test_attach_mcp_server_allows_unrelated_server(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     # Completely different name + URL — should succeed
     result = await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory, public_url=public_url),
@@ -4372,7 +4818,13 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4450,7 +4902,13 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4531,7 +4989,13 @@ async def test_update_agent_retries_once_on_version_conflict(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4596,7 +5060,13 @@ async def test_update_agent_maps_residual_conflict_to_tool_error(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="modified concurrently"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4670,7 +5140,13 @@ async def test_attach_mcp_server_retries_once_on_version_conflict(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4732,7 +5208,13 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     with pytest.raises(ToolError, match="modified concurrently"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4901,7 +5383,9 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
+    with pytest.raises(
+        ToolError, match="Connections require a platform admin or this agent's owner"
+    ):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4978,7 +5462,13 @@ async def test_update_agent_impl_allows_admin_system_patch_without_a_reach_read(
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -5003,7 +5493,9 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
+    with pytest.raises(
+        ToolError, match="Connections require a platform admin or this agent's owner"
+    ):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -5099,7 +5591,11 @@ async def test_fork_agent_impl_refuses_to_copy_a_pinned_agent_even_for_an_admin(
         fork_name="acme-copy",
     )
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     with pytest.raises(
@@ -5272,7 +5768,13 @@ async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
@@ -5311,7 +5813,13 @@ async def test_update_agent_allows_a_skill_merge_exactly_at_the_cap(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -5347,7 +5855,13 @@ async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_c
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
@@ -5383,7 +5897,13 @@ async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -5469,7 +5989,11 @@ async def test_create_agent_returns_unrouted_note_when_not_reachable(
 ) -> None:
     tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     result = await _create_agent_impl(
@@ -5491,7 +6015,11 @@ async def test_create_agent_returns_no_unrouted_note_when_a_config_row_names_it(
 ) -> None:
     tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="demo")
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     result = await _create_agent_impl(
@@ -5529,7 +6057,11 @@ async def test_fork_agent_returns_unrouted_note_when_not_reachable(
         ),
     )
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     result = await _fork_agent_impl(
@@ -5581,7 +6113,13 @@ async def test_update_agent_refuses_to_repoint_the_reserved_server(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     with pytest.raises(ToolError, match="reserved|Daimon's own"):
         await _update_agent_impl(
@@ -5612,7 +6150,13 @@ async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+    )
 
     await _update_agent_impl(
         _runtime(
@@ -5733,7 +6277,11 @@ async def test_create_agent_impl_renders_no_face_for_the_deployment_default(
         deployment_default=DeploymentDefault(agent_name="daimon"),
     )
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     await _create_agent_impl(runtime, auth, AgentSpec(name="daimon", model="claude-opus-4-5"))
@@ -5753,7 +6301,11 @@ async def test_attach_mcp_server_impl_refuses_a_server_name_with_a_slash() -> No
     """`linear/bridge/get_issue` would also read as linear's `bridge/get_issue`."""
     client = MagicMock()
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
     with pytest.raises(ToolError, match="cannot contain '/'"):
         await _attach_mcp_server_impl(
@@ -6057,7 +6609,11 @@ async def test_two_copies_of_yourself_at_once_take_two_new_names(
         build_fake_anthropic(router.dispatch), session_factory=sessions, fernet=fernet
     )
     auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+        account_id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
     )
 
     results = await asyncio.gather(
@@ -6219,6 +6775,8 @@ async def test_owner_says_who_to_ask_about_changing_an_agent(
             tenant_id=tenant_id,
             role=Role.ADMIN if admin else Role.USER,
             is_admin=admin,
+            is_platform_admin=admin,
+            token_kind="cli",
             platform="discord",
             platform_user_id=user,
         )
@@ -6317,3 +6875,49 @@ async def test_a_member_who_creates_an_agent_in_chat_lists_gets_and_edits_it(
     assert await _list_agents_impl(runtime, them, None) == []
     with pytest.raises(ToolError):
         await _get_agent_impl(runtime, them, "draft", expected_ma_agent_id="ag_draft")
+
+
+@pytest.mark.parametrize("owner", [True, False], ids=["owner", "delegate-without-ownership"])
+async def test_connection_write_keeps_ownership_without_using_delegation(
+    db_session_factory: async_sessionmaker[AsyncSession], owner: bool
+) -> None:
+    from daimon.core.stores.daimon_admins import change_grant
+
+    tenant_id, owner_id, member_id = await _owned_scoped_agent(db_session_factory)
+    async with db_session_factory.begin() as db:
+        await change_grant(
+            db,
+            tenant_id=tenant_id,
+            platform="discord",
+            subject_kind="user",
+            subject_id="member-user",
+            actor_user_id="platform-owner",
+            is_platform_admin=True,
+        )
+    captured, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    auth = AuthIdentity(
+        account_id=owner_id if owner else member_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=not owner,
+        is_platform_admin=False,
+        platform="discord",
+        platform_user_id="owner-user" if owner else "member-user",
+    )
+    call = _attach_mcp_server_impl(
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        agent_name="scoped-agent",
+        expected_ma_agent_id="ag_scoped",
+        server_name="third-party",
+        url="https://tools.example/mcp",
+    )
+    if owner:
+        await call
+        assert any(server["name"] == "third-party" for server in captured["mcp_servers"])
+    else:
+        with pytest.raises(ToolError, match="platform admin or this agent's owner"):
+            await call
+        assert captured == {}

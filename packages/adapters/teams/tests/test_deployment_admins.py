@@ -28,6 +28,7 @@ from daimon.adapters.teams.deployment_admins import (
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.team_owners import team_owner_lookup
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import TeamsSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -334,3 +335,45 @@ async def test_only_a_text_that_asks_for_an_admin_gets_the_line(
     assert asked.endswith("\n\nAdmins are the owners of the Leads team.")
     for text in ("Too many chats at once right now.", "Cancelling the administration."):
         assert await with_admin_team_if_asked(runtime, text) == text
+
+
+async def test_delegated_user_admin_gate_rechecks_revoke(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.daimon_admins import change_grant
+    from daimon.testing.factories import make_tenant
+
+    settings = _settings()
+    tenant = await make_tenant(db_session, platform="teams", workspace_id=settings.tenant_id)
+    key = dict(
+        tenant_id=tenant.id,
+        platform="teams",
+        subject_kind="user",
+        subject_id=OTHER_AAD_OBJECT_ID,
+        actor_user_id=AAD_OBJECT_ID,
+        is_platform_admin=True,
+    )
+    await change_grant(db_session, **key)
+    await db_session.commit()
+    runtime = _runtime(_Owners(AAD_OBJECT_ID))
+    runtime.sessionmaker = db_session_factory
+    assert await is_deployment_admin(
+        settings,
+        admin_team_owners(runtime),
+        user_id=OTHER_AAD_OBJECT_ID,
+        runtime=runtime,
+        action=DelegatedAction.AGENT_SETTINGS,
+    )
+    assert not await is_deployment_admin(
+        settings, admin_team_owners(runtime), user_id=OTHER_AAD_OBJECT_ID
+    ), "platform-only billing has no delegation"
+    await change_grant(db_session, **key, revoke=True)
+    await db_session.commit()
+    assert not await is_deployment_admin(
+        settings,
+        admin_team_owners(runtime),
+        user_id=OTHER_AAD_OBJECT_ID,
+        runtime=runtime,
+        action=DelegatedAction.AGENT_SETTINGS,
+    )

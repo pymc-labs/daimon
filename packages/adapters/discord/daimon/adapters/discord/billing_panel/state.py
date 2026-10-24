@@ -51,7 +51,7 @@ class BillingPanelState:
     # The invoking channel's budget (both views); None when it has none.
     channel_budget: ChannelBudgetStatus | None = None
     # Some code this viewer may redeem is redeemable now: any code for an admin,
-    # a channel code for a member. Gates the redeem button.
+    # a channel code. Only platform admins get the redeem button.
     has_redeemable_promo_code: bool = False
     # Every channel budget, by share of its limit spent (admin view only)
     channel_budgets: tuple[ChannelBudgetStatus, ...] = ()

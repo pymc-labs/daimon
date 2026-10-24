@@ -134,6 +134,7 @@ def _auth_identity(
         external_id=external_id,
         platform_user_id=platform_user_id,
         is_admin=is_admin,
+        is_platform_admin=is_admin,
         chat_session_id="test-session",
     )
 

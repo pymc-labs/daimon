@@ -1268,11 +1268,14 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
                 token_db, account_id=account_id, secret=secret, now=datetime.now(UTC)
             )
 
-    async def check(token, *, allowed, agent=False):
+    async def check(token, *, allowed, agent=False, authentication_refused=False):
         result = await call_mcp_tool(app, token=token, name="agent_probe" if agent else "probe")
         rendered = json.dumps(result)
         assert ("private source content" in rendered) is allowed, rendered
-        if not allowed:
+        if authentication_refused:
+            assert not allowed
+            assert result["error"]["code"] == -32602, rendered
+        elif not allowed:
             assert "ask me there" in rendered, rendered
 
     async def check_sessions(token, handle, *, allowed=False, agent=False):
@@ -1342,7 +1345,11 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
             {"slack_turn_context_id": "malformed"},
             {"slack_turn_context_id": "00000000-0000-0000-0000-000000000000"},
         ):
-            await check(jwt.encode(claims | extra, secret, algorithm="HS256"), allowed=False)
+            await check(
+                jwt.encode(claims | extra, secret, algorithm="HS256"),
+                allowed=False,
+                authentication_refused=extra["slack_turn_context_id"] == "malformed",
+            )
         for previous in private_tokens:
             await check(previous, allowed=False)
             await check_sessions(previous, handle)
@@ -1394,12 +1401,21 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         other_tokens.append((agent_token, True))
         # No tool argument can select the row; unknown parameters never grant access.
 
+    observer_errors = []
+
+    async def checked_observe(request):
+        try:
+            return await observe(request)
+        except Exception as exc:
+            observer_errors.append(repr(exc))
+            raise
+
     tenant, deps, admission, _, _, created = await _setup(
         db_session,
         db_session_factory,
         platform="slack",
         workspace="T1",
-        on_event=observe,
+        on_event=checked_observe,
         vault_state=vaults,
         session_state=session_state,
     )
@@ -1503,6 +1519,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         for other, is_agent in other_tokens:
             for handle in private_handles:
                 await check_sessions(other, handle, agent=is_agent)
+    assert not observer_errors, observer_errors
     assert len(private_tokens) == 2 and private_tokens[0] != private_tokens[1]
     assert len(denied_headless) == 2
     assert len(vaults["vaults"]) == 3, "two isolated DM grants and one shared non-DM vault"

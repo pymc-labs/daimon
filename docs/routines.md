@@ -1,5 +1,13 @@
 # Routines
 
+A routine runs as the person who last authored its behavior. When another
+person changes its trigger message, agent or target, core transfers
+`created_by_user_id` to that editor and records an authority-transfer audit
+in the same transaction. The scheduler uses that author’s current credential
+and permissions. Pause, resume and delete do not transfer authority. A stale
+edit is refused. Transfers erase retained output and pending delivery, and
+private delivery follows the new author.
+
 A routine is a recurring scheduled turn: a cron expression, a timezone, an
 agent and one prompt. The scheduler fires it, the agent runs with no human in
 the thread, and the tail of its final message is written back onto the
@@ -88,7 +96,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | Column | Meaning |
 | --- | --- |
 | `tenant_id` | the partition; cascades on tenant delete |
-| `created_by_user_id` | the **platform** user id of the creator, not an account id |
+| `created_by_user_id` | the **platform** user id of the current behavior author, not an account id |
 | `agent_name` / `agent_id` | the Daimon tag is authoritative; the MA id is a cache, self-healed at fire time |
 | `cron_expr` / `timezone` | a five-field croniter expression and an IANA zone |
 | `trigger_message` | the prompt sent as the turn's user message |
@@ -667,7 +675,6 @@ stamped. Every stamped routine session also carries the private-DM stamp
 (`daimon_private_dm=routine:<id>`): a routine runs on its owner's
 credentials, so its transcript stays its owner's alone. No server admin reads it from the hub, as before routine sessions carried a
 channel.
-
 
 ### Durable fire diagnostics
 

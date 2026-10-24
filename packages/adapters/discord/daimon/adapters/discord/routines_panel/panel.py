@@ -22,6 +22,7 @@ from daimon.adapters.discord.routines_panel.write import (
     resume_routine_via_panel,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
@@ -204,7 +205,9 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
             async with runtime.sessionmaker() as session, session.begin():
 
                 async def allowed(row: RoutineRow) -> bool:
-                    is_admin = checks.is_guild_admin(interaction)
+                    is_admin = await checks.is_guild_admin(
+                        interaction, action=DelegatedAction.ROUTINES
+                    )
                     is_creator = (
                         row.created_by_user_id is not None
                         and row.created_by_user_id == str(interaction.user.id)

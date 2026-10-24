@@ -77,6 +77,8 @@ async def test_resolve_is_admin_returns_true_when_users_info_reports_admin() -> 
             payload={
                 "ok": True,
                 "user": {
+                    "deleted": False,
+                    "is_bot": False,
                     "id": "U_ADMIN",
                     "name": "admin_user",
                     "team_id": "T_HOST",
@@ -109,7 +111,16 @@ async def test_resolve_is_admin_is_false_for_an_external_admin(user: dict[str, o
     with AioResponsesMock() as mock:
         mock.get(  # pyright: ignore[reportUnknownMemberType]
             _USERS_INFO_PATTERN,
-            payload={"ok": True, "user": {"id": "U_EXTERNAL", "name": "visitor", **user}},
+            payload={
+                "ok": True,
+                "user": {
+                    "deleted": False,
+                    "is_bot": False,
+                    "id": "U_EXTERNAL",
+                    "name": "visitor",
+                    **user,
+                },
+            },
         )
         client = AsyncWebClient(token="xoxb-test")
         result = await resolve_is_admin(client, user_id="U_EXTERNAL", host_team_id="T_HOST")
@@ -128,6 +139,8 @@ async def test_resolve_is_admin_returns_false_when_users_info_reports_regular_me
             payload={
                 "ok": True,
                 "user": {
+                    "deleted": False,
+                    "is_bot": False,
                     "id": "U_TEST",
                     "name": "tester",
                     "team_id": "T_HOST",
@@ -215,7 +228,11 @@ async def _requester_for(
 
     with AioResponsesMock() as mock:
         mock.get(  # pyright: ignore[reportUnknownMemberType]
-            _USERS_INFO_PATTERN, payload={"ok": True, "user": user}
+            _USERS_INFO_PATTERN,
+            payload={
+                "ok": True,
+                "user": {"id": "U_TEST", "deleted": False, "is_bot": False, **user},
+            },
         )
         client = AsyncWebClient(token="xoxb-test")
         result = await resolve_requester(client, user_id="U_TEST", host_team_id=host_team_id)

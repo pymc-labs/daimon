@@ -77,8 +77,8 @@ TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
 
 #: Minting requires a workspace admin.
 NEEDS_ADMIN_MESSAGE: Final[str] = (
-    "You can't create this token.\n\n"
-    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only platform admins can create coding-tool keys, including channel-bound keys.\n\n"
+    'Ask a platform admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 
@@ -172,7 +172,7 @@ async def handle_coding_tools_click(
         )
         return
 
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id, action=None)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -372,7 +372,11 @@ async def _authorize_mint(
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
         subject = await load_live_subject(
-            session, tenant_id=tenant_id, platform="slack", caller=caller
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            caller=caller,
+            action=None,
         )
     agent = AgentRef.of(target.name)
     if channel_id is not None and any_agent_rules(policy):

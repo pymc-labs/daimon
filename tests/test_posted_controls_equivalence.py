@@ -380,7 +380,12 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             view = SimpleNamespace(
                 state=SimpleNamespace(selected=SimpleNamespace(routine=row)), runtime=runtime
             )
+
+            async def discord_admin(*args, **kwargs):
+                return scenario == "admin"
+
             scope.update(
+                checks=SimpleNamespace(is_guild_admin=discord_admin),
                 pause_routine_via_panel=scope["pause_routine"],
                 resume_routine_via_panel=scope["resume_routine"],
                 _rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),
@@ -414,7 +419,10 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             scope.update(
                 card_actor=AsyncMock(
                     return_value=SimpleNamespace(
-                        tenant_id=TENANT, user_id=USER, is_admin=scenario == "admin"
+                        tenant_id=TENANT,
+                        user_id=USER,
+                        is_admin=scenario == "admin",
+                        admin_for=lambda _action: scenario == "admin",
                     )
                 ),
                 store=SimpleNamespace(

@@ -291,13 +291,16 @@ async def test_d5_real_member_edit_and_independent_revision_readback(case: Case)
     assert updates == []
     case.binding.trace.assert_consumed()
     assert receipt.status == "refused" and receipt.code == "ADMIN_MEMBER_EDIT_REFUSED"
-    expected_error = (
-        "Changing 'qa-unbound-c6' needs its owner or a server admin. "
-        "Ask one to make the requested change. Do not retry."
-    )
     assert receipt.observations["errors"] == [
-        {"operation": operation, "error": expected_error}
-        for operation in ("update_agent", "attach_mcp_server")
+        {
+            "operation": "update_agent",
+            "error": "Changing 'qa-unbound-c6' needs its owner or a server admin. "
+            "Ask one to make the requested change. Do not retry.",
+        },
+        {
+            "operation": "attach_mcp_server",
+            "error": "Connections require a platform admin or this agent's owner.",
+        },
     ]
     assert (before.version, after.version) == (1, 1)
     assert before.payload == after.payload and before.cli_json == after.cli_json

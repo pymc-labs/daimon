@@ -32,9 +32,17 @@ async def _admit(db_session_factory, tmp_path: Path, tenant, *, role=Role.USER, 
 
         async with db_session_factory.begin() as session:
             await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def member(*_args):
+        return Membership(is_member=True, is_admin=role is Role.ADMIN)
+
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
     )
+    from dataclasses import replace
+
+    deps = replace(deps, membership_resolver=CachedMembershipResolver(member))
     admission = await admit(
         deps,
         tenant_id=tenant.id,
@@ -148,7 +156,7 @@ async def test_an_admin_dm_stays_exempt_and_an_unchanged_policy_returns_the_same
         db_session_factory, tmp_path, tenant, role=Role.ADMIN, is_dm=True
     )
 
-    assert await reauthorize(deps, admission) is admission
+    assert await reauthorize(deps, admission) == admission
 
 
 async def test_bind_session_decides_again_before_any_session_is_found_or_created(
@@ -346,7 +354,7 @@ async def test_native_private_surface_does_not_inherit_conversation_opt_in(
     assert not admission.grant.cold_dm and admission.grant.dm_source is None
     async with db_session_factory.begin() as session:
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
-    assert await reauthorize(deps, admission) is admission
+    assert await reauthorize(deps, admission) == admission
 
 
 async def test_admin_bypass_disabled_after_admission(

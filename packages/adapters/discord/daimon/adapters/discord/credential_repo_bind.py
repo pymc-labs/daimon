@@ -57,7 +57,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat, store_inline_pat
-from daimon.adapters.discord.checks import admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_platform_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
@@ -147,7 +147,7 @@ async def refuse_if_shared_and_not_admin_for_request(
        in the channel the mint named, so a cross-guild click is not
        reachable through normal use; this guard exists so it stays
        unreachable by construction rather than by luck.
-    2. A live guild admin (`is_guild_admin`) -> allow, before any MA call and
+    2. A live guild admin (`is_platform_admin`) -> allow, before any MA call and
        before any database read. This ordering is what keeps an admin able
        to bind a repo to the seeded agent — the first-run onboarding step
        this whole path exists to enable.
@@ -185,8 +185,17 @@ async def refuse_if_shared_and_not_admin_for_request(
         )
         await _send_ephemeral(interaction, _WRONG_GUILD_MESSAGE)
         return True
-    if is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    if is_platform_admin(interaction):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_platform_admin only reads user/guild
         return False
+    if operation == "skill_repo_connect":
+        from daimon.adapters.discord.checks import is_guild_admin
+        from daimon.core.admin_actions import DelegatedAction
+
+        if await is_guild_admin(interaction, action=DelegatedAction.SKILLS):
+            return False
+    if operation == "repo_bind":
+        await _send_ephemeral(interaction, "Only a platform admin can bind GitHub repos.")
+        return True
     agent = await resolve_ma_agent_for_uuid(
         runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
     )
@@ -217,7 +226,7 @@ async def refuse_if_shared_and_not_admin_for_request(
     if outcome in ("managed_agent", "needs_admin"):
         await _send_ephemeral(
             interaction,
-            _SHARED_AGENT_MESSAGE if operation == "repo_bind" else _SHARED_AGENT_SKILLS_MESSAGE,
+            _SHARED_AGENT_SKILLS_MESSAGE,
         )
         return True
     return False

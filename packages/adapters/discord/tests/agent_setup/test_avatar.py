@@ -78,7 +78,7 @@ async def test_reset_refuses_when_agent_pictures_are_off_or_guild_excluded(
 async def test_reset_refuses_member_and_built_in(
     monkeypatch: pytest.MonkeyPatch, is_admin: bool
 ) -> None:
-    monkeypatch.setattr(avatar_module, "is_guild_admin", lambda _interaction: is_admin)
+    monkeypatch.setattr(avatar_module, "is_guild_admin", AsyncMock(return_value=is_admin))
     monkeypatch.setattr(
         avatar_module,
         "find_agent_by_daimon_tag",
@@ -104,7 +104,7 @@ async def test_use_default_replaces_an_existing_uploaded_picture(
             session, tenant_id=tenant.id, agent_name="analyst", png=_png(), source="upload"
         )
     runtime = _runtime(db_session_factory)
-    monkeypatch.setattr(avatar_module, "is_guild_admin", lambda _interaction: True)
+    monkeypatch.setattr(avatar_module, "is_guild_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(
         avatar_module,
         "find_agent_by_daimon_tag",

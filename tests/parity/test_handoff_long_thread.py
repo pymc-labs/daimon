@@ -121,6 +121,9 @@ def _register_slack_defaults(
         payload={
             "ok": True,
             "user": {
+                "id": "U_LONG_THREAD_PARITY",
+                "deleted": False,
+                "is_bot": False,
                 "is_admin": False,
                 "is_owner": False,
                 "is_primary_owner": False,

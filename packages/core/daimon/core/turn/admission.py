@@ -72,7 +72,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
-from daimon.core.membership_subject import resolve_subject
+from daimon.core.membership_subject import resolve_subject, resolve_subject_authority
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -246,6 +246,8 @@ class Admission:
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
+    is_platform_admin: bool = False
+    effective_is_admin: bool | None = None
     observation: TurnObservation | None = field(default=None, compare=False, repr=False)
     # The channel's backend configuration and its admission, when the channel
     # has one and `DAIMON_TURN__CHANNEL_BACKENDS` is on; None otherwise.
@@ -276,6 +278,13 @@ class Admission:
     # The stored agent before the conversation's model was put in `agent`; set
     # only with `model_override`. A fleet root or worker runs it (`authored`).
     authored_agent: BetaManagedAgentsAgent | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def is_admin(self) -> bool:
+        """The effective authority admitted for this turn; absent evidence denies."""
+        if self.effective_is_admin is not None:
+            return self.effective_is_admin
+        return self.grant is not None and self.grant.subject.is_admin
 
     def authored(self) -> Admission:
         """This admission without the conversation's model choice: the agent as authored.
@@ -574,11 +583,19 @@ async def admit_impl(
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
         mark("policy_and_admins")
+        from daimon.core.native_admins import is_daimon_admin
 
-        # Refusals must happen before config is read. Keeping the session here
-        # reuses its connection for the config cascade after authorization.
+        platform_admin = role is Role.ADMIN and not client
+        admin = await is_daimon_admin(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            platform_user_id=external_user_id,
+            is_platform_admin=platform_admin,
+            role_ids=role_ids,
+        )
         subject = build_subject(
-            is_admin=role is Role.ADMIN and hold is None,
+            is_admin=admin and hold is None,
             client=client,
             platform_user_id=external_user_id,
             role_ids=role_ids,
@@ -586,10 +603,10 @@ async def admit_impl(
         )
         if (
             platform == "discord"
-            and verified_membership is None
-            and (policy.invoker_role_ids or deps.membership_resolver is not None)
+            and (is_dm or verified_membership is None)
+            and (is_dm or policy.invoker_role_ids or deps.membership_resolver is not None)
         ):
-            subject = await resolve_subject(
+            subject, platform_admin = await resolve_subject_authority(
                 deps.sessionmaker,
                 deps.membership_resolver,
                 tenant_id=tenant_id,
@@ -597,9 +614,29 @@ async def admit_impl(
                 require_fresh=is_dm,
                 session=session,
             )
-            if subject.verified_membership is not True:
-                raise AdmissionDenied(reason="invoker_not_allowed")
-        if is_dm and platform == "discord" and subject.verified_membership is not True:
+        platform_admin = platform_admin and not client
+        effective_admin = subject.is_admin and hold is None and not client
+        # Turn admission is not a delegated configuration action. Preserve the
+        # effective verdict for the UI without granting runtime exemptions.
+        subject = replace(subject, is_admin=platform_admin and hold is None, client=client)
+        # Stored authority belongs only to live platform admins. A grant affects
+        # this subject, never the hub's account/transcript admin exception.
+        if role is not None and requester_org is RequesterOrg.HOST:
+            await set_role(
+                session, principal.account_id, Role.ADMIN if platform_admin else Role.USER
+            )
+        await session.commit()
+        if (
+            platform == "discord"
+            and (
+                (
+                    verified_membership is None
+                    and (policy.invoker_role_ids or deps.membership_resolver is not None)
+                )
+                or is_dm
+            )
+            and subject.verified_membership is not True
+        ):
             raise AdmissionDenied(reason="invoker_not_allowed")
         if hold is not None:
             subject = replace(subject, is_admin=False, client=client)
@@ -994,6 +1031,8 @@ async def admit_impl(
         from daimon.core.turn.runtimes import scope_channel_runtimes
 
         provisional = Admission(
+            is_platform_admin=platform_admin,
+            effective_is_admin=effective_admin,
             account_id=principal.account_id,
             agent=agent,
             environment=environment,
@@ -1237,6 +1276,8 @@ async def admit_impl(
     mark("thread_model")
 
     result = Admission(
+        is_platform_admin=platform_admin,
+        effective_is_admin=effective_admin,
         backend_revision=backend_revision,
         backend_revision_origin=backend_revision_origin,
         backend_counterpart=backend_counterpart,

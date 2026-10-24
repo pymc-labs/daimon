@@ -4447,7 +4447,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -4534,7 +4534,7 @@ class DaimonBot(commands.Bot):
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
             configuration_target_name=admission.config.configuration_target_name,
-            role=role,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             sender_foreign=admission.hold is not None and admission.hold.client,
             shared_channel=admission.shared_channel,
             is_setup=admission.config.thread_binding_kind == "setup",
@@ -4644,6 +4644,7 @@ class DaimonBot(commands.Bot):
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
+                    effective_is_admin=admission.is_admin,
                 )
                 + "\n"
                 + seed_message
@@ -4659,7 +4660,7 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id,
                 budget_channel_id=admission.budget_channel_id,
                 requester_id=int(row.requester_external_user_id),
-                requester_is_admin=role is Role.ADMIN,
+                requester_is_admin=admission.is_admin,
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
@@ -4722,6 +4723,7 @@ class DaimonBot(commands.Bot):
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
+                            effective_is_admin=admission.is_admin,
                         )
                         + "\n"
                         + seed_message
@@ -5306,6 +5308,7 @@ class DaimonBot(commands.Bot):
                     )
                 )
             return
+        is_admin = admission.is_admin
 
         agent = admission.agent
 
@@ -5646,7 +5649,7 @@ class DaimonBot(commands.Bot):
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
             configuration_target_name=admission.config.configuration_target_name,
-            role=role,
+            role=Role.ADMIN if admission.is_platform_admin else Role.USER,
             sender_foreign=admission.hold is not None and admission.hold.client,
             shared_channel=admission.shared_channel,
             is_setup=admission.config.thread_binding_kind == "setup",
@@ -6043,6 +6046,7 @@ class DaimonBot(commands.Bot):
                     recovery_origin,
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
+                    effective_is_admin=admission.is_admin,
                 )
                 + "\n"
                 + full_message
@@ -6124,6 +6128,7 @@ class DaimonBot(commands.Bot):
                             origin,
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
+                            effective_is_admin=admission.is_admin,
                         )
                         + "\n"
                         + user_message

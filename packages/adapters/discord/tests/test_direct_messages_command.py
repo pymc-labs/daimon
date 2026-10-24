@@ -32,6 +32,7 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     monkeypatch: pytest.MonkeyPatch, channel_type: type[Any]
 ) -> None:
     monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
+    monkeypatch.setattr(direct_messages, "is_member_daimon_admin", AsyncMock(return_value=False))
     monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=_sealed_admission()))
     start_dm = AsyncMock()
     monkeypatch.setattr(direct_messages, "start_dm", start_dm)
@@ -71,6 +72,7 @@ async def test_dm_move_drops_system_notices_such_as_a_sealed_threads_created_not
 ) -> None:
     """A thread-created notice in the parent carries the (sealed) thread's name."""
     monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
+    monkeypatch.setattr(direct_messages, "is_member_daimon_admin", AsyncMock(return_value=False))
     monkeypatch.setattr(
         direct_messages,
         "admit",

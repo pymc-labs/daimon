@@ -136,8 +136,12 @@ async def test_the_owner_edits_settings_backend_and_fleet_and_a_member_cannot(pe
         await service.revoke_fleet_grant(
             agent, 4, actors["member"], expected_preview_digest=grant_preview.digest, now=now
         )
+    with pytest.raises(AgentBackendRefused, match="admin required"):
+        await service.revoke_fleet_grant(
+            agent, 4, actors["owner"], expected_preview_digest=grant_preview.digest, now=now
+        )
     revoked = await service.revoke_fleet_grant(
-        agent, 4, actors["owner"], expected_preview_digest=grant_preview.digest, now=now
+        agent, 4, actors["admin"], expected_preview_digest=grant_preview.digest, now=now
     )
     assert revoked.requires == REQUIRES_TOOLS
     rows = await service.audit(agent.tenant_id, agent_id=agent.agent_id)

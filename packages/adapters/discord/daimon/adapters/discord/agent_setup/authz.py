@@ -48,8 +48,14 @@ from __future__ import annotations
 import structlog
 from daimon.adapters.discord.agent_setup.state import RosterEntry
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
-from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import (
+    ADMIN_NOUN,
+    admin_caller,
+    is_guild_admin,
+    is_platform_admin,
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.operation_policy import (
     OperationKind,
@@ -88,7 +94,7 @@ async def _target_facts(
     if not needs_reachability_read(operation, is_admin=is_admin, is_daimon_managed=entry.is_system):
         return TargetFacts(is_daimon_managed=entry.is_system, is_reachable_in_tenant=False)
     tenant_id = await resolve_tenant_for_panel(runtime, interaction)
-    caller = admin_caller(interaction.user).model_copy(update={"is_server_admin": is_admin})
+    caller = admin_caller(interaction.user)
     async with runtime.sessionmaker() as session:
         return await load_target_facts(
             session,
@@ -138,7 +144,7 @@ async def refuse_if_reachable_and_not_admin(
     if entry is None:
         log.debug("agent_setup.authz.no_target")
         return True
-    is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    is_admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
     facts = await _target_facts(
         interaction, runtime=runtime, entry=entry, operation="agent_spec_edit", is_admin=is_admin
     )
@@ -184,7 +190,7 @@ async def refuse_if_shared_and_not_admin(
     if entry is None:
         log.debug("agent_setup.authz.no_target")
         return True
-    is_admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
+    is_admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
     if is_admin:
         return False
     facts = await _target_facts(

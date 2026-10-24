@@ -822,6 +822,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
+        "daimon_admins": "daimon_admins",
         "channel_admins": "channel_admins",
         "agent_post_requesters": "agent_post_requesters",
         "platform_user_names": "platform_user_names",
@@ -879,6 +880,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "support_escalations": "account_id FK -> accounts.id",
         "direct_message_conversations": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
+        "daimon_admins": "subject_id and granted_by are erased by platform principal",
         "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
     }
     # Intentional exclusions, each justified inline.

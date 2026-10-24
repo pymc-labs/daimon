@@ -51,7 +51,8 @@ async def get_account_with_tenant(
         .outerjoin(
             PlatformPrincipal,
             (PlatformPrincipal.account_id == Account.id)
-            & (PlatformPrincipal.platform == Tenant.platform),
+            & (PlatformPrincipal.platform == Tenant.platform)
+            & (PlatformPrincipal.tenant_id == Tenant.id),
         )
         .where(Account.id == account_id)
     )

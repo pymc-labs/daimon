@@ -148,7 +148,9 @@ def _default_users_info(_url: object, **_kwargs: object) -> CallbackResult:
         payload={
             "ok": True,
             "user": {
-                "id": "U_TEST",
+                "id": getattr(_url, "query", {}).get("user", "U_TEST"),
+                "deleted": False,
+                "is_bot": False,
                 "name": "tester",
                 "team_id": _current_host_team_id,
                 "is_admin": False,

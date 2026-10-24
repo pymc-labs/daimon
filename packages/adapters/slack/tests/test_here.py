@@ -406,7 +406,16 @@ def _review_client(*, connect: bool) -> MagicMock:
     )
     client.users_conversations = AsyncMock(return_value={"channels": []})
     client.users_info = AsyncMock(
-        return_value={"user": {"is_admin": True, "is_restricted": False, "team_id": "T1"}}
+        return_value={
+            "user": {
+                "id": "U_CALLER",
+                "deleted": False,
+                "is_bot": False,
+                "is_admin": True,
+                "is_restricted": False,
+                "team_id": "T1",
+            }
+        }
     )
     client.chat_postEphemeral = AsyncMock()
     return client

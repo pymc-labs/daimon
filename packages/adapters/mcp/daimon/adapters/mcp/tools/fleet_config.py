@@ -12,6 +12,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
+    _require_platform_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools.setup_target import get_chat_origin
@@ -74,6 +75,9 @@ class ProviderAllowlistInfo(BaseModel):
 async def _require_chat(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None, tool: str
 ) -> None:
+    if tool == "request_fleet_config":
+        _require_platform_admin(auth)
+        return
     if tool in ("request_provider_allowlist", "request_channel_pin_clear"):
         _require_admin(auth)
     if auth.agent_id is not None or auth.platform_user_id is None:
@@ -89,7 +93,7 @@ def _actor(auth: AuthIdentity) -> BackendActor:
     return BackendActor(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        subject=mcp_subject(auth, is_admin=auth.admin_for()),
     )
 
 
@@ -114,7 +118,10 @@ async def _capture_fleet_target(
         billing_config=None,
     )
     return await capture_agent_source(
-        deps, source, account_id=auth.account_id, subject=mcp_subject(auth, is_admin=auth.is_admin)
+        deps,
+        source,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.admin_for()),
     )
 
 
@@ -254,9 +261,8 @@ async def _request_fleet_config_impl(
         status = "preview"
         summary = (
             "Show these limits, then call request_fleet_config with this exact config, "
-            "revoke, expected_revision and preview_digest. The requesting owner or "
-            "admin must Confirm "
-            "on the card. Nothing changed yet."
+            "revoke, expected_revision and preview_digest. The platform admin must save "
+            "with their personal CLI credential. Nothing changed yet."
         )
         if preview_digest is not None:
             reference = ConfigurationReference.model_validate(
@@ -456,10 +462,10 @@ def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         preview_digest: str | None = None,
         origin_context_id: str | None = None,
     ) -> FleetConfigInfo:
-        """Configure this agent's fleet of worker agents, with owner/admin confirmation.
+        """Change worker spending limits with a personal CLI credential and live platform authority.
 
         Every agent already has a fleet with default limits (4 workers, $2 a run);
-        call this only when the agent's owner or an admin asks to change or turn off
+        call this only when a platform admin asks to change or turn off
         those limits. Never use it to get around a fleet refusal or a limit someone
         else hit: tell them the limit and who can change it instead.
 
@@ -469,7 +475,7 @@ def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         max_workers, budget_usd and max_worker_seconds (required for a new fleet).
         On edits, every omitted field keeps its saved value, including expiry,
         provider caps, token limits and worker selection. Explicit null removes an
-        optional cap; the card marks removals. A current-settings read returns the
+        optional cap; the preview marks removals. A current-settings read returns the
         complete saved config, so it can be edited without reconstructing defaults.
         Use fleet_agents to list eligible workers. Each worker runs AS that
         agent, using its own prompt, model, tools and skills; model choices
@@ -482,8 +488,9 @@ def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         partial map prevents omitted providers from spending.
         Omit config to show the current settings; revoke=true turns fleet off.
         Preview first. Then pass the exact returned config, expected_revision
-        and preview_digest to show the requesting owner's/admin's Confirm card.
-        Pass this turn's origin_context_id. A stale preview changes nothing.
+        and preview_digest to save using the same personal credential.
+        Chat, routine, continuation, watch and external agent credentials are refused.
+        A stale preview changes nothing.
         """
         return await _request_fleet_config_impl(
             runtime,

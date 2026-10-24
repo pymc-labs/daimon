@@ -224,8 +224,8 @@ async def test_handler_persona_matrix(
         "not available for this account",
         "Only an admin can change this",  # not the skills note's "can change them"
         "Only an admin can create",
-        "Only an admin can top up",
-        "Only an admin can look up",
+        "Only a platform admin can top up",
+        "Only a platform admin can look up",
         "Only an admin can mint",
         "Only the owner",
         "Ask in a channel that uses its own agents.",

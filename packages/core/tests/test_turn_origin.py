@@ -637,3 +637,9 @@ def test_controls_for_a_platform_with_no_chat_commands_carry_no_words() -> None:
 
     assert "words" not in _controls(rendered)
     assert "another chat app" not in rendered
+
+
+def test_effective_role_is_separate_from_the_platform_snapshot() -> None:
+    controls = render_turn_origin(_origin(), effective_is_admin=True)
+    assert '"current_role": "user"' in controls
+    assert '"effective_role": "admin"' in controls

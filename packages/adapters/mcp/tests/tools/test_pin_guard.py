@@ -94,6 +94,7 @@ async def test_the_guard_never_exempts_an_agent_key_even_an_admins(
         platform_user_id=None if auth_kind == "agent-key-no-platform-user" else "42",
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
         is_admin=True,
+        is_platform_admin=True,
     )
     with pytest.raises(ToolError):
         await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
@@ -109,6 +110,7 @@ def _member(tenant_id: uuid.UUID, *, is_admin: bool = False) -> AuthIdentity:
         platform_user_id="42",
         chat_agent_id=uuid.uuid4(),
         is_admin=is_admin,
+        is_platform_admin=is_admin,
     )
 
 
@@ -149,7 +151,12 @@ async def test_direct_tools_refuse_a_member_editing_a_pinned_agent(
     auth = _member(tenant_id)
     target: dict[str, Any] = {"expected_ma_agent_id": _AGENT_ID}
 
-    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
+    reason = (
+        "Connections require a platform admin or this agent's owner"
+        if tool in {"attach_mcp_server", "update_agent_mcp"}
+        else "rule runs it only in certain channels"
+    )
+    with pytest.raises(ToolError, match=reason):
         if tool == "attach_mcp_server":
             await _attach_mcp_server_impl(
                 runtime,

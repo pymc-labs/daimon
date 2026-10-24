@@ -1,13 +1,11 @@
 """Who administers the deployment from Teams: the admin team's owners.
 
-The owners of `admin_team_id` are the only admins, read live through the
-runtime's short team-owner cache (`TeamMember.Read.Group`), so making someone
-an owner needs no redeploy and a removed owner lapses when the cache expires;
-each read also demotes their stored role, which routines and tools act on.
-A failed owner read is logged once per lookup and
-answered by the last successful one for up to an hour (`STALE_OWNERS_S`);
-after that nobody is an admin until the next good read, and a turn records
-no role, so stored admin roles stand until then.
+The owners of `admin_team_id` are platform admins. Authorization reads them
+fresh and combines that authority with uncached tenant-wide user grants.
+A failed fresh read confers no platform authority. Notification recipient
+lookups may use the bounded owner cache and its last successful snapshot.
+Every successful owner read also demotes unlisted stored platform accounts.
+Delegated grants are evaluated live and never cached in account roles.
 """
 
 from __future__ import annotations
@@ -21,9 +19,15 @@ import structlog
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.provisioning import demote_former_admins
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.native_admins import GroupLookupFailed, GroupMembers, ServerAdminIds
+from daimon.core.native_admins import (
+    GroupLookupFailed,
+    GroupMembers,
+    ServerAdminIds,
+    is_daimon_admin,
+)
 from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import list_teams_installations
 from sqlalchemy.exc import SQLAlchemyError
@@ -111,6 +115,8 @@ def admin_team_owners(runtime: TeamsRuntime, *, fresh: bool = False) -> GroupMem
                 ("teams", group_id), lambda: lookup(group_id), fresh=fresh
             )
         except GroupLookupFailed:
+            if fresh:
+                raise
             # An outage, or the app removed from the team, keeps the admins for an hour.
             last = None if reads is None else reads.last_owners()
             if last is None:
@@ -145,28 +151,56 @@ async def deployment_role(
     return Role.ADMIN if user_id.lower() in owner_ids else Role.USER
 
 
+async def is_platform_admin(
+    settings: TeamsSettings, owners: GroupMembers | None, *, user_id: str
+) -> bool:
+    """Platform-only authority for billing, caps and delegation."""
+    return await deployment_role(settings, owners, user_id=user_id) is Role.ADMIN
+
+
 async def is_deployment_admin(
     settings: TeamsSettings,
     owners: GroupMembers | None,
     *,
     user_id: str,
+    runtime: TeamsRuntime | None = None,
+    action: DelegatedAction | None = None,
 ) -> bool:
-    """Whether `user_id` administers the deployment: an owner of the admin team."""
-    return await deployment_role(settings, owners, user_id=user_id) is Role.ADMIN
+    """Whether `user_id` has live platform authority or a tenant user grant."""
+    role = await deployment_role(settings, owners, user_id=user_id)
+    if runtime is None or not isinstance(action, DelegatedAction):
+        return role is Role.ADMIN
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=settings.tenant_id)
+    async with runtime.sessionmaker() as session:
+        return await is_daimon_admin(
+            session,
+            tenant_id=tenant_id,
+            platform="teams",
+            platform_user_id=user_id.lower(),
+            is_platform_admin=role is Role.ADMIN,
+        )
 
 
 async def inbound_role(
     runtime: TeamsRuntime, settings: TeamsSettings, inbound: TeamsInbound
 ) -> Role | None:
     """A message sender's `deployment_role`."""
-    return await deployment_role(settings, admin_team_owners(runtime), user_id=inbound.user_id)
+    return await deployment_role(
+        settings, admin_team_owners(runtime, fresh=True), user_id=inbound.user_id
+    )
 
 
 async def inbound_is_admin(
     runtime: TeamsRuntime, settings: TeamsSettings, inbound: TeamsInbound
 ) -> bool:
     """Whether a message's sender administers the deployment."""
-    return await inbound_role(runtime, settings, inbound) is Role.ADMIN
+    return await is_deployment_admin(
+        settings,
+        admin_team_owners(runtime, fresh=True),
+        user_id=inbound.user_id,
+        runtime=runtime,
+        action=DelegatedAction.AGENT_SETTINGS,
+    )
 
 
 async def deployment_admin_ids(

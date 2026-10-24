@@ -83,7 +83,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
     except ValueError:
         pytest.skip("native selector proofs require an owned lane DB or isolated CI")
     async with db_session_factory.begin() as db:
-        tenant = await make_tenant(db, id=TENANT)
+        tenant = await make_tenant(db, id=TENANT, platform="slack")
         account = await make_account(db, tenant=tenant, id=ACCOUNT)
         await make_platform_principal(
             db, platform="slack", external_id="caller", tenant=tenant, account=account

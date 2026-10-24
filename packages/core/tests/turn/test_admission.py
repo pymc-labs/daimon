@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -21,6 +22,7 @@ from daimon.core.config import McpSettings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
@@ -96,10 +98,18 @@ def _deps(
     router: MARouter,
     billing_config: BillingConfig | None = None,
     resolver_cache: ResolverCache | None = None,
+    native_member_admin: bool | None = None,
 ) -> TurnDeps:
     return TurnDeps(
         anthropic=build_fake_anthropic(router.dispatch),
         sessionmaker=sessionmaker,
+        membership_resolver=(
+            CachedMembershipResolver(
+                AsyncMock(return_value=Membership(is_member=True, is_admin=native_member_admin))
+            )
+            if native_member_admin is not None
+            else None
+        ),
         deployment_default=DeploymentDefault(),
         resolver_cache=resolver_cache if resolver_cache is not None else new_resolver_cache(),
         defaults_root=defaults_root,
@@ -339,7 +349,10 @@ async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
     tenant = await _funded_tenant_with_spent_channel(db_session)
     await db_session.commit()
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_router_for(tenant),
     )
     args = {
         "tenant_id": tenant.id,
@@ -1139,9 +1152,9 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
 
 
 async def _seed_admittable_tenant(
-    db_session: AsyncSession, *, policy: TenantAccessPolicy | None
+    db_session: AsyncSession, *, policy: TenantAccessPolicy | None, platform: str = "discord"
 ) -> TenantRow:
-    tenant = await make_tenant(db_session)
+    tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
     )
@@ -1188,7 +1201,12 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
     deps = replace(
-        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        _deps(
+            native_member_admin=False,
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=router,
+        ),
         platform_skills=load_platform_skills(Path(__file__).resolve().parents[4] / "defaults"),
     )
 
@@ -1504,7 +1522,10 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     admission = await admit(
@@ -1997,7 +2018,10 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
     """The pin holds in every channel and thread, admins included, and for a member's DM."""
     tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     with pytest.raises(AdmissionDenied) as exc_info:
@@ -2085,7 +2109,10 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
     """/dm-me needs to know the source itself is sealed, not only that memory is read-only."""
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     admission = await admit(
@@ -2227,9 +2254,12 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     On Teams the adapter passes ADMIN for an owner of the admin team
     in a personal chat, so the same rule covers them.
     """
-    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON, platform=platform)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=True,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
 
     admission = await admit(
@@ -2263,7 +2293,10 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
     )
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+        native_member_admin=True,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_admittable_router(tenant),
     )
     args = {
         "tenant_id": tenant.id,
@@ -2369,7 +2402,12 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
     deps = replace(
-        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=router,
+            native_member_admin=False,
+        ),
         tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=enabled),
     )
     admission = await admit(
@@ -2539,3 +2577,88 @@ async def test_gate_revocation_reaches_prepared_and_running_turns(
     await decide_before_send(deps, admission, attended=False)()
     assert not (await posture.decide(call.model_copy(update={"tool_use_id": "next"}))).allow
     card.assert_awaited_once()
+
+
+async def test_explicit_grant_does_not_promote_stored_role_when_platform_is_unavailable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    from daimon.core.stores.accounts import get_account
+    from daimon.core.stores.daimon_admins import change_grant
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None, platform="teams")
+    await change_grant(
+        db_session,
+        tenant_id=tenant.id,
+        platform="teams",
+        subject_kind="user",
+        subject_id="user-1",
+        actor_user_id="owner",
+        is_platform_admin=True,
+    )
+    await db_session.commit()
+    admission = await admit(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="teams",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+        role=None,
+    )
+    assert admission.is_admin
+    assert not admission.grant.subject.is_admin, "delegation does not exempt turn admission"
+    account = await get_account(db_session, admission.account_id)
+    assert account is not None and account.role is Role.USER
+
+
+@pytest.mark.parametrize(
+    ("platform", "kind"),
+    [("discord", "user"), ("discord", "role"), ("slack", "user"), ("teams", "user")],
+)
+async def test_delegated_admission_never_caches_admin_authority(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+    kind: str,
+) -> None:
+    from daimon.core.stores.accounts import get_account
+    from daimon.core.stores.daimon_admins import change_grant
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None, platform=platform)
+    await change_grant(
+        db_session,
+        tenant_id=tenant.id,
+        platform=platform,
+        subject_kind=kind,
+        subject_id="granted-role" if kind == "role" else "user-1",
+        actor_user_id="owner",
+        is_platform_admin=True,
+    )
+    await db_session.commit()
+    admission = await admit(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform=platform,
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+        role=Role.USER,
+        role_ids=("granted-role",) if kind == "role" else (),
+        verified_membership=True,
+    )
+    assert admission.is_admin and not admission.is_platform_admin
+    account = await get_account(db_session, admission.account_id)
+    assert account is not None and account.role is Role.USER

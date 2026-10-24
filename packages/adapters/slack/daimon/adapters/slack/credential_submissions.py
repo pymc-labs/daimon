@@ -256,7 +256,7 @@ async def _replacement_refused_at_submit(
     family answers `allow` for an admin before anything else is consulted — and
     a target that can no longer be resolved fails closed.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id, action=None)
     facts = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
     if not is_admin:
         agent = await find_agent_by_derived_uuid(
@@ -319,7 +319,9 @@ async def _decide_mcp_connect_at_submit(
             client,
             tenant_id=row.tenant_id,
             user_id=user_id,
-            is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
+            is_admin=await resolve_is_admin(
+                client, user_id=user_id, host_team_id=team_id, action=None
+            ),
         ),
         default=runtime.deployment_default,
         shares_token=True,
@@ -447,7 +449,7 @@ async def run_env_credential_submission(
     # The name a member may store is re-checked against the submitter's live
     # role. `key_add` needs no gate, but the NAME does: a tool-control or
     # redirect name is refused for a member even on a brand-new key.
-    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id, action=None)
     name_problem = env_name_problem(request.target, is_admin=is_admin)
     if name_problem is not None:
         await post_ephemeral(
@@ -684,7 +686,9 @@ async def run_env_file_credential_submission(
     try:
         # `decode_env_bytes` re-measures the real bytes against the same cap
         # the submission checked the client's reported size against.
-        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+        is_admin = await resolve_is_admin(
+            client, user_id=user_id, host_team_id=team_id, action=None
+        )
         entries = parse_env_file(decode_env_bytes(body), member_writable_only=not is_admin)
     except EnvFileRejected as err:
         log.info(
@@ -1490,7 +1494,9 @@ async def run_skill_repo_credential_submission(
                 path=path,
                 tenant_id=consumed.tenant_id,
                 seeded_skill_names=seeded_skill_names,
-                is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
+                is_admin=await resolve_is_admin(
+                    client, user_id=user_id, host_team_id=team_id, action=None
+                ),
                 token=value,
             )
         except DaimonError as err:

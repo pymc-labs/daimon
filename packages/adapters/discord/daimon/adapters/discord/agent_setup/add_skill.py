@@ -24,6 +24,7 @@ from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import AgentDetails
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
@@ -116,7 +117,11 @@ async def skill_change_refusal(
 
         async def live_subject() -> Subject:
             return await load_live_subject(
-                session, tenant_id=tenant_id, platform="discord", caller=caller
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                caller=caller,
+                action=DelegatedAction.SKILLS,
             )
 
         pinned = await pin_refusal(

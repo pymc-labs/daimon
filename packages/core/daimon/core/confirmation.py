@@ -754,6 +754,7 @@ def backend_switch_callbacks(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     current_admin: Callable[[str], Awaitable[bool]],
+    current_platform_admin: Callable[[str], Awaitable[bool]] | None = None,
     resource_host: NeutralResourceHost | None = None,
     default_agent_name: str | None = None,
     place_word: str = "server",
@@ -869,11 +870,11 @@ def backend_switch_callbacks(
             or identity.platform_user_id != clicker
         ):
             raise ValueError("This confirmation is unavailable. Preview again.")
-        subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
-        if (
-            reference.operation in ("provider_allowlist", "channel_pin_clear")
-            and not subject.is_admin
-        ):
+        subject = build_subject(
+            is_admin=current_platform_admin is not None and await current_platform_admin(clicker),
+            platform_user_id=clicker,
+        )
+        if not subject.is_admin:
             raise ValueError("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:

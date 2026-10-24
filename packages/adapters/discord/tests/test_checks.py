@@ -176,6 +176,16 @@ def _admin_gate_interaction(
     """Build a mock Interaction with the minimum attributes refuse_if_not_admin touches."""
     interaction = MagicMock()
     interaction.user = MagicMock(spec=discord.Member) if is_member else MagicMock()
+    session = AsyncMock()
+    session.get.return_value = None
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    session.execute.return_value = result
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    interaction.client.runtime.sessionmaker.return_value = context
+    interaction.guild_id = 123
+    interaction.user.roles = []
     interaction.user.id = 1 if is_admin else 2
     interaction.user.guild_permissions.administrator = is_admin
     interaction.user.guild_permissions.manage_guild = False
@@ -203,7 +213,7 @@ async def test_refuse_if_not_admin_refuses_a_member_with_one_ephemeral() -> None
 
     assert refused is True, "an ordinary member must be refused"
     interaction.response.send_message.assert_awaited_once()
-    assert "Manage Server" in interaction.response.send_message.call_args.args[0], (
+    assert "Daimon admin" in interaction.response.send_message.call_args.args[0], (
         "the refusal should name the permission the member is missing"
     )
     assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True, (
@@ -246,7 +256,7 @@ async def test_routines_refusal_gives_an_admin_the_requested_action() -> None:
 
     assert called is False, "a member must not run the admin command"
     message = interaction.response.send_message.call_args.args[0]
-    assert "server admin (Manage Server)" in message, "the refusal must name the required role"
+    assert "Daimon admin" in message, "the refusal must name the required role"
     assert "Please open `/routines`" in message, "the handover must preserve the requested action"
     assert "this server’s scheduled routines" in message, "the handover must preserve the target"
     assert "/agent-setup" not in message and "->" not in message, "the next step must be reachable"

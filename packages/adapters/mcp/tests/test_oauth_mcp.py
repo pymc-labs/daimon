@@ -41,7 +41,7 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow, Role
 from daimon.testing.crypto import make_fernet
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -255,6 +255,9 @@ async def _seed_flow(
 ) -> tuple[McpOAuthFlowRow, uuid.UUID]:
     tenant = await make_tenant(session)
     account = await make_account(session, tenant=tenant)
+    await make_platform_principal(
+        session, tenant=tenant, account=account, platform=tenant.platform, external_id="requester-1"
+    )
     if admin:
         await set_role(session, account.id, Role.ADMIN)
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_oauth")

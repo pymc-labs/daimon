@@ -28,16 +28,22 @@ _OVER_BUDGET = "This channel's budget is used up.\n\nAn admin can raise it."
 @pytest.mark.parametrize(
     ("admin", "action", "expected"),
     [
-        (False, "enable", "Only a server admin can turn Daimon DMs on or off here."),
+        (False, "enable", "Only a platform admin can turn Daimon DMs on or off here."),
         (True, "enable", "Daimon DMs are on for this server."),
         (True, "disable", "Daimon DMs are off for this server."),
     ],
 )
 async def test_dm_policy_replies_use_server_words(
-    monkeypatch: pytest.MonkeyPatch, admin: bool, action: str, expected: str
+    monkeypatch: pytest.MonkeyPatch,
+    admin: bool,
+    action: str,
+    expected: str,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    await provision_tenant(db_session_factory, platform="discord", workspace_id=str(_GUILD))
     save = AsyncMock()
     monkeypatch.setattr(dm_module, "set_dm_enabled", save)
+    monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
     member = MagicMock()
     member.guild_permissions.administrator = admin
     member.guild_permissions.manage_guild = admin
@@ -45,13 +51,16 @@ async def test_dm_policy_replies_use_server_words(
     guild.id = _GUILD
     guild.owner_id = 1
     guild.fetch_member = AsyncMock(return_value=member)
+    member.guild = guild
+    member.id = 999
+    member.roles = []
     interaction = MagicMock()
     interaction.guild = guild
     interaction.channel = MagicMock(spec=discord.TextChannel)
     interaction.user.id = 999
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    runtime = MagicMock()
+    runtime = MagicMock(sessionmaker=db_session_factory)
     cog = DirectMessageCog(MagicMock(runtime=runtime))
     await cog.dm.callback.__wrapped__(cog, interaction, action)  # pyright: ignore[reportFunctionMemberAccess]
     assert interaction.followup.send.await_args.args[0] == expected

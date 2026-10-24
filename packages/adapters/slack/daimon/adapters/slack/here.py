@@ -14,6 +14,7 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.outsiders import channel_outsiders
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import Approvals
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.approval_admin import approval_admin
@@ -212,7 +213,12 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
         try:
             if bot_view is None:
                 raise SlackClientError("Channel metadata is unavailable")
-            is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+            is_admin = await resolve_is_admin(
+                client,
+                user_id=user_id,
+                host_team_id=team_id,
+                action=DelegatedAction.CHANNEL_PERMISSIONS,
+            )
             visible_ids = await _visible_channel_ids(client, user_id)
             visible_ids.add(channel_id)
         except (SlackClientError, ClientError, TimeoutError):
@@ -309,7 +315,9 @@ async def handle_make_confidential(runtime: SlackRuntime, payload: dict[str, Any
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
+    if not await resolve_is_admin(
+        client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.CHANNEL_PERMISSIONS
+    ):
         text = RULE_NEED_ADMIN_MESSAGE
     else:
         text = await change_rule(

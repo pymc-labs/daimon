@@ -586,13 +586,16 @@ async def _run_admitted_dm_turn(
             thread_id=scope_id,
             responder_ma_agent_id=prepared.admission.agent.id,
             responder_name=prepared.admission.agent.name,
-            role=role,
+            role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
             attended=origin != "routine",
             sender_foreign=prepared.admission.hold is not None and prepared.admission.hold.client,
             shared_channel=prepared.admission.shared_channel,
         ) as turn_origin_row,
     ):
-        user_message = f"{render_turn_origin(turn_origin_row)}\n{prompt}"
+        controls = render_turn_origin(
+            turn_origin_row, effective_is_admin=prepared.admission.is_admin
+        )
+        user_message = f"{controls}\n{prompt}"
 
         async def reseed() -> str:
             return user_message
@@ -951,7 +954,7 @@ async def run_dm_routine(
                 parent_channel_id=scope_id,
                 scope_id=scope_id,
                 external_user_id=owner_user_id,
-                role=Role.ADMIN if grant.subject.is_admin else Role.USER,
+                role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
                 prompt=prompt,
                 deadline=deadline,
                 on_sealed=sealed,

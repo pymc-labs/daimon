@@ -162,6 +162,7 @@ async def test_fleet_card_reloads_effective_models_and_rechecks_permission_and_c
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=admin,
+        current_platform_admin=admin,
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
@@ -173,7 +174,6 @@ async def test_fleet_card_reloads_effective_models_and_rechecks_permission_and_c
     assert await check(prompt, "requester") is None
     assert await check(prompt, "someone-else")
     admin.return_value = False
-    trace.queue(reply())
     assert await check(prompt, "requester")
     admin.return_value = True
     await service.set_fleet_grant(
@@ -213,6 +213,7 @@ async def test_provider_card_is_bound_to_tenant_policy_and_current_admin(owned_p
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=admin,
+        current_platform_admin=admin,
     )
     prepared = await prepare(prompt)
     assert "anthropic, gemini" in prepared.consequence and "Free" not in prepared.consequence
@@ -257,12 +258,12 @@ async def test_owner_confirmation_is_refused_if_ownership_is_removed(owned_previ
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=False),
+        current_platform_admin=AsyncMock(return_value=False),
     )
-    trace.queue(reply())
-    assert (await prepare(prompt)).configuration
+    with pytest.raises(ValueError, match="current workspace admin"):
+        await prepare(prompt)
     async with sessions.begin() as session:
         await agent_owners.clear_owner(session, tenant_id=agent.tenant_id, agent_id=agent.agent_id)
-    trace.queue(reply())
     assert await check(prompt, "requester")
     assert not trace.replies and not trace.violations
 
@@ -394,6 +395,7 @@ async def test_channel_pin_card_binds_the_chat_channel_and_a_current_admin(owned
             tenant_id=agent.tenant_id,
             account_id=actor.account_id,
             current_admin=admin,
+            current_platform_admin=admin,
             pin_channel=channel,
         )
 
@@ -448,9 +450,9 @@ async def test_an_owners_card_can_not_raise_fleet_limits_above_the_default(owned
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=False),
+        current_platform_admin=AsyncMock(return_value=False),
     )
-    trace.queue(reply())
-    with pytest.raises(ValueError, match="Only an admin can raise fleet limits"):
+    with pytest.raises(ValueError, match="current workspace admin"):
         await prepare(prompt)
     # The same card from an admin prepares.
     admin_prepare, _ = backend_switch_callbacks(
@@ -460,6 +462,7 @@ async def test_an_owners_card_can_not_raise_fleet_limits_above_the_default(owned
         tenant_id=agent.tenant_id,
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
+        current_platform_admin=AsyncMock(return_value=True),
     )
     trace.queue(reply())
     assert (await admin_prepare(prompt)).configuration

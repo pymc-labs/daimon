@@ -11,6 +11,7 @@ import json
 import uuid
 
 import httpx
+import pytest
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.middleware.mcp_identity import ClaimResolver
 from daimon.adapters.mcp.server import create_mcp_app
@@ -20,7 +21,9 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
-from daimon.testing.factories import make_account, make_tenant
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import Role
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
 from fastmcp import Client
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -29,7 +32,17 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, lis
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .harness import seed_tenant_and_account
+pytestmark = pytest.mark.usefixtures("platform_admin_edge")
+
+
+async def seed_tenant_and_account(session):
+    tenant = await make_tenant(session)
+    account = await make_account(session, tenant=tenant)
+    await make_platform_principal(
+        session, tenant=tenant, account=account, platform=tenant.platform, external_id="test-admin"
+    )
+    await set_role(session, account.id, Role.ADMIN)
+    return tenant.id, account.id
 
 
 def _fixed_resolvers(
@@ -152,6 +165,10 @@ async def test_list_agents_isolates_tenants_end_to_end(
     tenant_a_id, account_a_id = await seed_tenant_and_account(db_session)
     tenant_b = await make_tenant(db_session, platform="discord", workspace_id="guild-e2e-b")
     account_b = await make_account(db_session, tenant=tenant_b)
+    await make_platform_principal(
+        db_session, tenant=tenant_b, account=account_b, platform="discord", external_id="test-admin"
+    )
+    await set_role(db_session, account_b.id, Role.ADMIN)
     tenant_b_id = tenant_b.id
     account_b_id = account_b.id
     await db_session.commit()
