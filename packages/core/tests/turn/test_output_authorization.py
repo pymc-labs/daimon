@@ -120,3 +120,30 @@ async def test_transient_final_check_retries_and_delivers(ending, monkeypatch):
     assert authorize.await_count == 2
     sleep.assert_awaited_once_with(1)
     inner.on_output_refused.assert_not_awaited()
+
+
+@pytest.mark.parametrize("ending", ["success", "failure"])
+async def test_inner_terminal_transient_error_is_logged_and_cleaned_up(ending):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.turn.run import _DeferredFailureLifecycle
+    from daimon.core.turn.state import TurnState
+    from structlog.testing import capture_logs
+
+    inner = AsyncMock()
+    hook = inner.on_terminal_success if ending == "success" else inner.on_terminal_failure
+    hook.side_effect = OSError("connection reset between chunks")
+    authorize = AsyncMock()
+    lifecycle = _DeferredFailureLifecycle(inner=inner, authorize_final=authorize)
+    with capture_logs() as logs:
+        if ending == "success":
+            await lifecycle.on_terminal_success(TurnState())
+        else:
+            await lifecycle.on_terminal_failure(TurnState(), RuntimeError("model failed"))
+            await lifecycle.flush_held_failure()
+    authorize.assert_awaited_once()
+    hook.assert_awaited_once()
+    inner.on_output_refused.assert_awaited_once()
+    assert logs == [
+        {"event": "turn.final_output_refused", "error_type": "OSError", "log_level": "warning"}
+    ]

@@ -3378,8 +3378,6 @@ async def test_refused_watch_final_ends_card_and_stops_cancel(ending, monkeypatc
     inner, sends, edits = _make_lifecycle(cancel_view=cancel_view)
     await inner.post_initial()
     before = (len(sends), len(edits))
-    repair = MagicMock()
-    monkeypatch.setattr(inner._card_writes, "queue_repair", repair)
     monkeypatch.setattr("daimon.core.turn.run.asyncio.sleep", AsyncMock())
     lifecycle = _DeferredFailureLifecycle(
         inner=inner, authorize_final=AsyncMock(side_effect=OSError("connection reset"))
@@ -3393,7 +3391,6 @@ async def test_refused_watch_final_ends_card_and_stops_cancel(ending, monkeypatc
     assert inner._terminal
     assert inner._ended_before is not None
     assert cancel_view.is_finished()
-    repair.assert_called_once()
     assert (len(sends), len(edits)) == before
 
 

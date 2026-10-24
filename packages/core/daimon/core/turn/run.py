@@ -360,24 +360,32 @@ class _DeferredFailureLifecycle:
     async def _may_finish(self) -> bool:
         if self.authorize_final is None:
             return True
-        for attempt in range(3):
+        for delay in (1, 2, None):
             try:
                 await self.authorize_final()
                 return True
             except Exception as err:
-                if not isinstance(err, AdmissionDenied) and attempt < 2:
-                    await asyncio.sleep(attempt + 1)
+                if not isinstance(err, AdmissionDenied) and delay is not None:
+                    await asyncio.sleep(delay)
                     continue
-                log.warning("turn.final_output_refused", error_type=type(err).__name__)
-                cleanup = getattr(self.inner, "on_output_refused", None)
-                if cleanup is not None:
-                    await cast(Callable[[], Awaitable[None]], cleanup)()
-                return False
+                await self._output_refused(err)
+                break
         return False
+
+    async def _output_refused(self, err: Exception) -> None:
+        log.warning("turn.final_output_refused", error_type=type(err).__name__)
+        cleanup = getattr(self.inner, "on_output_refused", None)
+        if cleanup is not None:
+            await cast(Callable[[], Awaitable[None]], cleanup)()
 
     async def on_terminal_success(self, state: TurnState) -> None:
         if await self._may_finish():
-            await self.inner.on_terminal_success(state)
+            try:
+                await self.inner.on_terminal_success(state)
+            except Exception as err:
+                if self.authorize_final is None or isinstance(err, AdmissionDenied):
+                    raise
+                await self._output_refused(err)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         self._held = (state, err)
@@ -412,7 +420,12 @@ class _DeferredFailureLifecycle:
         if termination is not None:
             state = replace(state, termination=termination)
         if await self._may_finish():
-            await self.inner.on_terminal_failure(state, err)
+            try:
+                await self.inner.on_terminal_failure(state, err)
+            except Exception as delivery_error:
+                if self.authorize_final is None or isinstance(delivery_error, AdmissionDenied):
+                    raise
+                await self._output_refused(delivery_error)
 
 
 async def _mirror_cancel(cancel: asyncio.Event, fresh_cancel: asyncio.Event) -> None:
