@@ -575,6 +575,8 @@ class DiscordFleetCardFactory:
             if intent_id is None or (interaction is not None and run_id is None):
                 raise FleetRefused("prerequisites_unavailable")
             tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+            # This thread's own intent, proven from its durable row (run_id None only).
+            own_intent = False
             try:
                 async with deps.sessionmaker() as db:
                     original = await find_platform_principal(
@@ -613,13 +615,13 @@ class DiscordFleetCardFactory:
                         frozen = await get_fleet_root_operation(
                             db, scope, intent_id=intent_id, check_intent_owner=True
                         )
-                    if (
+                    own_intent = (
                         own is not None
                         and own.tenant_id == tenant_id
                         and own.platform == "discord"
                         and own.thread_id == str(thread.id)
-                        and frozen is None
-                    ):
+                    )
+                    if own_intent and frozen is None:
                         return None
                 result = await read_frozen_root(
                     deps,
@@ -637,6 +639,20 @@ class DiscordFleetCardFactory:
                     raise FleetRefused("foreign_run")
                 return replace(parent, subject=subject), policy
             except (WorkerSpecRefused, ScopeViolation, SQLAlchemyError) as error:
+                if (
+                    own_intent
+                    and interaction is None
+                    and isinstance(error, WorkerSpecRefused)
+                    and error.reason == "unbound"
+                ):
+                    # This thread's own card on a render tick, before its root is readable:
+                    # the freeze (at the turn's first send) has begun the root operation
+                    # but not finished it, so read_frozen_root rightly refuses it. There is
+                    # no fleet to show yet; a refusal here only failed the render tick and
+                    # could drop what rode on it (smoke a1d991fb). Once a worker is
+                    # spawned the card has a run id and resolves through the run.
+                    log.info("fleet.card_root_pending", intent_id=str(intent_id))
+                    return None
                 # Name the real cause once: the refusal the card shows is generic.
                 log.warning(
                     "fleet.card_root_unavailable",
