@@ -131,6 +131,15 @@ log = structlog.get_logger(__name__)
 # turn ever sent it (and may put back what it would have carried).
 SEND_ATTEMPTED: ContextVar[list[bool] | None] = ContextVar("turn_send_attempted", default=None)
 
+
+def send_attempted() -> bool:
+    """Whether a turn under the caller's `SEND_ATTEMPTED` mark may have sent its message.
+
+    From then on a failure is no longer "nothing ran": re-running could answer twice.
+    """
+    return bool(SEND_ATTEMPTED.get())
+
+
 InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
 
 # Module-level singleton so `run_turn`'s default arg isn't a function call in

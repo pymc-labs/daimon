@@ -22,6 +22,7 @@ from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continu
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
 from daimon.core.continuity.wakes import (
     WAKE_CLAIM_LEASE,
+    WAKE_RETRY_DELAY,
     WAKE_RUN_LEASE,
     abandon_interrupted_wakes,
 )
@@ -258,8 +259,9 @@ async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
 
     On main each busy bind settled the row and re-queued the request under a
     new key for the next turn tail, without limit, so the sixth tail delivered
-    it. Here the same row is released with its claim refunded and
-    `available_at` left NULL: delivered on the sixth tail, exactly once.
+    it. Here the same row is released with its claim refunded and a poll time
+    (the wake poller retries it; #1549 review 1): delivered on the sixth try,
+    exactly once.
     """
     thread_id = "9200000003.000001"
     request = await _seed_request(
@@ -298,7 +300,7 @@ async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
         row = await _read(db_session_factory, request.idempotency_key)
         if tail < 5:
             assert row.status == "pending" and row.attempts == 0, "a busy wait is refunded"
-            assert row.available_at is None, "a handoff still waits for the next turn tail"
+            assert row.available_at == at + WAKE_RETRY_DELAY, "the poller retries it"
 
     assert delivered == ["please pick up the migration"]
     row = await _read(db_session_factory, request.idempotency_key)

@@ -119,7 +119,7 @@ from daimon.core.continuity.continuation import (
     ContinuationRequest,
     check_wake_responder,
     load_asking_agent_id,
-    record_continuation,
+    queued_message_key,
 )
 from daimon.core.continuity.messages import (
     render_access_changed_try_again,
@@ -134,6 +134,7 @@ from daimon.core.continuity.wakes import (
     WakeThread,
     WorkerFinishedRootChanged,
     decide_worker_finished,
+    enqueue_wake,
     require_worker_finished_root,
     run_wake_poller,
     skip_thread_wakes,
@@ -180,6 +181,7 @@ from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
+from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenant_ledger import get_prepaid_balance
 from daimon.core.stores.tenants import (
     get_plain_text_mentions,
@@ -216,6 +218,7 @@ from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
+from daimon.core.turn.driver import send_attempted
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
     BackendRefusalCause,
@@ -668,6 +671,9 @@ class _TurnFailureSurface:
 
     thread: discord.Thread | None = None
     end_card: Callable[[str], Awaitable[None]] | None = None
+    #: Removes a continuation's card that never carried an answer (a busy bind:
+    #: the row waits and its next attempt posts a card of its own).
+    retract_card: Callable[[], Awaitable[None]] | None = None
 
 
 # Shared with every adapter that follows threads (see `daimon.core.participation_gates`).
@@ -4151,18 +4157,26 @@ class DaimonBot(commands.Bot):
         ):
             return
         busy = session_busy_in(exc)
-        if busy is not None:
-            # The thread's previous turn still holds the session: dispatch releases
-            # this row and retries it at the next turn tail. That is not a failure,
-            # so the status card must not become "Something went wrong on our side"
-            # (J6g: the copy answered, then a second error reply). The busy bind may
-            # arrive wrapped in the turn's own TurnError; unwrap its cause chain.
+        if busy is not None and not send_attempted():
+            # The thread's previous turn still holds the session and nothing was
+            # sent: dispatch releases this row and retries it. That is not a
+            # failure, so the card says nothing ("Daimon is busy", J6g) and goes:
+            # left up, recovery would later end it "Stopped" or "restarted". The
+            # busy bind may arrive wrapped in the turn's own TurnError.
             log.info(
                 "continuation.busy_bind_not_an_error",
                 reason=row.reason,
                 pending=list(busy.pending_reasons),
                 retry_after=busy.retry_after.isoformat(),
             )
+            if surface.retract_card is not None:
+                try:
+                    await surface.retract_card()
+                except Exception as card_exc:  # best effort; recovery retires a leftover
+                    log.warning(
+                        "continuation.busy_card_retract_failed",
+                        error_type=type(card_exc).__name__,
+                    )
             return
         rid = bound_request_id()
         if row.reason == "worker_finished" and isinstance(
@@ -4407,6 +4421,23 @@ class DaimonBot(commands.Bot):
             )
 
         surface.end_card = _end_card_with_error
+
+        async def _retract_unanswered_card() -> None:
+            current = lifecycle_holder[0]
+            if current.ended:
+                return
+            card = current.message_ref
+            if card is not None and not watch.is_stopped():
+                with contextlib.suppress(discord.NotFound):
+                    await card.delete()
+            await retire_terminal_turn_card(
+                self.runtime.sessionmaker,
+                intent_id=turn_card_intent.id,
+                expected_message_id=current.card_message_id,
+                no_post_confirmed=not current.first_post_attempted,
+            )
+
+        surface.retract_card = _retract_unanswered_card
 
         origin_context = turn_origin(
             self.runtime.sessionmaker,
@@ -4968,6 +4999,78 @@ class DaimonBot(commands.Bot):
                 unprompted=unprompted,
                 failure_surface=failure_surface,
             )
+
+    async def _queue_behind_busy_turn(
+        self,
+        message: discord.Message,
+        batch: tuple[discord.Message, ...],
+        *,
+        tenant_id: uuid.UUID,
+        account_id: uuid.UUID,
+        target_ma_agent_id: str,
+        target_name: str,
+        parent_channel_id: str,
+        thread: discord.Thread,
+    ) -> bool:
+        """Queue each message of a turn that bound busy for the agent it was handed to.
+
+        M07g: the outgoing agent's turn still holds the session, so the copy can't
+        answer yet. Each message gets its own row, keyed by its Discord id (a
+        redelivered message finds its row) and polled, so the copy answers each
+        once when the session frees. Only what the queue carries whole: one
+        author's plain messages (the drained batch included). An attachment, an
+        empty or over-long message, or another author's message queues nothing,
+        and the caller says to send again. False when nothing was queued.
+        """
+        names = self._plain_text_names(message.guild)
+        messages = batch or (message,)
+        works = [strip_mentions(item.content, names).strip() for item in messages]
+        if any(
+            item.author.id != message.author.id
+            or item.attachments
+            or not work
+            or len(work) > MAX_REQUESTED_WORK
+            for item, work in zip(messages, works, strict=True)
+        ):
+            return False
+        queued = 0
+        for item, work in zip(messages, works, strict=True):
+            key = queued_message_key("discord", str(item.id))
+            try:
+                # One transaction each: a row's created_at orders the answers, so the
+                # messages are answered in the order they were posted.
+                async with self.runtime.sessionmaker.begin() as session:
+                    if await get_continuation(session, idempotency_key=key) is None:
+                        await enqueue_wake(
+                            session,
+                            ContinuationRequest(
+                                tenant_id=tenant_id,
+                                platform="discord",
+                                parent_channel_id=parent_channel_id,
+                                thread_id=str(thread.id),
+                                requester_account_id=account_id,
+                                requester_external_user_id=str(message.author.id),
+                                target_ma_agent_id=target_ma_agent_id,
+                                target_name=target_name,
+                                requested_work=work,
+                                reason="task_handoff",
+                                idempotency_key=key,
+                            ),
+                            available_at=datetime.now(UTC),
+                        )
+                queued += 1  # queued now, or already by an earlier delivery
+            except Exception as error:
+                log.warning(
+                    "turn.handoff_busy_queue_failed",
+                    thread_id=str(thread.id),
+                    queued=queued,
+                    error_class=type(error).__name__,
+                )
+                if queued == 0:
+                    return False
+                break
+        log.info("turn.handoff_busy_queued", thread_id=str(thread.id), messages=queued)
+        return True
 
     async def _orchestrate_observed_guarded(
         self,
@@ -5619,54 +5722,32 @@ class DaimonBot(commands.Bot):
             # message for it and answers once the in-flight turn ends (M07g);
             # every other change is told to send again. A seal defers it the
             # same way; the next message is prepared read-only, so it says so.
-            queued_work = strip_mentions(
-                message.content, self._plain_text_names(message.guild)
-            ).strip()
             if (
                 "seal" not in busy.pending_reasons
                 and admission.config.thread_binding_kind in ("handoff", "owner")
-                and queued_work
-                and len(queued_work) <= MAX_REQUESTED_WORK
-                and not message.attachments
+                and await self._queue_behind_busy_turn(
+                    message,
+                    query_messages,
+                    tenant_id=tenant_id,
+                    account_id=admission.account_id,
+                    target_ma_agent_id=str(agent.id),
+                    target_name=admission.config.agent_name or agent.name,
+                    parent_channel_id=parent_channel_id,
+                    thread=thread,
+                )
             ):
-                # Only a plain message the queue can carry whole: an attachment
-                # or a longer message is still told to send again, never cut.
-                try:
-                    await record_continuation(
-                        self.runtime.sessionmaker,
-                        ContinuationRequest(
-                            tenant_id=tenant_id,
-                            platform="discord",
-                            parent_channel_id=parent_channel_id,
-                            thread_id=str(thread.id),
-                            requester_account_id=admission.account_id,
-                            requester_external_user_id=str(message.author.id),
-                            target_ma_agent_id=str(agent.id),
-                            target_name=admission.config.agent_name or agent.name,
-                            requested_work=queued_work,
-                            reason="task_handoff",
-                            idempotency_key=uuid.uuid4(),
-                        ),
-                    )
-                except Exception as error:
-                    log.warning(
-                        "turn.handoff_busy_queue_failed",
-                        thread_id=str(thread.id),
-                        error_class=type(error).__name__,
-                    )
+                queued_text = render_message_queued_behind_turn(agent.name)
+                if lifecycle.message_ref is not None:
+                    await lifecycle.edit_card(content=queued_text, embed=None, view=None)
                 else:
-                    queued_text = render_message_queued_behind_turn(agent.name)
-                    if lifecycle.message_ref is not None:
-                        await lifecycle.edit_card(content=queued_text, embed=None, view=None)
-                    else:
-                        await turn_send(queued_text)
-                    await retire_terminal_turn_card(
-                        self.runtime.sessionmaker,
-                        intent_id=turn_card_intent.id,
-                        expected_message_id=lifecycle.card_message_id,
-                        no_post_confirmed=not lifecycle.first_post_attempted,
-                    )
-                    return
+                    await turn_send(queued_text)
+                await retire_terminal_turn_card(
+                    self.runtime.sessionmaker,
+                    intent_id=turn_card_intent.id,
+                    expected_message_id=lifecycle.card_message_id,
+                    no_post_confirmed=not lifecycle.first_post_attempted,
+                )
+                return
             busy_text = (
                 render_access_changed_try_again()
                 if "seal" in busy.pending_reasons

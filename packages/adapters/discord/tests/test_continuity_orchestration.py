@@ -938,6 +938,7 @@ async def test_a_hand_off_that_binds_busy_queues_the_message_for_the_copy(
     A plain message is queued whole for the copy; one with an attachment can't be
     carried by the queue, so it is still told to send again.
     """
+    from daimon.core.continuity.continuation import queued_message_key
     from daimon.core.stores.task_continuations import list_pending_continuations
 
     guild_id = "700000012"
@@ -963,8 +964,10 @@ async def test_a_hand_off_that_binds_busy_queues_the_message_for_the_copy(
         guild_id=int(guild_id), content="<@999> read this file for me please"
     )
     with_file.attachments = [MagicMock(filename="notes.txt")]
+    plain.id, with_file.id = 9001, 9002
 
-    for message in (plain, with_file):
+    # The plain message twice: Discord can redeliver it, and it must not queue twice.
+    for message in (plain, with_file, plain):
         with (
             patch(
                 "daimon.adapters.discord.bot.bind_session",
@@ -982,13 +985,25 @@ async def test_a_hand_off_that_binds_busy_queues_the_message_for_the_copy(
 
     async with db_session_factory() as session:
         rows = await list_pending_continuations(
-            session, tenant_id=tenant_id, platform="discord", thread_id="5555"
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id="5555",
+            include_future=True,
         )
     assert [
-        (r.status, r.reason, r.target_ma_agent_id, r.requested_work, r.thread_id) for r in rows
-    ] == [("pending", "task_handoff", "ag_test", "which model are you running on?", "5555")], (
-        "only the plain message is queued for the copy, whole"
-    )
+        (r.status, r.reason, r.target_ma_agent_id, r.requested_work, r.idempotency_key)
+        for r in rows
+    ] == [
+        (
+            "pending",
+            "task_handoff",
+            "ag_test",
+            "which model are you running on?",
+            queued_message_key("discord", "9001"),
+        )
+    ], "only the plain message is queued for the copy, whole, once, keyed by its id"
+    assert rows[0].available_at is not None, "the wake poller delivers it (#1549 review 1)"
 
     def _said(message: MagicMock) -> list[str | None]:
         ref = message.channel.send.return_value
@@ -1000,6 +1015,56 @@ async def test_a_hand_off_that_binds_busy_queues_the_message_for_the_copy(
     assert render_current_work_must_finish("test-agent", handoff=True) not in _said(plain)
     assert render_current_work_must_finish("test-agent", handoff=True) in _said(with_file)
     await _assert_no_recoverable_cards(db_session_factory)
+
+
+async def test_a_drained_batch_queues_one_row_per_message_or_none(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#1549 review 4: messages that waited while the thread was busy arrive as one
+    drained batch (content/attachments overrides), not as `message` alone. Each of one
+    author's plain messages gets its own row (one answer per message). A batch the
+    queue can't carry whole (an attachment, another author) queues none of it."""
+    from daimon.core.continuity.continuation import queued_message_key
+    from daimon.core.stores.task_continuations import list_pending_continuations
+
+    tenant_id = await _seed_tenant(db_session, guild_id="700000013")
+    bot = make_bot(_make_runtime(db_session_factory))
+
+    def _message(message_id: int, content: str, *, author_id: int = 111) -> MagicMock:
+        message = _make_thread_message(content=content, author_id=author_id, thread_id=5556)
+        message.id = message_id
+        return message
+
+    async def _queue(batch: tuple[MagicMock, ...]) -> bool:
+        return await bot._queue_behind_busy_turn(  # pyright: ignore[reportPrivateUsage]
+            batch[0],
+            batch,
+            tenant_id=tenant_id,
+            account_id=uuid.uuid4(),
+            target_ma_agent_id="ag_copy",
+            target_name="daimon-copy",
+            parent_channel_id="789",
+            thread=batch[0].channel,
+        )
+
+    with_file = _message(3, "<@999> and read this file please")
+    with_file.attachments = [MagicMock(filename="notes.txt")]
+    assert not await _queue((_message(1, "<@999> first question here"), with_file))
+    assert not await _queue(
+        (_message(4, "<@999> my question first"), _message(5, "<@999> mine too", author_id=222))
+    )
+    assert await _queue(
+        (_message(6, "<@999> what's the plan for today?"), _message(7, "<@999> and tomorrow?"))
+    )
+    async with db_session_factory() as session:
+        rows = await list_pending_continuations(
+            session, tenant_id=tenant_id, platform="discord", thread_id="5556", include_future=True
+        )
+    assert [(r.idempotency_key, r.requested_work) for r in rows] == [
+        (queued_message_key("discord", "6"), "what's the plan for today?"),
+        (queued_message_key("discord", "7"), "and tomorrow?"),
+    ]
 
 
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)

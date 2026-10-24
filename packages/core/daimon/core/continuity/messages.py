@@ -541,6 +541,16 @@ def render_message_queued_behind_turn(target_name: str) -> str:
     return f"{target_name} takes this message once the one it is working on finishes."
 
 
+def render_handoff_wait_expired(target_name: str) -> str:
+    """Tell the person a hand-off waited too long behind the previous turn, once."""
+    return "\n".join(
+        [
+            f"{target_name} couldn't pick up your message: the previous one here is still running.",
+            "Send it again and I'll answer it.",
+        ]
+    )
+
+
 def render_access_changed_try_again() -> str:
     """Tell the person a seal landed while their turn was being prepared, so it didn't run."""
     return "\n".join(

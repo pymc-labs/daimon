@@ -24,6 +24,7 @@ from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import clear_active_turn, mark_turn_active
+from daimon.core.turn.driver import SEND_ATTEMPTED
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn_origin import build_handoff_notice
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
@@ -97,6 +98,8 @@ async def _dispatch(
     latest: datetime | None = None,
     target_tenant: uuid.UUID | None = None,
     worker_finished_decision: WorkerFinishedDecision | None = None,
+    now: datetime | None = None,
+    sends: bool = False,
 ) -> tuple[list[str], list[str]]:
     """`target_tenant` owns the target agent: another tenant's means it is gone."""
     seeds: list[str] = []
@@ -104,6 +107,11 @@ async def _dispatch(
 
     async def run_follow_up(_row: TaskContinuationRow, seed: str) -> None:
         seeds.append(seed)
+        if sends:
+            # As `run_prepared_turn` does once the message is handed to the provider.
+            mark = SEND_ATTEMPTED.get()
+            assert mark is not None, "the dispatcher watches for a send"
+            mark.append(True)
         if run is not None:
             raise run
 
@@ -124,6 +132,7 @@ async def _dispatch(
         latest_user_message_at=latest_user_message_at,
         dispatch_errors=(RuntimeError,),
         worker_finished_decision=worker_finished_decision,
+        **({} if now is None else {"now": lambda: now}),
     )
     return seeds, notices
 
@@ -205,34 +214,77 @@ async def test_run_failures_settle(
     assert await _status(db_session_factory, key) == ("skipped", reason)
 
 
-async def test_a_busy_handoff_is_released_for_the_next_turn_tail(
-    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_a_busy_handoff_waits_for_the_poller_not_a_turn_tail(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+    wrapped: bool,
 ) -> None:
-    key = await _queue(db_session_factory, caller, "w")
-    busy = SessionBusyError(pending_reasons=("x",), retry_after=_SOON)
-    await _dispatch(db_session_factory, caller, run=busy)
-    row = await _row(db_session_factory, key)
-    assert (row.status, row.attempts, row.available_at) == ("pending", 0, None), (
-        "the same row waits again, claim refunded, still a handoff"
-    )
-    assert await _dispatch(db_session_factory, caller) == (["w"], []), "the next tail runs it"
-    assert await _status(db_session_factory, key) == ("delivered", None)
-
-
-async def test_a_wrapped_busy_handoff_is_released_for_the_next_turn_tail(
-    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
-) -> None:
-    """The turn can wrap the busy bind in its own TurnError (J6g)."""
+    """J6g/M07g (#1549 review 1): a busy bind before the send releases the hand-off with a
+    poll time, direct or wrapped in the turn's own TurnError. Left with no
+    `available_at` it waited for a turn tail that may never come: the copy is the
+    one meant to answer, so the wake poller delivers it."""
+    from daimon.core.continuity.wakes import list_due_wake_threads
     from daimon.core.errors import TurnError
 
     key = await _queue(db_session_factory, caller, "w")
-    busy = SessionBusyError(pending_reasons=("x",), retry_after=_SOON)
-    await _dispatch(db_session_factory, caller, run=TurnError(kind="upstream", cause=busy))
-    row = await _row(db_session_factory, key)
-    assert (row.status, row.attempts, row.available_at) == ("pending", 0, None), (
-        "a wrapped busy bind is not a dispatch failure: the row waits again"
+    soon = datetime.now(UTC) + timedelta(minutes=5)  # later than the poll delay
+    busy = SessionBusyError(pending_reasons=("x",), retry_after=soon)
+    await _dispatch(
+        db_session_factory, caller, run=TurnError(kind="upstream", cause=busy) if wrapped else busy
     )
-    assert await _dispatch(db_session_factory, caller) == (["w"], []), "the next tail runs it"
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.attempts, row.available_at) == ("pending", 0, soon), (
+        "the same row waits, claim refunded, until the session's own retry time"
+    )
+    due = await list_due_wake_threads(db_session_factory, platform="teams", now=soon)
+    assert [(t.tenant_id, t.thread_id) for t in due if t.tenant_id == caller[0]] == [
+        (caller[0], _THREAD)
+    ], "the poller picks it up; no other turn in the thread is needed"
+    assert await _dispatch(db_session_factory, caller, now=soon) == (["w"], [])
+    assert await _status(db_session_factory, key) == ("delivered", None)
+    assert await _dispatch(db_session_factory, caller, now=soon) == ([], []), "answered once"
+
+
+async def test_a_busy_error_after_the_send_is_settled_never_rerun(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """#1549 review 5: a busy error raised once the message may have reached the session
+    (a mid-turn session replacement) is not "nothing ran": re-running it could answer
+    twice, so the row settles instead of waiting."""
+    from daimon.core.errors import TurnError
+
+    key = await _queue(db_session_factory, caller, "w")
+    busy = SessionBusyError(pending_reasons=("seal",), retry_after=_SOON)
+    assert await _dispatch(
+        db_session_factory, caller, run=TurnError(kind="upstream", cause=busy), sends=True
+    ) == (["w"], [])
+    assert await _status(db_session_factory, key) == ("skipped", "dispatch_failed")
+    assert await _dispatch(db_session_factory, caller, now=_SOON) == ([], []), "never rerun"
+
+
+async def test_a_handoff_held_up_past_the_cap_is_told_once_and_stops(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """#1549 review 3: a release refunds the attempt, so a hand-off whose session never
+    frees was retried forever. Past `HANDOFF_WAIT_CAP` the person is told plainly,
+    once, and the row settles."""
+    from daimon.core.continuity.dispatch import HANDOFF_WAIT_CAP
+    from daimon.core.continuity.messages import render_handoff_wait_expired
+
+    key = await _queue(db_session_factory, caller, "w")
+    created = (await _row(db_session_factory, key)).created_at
+    busy = SessionBusyError(pending_reasons=("x",), retry_after=created)
+    late = created + HANDOFF_WAIT_CAP
+    assert await _dispatch(db_session_factory, caller, run=busy, now=late) == (
+        ["w"],
+        [render_handoff_wait_expired("stats-bot")],
+    )
+    assert await _status(db_session_factory, key) == ("skipped", "skip_wait_expired")
+    assert await _dispatch(db_session_factory, caller, now=late + timedelta(minutes=1)) == (
+        [],
+        [],
+    ), "told once"
 
 
 async def test_a_message_queued_behind_a_hand_off_is_answered_exactly_once(
