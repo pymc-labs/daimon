@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0135_mcp_token_skill_bytes"
-down_revision: str | None = "0131_usage_obs_tenant_idx"
+down_revision: str | None = "0134_thread_binding_owner_kind"
 branch_labels: str | None = None
 depends_on: str | None = None
 
