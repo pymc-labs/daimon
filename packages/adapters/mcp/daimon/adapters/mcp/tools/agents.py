@@ -169,17 +169,17 @@ class AgentInfo(BaseModel):
     copy's name. The copy has them even when ``skills`` does not list them yet; do
     not add them again."""
     owned_by_you: bool | None = Field(default=None, exclude_if=lambda value: value is None)
-    # The provider it answers on: its own provider setting, else Anthropic. When
-    # that setting moved it off Anthropic, ``active_model`` is that provider's model;
-    # ``model`` stays its own (Claude) model, the one update_agent changes.
-    provider: Provider | None = Field(default=None, exclude_if=lambda value: value is None)
-    active_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     """Set by ``get_agent`` and ``list_agents``: whether the caller owns this agent
     (created it, or an admin named them), so may change it without an admin."""
     owner: str | None = Field(default=None, exclude_if=lambda value: value is None)
     """Set by ``get_agent`` and ``list_agents``: who to ask about changing this agent:
     ``"you"``, the owner's name, or ``"another member"`` when no name is known.
     Absent when the agent has no owner: then only an admin changes it."""
+    # The provider it answers on: its own provider setting, else Anthropic. When
+    # that setting moved it off Anthropic, ``active_model`` is that provider's model;
+    # ``model`` stays its own (Claude) model, the one update_agent changes.
+    provider: Provider | None = Field(default=None, exclude_if=lambda value: value is None)
+    active_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @classmethod
     def from_ma(
@@ -1065,8 +1065,10 @@ async def _create_agent_impl(
         runtime.client, ma_agent, tenant_id=auth.tenant_id, sync_warnings=warnings
     )
     if backend is not None:
-        # The model it runs on, never the Claude record it is saved with.
-        info = info.model_copy(update={"model": backend[1], "applies": started})
+        info = info.model_copy(update={"applies": started})
+    # Read back as get_agent and list_agents read it: ``provider`` and, off Claude,
+    # the ``active_model`` it runs on; ``model`` stays its own Claude model.
+    (info,) = await _with_providers(runtime, auth, [info])
     # Say whether the creator was recorded as its owner, read back as get_agent
     # reads it: recording fails closed, so a miss reads as not owned.
     owned = await caller_owns_agent(runtime, auth, ma_agent.id)

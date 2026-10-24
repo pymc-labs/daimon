@@ -22,6 +22,8 @@ from daimon.adapters.mcp.tools.agents import (
     _build_create_spec,  # pyright: ignore[reportPrivateUsage]
     _create_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _create_model,  # pyright: ignore[reportPrivateUsage]
+    _get_agent_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_agents_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
@@ -165,7 +167,8 @@ async def test_j4_a_flash_agent_and_a_luna_agent_made_from_chat_run_as_a_fleet(
     )
     # Each was created on its own provider in the create call, and says so.
     flash, luna = made["flash-agent"], made["luna-agent"]
-    assert flash.model == "gemini-3.8-flash" and luna.model == "gpt-6-luna"
+    assert flash.active_model == "gemini-3.8-flash" and luna.active_model == "gpt-6-luna"
+    assert (flash.provider, luna.provider) == ("gemini", "openai")
     assert "flash-agent runs on Gemini 3.8 Flash" in (flash.applies or "")
     assert "luna-agent runs on GPT-6 Luna" in (luna.applies or "")
     # Each worker ran on that provider and model: the Claude record its definition is
@@ -479,6 +482,22 @@ async def test_a_copy_of_a_luna_agent_starts_on_luna_or_not_at_all(j10_root, tur
     )
     async with member_chat(j10_root) as (runtime_, auth, origin):
         luna = await create_from_chat(runtime_, auth, origin, "luna-agent", "luna")
+        # create_agent reads back as get_agent and list_agents read it: the provider
+        # and the model it runs on, with ``model`` its own Claude record.
+        assert luna.provider == "openai" and luna.active_model == "gpt-6-luna"
+        assert luna.model != "gpt-6-luna"
+        got = await _get_agent_impl(runtime_, auth, "luna-agent", origin_context_id=str(origin.id))
+        (listed,) = [
+            info
+            for info in await _list_agents_impl(runtime_, auth, None, str(origin.id))
+            if info.name == "luna-agent"
+        ]
+        for read in (got, listed):
+            assert (read.provider, read.model, read.active_model) == (
+                luna.provider,
+                luna.model,
+                luna.active_model,
+            )
         if turned_off:
             async with deps.sessionmaker.begin() as session:
                 policy = await load_access_policy(session, tenant_id=auth.tenant_id)
