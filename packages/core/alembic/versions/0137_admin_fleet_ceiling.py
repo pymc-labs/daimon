@@ -20,8 +20,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0124_admin_fleet_ceiling"
-down_revision: str | None = "0123_tenant_backends_explicit"
+revision: str = "0137_admin_fleet_ceiling"
+down_revision: str | None = "0136_tool_approval_cards"
 branch_labels: str | None = None
 depends_on: str | None = None
 

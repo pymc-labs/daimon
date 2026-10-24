@@ -437,7 +437,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert owner_spec is not None and owner_spec.loader is not None
     owner_module = importlib.util.module_from_spec(owner_spec)
     owner_spec.loader.exec_module(owner_module)
-    set_by_path = path.with_name("0124_admin_fleet_ceiling.py")
+    set_by_path = path.with_name("0137_admin_fleet_ceiling.py")
     set_by_spec = importlib.util.spec_from_file_location("admin_fleet_ceiling_restore", set_by_path)
     assert set_by_spec is not None and set_by_spec.loader is not None
     set_by_module = importlib.util.module_from_spec(set_by_spec)

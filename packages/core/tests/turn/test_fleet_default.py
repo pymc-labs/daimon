@@ -909,7 +909,7 @@ async def test_the_migration_backfills_existing_grants_and_revokes_as_admin_ceil
                 preview_digest="legacy",
                 fleet_grant=grant,
             )
-    path = Path(__file__).parents[2] / "alembic" / "versions" / "0124_admin_fleet_ceiling.py"
+    path = Path(__file__).parents[2] / "alembic" / "versions" / "0137_admin_fleet_ceiling.py"
     spec = importlib.util.spec_from_file_location("admin_fleet_ceiling_backfill", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
