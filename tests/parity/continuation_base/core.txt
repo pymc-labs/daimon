@@ -39,7 +39,7 @@ async def dispatch_pending_continuations(sessionmaker: async_sessionmaker[AsyncS
         async with sessionmaker() as session:
             live = await get_live_thread_session(session, tenant_id=row.tenant_id, platform=platform, thread_id=row.thread_id, account_id=row.requester_account_id)
         decision = await decide_continuation(sessionmaker, anthropic, request=request, now=datetime.now(UTC), latest_user_message_at=await latest_user_message_at(row), active_turn=live is not None and live.active_turn_message_id is not None)
-        if decision.action == 'skip_turn_running' and row.available_at is not None:
+        if decision.action == 'skip_turn_running' and (row.available_at is not None or row.reason == 'task_handoff'):
             await release_wake(sessionmaker, claim, retry_at=datetime.now(UTC) + WAKE_RETRY_DELAY)
             continue
         seed = decision.seed_user_message

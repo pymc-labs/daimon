@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Final
 
 import anthropic as anthropic_pkg
 import structlog
@@ -28,6 +29,7 @@ from daimon.core.continuity.continuation import (
     ResponderChanged,
     decide_continuation,
 )
+from daimon.core.continuity.messages import render_handoff_wait_expired
 from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
     WAKE_UNAVAILABLE_DELAY,
@@ -44,11 +46,12 @@ from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.turn.driver import SEND_ATTEMPTED
 from daimon.core.turn.errors import (
     AdmissionDenied,
-    SessionBusyError,
     SessionPreparationFailed,
     TurnNotStarted,
+    session_busy_in,
 )
 from daimon.core.turn.protection import protection_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -61,6 +64,7 @@ class ContinuationContextUnavailable(Exception):
 
 
 __all__ = [
+    "HANDOFF_WAIT_CAP",
     "ContinuationContextUnavailable",
     "LatestMessageAt",
     "PostNotice",
@@ -81,6 +85,28 @@ RunDecision = Callable[[TaskContinuationRow, ContinuationDecision], Awaitable[No
 WorkerFinishedDecision = Callable[
     [TaskContinuationRow, datetime], Awaitable[ContinuationDecision | None]
 ]
+
+
+#: How long a hand-off waits behind the thread's previous turn (still running, or its
+#: session still held) before the person is told, once, to send it again.
+HANDOFF_WAIT_CAP: Final[timedelta] = timedelta(minutes=10)
+
+
+def _retry_at(
+    row: TaskContinuationRow, *, now: datetime, not_before: datetime | None = None
+) -> datetime | None:
+    """`busy_retry_at`, except a hand-off is polled too.
+
+    A hand-off has no `available_at` of its own, so `busy_retry_at` leaves it to the
+    thread's next turn, which may never come (J6g, M07g): the copy is the one meant
+    to answer. It gets the wake poller's retry instead.
+    """
+    retry = busy_retry_at(row, now=now, not_before=not_before)
+    if retry is None and row.reason == "task_handoff":
+        retry = now + WAKE_RETRY_DELAY
+        if not_before is not None:
+            retry = max(retry, not_before)
+    return retry
 
 
 async def _settle(
@@ -165,6 +191,28 @@ async def dispatch_pending_continuations(
             return
         log.info(
             "continuation.notice_withheld", row_id=str(row.id), reason=reason, state=state.value
+        )
+
+    async def wait_or_give_up(
+        row: TaskContinuationRow, claim: WakeClaim, *, not_before: datetime | None = None
+    ) -> None:
+        """Release a row that must wait; a hand-off past `HANDOFF_WAIT_CAP` is told once.
+
+        A release refunds the claim's attempt, so without the cap a hand-off held
+        up forever would be retried forever and never answered or explained.
+        """
+        current = now()
+        if row.reason == "task_handoff" and current - row.created_at >= HANDOFF_WAIT_CAP:
+            log.info("continuation.handoff_wait_expired", row_id=str(row.id))
+            text = render_handoff_wait_expired(row.target_name)
+            if settle_before_notice:
+                await _settle(sessionmaker, claim, "skip_wait_expired", now)
+            await notify(row, text, reason="skip_wait_expired")
+            if not settle_before_notice:
+                await _settle(sessionmaker, claim, "skip_wait_expired", now)
+            return
+        await release_wake(
+            sessionmaker, claim, retry_at=_retry_at(row, now=current, not_before=not_before)
         )
 
     rows = await list_dispatchable_wakes(
@@ -254,9 +302,15 @@ async def dispatch_pending_continuations(
                 log.warning("continuation.context_unavailable", row_id=str(row.id), reason=str(exc))
                 await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
                 continue
-            if decision.action == "skip_turn_running" and row.available_at is not None:
-                # A wake has nobody waiting to be told; it runs after the turn in progress.
-                await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
+            if decision.action == "skip_turn_running" and (
+                row.available_at is not None or row.reason == "task_handoff"
+            ):
+                # A wake has nobody waiting to be told; it runs after the turn in
+                # progress. A hand-off's queued work was recorded by the very turn
+                # that is still marked active, so it must be retried too: settling
+                # it here is what left J6g with only "takes over from your next
+                # message" and no answer.
+                await wait_or_give_up(row, claim)
                 continue
             seed = decision.seed_user_message
             if decision.action != "dispatch" or (seed is None and run_decision is None):
@@ -272,6 +326,9 @@ async def dispatch_pending_continuations(
                 continue
             if not await start_wake(sessionmaker, claim, now=now()):
                 continue  # Another dispatcher took the row over while this one decided.
+            # Set once the follow-up's message may have reached the session: after that a
+            # busy error is no longer "nothing ran", and re-running would answer twice.
+            sent: list[bool] = []
             try:
                 if row.reason == "worker_finished":
                     async with sessionmaker() as db:
@@ -284,11 +341,15 @@ async def dispatch_pending_continuations(
                     ):
                         raise WorkerFinishedRootChanged("Completion claim changed before resume")
                     row = started_row
-                if run_decision is not None:
-                    await run_decision(row, decision)
-                else:
-                    assert run_follow_up is not None and seed is not None
-                    await run_follow_up(row, seed)
+                marking = SEND_ATTEMPTED.set(sent)
+                try:
+                    if run_decision is not None:
+                        await run_decision(row, decision)
+                    else:
+                        assert run_follow_up is not None and seed is not None
+                        await run_follow_up(row, seed)
+                finally:
+                    SEND_ATTEMPTED.reset(marking)
             except AnthropicDisabled:
                 log.warning("continuation.provider_guard_denied", row_id=str(row.id))
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
@@ -311,12 +372,20 @@ async def dispatch_pending_continuations(
             except AdmissionDenied as exc:
                 # Held to the same gates as a mention, and not retried.
                 await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)
-            except SessionBusyError as busy:
-                # Nothing ran: the same row goes back to pending with its claim refunded.
-                retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
-                await release_wake(sessionmaker, claim, retry_at=retry_at)
             except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
-                log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
-                await _settle(sessionmaker, claim, "dispatch_failed", now)
+                # A busy session, direct or wrapped in the turn's own error (J6g). Before
+                # the message was sent nothing ran: the row waits (claim refunded). After
+                # it, the turn may have answered, so it settles rather than run again.
+                busy = session_busy_in(exc)
+                if busy is not None and not sent:
+                    await wait_or_give_up(row, claim, not_before=busy.retry_after)
+                else:
+                    log.warning(
+                        "continuation.dispatch_failed",
+                        row_id=str(row.id),
+                        error=str(exc),
+                        busy_after_send=busy is not None,
+                    )
+                    await _settle(sessionmaker, claim, "dispatch_failed", now)
             else:
                 await _settle(sessionmaker, claim, None, now)

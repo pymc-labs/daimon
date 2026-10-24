@@ -348,7 +348,7 @@ async def test_newer_human_behind_bot_posts_skips_handoff(
         )
         for i in range(6, 0, -1)
     ]
-    posts.append(SimpleNamespace(author=SimpleNamespace(bot=False), created_at=human_at))
+    posts.append(SimpleNamespace(id=1001, author=SimpleNamespace(bot=False), created_at=human_at))
     thread = _make_thread()
     thread.history.side_effect = lambda *, limit, before=None: _AsyncIter(posts[:limit])
     run_follow_up = AsyncMock()
@@ -429,16 +429,14 @@ async def test_preparation_failure_settles_skipped_not_delivered(
     assert settled.skip_reason == "blocked_preparation_failed"
 
 
-async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
+async def test_a_handoff_survives_busy_binds_and_the_poller_delivers_it(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Baseline parity: five busy binds, then a free session, delivers the handoff.
+    """Five busy binds, then a free session, delivers the handoff once, from the poller.
 
-    On main each busy bind settled the row and re-queued the request under a
-    new key for the next turn in the thread, with no limit, so the sixth turn
-    tail delivered it. Here the same row is released with its claim refunded
-    and `available_at` left NULL: still dispatched only at a turn tail, still
-    delivered on the sixth, and busy waits never touch the crash budget.
+    Each busy bind before the send releases the same row with its claim refunded
+    and a poll time (#1549 review 1): with `available_at` left NULL it waited for
+    a turn tail in the thread, which may never come once the copy owns it.
     """
     from daimon.core.turn.errors import SessionBusyError
 
@@ -473,14 +471,14 @@ async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
         assert row is not None
         if tail < 5:
             assert row.status == "pending" and row.attempts == 0, "a busy wait is refunded"
-            assert row.available_at is None, "a handoff still waits for the next turn tail"
+            retry_at = now + timedelta(minutes=tail) + WAKE_RETRY_DELAY
+            assert row.available_at == retry_at, "the poller retries it"
             assert row.started_at is None and row.lease_owner is None
+            due = await list_due_wake_threads(db_session_factory, platform="discord", now=retry_at)
+            assert [t.thread_id for t in due if t.tenant_id == tenant_id] == [thread_id]
 
-    assert delivered == ["continue"], "the sixth turn tail delivers it, exactly once"
+    assert delivered == ["continue"], "delivered exactly once"
     assert row.status == "delivered" and row.attempts == 1
-    assert await list_due_wake_threads(db_session_factory, platform="discord", now=now) == [], (
-        "a released handoff is never picked up by the poller; only a turn tail runs it"
-    )
     async with db_session_factory() as session:
         pending = await list_pending_continuations(
             session, tenant_id=tenant_id, platform="discord", thread_id=thread_id
@@ -754,8 +752,111 @@ async def test_skip_copy_is_posted_only_where_the_agent_may_post(
 
     async with db_session_factory() as session:
         settled = await get_continuation(session, idempotency_key=key)
+    if path == "turn_running":
+        # J6g: a hand-off behind its own running turn waits and runs after it; nobody
+        # is told to send another message.
+        assert settled is not None and settled.status == "pending"
+        assert settled.available_at is not None
+        thread.send.assert_not_called()
+        return
     assert settled is not None and settled.status == "skipped"
     if may_post:
         thread.send.assert_awaited_once()
     else:
         thread.send.assert_not_called()
+
+
+async def test_queued_messages_and_the_handoff_each_get_one_answer_in_order(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#1549 review 6: the person wrote twice while the hand-off's turn still held the
+    session; both messages were queued behind it. A queued message will be answered, so
+    it doesn't make older queued work stale: the hand-off's own work and each message
+    get one answer, oldest first, and none is silently dropped. A message the person
+    sent instead of waiting (no row of its own) still supersedes."""
+    from daimon.core.continuity.continuation import queued_message_key
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(
+            session, platform="discord", workspace_id=str(uuid.uuid4().int)[:9]
+        )
+        account = await make_account(session, tenant=tenant)
+    keys = [uuid.uuid4(), queued_message_key("discord", "11"), queued_message_key("discord", "12")]
+    works = ["finish the report", "which model are you?", "and how long will it take?"]
+    created: list[datetime] = []
+    for key, work in zip(keys, works, strict=True):
+        async with db_session_factory() as session, session.begin():
+            row = await record_continuation(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="parent-1",
+                thread_id="42",
+                requester_account_id=account.id,
+                requester_external_user_id="555",
+                target_ma_agent_id="ag_target",
+                target_name="target-agent",
+                reason="task_handoff",
+                idempotency_key=key,
+                requested_work=work,
+                available_at=None if key == keys[0] else datetime.now(UTC),
+            )
+        created.append(row.created_at)
+
+    def _human(message_id: int, at: datetime) -> SimpleNamespace:
+        return SimpleNamespace(id=message_id, author=SimpleNamespace(bot=False), created_at=at)
+
+    # Each queued message was posted just before its own row was written.
+    posts = [
+        _human(12, created[1] + (created[2] - created[1]) / 2),
+        _human(11, created[0] + (created[1] - created[0]) / 2),
+    ]
+    thread = _make_thread()
+    thread.history.side_effect = lambda *, limit, before=None: _AsyncIter(posts[:limit])
+    anthropic = build_stub_anthropic(_reachable_agent_handler(tenant.id, ma_agent_id="ag_target"))
+    seeds: list[str] = []
+
+    async def _answer(row: TaskContinuationRow, decision: ContinuationDecision) -> None:
+        seeds.append(decision.seed_user_message or "")
+
+    for _ in range(2):  # a second pass answers nothing again
+        await dispatch_pending_continuations(
+            db_session_factory,
+            anthropic,
+            tenant_id=tenant.id,
+            thread=thread,
+            run_follow_up=_answer,
+            may_post=_may_post_open,
+        )
+    assert seeds == works, "one answer per request, oldest first"
+
+    # A message the person sent instead of waiting (no row of its own) supersedes.
+    late_key = uuid.uuid4()
+    async with db_session_factory() as session, session.begin():
+        row = await record_continuation(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="parent-1",
+            thread_id="42",
+            requester_account_id=account.id,
+            requester_external_user_id="555",
+            target_ma_agent_id="ag_target",
+            target_name="target-agent",
+            reason="task_handoff",
+            idempotency_key=late_key,
+            requested_work="stale work",
+        )
+    posts.insert(0, _human(13, row.created_at + timedelta(seconds=1)))
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        tenant_id=tenant.id,
+        thread=thread,
+        run_follow_up=_answer,
+        may_post=_may_post_open,
+    )
+    assert seeds == works
+    async with db_session_factory() as session:
+        stale = await get_continuation(session, idempotency_key=late_key)
+    assert stale is not None and stale.skip_reason == "skip_superseded"

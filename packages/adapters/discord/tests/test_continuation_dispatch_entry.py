@@ -460,6 +460,46 @@ async def _run_continuation(
     return user_message, tenant.id
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("sent", [False, True])
+async def test_a_busy_continuation_removes_its_card_unless_it_sent(
+    db_session_factory: async_sessionmaker[AsyncSession], wrapped: bool, sent: bool
+) -> None:
+    """J6g (#1549 review 2): a hand-off that binds busy before sending posts nothing and
+    leaves no card behind: dispatch retries the row, and a card left up would later be
+    ended "Stopped" or "Daimon restarted" by recovery. Direct or wrapped in the turn's
+    own TurnError. Once the message may have been sent, it is a real failure: the card
+    shows the error and stays."""
+    from types import SimpleNamespace
+
+    from daimon.adapters.discord.bot import (
+        _TurnFailureSurface,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.driver import SEND_ATTEMPTED
+    from daimon.core.turn.errors import SessionBusyError
+
+    bot = make_bot(_make_runtime(db_session_factory))
+    end_card, retract_card = AsyncMock(), AsyncMock()
+    surface = _TurnFailureSurface(thread=None, end_card=end_card, retract_card=retract_card)
+    busy = SessionBusyError(pending_reasons=("agent_identity",), retry_after=datetime.now(UTC))
+    marking = SEND_ATTEMPTED.set([True] if sent else [])
+    try:
+        await bot._end_continuation_card(  # pyright: ignore[reportPrivateUsage]
+            SimpleNamespace(reason="task_handoff"),
+            TurnError(kind="upstream", cause=busy) if wrapped else busy,
+            surface,
+        )
+    finally:
+        SEND_ATTEMPTED.reset(marking)
+    if sent:
+        end_card.assert_awaited_once()
+        retract_card.assert_not_awaited()
+    else:
+        retract_card.assert_awaited_once()
+        end_card.assert_not_awaited()
+
+
 async def test_continuation_turn_omits_handoff_notice_for_private_input(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1415,3 +1455,113 @@ async def test_a_fleet_wake_prepares_inside_its_origin_and_a_refused_wake_ends_i
     else:
         assert not any(WAKE_REFUSED_LINES[0] in text for text in shown)
         assert all(row.status == "delivered" for row in retained)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_j6g_a_handoff_behind_a_held_session_answers_once_from_the_poller(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    wrapped: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """J2/J6g journey on the real Discord dispatch path (#1549 review 1, 2, 7).
+
+    The hand-off's row (no `available_at`, as the hand-off tool records it) is run at
+    the outgoing turn's tail while that turn's session is still held, so the copy's
+    bind is busy (direct, or wrapped in the turn's own TurnError). Nothing is said, no
+    card is left behind, and with no further turn in the thread the wake poller runs
+    it once the session frees: one answer, never "Daimon is busy".
+    """
+    from daimon.core.errors import TurnError
+    from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+    from daimon.core.turn.errors import SessionBusyError
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord", workspace_id="710000031")
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=tenant.id,
+            delta_usd=Decimal("100.00"),
+            reason="trial",
+            idempotency_key=f"trial:{tenant.id}",
+        )
+        account = await make_account(session, tenant=tenant)
+        key = uuid.uuid4()
+        await record_continuation(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id=str(_THREAD_ID - 1),
+            thread_id=str(_THREAD_ID),
+            requester_account_id=account.id,
+            requester_external_user_id="555",
+            target_ma_agent_id="ag_target",
+            target_name="target-agent",
+            reason="task_handoff",
+            idempotency_key=key,
+            requested_work="compare X and Y",
+        )
+    bot, thread = _wake_bot(db_session_factory, tenant.id)
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    # The bot's dispatch reads the real clock: no poll delay, so the poller may run it now.
+    monkeypatch.setattr("daimon.core.continuity.dispatch.WAKE_RETRY_DELAY", timedelta(0))
+    held = SessionBusyError(pending_reasons=("session_active",), retry_after=datetime.now(UTC))
+
+    p_config, p_agent, p_env, p_bind, p_run = _admission_patches()
+    with (
+        p_config as resolve_config,
+        p_agent as resolve_agent,
+        p_env as resolve_env,
+        p_bind as bind,
+        p_run as run_turn,
+    ):
+        resolve_config.return_value = ResolvedConfig(
+            agent_name="test-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        resolve_agent.return_value = "ag_target"
+        resolve_env.return_value = "env_test"
+        bind.side_effect = [
+            TurnError(kind="upstream", cause=held) if wrapped else held,
+            _make_prepared_turn(account_id=account.id),
+        ]
+        run_turn.return_value = RunOutcome(
+            state=TurnState(), ma_session_id="sess_test", mapping_id=None, recovered=False
+        )
+        # The outgoing turn's tail: the copy's session is still held.
+        await bot.dispatch_continuations_in_thread(
+            tenant_id=tenant.id, thread=thread, guild_id="710000031"
+        )
+        async with db_session_factory() as session:
+            row = await get_continuation(session, idempotency_key=key)
+        assert row is not None and (row.status, row.attempts) == ("pending", 0)
+        assert row.available_at is not None, "the poller will run it"
+        run_turn.assert_not_awaited()
+        card = thread.send.return_value
+        card.delete.assert_awaited_once()  # the busy attempt's card is gone
+        async with db_session_factory() as session:
+            leftover = await list_recoverable_turn_card_intents(session, platform="discord")
+        assert [i for i in leftover if i.tenant_id == tenant.id] == [], "its intent is retired"
+
+        # No other turn in the thread: the poller runs it once the session frees.
+        for _ in range(2):
+            await poll_wakes_once(
+                db_session_factory,
+                platform="discord",
+                open_thread=bot._open_wake_thread,  # pyright: ignore[reportPrivateUsage]
+                now=datetime.now(UTC),
+            )
+            for task in list(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+                await task
+
+    run_turn.assert_awaited_once()
+    assert run_turn.await_args is not None
+    assert run_turn.await_args.kwargs["user_message"].endswith("compare X and Y")
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and (row.status, row.attempts) == ("delivered", 1)
+    said = [str(c.kwargs.get("content") or "") for c in thread.send.call_args_list] + [
+        str(c.kwargs.get("content") or "") for c in card.edit.call_args_list
+    ]
+    assert not any("busy" in text.lower() for text in said), said

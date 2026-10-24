@@ -945,6 +945,8 @@ async def run_prepared_turn(
         if prepared.admission.backend_footer_profile is not None and deps.backend_selection_enabled
         else None
     )
+    # A caller watching for a send (the continuation dispatcher) sees this turn's too.
+    outer_sent = SEND_ATTEMPTED.get()
     marking = SEND_ATTEMPTED.set(sent)
     try:
         with observation.activate(), deps.running_turns.track():
@@ -983,6 +985,8 @@ async def run_prepared_turn(
         raise
     finally:
         SEND_ATTEMPTED.reset(marking)
+        if sent and outer_sent is not None:
+            outer_sent.append(True)
         finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
         if finalize is not None:
             # Credential revocation must survive a second cancel of this task:

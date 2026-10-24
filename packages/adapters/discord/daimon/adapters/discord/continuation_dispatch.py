@@ -10,7 +10,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
-from daimon.core.continuity.continuation import ContinuationDecision
+from daimon.core.continuity.continuation import ContinuationDecision, queued_message_key
 from daimon.core.continuity.dispatch import (
     ContinuationContextUnavailable,
     WorkerFinishedDecision,
@@ -20,6 +20,7 @@ from daimon.core.continuity.dispatch import (
 )
 from daimon.core.neutral_resources import WorkerSpecRefused
 from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,9 +34,16 @@ _HISTORY_PAGE_SIZE = 100
 _HISTORY_MAX_PAGES = 20
 
 
-async def _latest_human_message_at(thread: discord.Thread, *, after: datetime) -> datetime | None:
+async def _latest_human_message_at(
+    thread: discord.Thread,
+    *,
+    after: datetime,
+    queued: Callable[[discord.Message], bool] = lambda _message: False,
+) -> datetime | None:
     """Newest human post after `after`; defer if the history read fails.
 
+    A message `queued` behind a busy turn is left out: it has its own row and will
+    be answered, so it doesn't make older queued work stale (one answer per message).
     Reaching the page cap is not retried: the same scan would hit it again on
     every retry. The work is treated as superseded instead, so a stale handoff
     never runs and the row doesn't wait forever.
@@ -49,7 +57,7 @@ async def _latest_human_message_at(thread: discord.Thread, *, after: datetime) -
             for message in page:
                 if message.created_at <= after:
                     return None
-                if not message.author.bot:
+                if not message.author.bot and not queued(message):
                     return message.created_at
             if len(page) < _HISTORY_PAGE_SIZE:
                 return None
@@ -79,11 +87,24 @@ async def dispatch_pending_continuations(
 
     async def context(row: TaskContinuationRow) -> tuple[datetime | None, bool]:
         # A timer is never superseded by newer messages, so it needs no history.
-        latest = (
-            None
-            if row.reason == "timer"
-            else await _latest_human_message_at(thread, after=row.created_at)
-        )
+        latest = None
+        if row.reason != "timer":
+            async with sessionmaker() as session:
+                waiting = {
+                    item.idempotency_key
+                    for item in await list_pending_continuations(
+                        session,
+                        tenant_id=row.tenant_id,
+                        platform="discord",
+                        thread_id=row.thread_id,
+                        include_future=True,
+                    )
+                }
+            latest = await _latest_human_message_at(
+                thread,
+                after=row.created_at,
+                queued=lambda message: queued_message_key("discord", str(message.id)) in waiting,
+            )
         async with sessionmaker() as session:
             live = await get_live_thread_session(
                 session,

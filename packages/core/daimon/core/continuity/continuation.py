@@ -121,6 +121,20 @@ ContinuationAction = Literal[
 ]
 
 
+#: Namespace of the keys of messages queued behind a busy turn (`queued_message_key`).
+_QUEUED_MESSAGE_NAMESPACE: Final = uuid.uuid5(uuid.NAMESPACE_URL, "daimon:queued-message")
+
+
+def queued_message_key(platform: str, message_id: str) -> uuid.UUID:
+    """The continuation key of one person's message queued behind a busy turn.
+
+    Stable per message: a redelivered message finds its own row instead of queueing
+    a second answer, and the history check can tell a queued message (it will be
+    answered) from one the person sent instead of waiting (it supersedes).
+    """
+    return uuid.uuid5(_QUEUED_MESSAGE_NAMESPACE, f"{platform}:{message_id}")
+
+
 class ContinuationRequest(BaseModel):
     """One queued continuation, fully addressed: who, where, which agent, what work.
 
