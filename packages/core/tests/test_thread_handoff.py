@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -723,24 +723,52 @@ async def test_an_owner_binding_is_marked_and_answers_only_its_owner(
             await resolve(session, context=here(other.id), default=_DEFAULT)
 
 
+@pytest.mark.parametrize("spoke", ["live_session", "closed_session", "recent_turn"])
 async def test_a_thread_other_people_are_in_never_moves_to_a_private_copy(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], spoke: str
 ) -> None:
+    from daimon.core.stores import thread_sessions
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.turn_origins import create_origin
     from daimon.core.thread_handoff import render_handoff_refused
 
     tenant = await _seed(db_session)
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    for account in (member, other):
-        await make_thread_session(
+    await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    if spoke == "recent_turn":
+        # Their turn has no session of its own yet (it is still starting).
+        await create_origin(
+            db_session,
+            tenant_id=tenant.id,
+            account_id=other.id,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="T1",
+            responder_ma_agent_id="agt_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=_NOW + timedelta(hours=1),
+            now=_NOW,
+            sender_foreign=False,
+            shared_channel=False,
+        )
+    else:
+        theirs = await make_thread_session(
             db_session,
             tenant=tenant,
-            account=account,
+            account=other,
             platform="slack",
             thread_id="T1",
             channel_id="C1",
         )
+        if spoke == "closed_session":
+            await thread_sessions.mark_dead(db_session, id=theirs.id)
     await db_session.commit()
     with pytest.raises(ThreadHandoffRefused) as refused:
         async with db_session_factory.begin() as session:
@@ -751,6 +779,115 @@ async def test_a_thread_other_people_are_in_never_moves_to_a_private_copy(
         "Start a new thread with me and ask again."
     )
     assert await _binding(db_session_factory, tenant.id) is None, "nothing is written"
+
+
+async def test_a_turn_long_past_with_no_session_never_blocks_the_owner(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.turn_origins import create_origin
+
+    tenant = await _seed(db_session)
+    member = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=other.id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        responder_ma_agent_id="agt_daimon",
+        responder_name="Daimon",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=_NOW - timedelta(minutes=1),
+        now=_NOW - timedelta(hours=2),
+        sender_foreign=False,
+        shared_channel=False,
+    )
+    await db_session.commit()
+    async with db_session_factory.begin() as session:
+        await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    binding = await _binding(db_session_factory, tenant.id)
+    assert binding is not None and binding.kind == "owner"
+
+
+async def test_the_owners_own_sessions_and_turns_never_count_as_someone_else(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    from daimon.core.stores import thread_sessions
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.turn_origins import create_origin
+
+    tenant = await _seed(db_session)
+    member = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    # Only the owner has ever been here: an earlier session of theirs (closed), the
+    # live one, and their own turn now.
+    closed = await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    await thread_sessions.mark_dead(db_session, id=closed.id)
+    await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=member.id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        responder_ma_agent_id="agt_daimon",
+        responder_name="Daimon",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=_NOW + timedelta(hours=1),
+        now=_NOW,
+        sender_foreign=False,
+        shared_channel=False,
+    )
+    await db_session.commit()
+    async with db_session_factory.begin() as session:
+        await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    binding = await _binding(db_session_factory, tenant.id)
+    assert binding is not None and binding.kind == "owner"
+
+
+async def test_a_session_with_no_account_counts_as_someone_else(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Fail closed. Every session written today carries an account (a shared thread's,
+    its shared owner's), so an account-less row is legacy and nobody can say it was
+    the caller's."""
+    from daimon.core._models import ThreadSession
+    from sqlalchemy import update
+
+    tenant = await _seed(db_session)
+    member = await make_account(db_session, tenant=tenant)
+    await _owned_copy(db_session, tenant, member.id)
+    await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    legacy = await make_thread_session(
+        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
+    )
+    await db_session.execute(
+        update(ThreadSession).where(ThreadSession.id == legacy.id).values(account_id=None)
+    )
+    await db_session.commit()
+    with pytest.raises(ThreadHandoffRefused) as refused:
+        async with db_session_factory.begin() as session:
+            await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
+    assert refused.value.refusal.reason == "shared_thread"
+    assert await _binding(db_session_factory, tenant.id) is None
 
 
 @pytest.mark.parametrize(

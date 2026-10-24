@@ -89,7 +89,12 @@ from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import lock_binding, upsert_responder_binding
-from daimon.core.stores.thread_sessions import list_live_thread_sessions, record_session_seals
+from daimon.core.stores.thread_sessions import (
+    list_live_thread_sessions,
+    record_session_seals,
+    thread_session_accounts,
+)
+from daimon.core.stores.turn_origins import thread_requester_accounts
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -283,6 +288,25 @@ async def _subject(
     )
 
 
+async def _others_in_thread(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    account_id: uuid.UUID | None,
+    now: datetime,
+) -> bool:
+    """Anyone but `account_id` spoke in the thread: a session, live or closed, or a
+    recent turn (one with no session yet, like a turn still starting)."""
+    people = await thread_session_accounts(
+        session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+    ) | await thread_requester_accounts(
+        session, tenant_id=tenant_id, platform=platform, thread_id=thread_id, now=now
+    )
+    return any(person != account_id for person in people)
+
+
 async def hand_over_thread(
     session: AsyncSession,
     *,
@@ -385,7 +409,14 @@ async def hand_over_thread(
     kind: Literal["handoff", "owner"] = "handoff"
     decision = decide(False)
     if isinstance(decision, HandoffRefused) and owned:
-        if any(item.account_id != caller.account_id for item in recorded):
+        if await _others_in_thread(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=caller.account_id,
+            now=now,
+        ):
             # The binding moves the whole thread: never someone else's turns onto a
             # private copy its owner controls.
             raise ThreadHandoffRefused(
