@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Annotated,
-    Final,
     Literal,
     Protocol,
     Self,
@@ -2847,11 +2846,6 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     return target
 
 
-#: The template drop a provider turn's consent named before Daimon posted the
-#: switch card itself (`tool_safety.self_carded_tools`).
-_SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
-
-
 def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
     return (
         target is not None
@@ -2860,36 +2854,45 @@ def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
     )
 
 
-def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
-    """`target` as a consent recorded before the switch tool was offered names it.
+def _offered_self_carded(target: AgentSpec) -> list[str]:
+    """The self-carded tools (`tool_safety.self_carded_tools`) `target` allows on
+    Daimon's MCP and doesn't declare lost."""
+    from daimon.core.tool_safety import self_carded_tools
 
-    That consent declared the tool a loss: not allowed on Daimon's MCP, one more
-    drop, and the drops line in the instructions. Only that one difference is
-    rebuilt; anything else still differs and still needs a fresh confirmation.
-    """
-    if _SWITCH_TOOL_DROP in target.declared_drops:
-        return None
-    tool = _SWITCH_TOOL_DROP.rsplit(":", 1)[1]
+    allowed: set[str] = set()
+    for server in target.mcp_servers or ():
+        listed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
+        if server.name == DAIMON_SERVER_NAME and isinstance(listed, list):
+            allowed.update(str(name) for name in listed)
+    return sorted(
+        tool
+        for tool in self_carded_tools() & allowed
+        if f"mcp_tool:{DAIMON_SERVER_NAME}:{tool}" not in target.declared_drops
+    )
+
+
+def _with_tools_dropped(
+    target: AgentSpec, source_system: str | None, tools: tuple[str, ...]
+) -> AgentSpec:
+    """`target` with Daimon MCP `tools` declared losses instead of allowed."""
     from mux.contracts.resources import MCPConnection
 
     servers: list[MCPConnection] = []
-    found = False
     for server in target.mcp_servers or ():
         allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list) and tool in allowed:
-            found = True
+        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
             server = server.model_copy(
                 update={
                     "tool_policy": {
                         **server.tool_policy,
-                        "allowed_tools": [name for name in allowed if name != tool],
+                        "allowed_tools": [name for name in allowed if name not in tools],
                     }
                 }
             )
         servers.append(server)
-    if not found:
-        return None
-    drops = tuple(sorted((*target.declared_drops, _SWITCH_TOOL_DROP)))
+    drops = tuple(
+        sorted((*target.declared_drops, *(f"mcp_tool:{DAIMON_SERVER_NAME}:{t}" for t in tools)))
+    )
     return target.model_copy(
         update={
             "mcp_servers": tuple(servers),
@@ -2905,8 +2908,8 @@ def _with_skills_dropped(target: AgentSpec, source_system: str | None) -> AgentS
     """`target` as a consent recorded before skills came along through Daimon MCP names it.
 
     That consent declared `skills` a loss and its instructions had no skill line
-    (J6 b). Only that one difference is rebuilt, as `_with_switch_tool_dropped`
-    does for the switch tool; the copy then runs with its skills from now on.
+    (J6 b). Only that one difference is rebuilt, as `_with_tools_dropped` does
+    for the self-carded tools; the copy then runs with its skills from now on.
     """
     if "skills" in target.declared_drops or SKILL_READ_INSTRUCTION not in (target.system or ""):
         return None
@@ -2924,17 +2927,26 @@ def _with_skills_dropped(target: AgentSpec, source_system: str | None) -> AgentS
 def _consented_before(
     target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
 ) -> bool:
-    """A consent recorded before the switch tool or the skill tools were offered.
+    """A consent recorded before some self-carded tools or the skill tools were offered.
 
-    Either difference alone, or both, is rebuilt; anything else still needs a
-    fresh confirmation.
+    Such a consent declared them losses: the tools not allowed on Daimon's MCP, the
+    skills dropped, more drops, and the drops line in the instructions. Skills alone,
+    each subset of the self-carded tools `target` now allows, or skills with each
+    subset, is rebuilt that way (an old copy may have lost both); anything else
+    still needs a fresh confirmation.
     """
+    from itertools import combinations
+
+    offered = _offered_self_carded(target)
+    subsets = [
+        dropped for size in range(1, len(offered) + 1) for dropped in combinations(offered, size)
+    ]
+    own = _without_losses_line(target, source_system)
+    candidates: list[AgentSpec] = [_with_tools_dropped(target, own, d) for d in subsets]
     without_skills = _with_skills_dropped(target, source_system)
-    candidates = (
-        _with_switch_tool_dropped(target, _without_losses_line(target, source_system)),
-        without_skills,
-        _with_switch_tool_dropped(without_skills, source_system) if without_skills else None,
-    )
+    if without_skills is not None:
+        candidates.append(without_skills)
+        candidates.extend(_with_tools_dropped(without_skills, source_system, d) for d in subsets)
     return any(_consented(candidate, consent) for candidate in candidates)
 
 

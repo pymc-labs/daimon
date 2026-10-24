@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
+    from daimon.core.authz import Subject
     from daimon.core.config import TurnSettings
     from daimon.core.posted_controls import PostedCard
     from daimon.core.stores.backend_switch_cards import SwitchCardRow
@@ -338,7 +339,6 @@ async def _apply(
     from daimon.core.turn.notices import provider_name, switched_meanwhile_text
 
     card_id = claimed.id
-    reference = BackendSwitchReference.model_validate(claimed.reference)
 
     platform_admin = current_admin
 
@@ -348,6 +348,22 @@ async def _apply(
 
     is_admin = await admin_now(clicker)
     subject = build_subject(is_admin=is_admin, platform_user_id=clicker, client=claimed.client)
+    if "operation" in claimed.reference:
+        return await _apply_configuration(
+            claimed,
+            end,
+            deps=deps,
+            sessionmaker=sessionmaker,
+            anthropic=anthropic,
+            turn_settings=turn_settings,
+            deployment_default=deployment_default,
+            tenant_id=tenant_id,
+            clicker=clicker,
+            admin_now=admin_now,
+            subject=subject,
+            place_word=place_word,
+        )
+    reference = BackendSwitchReference.model_validate(claimed.reference)
     # The source is read in the card's own conversation, as the MCP tool read it
     # for the preview, so the same agent setup yields the same preview digest.
     capture = (
@@ -464,3 +480,129 @@ async def _apply(
         "applied",
         f"Switched {reference.agent} to {provider_name(reference.target_backend)}. {moved}",
     )
+
+
+async def _apply_configuration(
+    claimed: SwitchCardRow,
+    end: Callable[[Literal["applied", "refused"], str], Awaitable[SwitchCardPress]],
+    *,
+    deps: TurnDeps | None,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    turn_settings: TurnSettings,
+    deployment_default: DeploymentDefault,
+    tenant_id: uuid.UUID,
+    clicker: str,
+    admin_now: Callable[[str], Awaitable[bool]],
+    subject: Subject,
+    place_word: str,
+) -> SwitchCardPress:
+    """A configuration card's press: the Claude card's own check, then the same write."""
+    from daimon.core.channel_backend import (
+        AgentBackendRefused,
+        BackendActor,
+        channel_ref,
+        clear_channel_backend,
+        current_backend,
+        load_backend_agent,
+        make_backend_service,
+    )
+    from daimon.core.confirmation import ConfirmationPrompt, backend_switch_callbacks
+    from daimon.core.fleet_configuration import (
+        ConfigurationReference,
+        complete_fleet_config,
+        configuration_refusal,
+        configured_fleet_grant,
+    )
+    from daimon.core.turn.admission import capture_agent_source
+
+    reference = ConfigurationReference.model_validate(claimed.reference)
+    fleet = reference.operation in ("fleet_set", "fleet_revoke")
+    # A fleet preview read the named agent's own source (the MCP tool's capture).
+    capture = (
+        partial(capture_agent_source, deps, account_id=claimed.account_id, subject=subject)
+        if fleet and deps is not None
+        else None
+    )
+    service = make_backend_service(sessionmaker, turn_settings, capture_source=capture)
+    pin = channel_ref(tenant_id, claimed.platform, claimed.channel_id)
+    _, check = backend_switch_callbacks(
+        service,
+        sessionmaker=sessionmaker,
+        anthropic=anthropic,
+        tenant_id=tenant_id,
+        account_id=claimed.account_id,
+        current_admin=admin_now,
+        default_agent_name=deployment_default.agent_name,
+        place_word=place_word,
+        pin_channel=pin,
+    )
+    prompt = ConfirmationPrompt(
+        title="Change this setting?",
+        requester_platform_user_id=claimed.requester_platform_user_id,
+        expires_at=claimed.expires_at,
+        admin=True,
+        configuration=reference,
+    )
+    refusal = await check(prompt, clicker)
+    if refusal is not None:
+        return await end("refused", refusal)
+    actor = BackendActor(tenant_id=tenant_id, account_id=claimed.account_id, subject=subject)
+    now = datetime.datetime.now(datetime.UTC)
+    stale = "This changed since the card was posted. Ask again to redo it. Nothing changed."
+    try:
+        if fleet:
+            assert reference.agent_name is not None
+            assert isinstance(reference.expected_revision, int)
+            agent = await load_backend_agent(
+                anthropic, sessionmaker, tenant_id=tenant_id, agent_name=reference.agent_name
+            )
+            if reference.operation == "fleet_revoke" or reference.config is None:
+                await service.revoke_fleet_grant(
+                    agent,
+                    reference.expected_revision,
+                    actor,
+                    expected_preview_digest=reference.preview_digest,
+                    now=now,
+                )
+                text = f"Fleet turned off for {agent.name}."
+            else:
+                setting = await service.fleet_setting(tenant_id, agent.agent_id, now=now)
+                complete = await complete_fleet_config(
+                    reference.config,
+                    setting.base,
+                    anthropic,
+                    tenant_id=tenant_id,
+                    default=setting.kind != "custom",
+                )
+                value = await configured_fleet_grant(
+                    complete, service, anthropic, sessionmaker, agent, now=now
+                )
+                await service.set_fleet_grant(
+                    agent,
+                    value,
+                    reference.expected_revision,
+                    actor,
+                    expected_preview_digest=reference.preview_digest,
+                    now=now,
+                )
+                text = f"Fleet limits saved for {agent.name}."
+        elif reference.operation == "provider_allowlist":
+            providers = reference.providers or ()
+            policy = await service.tenant_policy(tenant_id)
+            if policy.revision != reference.expected_revision:
+                return await end("refused", stale)
+            await service.set_tenant_allowlist(tenant_id, providers, policy.revision, actor)
+            text = "Allowed providers saved: " + (", ".join(providers) or "none") + "."
+        else:
+            async with sessionmaker.begin() as session:
+                current = await current_backend(session, pin)
+                if current is None or current.local != reference.expected_revision:
+                    return await end("refused", stale)
+                await clear_channel_backend(session, pin, actor=actor, expected=current)
+            text = "This channel's provider pin is cleared: agents answer here on their own."
+    except AgentBackendRefused as exc:
+        log.warning("switch_card.configuration_refused", card_id=str(claimed.id), reason=exc.reason)
+        return await end("refused", configuration_refusal(exc.reason) + " Nothing changed.")
+    log.info("switch_card.configuration_applied", card_id=str(claimed.id), op=reference.operation)
+    return await end("applied", text)

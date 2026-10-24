@@ -182,7 +182,14 @@ def self_carded_tools() -> frozenset[str]:
     A provider turn with no confirmation card of its own may call them: the
     tool posts the card instead of acting, and the press applies.
     """
-    return frozenset({"request_agent_backend_switch"})
+    return frozenset(
+        {
+            "request_agent_backend_switch",
+            "request_fleet_config",
+            "request_provider_allowlist",
+            "request_channel_pin_clear",
+        }
+    )
 
 
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
