@@ -40,3 +40,46 @@ async def test_cancelled_progress_rechecks_access_for_final_delivery(revoked):
         await gate.check()
         assert calls == 2
         assert not gate.failed
+
+
+async def test_watch_progress_ticks_skip_access_and_final_rechecks():
+    from unittest.mock import AsyncMock
+
+    from daimon.core.turn.run import _DeferredFailureLifecycle
+    from daimon.core.turn.state import TurnState
+
+    inner = AsyncMock()
+    authorize = AsyncMock()
+    lifecycle = _DeferredFailureLifecycle(inner=inner, authorize_final=authorize)
+    state = TurnState()
+    for _ in range(10):
+        await lifecycle.on_render(state)
+    authorize.assert_not_awaited()
+    inner.on_render.assert_not_awaited()
+    await lifecycle.on_terminal_success(state)
+    authorize.assert_awaited_once()
+    inner.on_terminal_success.assert_awaited_once_with(state)
+
+
+@pytest.mark.parametrize("ending", ["success", "failure"])
+async def test_refused_watch_final_is_logged(ending):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.turn.run import _DeferredFailureLifecycle
+    from daimon.core.turn.state import TurnState
+    from structlog.testing import capture_logs
+
+    inner = AsyncMock()
+    authorize = AsyncMock(side_effect=OSError("connection reset"))
+    lifecycle = _DeferredFailureLifecycle(inner=inner, authorize_final=authorize)
+    with capture_logs() as logs:
+        if ending == "success":
+            await lifecycle.on_terminal_success(TurnState())
+        else:
+            await lifecycle.on_terminal_failure(TurnState(), RuntimeError("model failed"))
+            await lifecycle.flush_held_failure()
+    inner.on_terminal_success.assert_not_awaited()
+    inner.on_terminal_failure.assert_not_awaited()
+    assert logs == [
+        {"event": "turn.final_output_refused", "error_type": "OSError", "log_level": "warning"}
+    ]

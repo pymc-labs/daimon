@@ -344,21 +344,25 @@ class _DeferredFailureLifecycle:
 
     inner: TurnLifecycle
     _held: tuple[TurnState, Exception] | None = None
-    may_render: Callable[[], Awaitable[None]] | None = None
+    authorize_final: Callable[[], Awaitable[None]] | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
         await acknowledge(self.inner, phase)
 
     async def on_render(self, state: TurnState) -> None:
-        if self.may_render is not None:
-            await self.may_render()
+        if self.authorize_final is not None:
+            # Watches keep their initial card until the final post. Streaming
+            # renders would either poll Discord on every tick or deliver stale
+            # authorization after access was revoked.
+            return
         await self.inner.on_render(state)
 
     async def on_terminal_success(self, state: TurnState) -> None:
-        if self.may_render is not None:
+        if self.authorize_final is not None:
             try:
-                await self.may_render()
-            except Exception:
+                await self.authorize_final()
+            except Exception as err:
+                log.warning("turn.final_output_refused", error_type=type(err).__name__)
                 return
         await self.inner.on_terminal_success(state)
 
@@ -394,10 +398,11 @@ class _DeferredFailureLifecycle:
         self._held = None
         if termination is not None:
             state = replace(state, termination=termination)
-        if self.may_render is not None:
+        if self.authorize_final is not None:
             try:
-                await self.may_render()
-            except Exception:
+                await self.authorize_final()
+            except Exception as denied:
+                log.warning("turn.final_output_refused", error_type=type(denied).__name__)
                 return
         await self.inner.on_terminal_failure(state, err)
 
@@ -1539,7 +1544,7 @@ async def run_prepared_turn_impl(
                 await authorize_watch(prepared.admission, ma_session_id)
             except asyncio.CancelledError:
                 raise
-            except BaseException:
+            except AdmissionDenied:
                 cancel.set()
                 raise
 
@@ -1549,7 +1554,7 @@ async def run_prepared_turn_impl(
             if install is not None:
                 cast(Callable[[OutputAuthorization], None], install)(delivery)
         first_attempt = _DeferredFailureLifecycle(
-            inner=lifecycle, may_render=delivery.check if delivery is not None else None
+            inner=lifecycle, authorize_final=delivery.check if delivery is not None else None
         )
         superseded: BindingSuperseded | None = None
         try:

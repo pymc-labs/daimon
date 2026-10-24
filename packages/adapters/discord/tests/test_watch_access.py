@@ -168,3 +168,40 @@ async def test_watch_authority_is_entirely_rest(db_session_factory, monkeypatch,
         if mode in {"former_owner_removed", "stale_manager", "stale_admin"}:
             rest.http.get_thread_member.assert_awaited_once_with(4242, 555)
     rest.http.get_guild.assert_awaited_once_with(710000099, with_counts=False)
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize("failure", [503, 403, 404, "reset", "timeout"])
+async def test_watch_transport_failure_only_pauses_proved_denial(
+    db_session_factory, monkeypatch, failure
+):
+    from daimon.core.turn.output import OutputAuthorization
+
+    factory, _, _, _, _, watch, key = await enrolled_page_watch(db_session_factory, monkeypatch)
+    async with factory() as db:
+        row = await get_continuation(db, idempotency_key=key)
+    client = discord.Client(intents=discord.Intents.none())
+    rest = WatchDiscordRest(client)
+    if failure == "reset":
+        error = OSError("connection reset")
+    elif failure == "timeout":
+        error = TimeoutError()
+    else:
+        error = discord.HTTPException(MagicMock(status=failure, reason="failed"), "failed")
+    rest.guild_error = error
+
+    async def authorize():
+        await require_watch_thread_access(factory, row, client)
+
+    delivery = OutputAuthorization(authorize)
+    proved_denial = failure in {403, 404}
+    with pytest.raises(AdmissionDenied if proved_denial else type(error)):
+        await delivery.check()
+    async with factory() as db:
+        current = await watches.get_watch(db, watch.id)
+    assert (current.status == "paused") == proved_denial
+    assert delivery.failed == proved_denial
+    if not proved_denial:
+        # Refusing this output must not poison the final answer or next tick.
+        rest.guild_error = None
+        await delivery.check()

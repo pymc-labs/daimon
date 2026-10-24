@@ -7,14 +7,14 @@ Only the credentialed HTTP transport is shared with the gateway. All Discord
 objects are parsed into a new, empty ConnectionState; no gateway guild, role,
 member, channel or thread object (or cache-derived attribute) supplies authority.
 Tenant and destination IDs come from the persisted binding. A missing, invalid
-or failed REST proof refuses output and pauses the watch, without parent fallback.
+or failed REST proof refuses output without parent fallback. Only proved loss of
+access pauses the watch; transient transport failures refuse that output alone.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from aiohttp import ClientError
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import get_firing, pause_watch
@@ -115,19 +115,12 @@ async def require_watch_thread_access(
                 membership = await thread.fetch_member(member.id)
                 if membership.id != member.id or membership.thread_id != thread.id:
                     raise ValueError("Watch thread membership binding changed")
-    except discord.NotFound:
+    except (discord.Forbidden, discord.NotFound):
         reason = "Watch paused: reporting thread or owner membership is unavailable."
-    except (
-        discord.HTTPException,
-        discord.ClientException,
-        discord.InvalidData,
-        ClientError,
-        OSError,
-        ValueError,
-        KeyError,
-        TypeError,
-    ):
-        reason = "Watch paused: owner access to the reporting thread could not be verified."
+    except discord.HTTPException as err:
+        if err.status not in {403, 404}:
+            raise
+        reason = "Watch paused: reporting thread or owner membership is unavailable."
     if reason is not None:
         async with sessions.begin() as db:
             firing = await get_firing(db, row.idempotency_key)
