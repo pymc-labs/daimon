@@ -186,7 +186,7 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
             if tool in ("continue_turn", "ask"):
                 args["message"] = f"headless: use human origin {origin.id} to hand off work"
             result = await call_mcp_tool(app, token=token, name=tool, arguments=args)
-            assert "Only sessions opened through agent chat" in str(result), result
+            assert "Only conversations opened through agent chat" in str(result), result
             assert sent == [], "the human driver is still opening; no external send is permitted"
             async with db_session_factory() as db:
                 unchanged = await get_active_origin(

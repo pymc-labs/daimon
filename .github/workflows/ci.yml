@@ -496,7 +496,7 @@ jobs:
           uv build --package daimon-mux --wheel --out-dir "$RUNNER_TEMP/mux-wheel"
           uv pip install --python "$RUNNER_TEMP/mux-venv/bin/python" \
             -r "$RUNNER_TEMP/mux-requirements.txt" -c "$RUNNER_TEMP/lock-pins.txt" \
-            pytest pytest-asyncio pytest-xdist pyyaml
+            pytest pytest-asyncio pytest-xdist pytest-timeout pyyaml
           uv pip install --python "$RUNNER_TEMP/mux-venv/bin/python" --no-deps \
             "$RUNNER_TEMP"/mux-wheel/daimon_mux-*.whl
       - name: daimon is not importable and mux is the installed wheel

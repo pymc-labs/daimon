@@ -3831,11 +3831,19 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
             ChannelRef(tenant_id=str(tenant.id), platform=platform, channel_id="C1"),
             1,
             ResolvedBackend(
-                backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"
+                backend="openai", profile="openai.conversation_only", model="gpt-6-luna"
             ),
         )
+        from mux.contracts.ids import ModelRef
+        from mux.contracts.resources import AgentSpec
+
         prepared = dataclasses.replace(
             prepared,
+            # A supported tool-less profile may run, but even an unexpected
+            # provider confirmation must still be refused without a host gate.
+            _native_spec=AgentSpec(
+                name="native-wake", model=ModelRef(provider="openai", id="gpt-6-luna"), tools=()
+            ),
             admission=dataclasses.replace(
                 admission, backend_revision=revision, backend_revision_origin="channel"
             ),

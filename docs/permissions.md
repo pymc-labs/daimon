@@ -239,6 +239,15 @@ without a confirmation gate still refuses unattended confirmations during a
 normal, uninterrupted decision. Cancellation during decision-task
 or card cleanup also finishes bounded interrupt cleanup before propagating.
 
+Native OpenAI workers and unattended wakes cannot use a profile that needs
+automatic sandbox, bash, custom tools, or other capabilities without host
+inspection. Daimon refuses before sending a message to the provider. An
+operator's approval of a native profile does not opt it into unattended
+sandbox execution. Conversation-only native workers and attended native
+conversations remain supported. Selfhosted runs inspect every tool through
+the host's current policy, so allowed reads can continue while unattended
+sandbox calls and unapproved writes are refused.
+
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and
 `get_my_session` report `status: paused` with the hint "paused: call

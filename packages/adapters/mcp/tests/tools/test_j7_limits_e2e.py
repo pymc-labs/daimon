@@ -179,6 +179,14 @@ async def member_fleet(
                 openai_sdk, "configured_transport", lambda **kwargs: SDKTransport(sdk)
             )
             await run_root_input((deps, *j10_root[1:4], origin, *j10_root[5:]))
+            # Model calls below simulate an in-flight execution after the
+            # scripted root driver returned and cleared its signed grant.
+            from daimon.core.stores.turn_origins import bind_origin_session
+
+            async with deps.sessionmaker.begin() as db:
+                await bind_origin_session(
+                    db, origin_id=origin.id, chat_session_id=AUTH.chat_session_id
+                )
             root, policy = await read_frozen_root(
                 deps, scope, origin_id=origin.id, now=datetime.now(UTC)
             )

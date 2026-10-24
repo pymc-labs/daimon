@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Preserve unattended sandbox restrictions across native providers: refuse workers and wakes that require automatic sandbox/custom tools or other ungated capabilities before a provider message; retain conversation-only workers, attended native execution and guarded selfhosted tools.
+
 - Hide saved routine triggers/results from MCP, CLI and Discord controls when
   their source or destination becomes reserved for recruitment, including
   unknown legacy provenance. Restore this bot's `/recruitment` status, refresh,

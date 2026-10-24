@@ -1299,10 +1299,17 @@ async def run_prepared_turn_impl(
                         # read/write and sandbox decider for those inspected actions.
                         if revision is None or revision.profile != SELFHOSTED_LOOP.profile_id:
                             posture = PolicyApproval(decide=refuse_ungated_confirmation)
+                            require_native_unattended_capabilities(
+                                prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
+                                profile_id=revision.profile if revision is not None else "unknown",
+                            )
 
                             async def native_gate() -> None:
                                 require_native_unattended_capabilities(
-                                    prepared._native_spec  # pyright: ignore[reportPrivateUsage]
+                                    prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
+                                    profile_id=revision.profile
+                                    if revision is not None
+                                    else "unknown",
                                 )
 
                             stack.enter_context(unattended_sends(native_gate))

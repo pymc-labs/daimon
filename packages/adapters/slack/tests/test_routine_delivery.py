@@ -433,7 +433,7 @@ async def test_dm_row_is_explicitly_refused_without_channel_or_dm_io(
     row = row.model_copy(update={"destination_kind": "dm", "destination_id": "U1"})
     post, client = _poster(db_session_factory, monkeypatch)
     result = await post(row)
-    assert result.status == "skipped" and "only on Discord" in result.note
+    assert result.status == "skipped" and "not supported here" in result.note
     client.chat_postMessage.assert_not_awaited()
     client.conversations_open.assert_not_awaited()
 

@@ -1269,7 +1269,8 @@ with a plain explanation that it cannot refresh the tool safety gate. This rule
 applies with safety on or off; the model receives a denial and the turn can
 continue or end. Unattended turns never invoke a human provider-action hook.
 Native providers without host tool inspection must expose a reviewed tool
-configuration and cannot run automatic sandbox or custom tools unattended;
+configuration and cannot run automatic sandbox, custom tools, ungated MCP
+connections or unreviewed provider options unattended;
 the send boundary refuses before posting a provider message. In particular,
 OpenAI persistent workers that require automatic `bash` are refused.
 Conversation-only workers without those tools remain supported. Selfhosted

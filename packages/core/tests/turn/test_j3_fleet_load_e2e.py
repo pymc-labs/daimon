@@ -28,17 +28,12 @@ from daimon.core.stores import fleet
 from mux.drivers.openai.transport import SDKTransport
 from mux.testing.isolated_sdk import build_async_openai
 
+from .conversation_worker_support import conversation_root as conversation_root
+from .conversation_worker_support import db_preflight as db_preflight
+from .conversation_worker_support import owned_database_preflight as owned_database_preflight
+from .conversation_worker_support import worker_root as worker_root
 from .test_fleet_native_dispatch import _policy, _spawn_terms
-from .test_fleet_native_dispatch import worker_root as worker_root
-from .test_frozen_root import root_turn as root_turn
 from .test_openai_host import Wire
-from .test_openai_worker_plan import application as application
-from .test_openai_worker_plan import claimed_openai_worker as claimed_openai_worker
-from .test_openai_worker_plan import db_preflight as db_preflight
-from .test_openai_worker_plan import db_session_factory as db_session_factory
-from .test_openai_worker_plan import owned as owned
-from .test_openai_worker_plan import owned_database_preflight as owned_database_preflight
-from .test_openai_worker_plan import provider as provider
 
 #: Smoke-5's measured slow producer read.
 SLOW_READ_S = 2.5
@@ -97,9 +92,28 @@ class MultiWorkerNative:
             wire = Wire(session_id=session_id)
             wire.expected_spend_limit = self._spend_limit
             self.sessions[session_id] = (wire, named)
-            raw = wire.session()
-            raw["agent"]["id"] = named
-            return httpx.Response(200, json=raw)
+            body = json.loads(call.content)
+            assert body["environment"] == {"type": "none"} and body["input"]
+            original = wire.session
+
+            def session(original=original, named=named, metadata=body["metadata"]):
+                raw = original()
+                raw["agent"]["id"] = named
+                raw["environment"] = {"type": "none"}
+                raw["metadata"] = metadata
+                return raw
+
+            wire.session = session
+            internal = httpx.Request(
+                "POST",
+                f"https://openai.invalid/v1/agents/sessions/{session_id}/events",
+                json={"events": [{"type": "agent.session.input", "input": body["input"]}]},
+                headers={"OpenAI-Beta": "agents=v1", "Idempotency-Key": "fixture:send"},
+            )
+            wire.handle(internal)
+            for turn in wire.turns:
+                turn["agent_id"] = named
+            return httpx.Response(200, json=wire.session())
         for session_id, (wire, agent_id) in self.sessions.items():
             if path.startswith("/v1/agents/sessions/" + session_id):
                 response = wire.handle(call)
@@ -213,14 +227,12 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
     ],
 )
 async def test_three_fleets_of_three_finish_well_under_their_deadline(
-    worker_root, owned, monkeypatch, lock
+    worker_root, monkeypatch, lock
 ):
     request, root, _, resolved, prices, _, wire, _, _ = worker_root
     import mux.drivers.openai as native_transport
 
-    native = MultiWorkerNative(
-        owned.wire, {owned.retained.agent.ref.id: owned.wire.agent}, wire.expected_spend_limit
-    )
+    native = MultiWorkerNative(None, {}, wire.expected_spend_limit)
     real_snapshot = channel_budget.read_fleet_budget_snapshot
 
     async def slow_snapshot(*args, **kwargs):

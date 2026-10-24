@@ -17,6 +17,7 @@ from daimon.adapters.discord.commands.help import (
 )
 from daimon.adapters.discord.commands.here import HereCog
 from daimon.adapters.discord.commands.memory import MemoryCog
+from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.commands.privacy import PrivacyCog
 from daimon.adapters.discord.commands.routines import RoutinesCog
 from daimon.core.platform_words import DESCRIPTIONS, WORDS
@@ -160,6 +161,7 @@ class TestSharedDescriptions:
             HelpCog,
             HereCog,
             MemoryCog,
+            ModelCog,
             PrivacyCog,
             RoutinesCog,
         ]

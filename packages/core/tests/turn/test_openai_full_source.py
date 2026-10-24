@@ -34,7 +34,6 @@ from daimon.core.turn.runtime_manifest import (
     source_preservation_pin,
 )
 from daimon.core.turn.runtimes import build_channel_runtime
-from daimon.core.turn.unattended import ALLOW_REVIEWED_NATIVE_UNATTENDED_TOOLS
 from daimon.testing import f2_mcp_binding
 from daimon.testing.db import sibling_nullpool_engine
 from daimon.testing.f2_mcp_binding import AgentMCPAuthority, AgentMCPBinding
@@ -966,7 +965,20 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             # Main's signed-grant assertions above still run at before_send.
             # Preview's default refuses this source's automatic sandbox tools
             # before a provider message, including timer and child execution.
-            refused = kind != "human" and not ALLOW_REVIEWED_NATIVE_UNATTENDED_TOOLS
+            refused = kind != "human"
+            if refused:
+                # Exercise the same signed-grant/handoff assertions independently:
+                # a denied profile never opens its stream or reaches before_send.
+                from daimon.core.stores.turn_origins import bind_origin_session
+
+                if not worker:
+                    async with sessions.begin() as db:
+                        await bind_origin_session(
+                            db, origin_id=origin.id, chat_session_id=grant, attended=False
+                        )
+                await before_send()
+                async with sessions.begin() as db:
+                    await bind_origin_session(db, origin_id=origin.id, chat_session_id=None)
             sent_before = [
                 call
                 for call in wire.requests

@@ -9,20 +9,16 @@ from decimal import Decimal
 
 import httpx
 import pytest
-from daimon.core._models import FleetWorker as WorkerRow
 from daimon.core.errors import TurnError
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused, HostFleetPorts
 from daimon.core.headless_runner import run_worker
-from daimon.core.mux_compat import retrieve_agent
-from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
+from daimon.core.neutral_resources import WorkerSpecRefused
 from daimon.core.stores import access_policy, fleet, mux_state
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.runtime_manifest import capture_preparation_source
 from mux.contracts.resources import AgentPatch
-from mux.testing.drivers.anthropic.ma import MARouter
-from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
-from sqlalchemy import update
 
+from .conversation_worker_support import conversation_root as conversation_root
+from .conversation_worker_support import worker_root as worker_root
 from .test_frozen_root import freeze
 from .test_frozen_root import root_turn as root_turn
 from .test_openai_worker_plan import application as application
@@ -34,60 +30,6 @@ from .test_openai_worker_plan import owned_database_preflight as owned_database_
 from .test_openai_worker_plan import provider as provider
 
 root_turn_factory = root_turn.__wrapped__
-
-
-@pytest.fixture
-async def worker_root(claimed_openai_worker):
-    request, root, row, prices, _, calls, wire = claimed_openai_worker
-    request = replace(request, scope=root.fleet.scope, worker=None, source=None)
-    source = request.admission.agent.model_dump(mode="json")
-    router = MARouter()
-    router.add(
-        "GET",
-        re.escape("/v1/agents/" + request.admission.agent.id),
-        lambda call, match: httpx.Response(200, json=source),
-    )
-    transport = ScriptedTransport(router=router)
-    async with transport.client() as client:
-        actual = await retrieve_agent(client, request.admission.agent.id, scope=request.scope)
-        request = replace(
-            request,
-            deps=replace(request.deps, anthropic=client),
-            admission=replace(request.admission, agent=actual),
-        )
-        captured = await capture_preparation_source(request)
-        assert captured.source is not None
-        root = replace(
-            root,
-            source_agents=(captured.source.ref,),
-            source_revisions=((captured.source.ref, captured.source.revision),),
-        )
-        previous = claimed_openai_worker[0].worker
-        resolved = resolve_worker_spec(
-            root,
-            captured.source if previous.source_agent else previous.spec,
-            overrides=AgentPatch.model_validate(previous.spec.model_dump(mode="json"))
-            if previous.source_agent
-            else None,
-            policy=await _policy(request),
-            now=request.now(),
-            backend=previous.backend,
-            limits=previous.limits,
-            resources=previous.resources,
-            environment=previous.environment,
-            captured_source=captured,
-        )
-        # Seed the admitted intent from the actual SDK source read, as a real root does.
-        async with request.deps.sessionmaker.begin() as db:
-            await db.execute(
-                update(WorkerRow)
-                .where(WorkerRow.id == row.id)
-                .values(spec=resolved.spec.model_dump(mode="json"), spec_digest=resolved.digest)
-            )
-        _, rows = await fleet.run_status(
-            request.deps.sessionmaker, tenant_id=row.tenant_id, run_id=row.run_id
-        )
-        yield request, root, rows[0], resolved, prices, calls, wire, transport, source
 
 
 async def _policy(request):
@@ -146,7 +88,6 @@ async def test_root_request_derivation_reaches_real_fresh_or_clone_worker(worker
     assert [call.url.path for call in calls if call.method == "POST"] == [
         "/v1/agents",
         "/v1/agents/sessions",
-        "/v1/agents/sessions/native-openai-session/events",
     ]
     assert all(call.method == "GET" for call in transport.requests)
 
@@ -179,7 +120,6 @@ async def test_a_worker_never_runs_the_root_conversations_model_choice(worker_ro
     assert [call.url.path for call in calls if call.method == "POST"] == [
         "/v1/agents",
         "/v1/agents/sessions",
-        "/v1/agents/sessions/native-openai-session/events",
     ]
     assert all(chosen not in call.content.decode() for call in calls if call.content), (
         "the conversation's model never reaches a worker"
@@ -304,7 +244,6 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
         assert posts == [
             "/v1/agents",
             "/v1/agents/sessions",
-            "/v1/agents/sessions/native-openai-session/events",
         ]
         again = await owner.spawn(root, policy, **terms)
         assert again["worker_id"] == first["worker_id"] and again["status"] == "succeeded"
@@ -520,7 +459,6 @@ async def test_falsey_preparation_and_pool_run_the_actual_worker(worker_root):
         assert [call.url.path for call in calls if call.method == "POST"] == [
             "/v1/agents",
             "/v1/agents/sessions",
-            "/v1/agents/sessions/native-openai-session/events",
         ]
     finally:
         await ports.close()
@@ -743,7 +681,6 @@ async def test_dispatcher_ends_only_its_known_pre_native_claim_and_allows_a_heal
         assert [call.url.path for call in calls if call.method == "POST"] == [
             "/v1/agents",
             "/v1/agents/sessions",
-            "/v1/agents/sessions/native-openai-session/events",
         ]
     finally:
         source["version"] = original_version
@@ -1401,3 +1338,59 @@ async def test_dispatch_skips_a_second_failure_commit_run_worker_already_recorde
         assert commits == ([] if recorded else ["setup_error"])
     finally:
         await ports.close()
+
+
+async def test_conversation_worker_native_mutations_reuse_the_owned_guard(worker_root, monkeypatch):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn import openai_host
+
+    request, root, worker, resolved, prices, calls, _, _, _ = worker_root
+    request = await request.for_worker(root, resolved)
+    build = request.deps.turn_runtime_factory
+    assert build is not None
+    create = openai_host._create
+    checks = {"agent": 0, "session": 0}
+
+    def instrument_build(request):
+        runtime = build(request)
+        materialize = runtime.materialize_worker
+        assert materialize is not None
+
+        async def instrument_materialize(preparation):
+            guard = preparation.before_native
+            assert guard is not None
+
+            async def counted():
+                checks["agent"] += 1
+                await guard()
+
+            return await materialize(replace(preparation, before_native=counted))
+
+        return replace(runtime, materialize_worker=instrument_materialize)
+
+    async def instrument_create(request, *args):
+        guard = request.before_native
+        assert guard is not None
+
+        async def counted():
+            checks["session"] += 1
+            await guard()
+
+        return await create(replace(request, before_native=counted), *args)
+
+    request = replace(request, deps=replace(request.deps, turn_runtime_factory=instrument_build))
+    monkeypatch.setattr(openai_host, "_create", instrument_create)
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    # Publication checks authority before catalog work and before native claim;
+    # session mutation checks it once at its native claim boundary.
+    assert checks == {"agent": 2, "session": 1}
+
+    assert not any(call.method == "POST" and call.url.path.endswith("/events") for call in calls)

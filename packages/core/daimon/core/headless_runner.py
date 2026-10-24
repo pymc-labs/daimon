@@ -1043,6 +1043,14 @@ async def run_worker(
                     "worker intent no longer resolves under current root authority",
                     reason="intent_changed",
                 )
+            if cancel.is_set():
+                raise asyncio.CancelledError
+            if revision.profile not in {"anthropic.managed_agents", "selfhosted.loop"}:
+                from daimon.core.turn.unattended import require_native_unattended_capabilities
+
+                # The task text can be carried by native resource creation.
+                # Refuse before funding, allocation or any provider transport.
+                require_native_unattended_capabilities(resolved.spec, profile_id=revision.profile)
             async with (
                 _worker_stage(worker, "admission", setup_at=setup_at),
                 _setup_transaction(deps.sessionmaker) as db,
