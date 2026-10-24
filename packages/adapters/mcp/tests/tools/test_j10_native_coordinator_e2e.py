@@ -58,11 +58,61 @@ class HostedTemplates:
         return self.wire.handle(call)
 
 
+#: Daimon's MCP tools the chat catalogue starts from (the fleet tools and their peers).
+DAIMON_TOOLS = (
+    "hand_off_task",
+    "request_agent_backend_switch",
+    "list_agents",
+    "fleet_spawn",
+    "fleet_collect",
+    "fleet_status",
+    "fleet_agents",
+    "fleet_kill",
+    "fleet_resume",
+    "fleet_cross_review",
+)
+
+
+async def _chat_catalogue(*, native: bool) -> frozenset[str]:
+    """What Daimon's MCP server lists to a turn's credential, through its real search
+    transform: a GPT/Gemini provider turn has no confirmation surface."""
+    from typing import Any
+
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
+    from daimon.core.stores.domain import Role
+    from fastmcp import Client, FastMCP
+    from fastmcp.server.middleware import Middleware, MiddlewareContext
+
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        no_confirmation_surface=native,
+    )
+
+    class Identity(Middleware):
+        async def on_list_tools(self, context: MiddlewareContext[Any], call_next: Any) -> Any:
+            await context.fastmcp_context.set_state("auth", auth, serializable=False)
+            return await call_next(context)
+
+    server = FastMCP("daimon")
+    for name in DAIMON_TOOLS:
+
+        def tool(name: str = name) -> str:
+            return name
+
+        server.tool(tool, name=name)
+    server.add_middleware(Identity())
+    server.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
+    async with Client(server) as client:
+        return frozenset(tool.name for tool in await client.list_tools())
+
+
 async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit: bool = False):
     """The copy (switched to `backend`, or left on Claude) answers one message with fleet
     on. Returns (retained fleet_root operation keys, remembered refusal)."""
     from daimon.core.mcp_oauth import discovery
-    from daimon.core.stores import turn_card_intents
     from daimon.core.stores.mux_state import PostgresStateStore
     from daimon.core.turn.admission import admit
     from daimon.core.turn.prepare import bind_session_impl
@@ -77,17 +127,18 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
     from packages.core.tests.turn.test_gemini_codec import interaction
     from packages.core.tests.turn.test_gemini_runtime_transport import clients_for
 
+    catalogue = await _chat_catalogue(native=backend is not None)
+
     async def listed(_url: str, _token: str) -> frozenset[str]:
-        return frozenset({"hand_off_task", "request_agent_backend_switch"})
+        return catalogue
 
     monkeypatch.setattr(discovery, "list_mcp_tools", listed)
-    if backend is None:
-        # Cheap models only: the control's copy is a Haiku agent.
-        source = chat.ma.agents["agent_daimon"]
-        if isinstance(source["model"], dict):
-            source["model"] = {**source["model"], "id": HAIKU}
-        else:
-            source["model"] = HAIKU
+    source = chat.ma.agents["agent_daimon"]
+    # As Managed Agents returns it: the model is an object, so the copy's source
+    # carries its Claude model config (anthropic.model_config). Cheap models only: the
+    # control's copy is a Haiku agent.
+    model_id = source["model"]["id"] if isinstance(source["model"], dict) else source["model"]
+    source["model"] = {"id": HAIKU if backend is None else model_id, "speed": "fast"}
     copy = await _fork_agent_impl(
         chat.runtime,
         chat.auth,
@@ -397,15 +448,26 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
         session_account_id=chat.auth.account_id,
         reuse_existing=True,
     )
-    async with sm.begin() as db:
-        intent = await turn_card_intents.create_turn_card_intent(
-            db,
-            tenant_id=chat.auth.tenant_id,
-            platform="discord",
-            channel_id="fresh-channel",
-            thread_id="thread",
-            turn_token=uuid.uuid4(),
-        )
+    # The bot's own first step for a thread message: commit the turn card intent, post
+    # the card and record its message id (post_initial_turn_card), never a test-built row.
+    from types import SimpleNamespace
+
+    from daimon.adapters.discord.turn_card_recovery import post_initial_turn_card
+
+    class FirstCard:
+        def __init__(self, intent_id, record):
+            self.record = record
+
+        async def post_initial(self):
+            await self.record(SimpleNamespace(id=1563400000000000000 + len(chat.ma.sessions)))
+
+    intent, _ = await post_initial_turn_card(
+        sm,
+        tenant_id=chat.auth.tenant_id,
+        thread_id="thread",
+        channel_id="fresh-channel",
+        make_lifecycle=FirstCard,
+    )
 
     async def no_recovery():
         pytest.fail("the turn changed its admitted source/session")
@@ -452,14 +514,17 @@ async def _coordinator_turn(chat, monkeypatch, backend: str | None, *, explicit:
             origin_id=origin.id,
             now=datetime.now(UTC),
         )
-    return keys, root_refusal(origin.id), prepared, frozen, deps, origin
+    provider_agent = (
+        native if backend == "gemini" else openai_root.wire.agent if backend == "openai" else {}
+    )
+    return keys, root_refusal(origin.id), prepared, frozen, deps, origin, provider_agent
 
 
 @pytest.mark.parametrize("grant", ["default", "explicit"])
 @pytest.mark.parametrize("backend", ["gemini", "openai", None])
 async def test_a_native_agent_coordinates_a_fleet(fresh_chat, monkeypatch, backend, grant):
     """The Claude (Haiku) copy is the control: it froze before the fix too."""
-    keys, refusal, prepared, frozen, *_ = await _coordinator_turn(
+    keys, refusal, prepared, frozen, _, _, provider_agent = await _coordinator_turn(
         fresh_chat, monkeypatch, backend, explicit=grant == "explicit"
     )
     if backend is not None:
@@ -471,6 +536,9 @@ async def test_a_native_agent_coordinates_a_fleet(fresh_chat, monkeypatch, backe
     # there too (not on the copy's original Claude model).
     if backend is not None:
         assert (frozen.spec.model.provider, frozen.spec.model.id) == (backend, NATIVE[backend])
+        # The model is told about fleet workers by name (M07 layer 2): its native agent
+        # allowlists fleet_spawn, not only the search proxy.
+        assert "fleet_spawn" in json.dumps(provider_agent), provider_agent
     else:
         assert (frozen.spec.model.provider, frozen.spec.model.id) == ("anthropic", HAIKU)
 
@@ -583,7 +651,7 @@ async def test_a_native_root_dispatches_a_worker_and_collects_its_result(
 ):
     """Worker dispatch and the delivered result from a GPT/Gemini root (#1494 follow-up):
     a worker that names no model runs on the root's own model and is collected."""
-    keys, refusal, _, frozen, deps, origin = await _coordinator_turn(
+    keys, refusal, _, frozen, deps, origin, _ = await _coordinator_turn(
         fresh_chat, monkeypatch, backend
     )
     assert refusal is None and keys
