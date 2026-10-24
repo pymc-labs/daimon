@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -446,6 +447,13 @@ type BackendRefusalStage = Literal[
 ]
 
 
+#: A capability name our own code raises (e.g. session_resource, environment_sources,
+#: or a dotted extension namespace): never request data. Names built from user data
+#: always carry a "kind:" prefix (mcp_tool:, mcp_server:, builtin_tool:) and stay
+#: redacted. Carlos's Opus worker (f95639c4) failed with its only clue redacted.
+_CODE_CAPABILITY = re.compile(r"[a-z][a-z0-9_]{0,63}(\.[a-z][a-z0-9_]{0,63})?")
+
+
 def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object]]:
     """One closed-label sanitizer for turn and background worker refusals."""
     # Delay this import: the turn package itself imports channel_backend.
@@ -537,7 +545,10 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
             )
         if isinstance(error, UnsupportedCapability):
             cause["missing"] = sorted(
-                {item if item in safe_missing else "redacted" for item in error.missing}
+                {
+                    item if item in safe_missing or _CODE_CAPABILITY.fullmatch(item) else "redacted"
+                    for item in error.missing
+                }
             )
         causes.append(cause)
         error = error.__cause__ or error.__context__

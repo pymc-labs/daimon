@@ -245,3 +245,28 @@ def test_skills_plus_any_other_difference_still_needs_a_new_confirmation():
     # The same old consent, plus one more loss nothing explains: a fresh card.
     old_and_more = _template_target("Source", ["memory", "sandbox", "skills"], ["call_tool"])
     assert not _consented_before(today, "Source", _consent_for(old_and_more))
+
+
+async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch):
+    """Smoke a1d991fb: Gemini copies and a Flash worker were refused at
+    read_preparation_counterpart's catch-all with nothing logged."""
+    from types import SimpleNamespace
+
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.errors import AdmissionDenied
+    from structlog.testing import capture_logs
+
+    async def broken(_request):
+        raise RuntimeError("catalogue read failed")
+
+    monkeypatch.setattr(runtime_manifest, "prepare_source", broken)
+    request = SimpleNamespace(
+        admission=SimpleNamespace(backend_revision=SimpleNamespace(profile="gemini.inline_reuse")),
+        worker=None,
+    )
+    with capture_logs() as logs, pytest.raises(AdmissionDenied) as refused:
+        await runtime_manifest.read_preparation_counterpart(request)  # type: ignore[arg-type]
+    assert refused.value.reason == "backend_unsupported"
+    (named,) = [e for e in logs if e["event"] == "turn.preparation_counterpart_error"]
+    assert named["error_class"] == "RuntimeError" and named["profile"] == "gemini.inline_reuse"
+    assert "catalogue read failed" in named["error"]
