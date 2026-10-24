@@ -104,3 +104,31 @@ async def test_j5_a_raise_refusal_is_a_card_refusal(owned_preview):
     trace.queue(reply())
     with pytest.raises(CardRefusal, match="Only an admin can raise fleet limits"):
         await prepare(prompt)
+
+
+async def test_j5_an_internal_error_never_reaches_the_model_as_text(owned_preview, monkeypatch):
+    """Only refusals worded for the person pass through; an internal error stays generic."""
+    service, *_ = owned_preview
+    call, prepare, trace, reply = await _owner_card(owned_preview, max_workers=2, budget_usd="1")
+
+    async def broken(*_args, **_kwargs):
+        raise ValueError("internal detail: row 42 digest mismatch")
+
+    monkeypatch.setattr(service, "preview_fleet_grant", broken)
+
+    async def confirm(prompt):
+        trace.queue(reply())
+        return await prepare(prompt)
+
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=confirm,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=backend_switch_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(call)
+    said = result.deny_message or ""
+    assert result.allow is False and "internal detail" not in said
+    assert "could not be shown" in said or "couldn't be shown" in said, said

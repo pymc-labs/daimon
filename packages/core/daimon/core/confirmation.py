@@ -720,7 +720,7 @@ def backend_switch_callbacks(
     ) -> tuple[BackendAgent, CompatibilityPreview]:
         reference = prompt.backend_switch
         if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            raise CardRefusal("This confirmation is unavailable. Preview again.")
         async with sessionmaker() as session:
             identity = await get_account_with_tenant(session, account_id=account_id)
         if (
@@ -728,7 +728,7 @@ def backend_switch_callbacks(
             or identity.tenant_id != tenant_id
             or identity.platform_user_id != clicker
         ):
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            raise CardRefusal("This confirmation is unavailable. Preview again.")
         agent = await load_backend_agent(
             anthropic,
             sessionmaker,
@@ -779,16 +779,16 @@ def backend_switch_callbacks(
             or (preview.declared_drops and reference.accepted_drops != preview.declared_drops)
             or (not preview.declared_drops and reference.accepted_drops not in (None, ()))
         ):
-            raise ValueError("This preview changed. Preview and confirm again.")
+            raise CardRefusal("This preview changed. Preview and confirm again.")
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
         # The agent's owner or a current workspace admin, as the write re-checks.
         if not await service.may_edit(agent, BackendActor(tenant_id, account_id, subject)):
-            raise ValueError("This change needs the agent's owner or a current workspace admin.")
+            raise CardRefusal("This change needs the agent's owner or a current workspace admin.")
         # Recheck the scoped identity after the platform lookup has yielded.
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
-            raise ValueError("This permission changed. Preview and confirm again.")
+            raise CardRefusal("This permission changed. Preview and confirm again.")
         return agent, preview
 
     async def verified_configuration(
@@ -798,7 +798,7 @@ def backend_switch_callbacks(
 
         reference = prompt.configuration
         if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            raise CardRefusal("This confirmation is unavailable. Preview again.")
         async with sessionmaker() as session:
             identity = await get_account_with_tenant(session, account_id=account_id)
         if (
@@ -806,19 +806,19 @@ def backend_switch_callbacks(
             or identity.tenant_id != tenant_id
             or identity.platform_user_id != clicker
         ):
-            raise ValueError("This confirmation is unavailable. Preview again.")
+            raise CardRefusal("This confirmation is unavailable. Preview again.")
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
         if (
             reference.operation in ("provider_allowlist", "channel_pin_clear")
             and not subject.is_admin
         ):
-            raise ValueError("This change needs a current workspace admin.")
+            raise CardRefusal("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:
             if reference.operation == "channel_pin_clear":
                 # Only the chat this card is posted in: the reference names no channel.
                 if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
-                    raise ValueError("This confirmation is unavailable. Preview again.")
+                    raise CardRefusal("This confirmation is unavailable. Preview again.")
                 from daimon.core.channel_backend import current_backend
                 from daimon.core.fleet_configuration import channel_pin_digest
                 from daimon.core.stores import mux_state
@@ -837,7 +837,7 @@ def backend_switch_callbacks(
                     or pin.local != reference.expected_revision
                     or channel_pin_digest(pin) != reference.preview_digest
                 ):
-                    raise ValueError("This preview changed. Preview and confirm again.")
+                    raise CardRefusal("This preview changed. Preview and confirm again.")
                 model = f" ({pin.model})" if pin.model else ""
                 action = "Clear this channel's provider pin"
                 details = (
@@ -853,7 +853,7 @@ def backend_switch_callbacks(
                     or provider_preview_digest(policy, reference.providers)
                     != reference.preview_digest
                 ):
-                    raise ValueError("This preview changed. Preview and confirm again.")
+                    raise CardRefusal("This preview changed. Preview and confirm again.")
                 await service.set_tenant_allowlist(
                     tenant_id, reference.providers, policy.revision, actor, dry_run=True
                 )
@@ -873,7 +873,7 @@ def backend_switch_callbacks(
                     resource_host=resource_host,
                 )
                 if not await service.may_edit(agent, actor):
-                    raise ValueError("This change needs the agent's owner or a current admin.")
+                    raise CardRefusal("This change needs the agent's owner or a current admin.")
                 setting = await service.fleet_setting(
                     tenant_id, agent.agent_id, now=datetime.now(prompt.expires_at.tzinfo)
                 )
@@ -913,7 +913,7 @@ def backend_switch_callbacks(
                     preview.setting_revision != reference.expected_revision
                     or preview.digest != reference.preview_digest
                 ):
-                    raise ValueError("This preview changed. Preview and confirm again.")
+                    raise CardRefusal("This preview changed. Preview and confirm again.")
                 action = (
                     "Turn off fleet for "
                     if reference.operation == "fleet_revoke"
@@ -930,12 +930,12 @@ def backend_switch_callbacks(
                 )
         except AgentBackendRefused as exc:
             if exc.reason == "fleet_raise_admin_required":
-                raise ValueError(configuration_refusal(exc.reason)) from exc
-            raise ValueError("This preview changed. Preview and confirm again.") from exc
+                raise CardRefusal(configuration_refusal(exc.reason)) from exc
+            raise CardRefusal("This preview changed. Preview and confirm again.") from exc
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
-            raise ValueError("This permission changed. Preview and confirm again.")
+            raise CardRefusal("This permission changed. Preview and confirm again.")
         return action, details
 
     async def _answering_here(turn_agent: str | None) -> str | None:
@@ -965,16 +965,6 @@ def backend_switch_callbacks(
         return turn_agent
 
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
-        try:
-            return await _prepared(prompt)
-        except CardRefusal:
-            raise
-        except ValueError as exc:
-            # Every refusal above is worded for the person: the model relays it
-            # instead of "the approval card couldn't be shown" (latent M30).
-            raise CardRefusal(str(exc)) from exc
-
-    async def _prepared(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
         if prompt.configuration is not None:
             action, details = await verified_configuration(
                 prompt, prompt.requester_platform_user_id
