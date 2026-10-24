@@ -64,6 +64,7 @@ from daimon.core.stores.domain import (
     McpTokenRow,
 )
 from daimon.core.text_layout import fit_lines
+from daimon.core.turn.notices import conversations_follow_line
 from mux.contracts.ids import Provider
 
 __all__ = [
@@ -658,7 +659,14 @@ def build_backend_preview_view(
         shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
         lines.append(f"{label}: {shown}")
     lines.extend(
-        [preview.cost_line, "Existing threads keep their provider; channel settings still apply."]
+        [
+            preview.cost_line,
+            conversations_follow_line(
+                meta.agent_name,
+                None if meta.backend_target == "clear" else preview.target_backend,
+            )
+            + " Channel settings still apply.",
+        ]
     )
     blocks = [_section("\n".join(lines))]
     if not preview.allowed:

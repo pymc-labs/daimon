@@ -60,6 +60,7 @@ from daimon.core.stores import agent_tool_rules as tool_rules_store
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
+from daimon.core.turn.notices import conversations_follow_line
 from mux.profiles import selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
@@ -977,7 +978,11 @@ async def agents_backend_change(
             )
             console.print("Revert any time; nothing is deleted.", markup=False)
         console.print(preview.cost_line, markup=False)
-        console.print("Existing threads keep their backend; channel overrides still apply.")
+        console.print(
+            conversations_follow_line(name, preview.target_backend)
+            + " Channel overrides still apply.",
+            markup=False,
+        )
     if dry_run:
         if as_json:
             console.print(preview_json, markup=False, highlight=False, soft_wrap=True)
