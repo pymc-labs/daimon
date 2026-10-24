@@ -27,6 +27,7 @@ from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_diges
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
+from daimon.core.posted_controls import CardButton
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from discord.webhook.async_ import AsyncWebhookAdapter, async_context
@@ -157,11 +158,25 @@ def interaction(user_id=123, guild=60, thread=70, card=None):
 
 
 def buttons(view):
+    """Worker 1's Stop and Resume, as a card posted before the one-Stop card still
+    carries them. No card renders them now (`stop_buttons`), but their press path is
+    unchanged, so the press tests drive it directly."""
+    row = worker()
     return [
-        item
-        for item in view.walk_children()
-        if isinstance(item, FleetControl) and item.worker_id is not None
+        FleetControl.from_button(
+            CardButton(
+                label=f"{caption} {row.ordinal}",
+                style="primary",
+                custom_id=f"fleet:{RUN.hex}:{row.id.hex}:{row.version}:{action}",
+            )
+        )
+        for action, caption in (("kill", "Stop"), ("resume", "Resume"))
     ]
+
+
+def stop_buttons(view):
+    """Every fleet control the card renders: at most the one Stop for the whole fleet."""
+    return [item for item in view.walk_children() if isinstance(item, FleetControl)]
 
 
 def setup(provider="anthropic"):
@@ -267,7 +282,7 @@ async def test_waiting_owner_ack_keeps_controls_active():
     owner.control.side_effect = waiting
     click = interaction(card=card)
     await buttons(view)[0].callback(click)
-    assert not any(button.item.disabled for button in buttons(view))
+    assert not any(button.item.disabled for button in stop_buttons(view))
     click.response.edit_message.assert_not_awaited()
 
 
@@ -402,7 +417,9 @@ async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_ite
     original, owner, loader, send, edit = setup()
     await original.refresh()
     view = send.call_args.kwargs["view"]
-    custom_id = buttons(view)[0].item.custom_id
+    # The card's one Stop, as rendered: recovery finds the posted card by it.
+    (stop,) = stop_buttons(view)
+    custom_id = stop.item.custom_id
     components = view.to_components()
     del original, view
 
@@ -509,11 +526,9 @@ async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_ite
     await asyncio.wait_for(asyncio.gather(*tasks), timeout=3)
     owner.control.assert_awaited_once()
     assert owner.control.call_args.args[1].id == RUN
-    assert owner.control.call_args.kwargs["expected_version"] == 3
-    assert (
-        owner.control.call_args.kwargs["operation_key"]
-        == f"discord:fleet:{RUN}:{worker().id}:3:kill"
-    )
+    assert owner.control.call_args.args[2] is None
+    assert owner.control.call_args.kwargs["expected_version"] == run().version
+    assert owner.control.call_args.kwargs["operation_key"] == f"discord:fleet:{RUN}:all:2:kill"
     click.response.defer.assert_awaited_once()
     bot.http.edit_message.assert_awaited_once()
     assert loader.await_args_list[-1].args == (click,)
@@ -522,13 +537,13 @@ async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_ite
 async def test_the_default_maximum_fleet_keeps_every_worker_and_control():
     rows = tuple(worker(ordinal=index) for index in range(1, 9))
     view = build_fleet_view(run(), rows)
-    assert len(buttons(view)) == 16
+    assert [item.item.label for item in stop_buttons(view)] == ["Stop"]
     assert view.total_children_count <= 40
     assert view.content_length() <= 4000
 
 
 @pytest.mark.parametrize("terminal", [False, True])
-async def test_sixteen_workers_fit_with_all_statuses_and_run_level_controls(terminal):
+async def test_sixteen_workers_fit_with_all_statuses_and_one_stop(terminal):
     rows = tuple(
         worker(ordinal=index, status="succeeded" if terminal and index > 12 else "pending")
         for index in range(1, 17)
@@ -540,22 +555,11 @@ async def test_sixteen_workers_fit_with_all_statuses_and_run_level_controls(term
     assert all(f"{index}. **" in text for index in range(1, 17))
     assert view.total_children_count <= 40
     assert view.content_length() <= 4000
-    individual = buttons(view)
-    assert len(individual) == 24
-    expected = range(1, 13) if terminal else range(5, 17)
-    assert {item.worker_id for item in individual} == {
-        worker(ordinal=index).id for index in expected
-    }
-    all_controls = [
-        item
-        for item in view.walk_children()
-        if isinstance(item, FleetControl) and item.worker_id is None
-    ]
-    assert {item.item.label for item in all_controls} == {"Stop all", "Resume all"}
-    assert all(
-        item.run_id == RUN and item.expected_version == run().version for item in all_controls
-    )
-    assert text.count("status only") == (0 if terminal else 4)
+    # One Stop for the whole fleet (Carlos): no per-worker or Resume controls.
+    (stop,) = stop_buttons(view)
+    assert stop.item.label == "Stop" and stop.worker_id is None and stop.action == "kill"
+    assert stop.run_id == RUN and stop.expected_version == run().version
+    assert "status only" not in text and "Resume" not in text
 
 
 @pytest.mark.parametrize("size", [16, 50, 200])
@@ -614,7 +618,7 @@ async def test_large_fleet_text_keeps_the_maximum_complete_rows(
         if isinstance(item, FleetControl) and item.worker_id is None
     ]
     assert {item.item.label for item in all_controls} == (
-        {"Stop all", "Resume all"} if status == "running" else set()
+        {"Stop"} if status == "running" else set()
     )
 
 
@@ -630,11 +634,19 @@ async def test_run_level_control_uses_the_same_owner_and_run_compare_and_set(act
     card, owner, _, send, _ = setup()
     await card.refresh()
     view = send.call_args.kwargs["view"]
-    control = next(
-        item
-        for item in view.walk_children()
-        if isinstance(item, FleetControl) and item.worker_id is None and item.action == action
+    # The card renders only Stop; "Resume all" on a card posted earlier keeps its path.
+    control = (
+        stop_buttons(view)[0]
+        if action == "kill"
+        else FleetControl.from_button(
+            CardButton(
+                label="Resume all",
+                style="primary",
+                custom_id=f"fleet:{RUN.hex}:all:{run().version}:resume",
+            )
+        )
     )
+    assert control.worker_id is None and control.action == action
     await control.callback(interaction(card=card))
     owner.control.assert_awaited_once()
     assert owner.control.call_args.args[2] is None
@@ -704,7 +716,7 @@ async def test_all_three_backends_render_without_spec_or_result_material():
     assert all(provider in text for provider in ("anthropic", "openai", "gemini"))
     assert "DO_NOT_RENDER_SECRET" not in text and "root-session" not in text
     assert "@everyone" not in text and "<#50>" not in text
-    assert len(buttons(view)) == 6
+    assert [item.item.label for item in stop_buttons(view)] == ["Stop"]
 
 
 def _texts(*mocks):
@@ -2440,7 +2452,7 @@ def test_an_agent_workers_card_row_says_what_it_runs_without():
     text = "\n".join(
         item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
     )
-    assert "**openai** (fleet-openai, without its memory, its tools, its model settings) ·" in text
+    assert "**openai** (fleet-openai; no memory, tools or model settings) ·" in text
 
 
 def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
@@ -2462,12 +2474,62 @@ def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
     text = "\n".join(
         item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
     )
-    assert (
-        "**W1** (without its files and the caller's private items and logins, its connected tools) ·"
-        in text
-    )
+    # One short line, never the long "(without its files and the caller's private ...)".
+    assert "**W1** (no tools or files) ·" in text
     # Every task worker runs without tools and skills; that isn't news.
     assert "**W2** ·" in text
+    assert "without" not in text
+
+
+def _copy_worker(ordinal, *, status="pending"):
+    row = worker(ordinal=ordinal, role=f"visualiser-{ordinal}", status=status)
+    return replace(
+        row,
+        spec={
+            **row.spec,
+            "name": f"visualiser-{ordinal}",
+            "declared_drops": ["files", "mcp", "memory", "repository", "skills", "tools"],
+        },
+    )
+
+
+def _card_text(view):
+    return "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+
+
+def test_the_same_losses_are_said_once_for_the_whole_fleet():
+    """Carlos: the per-worker "(without its files and the caller's private items and
+    logins, its connected tools, its memory, its repository)" said once, short."""
+    rows = (_copy_worker(1), _copy_worker(2))
+    text = _card_text(build_fleet_view(replace(run(), total_budget_usd=Decimal("2")), rows))
+    assert text.count("Every worker: no memory, tools, files or repository.") == 1
+    assert "**visualiser-1** ·" in text and "**visualiser-2** ·" in text
+    assert "without" not in text and "private items" not in text
+    # Money as people read it (was "Budget cap $2.000000").
+    assert "Budget cap $2.00 · Deadline" in text
+    assert "$2.000" not in text
+
+
+@pytest.mark.parametrize(
+    "statuses,run_status,shown",
+    [
+        ((), "running", True),  # starting: nothing spawned yet, still stoppable
+        (("pending", "running"), "running", True),
+        (("running", "succeeded"), "collecting", True),
+        (("succeeded", "failed"), "running", False),  # every worker finished
+        (("succeeded",), "completed", False),
+        (("running",), "cancelled", False),
+    ],
+)
+def test_one_stop_only_while_the_fleet_can_still_be_stopped(statuses, run_status, shown):
+    rows = tuple(_copy_worker(index + 1, status=status) for index, status in enumerate(statuses))
+    view = build_fleet_view(replace(run(), status=run_status), rows)
+    controls = stop_buttons(view)
+    assert [item.item.label for item in controls] == (["Stop"] if shown else [])
+    assert all(item.worker_id is None and item.action == "kill" for item in controls)
+    assert "Resume" not in _card_text(view)
 
 
 @pytest.mark.parametrize("rows", ["none", "worker"])

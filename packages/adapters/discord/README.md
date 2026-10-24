@@ -54,11 +54,13 @@ operation keys as the tools. An accepted write retires the old controls and
 draws the current rows; it does not claim native termination or completed cost.
 Complete status rows stay in ordinal order while they fit within Discord's
 4,000-character total text limit, including the headline and budget footer.
-Larger fleets end with one `+N more` line counting the omitted rows. Admission
-and run-level controls cover the whole fleet. Within the component limit, individual
-controls favor the newest active workers; remaining active rows are marked
-status only. One Stop all and Resume all pair uses the run's own version and
-the same shared operation, so admission does not depend on display capacity.
+Larger fleets end with one `+N more` line counting the omitted rows. The card
+shows one Stop for the whole fleet, only while some worker can still be stopped;
+it uses the run's own version and the same shared operation, so admission does
+not depend on display capacity. What workers run without is one short line ("no
+memory, tools or files"), said once when every worker lacks the same, and money
+reads "$2.00". Per-worker and Resume controls on cards posted earlier keep their
+press path, but no card renders them.
 
 The runtime's optional `fleet_card_factory` is consulted only when fleet
 settings are explicitly enabled. Missing factories leave ordinary turns

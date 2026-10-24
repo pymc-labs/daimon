@@ -779,19 +779,17 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
     assert any("Cost less than $0.01 · Budget cap" in line for line in seen.card), seen.card
     for model in ("claude-opus-5-5", "gpt-6-astra", GEMINI[gemini]):
         assert f"{model} — succeeded" in text
-    # Nothing a worker lacks goes unsaid: each loss of the root's own setup is named
-    # on its card line, and a dropped login (when there is one) in the spawn reply.
-    words = {
-        "mcp": "its connected tools",
-        "files": "its files and the caller's private items and logins",
-        "repository": "its repository",
-        "memory": "its memory",
-    }
+    # Nothing a worker lacks goes unsaid: each loss of the root's own setup is named,
+    # in short words, on its card line or once for the whole fleet when every worker
+    # lacks the same; a dropped login (when there is one) in the spawn reply.
+    words = {"mcp": "tools", "files": "files", "repository": "repository", "memory": "memory"}
+    fleet_wide = next((line for line in text.splitlines() if "Every worker: no " in line), "")
     for row in seen.settled:
         (line,) = [line for line in text.splitlines() if f"/ {row.model} —" in line]
         for drop in row.spec.get("declared_drops") or ():
             if drop in words:
-                assert words[drop] in line, (drop, line)
+                assert words[drop] in line or words[drop] in fleet_wide, (drop, line, fleet_wide)
+    assert "private items" not in text
     without = getattr(seen.root, "workers_run_without", ())
     for reply in seen.replies:
         assert list(reply.get("workers_run_without", [])) == list(without)
