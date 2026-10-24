@@ -1713,10 +1713,12 @@ def fleet_root_permissions(
         # its counterpart runs at its own model's defaults, so the root (and every
         # worker under it) declares those controls lost, never carries them onto a GPT or
         # Gemini model (M07, smoke 857a82bb: every native freeze refused `extensions`).
+        from mux.profiles.anthropic import MODEL_CONFIG_NAMESPACE
+
         kept = tuple(
             extension
             for extension in spec.extensions or ()
-            if extension.namespace != "anthropic.model_config"
+            if extension.namespace != MODEL_CONFIG_NAMESPACE
         )
         dropped = len(kept) != len(spec.extensions or ())
         spec = spec.model_copy(
