@@ -36,6 +36,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any, Final, Literal, NamedTuple, NoReturn, cast, get_args
 
 import structlog
@@ -68,6 +69,7 @@ from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from mux.contracts.ids import Revision, Scope
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 UnattendedEntryPoint = Literal[
@@ -189,7 +191,7 @@ def _value_at(path: str) -> str:
     return f"unreviewed value at {path}"
 
 
-# One walker checks the provider representation. Unknown keys are refused
+# One walker checks parsed models and raw provider objects alike. Unknown keys are refused
 # only in capability containers; non-capability nodes keep known value checks
 # but accept additive provider fields. Custom input schemas are opaque data.
 type _Shape = Callable[[object, str], str | None]
@@ -228,6 +230,17 @@ def _digits(value: object, path: str) -> str | None:
     return None if fits else _value_at(path)
 
 
+def _entries(value: object) -> Mapping[str, object] | None:
+    """One node's provider fields, including fields a newer SDK declares."""
+    if isinstance(value, BaseModel):
+        return {name: getattr(value, name, None) for name in type(value).model_fields} | (
+            value.model_extra or {}
+        )
+    if isinstance(value, dict):
+        return cast("dict[str, object]", value)
+    return None
+
+
 def _list(item: _Shape, *, unique: str | None = None, duplicate: str = "") -> _Shape:
     def check(value: object, path: str) -> str | None:
         if not isinstance(value, list):
@@ -236,8 +249,8 @@ def _list(item: _Shape, *, unique: str | None = None, duplicate: str = "") -> _S
         for index, element in enumerate(cast("list[object]", value)):
             if (failed := item(element, f"{path}.{index}")) is not None:
                 return failed
-            if unique is not None and isinstance(element, dict):
-                name = cast("dict[str, object]", element).get(unique)
+            if unique is not None and (entries := _entries(element)) is not None:
+                name = entries.get(unique)
                 if name in seen:
                     return f"{duplicate} ({path})"
                 seen.add(name)
@@ -248,9 +261,9 @@ def _list(item: _Shape, *, unique: str | None = None, duplicate: str = "") -> _S
 
 def _object(*, strict: bool = True, **fields: _Shape) -> _Shape:
     def check(value: object, path: str) -> str | None:
-        if not isinstance(value, dict):
+        entries = _entries(value)
+        if entries is None:
             return _value_at(path)
-        entries = cast("dict[str, object]", value)
         if strict and (unknown := sorted(set(entries) - set(fields))):
             return _field_at(f"{path}.{unknown[0]}")
         for key, check_field in fields.items():
@@ -268,8 +281,7 @@ def _requiring(key: str, shape: _Shape) -> _Shape:
     """`shape`, refusing an object without `key` (an object's other keys may be absent)."""
 
     def check(value: object, path: str) -> str | None:
-        if isinstance(value, dict):
-            entries = cast("dict[str, object]", value)
+        if (entries := _entries(value)) is not None:
             if key not in entries:
                 return f"missing provider field {path}.{key}"
             return shape(entries, path)
@@ -286,9 +298,9 @@ def _tagged(**variants: _Shape) -> _Shape:
     """An object whose `type` picks its shape."""
 
     def check(value: object, path: str) -> str | None:
-        if not isinstance(value, dict):
+        entries = _entries(value)
+        if entries is None:
             return _value_at(path)
-        entries = cast("dict[str, object]", value)
         kind = entries.get("type")
         if not isinstance(kind, str) or kind not in variants:
             return _value_at(f"{path}.type")
@@ -298,6 +310,7 @@ def _tagged(**variants: _Shape) -> _Shape:
 
 
 _TEXT = _scalar(str)
+_TIMESTAMP = _scalar(str, datetime)
 _FLAG = _scalar(bool)
 _COUNT = _scalar(int)
 _NUMBER = _scalar(int, float)
@@ -311,9 +324,10 @@ _MONEY_SHAPE = _object(strict=False, amount=_digits, currency=_TEXT)
 
 def _builtin_config(value: object, path: str) -> str | None:
     # A built-in config may echo its own name as `type` (the driver's schema).
-    if not isinstance(value, dict):
+    entries = _entries(value)
+    if entries is None:
         return _value_at(path)
-    config = dict(cast("dict[str, object]", value))
+    config = dict(entries)
     if "type" in config and config.pop("type") != config.get("name"):
         return _value_at(f"{path}.type")
     return _CONFIG_SHAPE(config, path)
@@ -337,14 +351,14 @@ _SESSION_SHAPE = _object(
     strict=False,
     id=_TEXT,
     type=_TEXT,
-    archived_at=_TEXT,
+    archived_at=_TIMESTAMP,
     budget=_nullable(
         _requiring(
             "type", _object(strict=False, type=_exactly("limit"), max_list_cost=_MONEY_SHAPE)
         )
     ),
-    created_at=_TEXT,
-    updated_at=_TEXT,
+    created_at=_TIMESTAMP,
+    updated_at=_TIMESTAMP,
     deployment_id=_TEXT,
     environment_id=_TEXT,
     status=_TEXT,
@@ -359,7 +373,7 @@ _SESSION_SHAPE = _object(
             result=_TEXT,
             iteration=_scalar(int),
             explanation=_TEXT,
-            completed_at=_TEXT,
+            completed_at=_TIMESTAMP,
         )
     ),
     stats=_object(strict=False, active_seconds=_NUMBER, duration_seconds=_NUMBER),
@@ -387,16 +401,16 @@ _SESSION_SHAPE = _object(
                 type=_TEXT,
                 file_id=_TEXT,
                 mount_path=_TEXT,
-                created_at=_TEXT,
-                updated_at=_TEXT,
+                created_at=_TIMESTAMP,
+                updated_at=_TIMESTAMP,
             ),
             github_repository=_object(
                 id=_TEXT,
                 type=_TEXT,
                 url=_TEXT,
                 mount_path=_TEXT,
-                created_at=_TEXT,
-                updated_at=_TEXT,
+                created_at=_TIMESTAMP,
+                updated_at=_TIMESTAMP,
                 checkout=_nullable(
                     _tagged(
                         branch=_object(type=_TEXT, name=_TEXT),
@@ -480,8 +494,7 @@ def require_allowed_capabilities(
     if getattr(getattr(snapshot, "agent", None), "multiagent", None) is not None:
         # Named first: a coordinator is refused whatever else it carries.
         _refuse(COORDINATOR_DETAIL)
-    raw = snapshot.model_dump(mode="json", warnings=False)
-    if (failed := _SESSION_SHAPE(raw, "session")) is not None:
+    if (failed := _SESSION_SHAPE(snapshot, "session")) is not None:
         _refuse(failed)
     if snapshot.agent.skills and not allow_skills:
         _refuse("skills")
