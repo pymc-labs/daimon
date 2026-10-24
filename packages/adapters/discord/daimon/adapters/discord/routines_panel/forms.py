@@ -10,10 +10,6 @@ from typing import TYPE_CHECKING
 from daimon.adapters.discord import checks
 from daimon.adapters.discord.routines_panel import embeds
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
-from daimon.adapters.discord.routines_panel.write import (
-    create_routine_via_panel,
-    delete_routine_via_panel,
-)
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
@@ -22,7 +18,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.routines import can_manage_routine
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.routines import get_routine
+from daimon.core.stores.routines import create_routine, delete_routine, get_routine
 
 import discord
 
@@ -128,7 +124,7 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
                 ):
                     await interaction.followup.send(embeds.SAVE_REFUSED, ephemeral=True)
                     return
-                await create_routine_via_panel(
+                await create_routine(
                     session,
                     tenant_id=tenant_id,
                     created_by_user_id=str(self.origin.user.id),
@@ -238,7 +234,7 @@ class DeleteConfirmation(discord.ui.View):
                 ):
                     await interaction.response.send_message(embeds.DELETE_REFUSED, ephemeral=True)
                     return
-                if not await delete_routine_via_panel(session, row.id, tenant_id=tenant_id):
+                if not await delete_routine(session, row.id, tenant_id=tenant_id):
                     await interaction.response.send_message(embeds.GONE, ephemeral=True)
                     return
             await interaction.response.edit_message(content=embeds.DELETED, view=None)

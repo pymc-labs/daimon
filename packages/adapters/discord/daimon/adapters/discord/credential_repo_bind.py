@@ -74,12 +74,6 @@ import discord
 
 log = structlog.get_logger()
 
-_SHARED_AGENT_MESSAGE: Final[str] = (
-    "Connecting a repo to this agent needs an admin.\n\n"
-    "Ask me to draft a request for an admin, or to make you a new agent."
-)
-
-
 _SHARED_AGENT_SKILLS_MESSAGE: Final[str] = (
     "Adding skills from a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
