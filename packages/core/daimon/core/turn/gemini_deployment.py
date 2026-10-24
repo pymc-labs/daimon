@@ -405,7 +405,17 @@ class GeminiPlan(BaseModel):
                 and represented is not None
                 and target.mcp_servers != represented.target.mcp_servers
             )
-            or (not full and target.tools != ())
+            # A template carries only the represented execution tool (code_execution).
+            or (
+                not full
+                and target.tools != ()
+                and not (
+                    mcp
+                    and represented is not None
+                    and target.tools == represented.target.tools
+                    and all(tool.kind == "builtin" for tool in target.tools or ())
+                )
+            )
             or (not full and target.skills != ())
             or (not full and not mcp and target.mcp_servers != ())
             or target.extensions

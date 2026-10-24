@@ -48,7 +48,8 @@ CapabilityDrop = Literal[
 MCPToolDrop = Annotated[
     str, StringConstraints(pattern=r"^mcp_tool:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
 ]
-BuiltinToolDrop = Literal["builtin_tool:web_fetch"]
+# A built-in web tool the target won't carry (no native tool, or unpriced/off there).
+BuiltinToolDrop = Literal["builtin_tool:web_fetch", "builtin_tool:web_search"]
 # One whole MCP server (a user's connector) the target can't reach; the rest stay.
 MCPServerDrop = Annotated[str, StringConstraints(pattern=r"^mcp_server:[A-Za-z0-9_.-]+$")]
 DeclaredDrop = CapabilityDrop | MCPToolDrop | BuiltinToolDrop | MCPServerDrop

@@ -284,7 +284,10 @@ async def _revoked(request, token: str) -> bool:
 async def test_consent_keeps_daimon_tools_and_drops_only_what_the_template_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert {"memory", "skills", "tools"} <= set(quote.declared_drops)
+    assert {"memory", "skills"} <= set(quote.declared_drops)
+    # J6b: its execution tools map to bash in the hosted environment; only web tools
+    # (none on this source) would be named losses.
+    assert "tools" not in quote.declared_drops
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

@@ -45,7 +45,7 @@ from mux.contracts.resources import (
     ResourceBinding,
     ToolSpec,
 )
-from mux.errors import MuxError, UnsupportedCapability
+from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
 from mux.state.operations import OperationRecord, request_digest
 from mux.state.store import binding_slot
@@ -77,6 +77,9 @@ _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
 _WILDCARD = "*"
+#: Built-in web tools an agent template never carries off Anthropic: they are named
+#: losses (OpenAI's web_search is unpriced and uncounted; Gemini's grounding is off).
+_WEB_TOOLS = frozenset({"web_search", "web_fetch"})
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -1900,37 +1903,48 @@ async def _capture_source_capabilities(
                 and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
                 else ()
             )
-            # A template represents only Daimon MCP: the source's own tools and
-            # custom skills are whole losses its consent must name.
-            template_losses = (
-                (
-                    *(
-                        ("skills",)
-                        if any(s.source in (None, "custom") for s in spec.skills or ())
-                        else ()
-                    ),
-                    *(("tools",) if any(t.kind != "mcp_toolset" for t in tools) else ()),
+            own_tools = tuple(tool for tool in tools if tool.kind != "mcp_toolset")
+            template_losses: tuple[str, ...] = ()
+            if template:
+                # A template maps the source's execution tools to the provider's own
+                # (OpenAI bash in its hosted environment, Gemini code_execution): both
+                # are billed as tokens and container time already measured, never per
+                # call. Web tools stay named losses: OpenAI's web_search is unpriced
+                # and uncounted, and Gemini's grounding is off. Custom skills are a
+                # whole loss its consent must name.
+                web = tuple(
+                    tool for tool in own_tools if tool.kind == "builtin" and tool.name in _WEB_TOOLS
                 )
-                if template
-                else ()
-            )
-            mapped_tools = (
-                ()
-                if template
-                else represented_execution_tools(
+                unavailable_builtin_tools = tuple(
+                    f"builtin_tool:{tool.name}" for tool in sorted(web, key=lambda t: t.name)
+                )
+                try:
+                    mapped_tools = (
+                        represented_execution_tools(
+                            profile, tuple(tool for tool in own_tools if tool not in web)
+                        )
+                        if own_tools
+                        else ()
+                    )
+                except InvalidConfig:
+                    # Tools it can't map (custom tools, a partial toolset) go whole.
+                    mapped_tools, unavailable_builtin_tools = (), ()
+                    template_losses = ("tools",)
+                if any(s.source in (None, "custom") for s in spec.skills or ()):
+                    template_losses = ("skills", *template_losses)
+            else:
+                mapped_tools = represented_execution_tools(
                     profile,
                     tuple(
                         tool
-                        for tool in tools
-                        if tool.kind != "mcp_toolset"
-                        and not (
+                        for tool in own_tools
+                        if not (
                             unavailable_builtin_tools
                             and tool.kind == "builtin"
                             and tool.name == "web_fetch"
                         )
                     ),
                 )
-            )
             if any(
                 tool.kind == "mcp_toolset"
                 and (tool.name != DAIMON_SERVER_NAME or tool.permission != "auto")

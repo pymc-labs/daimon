@@ -671,6 +671,7 @@ _DROP_WORDS: Mapping[str, str] = {
     "repository": "its repository",
     "model_controls": "its model settings",
     "builtin_tool:web_fetch": "web fetch",
+    "builtin_tool:web_search": "web search",
 }
 
 
