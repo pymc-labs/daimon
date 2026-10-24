@@ -38,8 +38,8 @@ SKILL_READ_MAX_BYTES = 64 * 1024
 SKILL_READ_TURN_BYTES = 512 * 1024
 
 _NOT_HERE = (
-    "Only an agent's own GPT or Gemini turn reads its skills this way; on Anthropic "
-    "they load by themselves. Nothing was read."
+    "Only an agent's own reply on GPT or Gemini reads its skills this way; on "
+    "Anthropic they load by themselves. Nothing was read."
 )
 
 
@@ -76,7 +76,7 @@ async def _turn_skills(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, tup
         runtime.client, tenant_id=auth.tenant_id, agent_id=auth.chat_agent_id
     )
     if agent is None:
-        raise ToolError("This turn's agent wasn't found. Nothing was read.")
+        raise ToolError("The agent replying here wasn't found. Nothing was read.")
     custom = [skill for skill in agent.skills or () if skill.type == "custom"]
     if not custom:
         return {}
@@ -162,7 +162,7 @@ async def _skill_read_impl(
         )
     if not charged:
         raise ToolError(
-            "This turn has read as much of its skills as it may (512 KB). Work from what "
+            "This reply has read as much of its skills as it may (512 KB). Work from what "
             "it has read. Nothing more was read."
         )
     return SkillFile(
