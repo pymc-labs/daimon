@@ -384,9 +384,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
     )
     assert card.action == f"Switch {copy.name} to OpenAI"
     assert "On OpenAI it won't have " in card.consequence
-    assert (
-        "its memory" in card.consequence and "its sandbox's files and packages" in card.consequence
-    )
+    assert "its memory" in card.consequence and "its sandbox" in card.consequence
     changed = await _request_agent_backend_switch_impl(
         chat.runtime,
         chat.auth,

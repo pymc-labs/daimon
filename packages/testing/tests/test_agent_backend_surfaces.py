@@ -656,7 +656,7 @@ def runtime(persisted, client):
 #: DD3's trusted source capture (`capture_backend_source`) runs the same
 #: obligation check the workers use: this fixture agent has no explicit
 #: tools, skills or MCPs, so the only capabilities every real Managed Agent
-#: implicitly carries -- memory and its sandbox's files and packages/environment -- are what a
+#: implicitly carries -- memory and its sandbox/environment -- are what a
 #: cross-profile switch (anthropic -> openai/gemini) must declare dropped.
 #: Anthropic keeps full fidelity (same profile), so it declares nothing.
 _CROSS_PROFILE_DROPS = ("memory", "sandbox")

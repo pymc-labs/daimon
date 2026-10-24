@@ -209,9 +209,7 @@ def _connection(selected):
 async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert "memory" in quote.declared_drops
-    # J6b: its skills come along through call_tool -> skill_list/skill_read.
-    assert "skills" not in quote.declared_drops
+    assert {"memory", "skills"} <= set(quote.declared_drops)
     # J6b: its execution tools map to code_execution; web search and fetch
     # (grounding, off) are each a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops
@@ -718,49 +716,6 @@ async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
     allowed = _connection(selected).tool_policy["allowed_tools"]
     assert "request_agent_backend_switch" in allowed, "the tool is offered from now on"
     assert switch_drop not in selected.target_spec.declared_drops
-
-
-@pytest.fixture
-def consent_recorded_before_skill_tools(monkeypatch):
-    """While the consent is recorded, the template drops custom skills as before J6 b."""
-    from daimon.core.turn import runtime_manifest
-
-    monkeypatch.setattr(runtime_manifest, "SKILL_READ_PROXY", "no-such-proxy")
-    return runtime_manifest
-
-
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_consent_that_dropped_skills_still_prepares_and_now_keeps_them(
-    consent_recorded_before_skill_tools, template, monkeypatch
-):
-    """A copy switched before skills came along through Daimon MCP keeps working
-    without re-confirming, and runs with its skills from now on (#1484)."""
-    from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
-
-    request, quote, *_ = template
-    assert "skills" in quote.declared_drops, "the consent was recorded the old way"
-    monkeypatch.setattr(consent_recorded_before_skill_tools, "SKILL_READ_PROXY", "call_tool")
-    selected, _ = await _prepared(request)
-    assert "skills" not in selected.target_spec.declared_drops
-    assert SKILL_READ_INSTRUCTION in (selected.target_spec.system or "")
-
-
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_consent_that_dropped_skills_and_the_switch_tool_still_prepares(
-    consent_recorded_before_self_cards, consent_recorded_before_skill_tools, template, monkeypatch
-):
-    """Both older differences at once: switched before the switch tool was offered
-    and before skills came along. It prepares, with both now kept."""
-    from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
-
-    request, quote, *_ = template
-    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
-    assert {"skills", switch_drop} <= set(quote.declared_drops)
-    consent_recorded_before_self_cards["old"] = False
-    monkeypatch.setattr(consent_recorded_before_skill_tools, "SKILL_READ_PROXY", "call_tool")
-    selected, _ = await _prepared(request)
-    assert not {"skills", switch_drop} & set(selected.target_spec.declared_drops)
-    assert SKILL_READ_INSTRUCTION in (selected.target_spec.system or "")
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

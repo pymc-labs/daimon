@@ -85,7 +85,6 @@ from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
 from daimon.adapters.mcp.tools.publish import register_publish_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
-from daimon.adapters.mcp.tools.skill_reads import register_skill_read_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
@@ -552,7 +551,6 @@ def create_mcp_app(
     register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
-    register_skill_read_tools(mcp, runtime)  # J6 b: a GPT/Gemini turn reads its own skills
     register_skill_upload_tools(mcp, runtime)
     sessions.register_sessions_tools(mcp, runtime)
     agent_chat.register_agent_chat_tools(mcp, runtime, billing_config=effective_billing_config)
