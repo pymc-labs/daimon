@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
 import structlog
@@ -125,28 +126,28 @@ def build_fleet_view(
         if partial or blocked or run.status in ("cancelled", "failed")
         else "received"
     )
-    facts = tuple(
-        f"{worker.ordinal}. **{_literal(worker.role, 60)}**{_worker_agent(worker)} · "
+    ordered = sorted(workers, key=lambda row: row.ordinal)
+    losses = [_worker_losses(worker) for worker in ordered]
+    # Every worker without the same things: say it once for the fleet (Carlos).
+    shared = losses[0] if len(losses) > 1 and losses[0] and len(set(losses)) == 1 else None
+    facts = (() if shared is None else (f"Every worker: {_no_words(shared)}.",)) + tuple(
+        f"{worker.ordinal}. **{_literal(worker.role, 60)}**"
+        f"{_worker_agent(worker, () if shared is not None else lost)} · "
         f"{_literal(worker.backend, 20)} / {_literal(worker.model, 40)} — "
         f"{_worker_status(worker)}"
-        for worker in sorted(workers, key=lambda row: row.ordinal)
+        for worker, lost in zip(ordered, losses, strict=True)
     )
-    actions: tuple[tuple[Control, str], ...] = (("kill", "Stop"), ("resume", "Resume"))
-
-    def controls(target: str, version: int, label: str) -> tuple[CardButton, ...]:
-        result: list[CardButton] = []
-        for action, caption in actions:
-            custom_id = f"fleet:{run.id.hex}:{target}:{version}:{action}"
-            if len(custom_id) > 100:
-                raise FleetRefused("invalid_control")
-            result.append(
-                CardButton(label=f"{caption} {label}", style="primary", custom_id=custom_id)
-            )
-        return tuple(result)
-
+    # One Stop for the whole fleet, only while something can still be stopped. The
+    # per-worker and Resume controls a card posted earlier still carries keep their
+    # press path (FleetControl), but no card renders them any more.
+    custom_id = f"fleet:{run.id.hex}:all:{run.version}:kill"
+    if len(custom_id) > 100:
+        raise FleetRefused("invalid_control")
     buttons = (
-        controls("all", run.version, "all")
-        if (not collected and run.status in ("running", "collecting"))
+        (CardButton(label="Stop", style="primary", custom_id=custom_id),)
+        if not collected
+        and run.status in ("running", "collecting")
+        and (not workers or any(worker.status not in TERMINAL for worker in workers))
         else ()
     )
     card = PostedCard(
@@ -167,58 +168,13 @@ def build_fleet_view(
         buttons=buttons,
         footer=(
             # Once the run is over, what it cost leads (J3: "the cost is shown").
-            f"Cost {cost} · Budget cap ${run.total_budget_usd}"
+            f"Cost {cost} · Budget cap {_dollars(run.total_budget_usd)}"
             if cost is not None
-            else f"Budget cap ${run.total_budget_usd} · "
+            else f"Budget cap {_dollars(run.total_budget_usd)} · "
             f"Deadline <t:{int(run.deadline_at.timestamp())}:f>"
         ),
     )
     view = build_card_view(card, button_factory=FleetControl.from_button)
-    # Newer active workers receive individual controls
-    # first; the run-level pair always remains available for the rest.
-    individually_controlled: set[uuid.UUID] = set()
-    if buttons:
-        for worker in sorted(workers, key=lambda row: row.ordinal, reverse=True):
-            if worker.status in TERMINAL:
-                continue
-            candidate_buttons = buttons + controls(
-                worker.id.hex, worker.version, str(worker.ordinal)
-            )
-            try:
-                candidate = build_card_view(
-                    card.model_copy(update={"buttons": candidate_buttons}),
-                    button_factory=FleetControl.from_button,
-                )
-            except ValueError as error:
-                # The base card and typed control IDs are valid. Only the SDK's
-                # layout capacity may stop adding this pair; owner refusals escape.
-                if type(error) is not ValueError:
-                    raise
-                break
-            view.stop()
-            view, buttons = candidate, candidate_buttons
-            individually_controlled.add(worker.id)
-    if buttons and any(
-        worker.status not in TERMINAL and worker.id not in individually_controlled
-        for worker in workers
-    ):
-        view.stop()
-        facts = tuple(
-            fact
-            + (
-                " · status only"
-                if worker.status not in TERMINAL and worker.id not in individually_controlled
-                else ""
-            )
-            for worker, fact in zip(
-                sorted(workers, key=lambda row: row.ordinal), facts, strict=True
-            )
-        )
-        view = build_card_view(
-            card.model_copy(update={"buttons": buttons, "facts": facts}),
-            button_factory=FleetControl.from_button,
-        )
-    card = card.model_copy(update={"buttons": buttons, "facts": facts})
     retained = len(facts)
     # Count the actual SDK text, including Markdown, status labels and the footer.
     # Keep complete rows in canonical order and count every omitted row.
@@ -237,51 +193,78 @@ def build_fleet_view(
     return view
 
 
-def _worker_agent(worker: FleetWorker) -> str:
-    """The agent a worker ran as, when it ran as one and that isn't its role's name.
+def _dollars(usd: Decimal) -> str:
+    """Money as people read it on the card: "$2.00", never "$2.000000"."""
+    return f"${usd:.2f}"
+
+
+def _worker_agent_name(worker: FleetWorker) -> str | None:
+    """The agent a worker ran as, when it ran as one (not a task copy of the root).
 
     A worker that runs as an agent carries that agent's own metadata name. An inline
-    spec inherits the root's metadata, so a name it gives itself is not shown as an
-    agent.
+    spec inherits the root's metadata, so a name it gives itself is not an agent.
     """
     name, metadata = worker.spec.get("name"), worker.spec.get("metadata")
     agent = metadata.get(MA_METADATA_KEY_NAME) if isinstance(metadata, dict) else None
+    return name if isinstance(name, str) and name.strip() and name == agent else None
+
+
+def _worker_losses(worker: FleetWorker) -> tuple[str, ...]:
+    """What a worker runs without, in short words, in one fixed order."""
     drops = worker.spec.get("declared_drops")
-    declared = [
+    declared = {
         item for item in (drops if isinstance(drops, list) else []) if isinstance(item, str)
-    ]
-    if not isinstance(name, str) or not name.strip() or name != agent:
+    }
+    if _worker_agent_name(worker) is None:
         # A task copy of the root: every one runs without tools and skills, so say only
-        # what the root's own setup lost (its connectors, stored files, repositories,
-        # memory).
-        lost = [_DROP_WORDS[item] for item in declared if item in _COPY_LOSSES]
-        return f" (without {', '.join(dict.fromkeys(lost))})" if lost else ""
-    # What it runs without, so the person who asked sees it, not only the root.
-    lost = [_DROP_WORDS.get(item, "some of its setup") for item in declared]
-    without = f", without {', '.join(dict.fromkeys(lost))}" if lost else ""
-    label = "" if name == worker.role else _literal(name, 40)
+        # what the root's own setup lost.
+        declared &= _COPY_LOSSES
+    words = dict.fromkeys(_SHORT_DROP_WORDS.get(item, "some of its setup") for item in declared)
+    return tuple(sorted(words, key=_WORD_ORDER.index))
+
+
+def _no_words(lost: Sequence[str]) -> str:
+    """Short losses as one phrase: "no memory, tools or files"."""
+    return "no " + (lost[0] if len(lost) == 1 else f"{', '.join(lost[:-1])} or {lost[-1]}")
+
+
+def _worker_agent(worker: FleetWorker, lost: Sequence[str]) -> str:
+    """The agent a worker ran as (when that isn't its role's name) and what it lacks."""
+    name = _worker_agent_name(worker)
+    label = "" if name is None or name == worker.role else _literal(name, 40)
+    without = _no_words(lost) if lost else ""
     if not label and not without:
         return ""
-    return f" ({label}{without})" if label else f" ({without.removeprefix(', ')})"
+    return f" ({'; '.join(part for part in (label, without) if part)})"
 
 
 #: Losses a task copy of the root shows; the rest every task worker has.
 _COPY_LOSSES = frozenset({"mcp", "files", "repository", "memory"})
 
-#: Plain words for what an agent worker runs without (its declared losses).
-_DROP_WORDS = {
-    "tools": "its tools",
-    "skills": "its skills",
-    "mcp": "its connected tools",
-    "memory": "its memory",
-    "sandbox": "its sandbox",
-    "model_controls": "its model settings",
-    # The `files` loss also covers the caller's own private items and logins, which
-    # no worker ever carries (caller_resources): say so plainly.
-    "files": "its files and the caller's private items and logins",
-    "repository": "its repository",
-    "credentials": "its saved keys",
+#: Short words for what a worker runs without (its declared losses). The `files` loss
+#: also covers the caller's own private items and logins, which no worker carries.
+_SHORT_DROP_WORDS = {
+    "memory": "memory",
+    "tools": "tools",
+    "mcp": "tools",
+    "skills": "skills",
+    "files": "files",
+    "repository": "repository",
+    "sandbox": "sandbox",
+    "model_controls": "model settings",
+    "credentials": "saved keys",
 }
+_WORD_ORDER = (
+    "memory",
+    "tools",
+    "skills",
+    "files",
+    "repository",
+    "sandbox",
+    "model settings",
+    "saved keys",
+    "some of its setup",
+)
 
 
 def _worker_status(worker: FleetWorker) -> str:
