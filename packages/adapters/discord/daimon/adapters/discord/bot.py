@@ -209,7 +209,7 @@ from daimon.core.thread_naming import (
     strip_mentions,
 )
 from daimon.core.thread_participation import ParticipationMode
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
@@ -4502,6 +4502,7 @@ class DaimonBot(commands.Bot):
             return (
                 render_turn_origin(
                     recovery_origin,
+                    **backend_facts(admission),
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
@@ -4573,6 +4574,7 @@ class DaimonBot(commands.Bot):
                     user_message=(
                         render_turn_origin(
                             origin,
+                            **backend_facts(admission),
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
@@ -5873,6 +5875,7 @@ class DaimonBot(commands.Bot):
             return (
                 render_turn_origin(
                     recovery_origin,
+                    **backend_facts(admission),
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                 )
@@ -5954,6 +5957,7 @@ class DaimonBot(commands.Bot):
                     user_message=(
                         render_turn_origin(
                             origin,
+                            **backend_facts(admission),
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                         )

@@ -1867,7 +1867,11 @@ async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_en
     (resolved,) = admitted
     (trigger,) = triggers
     # The trigger the envelope was sized for is exactly what dispatch will send.
-    dispatched = worker_trigger(ports.admit.await_args.kwargs["reviewed_result"])
+    dispatched = worker_trigger(
+        ports.admit.await_args.kwargs["reviewed_result"],
+        provider=resolved.backend.backend,
+        model=resolved.spec.model.id,
+    )
     assert trigger == dispatched and (reviewer == ("x" * 40_000 in dispatched))
     limits = resolved.limits
     assert limits.max_input_tokens == (

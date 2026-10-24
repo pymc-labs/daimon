@@ -760,3 +760,204 @@ async def test_a_hand_off_that_fails_after_the_switch_says_the_switch_landed(
     )
     assert await _provider_of(chat, copy.name) == "openai"
     assert await _handed_to(chat) is None
+
+
+async def _switch_outside_chat(chat: Chat, name: str) -> None:
+    """An admin switches `name` to Gemini Flash outside chat (a setup panel's confirm)."""
+    from dataclasses import replace
+    from functools import partial
+
+    from daimon.adapters.mcp.tools.agents import (
+        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core import channel_backend
+    from daimon.core.authz import Subject
+
+    outside = replace(chat.auth, chat_agent_id=None)
+    service = channel_backend.make_backend_service(
+        chat.runtime.session_factory,
+        chat.runtime.settings.turn,
+        capture_source=partial(_capture_backend_source, chat.runtime, outside, None),
+    )
+    agent = await channel_backend.load_backend_agent(
+        chat.runtime.client,
+        chat.runtime.session_factory,
+        tenant_id=chat.auth.tenant_id,
+        agent_name=name,
+    )
+    preview = await service.preview(agent, "gemini", "gemini-3.8-flash")
+    await service.set_backend(
+        agent,
+        "gemini",
+        preview.setting_revision,
+        channel_backend.BackendActor(
+            chat.auth.tenant_id, chat.auth.account_id, Subject(is_admin=True)
+        ),
+        expected_preview_digest=preview.digest,
+        accepted_drops=preview.declared_drops,
+        model="gemini-3.8-flash",
+    )
+
+
+async def _next_message_here(chat: Chat, monkeypatch):
+    """The person's next message in this thread, admitted and run end to end, with
+    Gemini as J10 fakes it. Returns the admission, its controls and Gemini's request."""
+    import asyncio
+    from dataclasses import replace
+
+    import mux.drivers.gemini as gemini_sdk
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.turn.admission import admit, backend_facts
+    from daimon.core.turn.prepare import bind_session_impl
+    from daimon.core.turn.run import run_prepared_turn
+    from daimon.core.turn.runtimes import build_channel_runtime
+    from daimon.core.turn_hold import RequesterOrg
+    from daimon.core.turn_origin import render_turn_origin
+    from daimon.testing.turn_fakes import RecordingLifecycle, deps_for_pinned_mux
+    from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
+    from mux.testing.isolated_sdk import build_gemini_client
+
+    from packages.adapters.mcp.tests.tools.test_j10_fork_e2e import (
+        GeminiCatalog,
+        GeminiTransport,
+    )
+
+    gemini_wire = GeminiTransport()
+    gemini_wire.counted = []
+    monkeypatch.setattr(gemini_sdk, "configured_transport", lambda **kwargs: gemini_wire)
+    catalog = GeminiCatalog()
+    gemini_client = build_gemini_client(
+        transport=httpx.MockTransport(catalog.handle),
+        api_key="offline",
+        base_url="https://gemini.invalid",
+    )
+    monkeypatch.setattr(
+        gemini_sdk,
+        "configured_catalog_transport",
+        lambda **kwargs: SDKAgentCatalogTransport(gemini_client),
+    )
+    sm = chat.runtime.session_factory
+    deps = replace(
+        deps_for_pinned_mux(chat.runtime.client, sm),
+        agent_backends=True,
+        deployment_default=chat.runtime.deployment_default,
+        state_store=PostgresStateStore(sm),
+        turn_runtimes={},
+        turn_runtime_factory=build_channel_runtime,
+    )
+    try:
+        admission = await admit(
+            deps,
+            tenant_id=chat.auth.tenant_id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="123",
+            channel_id="fresh-channel",
+            thread_id="thread",
+            now=datetime.now(UTC),
+        )
+        controls = render_turn_origin(chat.origin, **backend_facts(admission))
+        prepared = await bind_session_impl(
+            deps,
+            admission,
+            tenant_id=chat.auth.tenant_id,
+            platform="discord",
+            external_user_id="123",
+            thread_id="thread",
+            session_account_id=chat.auth.account_id,
+            reuse_existing=True,
+        )
+
+        async def no_recovery():
+            pytest.fail("the turn changed its admitted source/session")
+
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=chat.auth.tenant_id,
+            platform="discord",
+            thread_id="thread",
+            external_user_id="123",
+            user_message=controls + "\nWhat model are you?",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=no_recovery,
+            recovery_lifecycle=lambda _: RecordingLifecycle(),
+            operation_key="m03-next",
+        )
+        assert outcome.state.error is None
+        (sent,) = gemini_wire.requests
+        return admission, prepared, controls, sent, catalog
+    finally:
+        gemini_client.close()
+        await gemini_client.aio.aclose()
+
+
+def _assert_runs_and_says(admission, prepared, controls, sent, catalog, model: str) -> None:
+    """What it says it runs on == the card's footer == the provider bound and billed."""
+    from daimon.core.turn.admission import running_on
+    from mux.profiles import get_profile
+
+    said = running_on(admission)
+    assert said == {"provider": "gemini", "model": model}
+    assert admission.backend_follow is not None and admission.backend_follow.kind == "moved"
+    assert admission.backend_footer_profile is not None
+    assert get_profile(admission.backend_footer_profile).provider == said["provider"]
+    assert f'"running_on": {{"provider": "gemini", "model": "{model}"}}' in controls
+    assert '"conversation_move": {"kind": "moved"' in controls
+    assert prepared.session_ref.provider == said["provider"]
+    assert sent["agent_config"]["model"] == model
+    assert catalog.agents[sent["agent"]]["agent_config"]["model"] == model
+
+
+async def test_m03_a_switch_outside_chat_moves_this_thread_and_it_says_which_model(
+    fresh_chat, monkeypatch
+):
+    """M03 (P0): an agent switched outside chat (a setup panel, not the card) kept
+    answering this thread on Claude while it claimed Gemini. On cheap models: Daimon on
+    Haiku is switched to Gemini Flash; the next message in the SAME thread runs on Gemini
+    Flash, and what it says it runs on == the card's footer == the provider it bills."""
+    chat = fresh_chat
+    chat.ma.agents["agent_daimon"]["model"] = {"id": "claude-haiku-5-5", "speed": "standard"}
+    await _switch_outside_chat(chat, "Daimon")
+    found = await _next_message_here(chat, monkeypatch)
+    assert found[0].agent.id == "agent_daimon"
+    _assert_runs_and_says(*found, model="gemini-3.8-flash")
+
+
+async def test_r08_the_hand_over_button_moves_this_thread_to_its_agents_provider(
+    fresh_chat, monkeypatch
+):
+    """R08 (Astra review): the panel's hand-over button gave a Claude thread to an agent
+    switched to Gemini, and the thread kept running on Claude. Now the next message is
+    that agent's, on its own provider and model, and says so."""
+    from daimon.core.native_admins import AdminCaller
+    from daimon.core.thread_handoff import switch_thread_on_request
+
+    chat = fresh_chat
+    chat.ma.agents["agent_daimon"]["model"] = {"id": "claude-haiku-5-5", "speed": "standard"}
+    flash = dict(chat.ma.agents["agent_daimon"])
+    flash.update(
+        id="agent_flash",
+        name="flash-helper",
+        metadata={**flash["metadata"], "daimon_name": "flash-helper"},
+    )
+    chat.ma.agents["agent_flash"] = flash
+    await _switch_outside_chat(chat, "flash-helper")
+    switched = await switch_thread_on_request(
+        chat.runtime.client,
+        chat.runtime.session_factory,
+        tenant_id=chat.auth.tenant_id,
+        platform="discord",
+        parent_channel_id="fresh-channel",
+        thread_id="thread",
+        ma_agent_id="agent_flash",
+        caller=AdminCaller(platform_user_id="123", is_server_admin=True),
+        default=chat.runtime.deployment_default,
+        channel="fresh-channel",
+        now=datetime.now(UTC),
+    )
+    assert switched.switched, switched.text
+    found = await _next_message_here(chat, monkeypatch)
+    assert found[0].agent.id == "agent_flash"
+    _assert_runs_and_says(*found, model="gemini-3.8-flash")

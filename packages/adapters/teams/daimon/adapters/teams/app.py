@@ -148,6 +148,7 @@ from daimon.core.turn.admission import (
     AdmissionDenied,
     MissingTurnConfigError,
     admit,
+    backend_facts,
 )
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -1764,6 +1765,7 @@ class TeamsApp:
             quiet = notice is not None or prepared.continuity.state == "continued"
             controls = render_turn_origin(
                 origin,
+                **backend_facts(admission),
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,

@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from anthropic import APIError, APIStatusError
@@ -98,7 +98,11 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
-from daimon.core.thread_release import apply_thread_release, release_due
+from daimon.core.thread_release import (
+    apply_thread_release,
+    release_due,
+    request_thread_release,
+)
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
@@ -136,6 +140,7 @@ __all__ = [
 
 if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
+    from mux.state.store import StateStore
 
 _log = structlog.get_logger(__name__)
 
@@ -178,6 +183,111 @@ class AdmissionGrant:
     # The platform admitted on; `reauthorize` rereads the requester's foreign
     # marker and the channel's shared record with it. None only in hand-built grants.
     platform: str | None = None
+
+
+@dataclass(frozen=True)
+class ThreadFollow:
+    """How this conversation followed its agent's model-provider switch (M03)."""
+
+    kind: Literal["moved", "stays"]
+    #: The agent's current selection: what a new conversation runs on.
+    provider: Provider
+    model: str | None
+
+
+async def _thread_follow(
+    session: AsyncSession,
+    deps: TurnDeps,
+    store: StateStore,
+    *,
+    tenant_id: uuid.UUID,
+    channel: ChannelRef | None,
+    thread_id: str | None,
+    own_slot: Slot,
+    responder_ma_agent_id: str | None,
+    ever_shared: bool,
+    eligible: bool,
+    now: datetime,
+) -> ThreadFollow | None:
+    """Whether this conversation must follow its agent's switch (M03).
+
+    The person's own slot of a conversation keeps the provider it started on until
+    something moves it. A confirmed switch from chat moves it (`_move_this_thread`);
+    every other switch (set_agent_backend, a setup panel, the CLI) used to leave it on
+    the old provider while the agent said otherwise. So: when the answering agent's
+    current selection differs from the provider (or, off Anthropic, the model) this
+    slot is bound to, the slot moves on this message, exactly as a confirmed switch
+    moves it. A shared conversation never moves; it stays and says so. A channel
+    that pins its own provider wins, and is never reached here.
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+    from mux.profiles import MANAGED_AGENTS
+
+    if not eligible or channel is None or thread_id is None:
+        return None
+    thread = ThreadRef(channel=channel, thread_id=thread_id)
+    binding = await store.get_binding(own_slot)
+    if binding is not None:
+        bound_provider, bound_revision = binding.provider, binding.config_revision
+        bound_agent = binding.native_refs.get("agent")
+    else:
+        previous = (
+            await get_thread_session_at(
+                session,
+                tenant_id=tenant_id,
+                platform=channel.platform,
+                thread_id=thread_id,
+                account_id=uuid.UUID(own_slot.account_id),
+                at=now,
+            )
+            if own_slot.account_id is not None
+            else None
+        )
+        if previous is None:
+            return None
+        # Pinned only by an older Managed Agents session: on the default provider.
+        bound_provider, bound_revision = MANAGED_AGENTS.provider, 0
+        bound_agent = previous.ma_agent_id
+    # The agent answering here: a hand-off's, else the one this slot is bound to.
+    responder_ma_agent_id = responder_ma_agent_id or bound_agent
+    if responder_ma_agent_id is None:
+        return None
+    preference = await channel_backend.current_agent_backend(
+        session,
+        tenant_id,
+        derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=responder_ma_agent_id),
+    )
+    provider: Provider = (
+        preference.backend
+        if preference is not None and preference.backend is not None
+        else MANAGED_AGENTS.provider
+    )
+    model = preference.model if preference is not None else None
+    if bound_provider == provider:
+        if provider == MANAGED_AGENTS.provider or model is None:
+            return None
+        try:
+            retained, _, _ = await channel_backend.resolve_turn_backend(
+                session, channel, None, enabled=True, retained_revision=bound_revision
+            )
+        except (channel_backend.AgentBackendRefused, BackendUnsupported):
+            return None
+        if retained is None or retained.model in (None, model):
+            return None
+    if ever_shared and await store.get_binding(Slot(thread=thread)) is not None:
+        return ThreadFollow("stays", provider, model)
+    # As a confirmed switch from chat does: request the release; admission selects
+    # as released now and applies it once this message is admitted. Nothing opens
+    # on the new provider until this message runs.
+    current = await store.get_binding(own_slot, include_released=True)
+    async with deps.sessionmaker.begin() as release_session:
+        await request_thread_release(
+            release_session,
+            own_slot,
+            generation=current.generation if current is not None else 0,
+            now=now,
+        )
+    return ThreadFollow("moved", provider, model)
 
 
 @dataclass(frozen=True)
@@ -256,6 +366,10 @@ class Admission:
         default=None, compare=False, repr=False
     )
     backend_footer_profile: str | None = field(default=None, compare=False, repr=False)
+    # M03: this conversation moved to the agent's switched model provider on this
+    # message ("moved"), or is shared and stays on its own ("stays", with the
+    # agent's selection for new conversations).
+    backend_follow: ThreadFollow | None = field(default=None, compare=False, repr=False)
     backend_counterpart: AgentRevision | None = field(default=None, compare=False, repr=False)
     backend_agent_revision: AgentBackendRevision | None = field(
         default=None, compare=False, repr=False
@@ -583,6 +697,26 @@ async def admit_impl(
         )
         backend_footer_profile: str | None = None
         retained_revision: int | None = None
+        backend_follow = await _thread_follow(
+            session,
+            deps,
+            state_store,
+            tenant_id=tenant_id,
+            channel=channel,
+            thread_id=thread_id,
+            own_slot=own_slot,
+            responder_ma_agent_id=config.responder_ma_agent_id,
+            ever_shared=backend_ever_shared,
+            eligible=(
+                selection_enabled
+                and not is_dm
+                and config.thread_binding_kind != "setup"
+                and not configured_channel
+                and not released
+            ),
+            now=now,
+        )
+        released = released or (backend_follow is not None and backend_follow.kind == "moved")
         if (
             selection_enabled
             and channel is not None
@@ -1168,6 +1302,7 @@ async def admit_impl(
         backend_counterpart=backend_counterpart,
         backend_agent_revision=backend_agent_revision,
         backend_footer_profile=backend_footer_profile,
+        backend_follow=backend_follow,
         backend_ever_shared=backend_ever_shared,
         backend=backend,
         memory_read_only=memory_read_only,
@@ -1941,3 +2076,28 @@ async def capture_admitted_backend_source(
         private_dm_id=None,
         responder_ma_agent_id=admission.agent.id,
     )
+
+
+def running_on(admission: Admission) -> dict[str, str]:
+    """The model provider and model this message actually runs on: what the card's
+    footer and the metering say, never the agent's settings (M03)."""
+    from mux.profiles import get_profile
+
+    revision = admission.backend_revision
+    provider = (
+        get_profile(revision.profile).provider if revision is not None else MANAGED_AGENTS.provider
+    )
+    model = (revision.model if revision is not None else None) or admission.agent.model.id
+    return {"provider": provider, "model": model}
+
+
+def backend_facts(admission: Admission) -> dict[str, Any]:
+    """`render_turn_origin`'s backend facts for this admitted message (M03)."""
+    follow = admission.backend_follow
+    return {
+        "running_on": running_on(admission),
+        # A later hand-off summary (#1434) slots in here beside the move.
+        "moved": None
+        if follow is None
+        else {"kind": follow.kind, "provider": follow.provider, "model": follow.model},
+    }

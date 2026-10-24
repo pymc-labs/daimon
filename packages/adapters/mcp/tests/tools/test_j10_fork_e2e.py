@@ -219,7 +219,10 @@ async def root_turn_harness(
     router.add(
         "POST",
         rf"/v1/sessions/{opus_session}/events",
-        lambda call, match: send_events_response(),
+        lambda call, match: (
+            opus.setdefault("inputs", []).append(call.content.decode()),
+            send_events_response(),
+        )[1],
     )
     router.add(
         "GET",
@@ -721,6 +724,10 @@ async def run_j10(
     )
 
 
+def transport_inputs(j10_root) -> list[str]:
+    return j10_root[7].opus.get("inputs", [])
+
+
 def transport_opus(j10_root) -> dict:
     return j10_root[7].opus.get("created", {})
 
@@ -788,3 +795,12 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
     without = getattr(seen.root, "workers_run_without", ())
     for reply in seen.replies:
         assert list(reply.get("workers_run_without", [])) == list(without)
+    # M03: each worker is told the model it actually runs on, the card's model, so it
+    # never answers with its root's Claude identity.
+    told = {
+        "claude-opus-5-5": "\n".join(transport_inputs(j10_root)),
+        "gpt-6-astra": json.dumps(seen.astra_sessions),
+        GEMINI[gemini]: json.dumps(seen.gemini_requests),
+    }
+    for row in seen.settled:
+        assert f"model {row.model}." in told[row.model], row.model
