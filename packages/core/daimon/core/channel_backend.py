@@ -510,7 +510,6 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "neutral_resource_host_profile",
         "neutral_resource_host_after_g2",
         "neutral_concrete_skill_pin",
-        "native_worker_resource_projection",
         "mcp_tool_policy_widens_allowlist",
         "native_authentication_action",
         "native_content_input",
@@ -546,6 +545,12 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "vault_list_order",
         "worker_token_envelope",
         "workspace_source",
+        "worker_extra_resources",
+        "worker_memory_store_absent",
+        "worker_repository_sources",
+        "worker_repository_undeclared",
+        "worker_resource_requirements",
+        "worker_sandbox_drop",
     }
 )
 #: Provider-specific names our code raises: "<provider>_<suffix>" for these suffixes
