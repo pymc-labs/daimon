@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -447,11 +446,148 @@ type BackendRefusalStage = Literal[
 ]
 
 
-#: A capability name our own code raises (e.g. session_resource, environment_sources,
-#: or a dotted extension namespace): never request data. Names built from user data
-#: always carry a "kind:" prefix (mcp_tool:, mcp_server:, builtin_tool:) and stay
-#: redacted. Carlos's Opus worker (f95639c4) failed with its only clue redacted.
-_CODE_CAPABILITY = re.compile(r"[a-z][a-z0-9_]{0,63}(\.[a-z][a-z0-9_]{0,63})?")
+#: The capability names our own code raises in UnsupportedCapability (never request
+#: data), so a refusal log can name them. An explicit list: any other name, even a
+#: plain lowercase one (a future path passing a skill or agent name without its
+#: "kind:" prefix), stays redacted. Carlos's Opus worker (f95639c4) failed with its
+#: only clue redacted.
+_RAISED_CAPABILITIES: frozenset[str] = frozenset(
+    {
+        "agent_delete",
+        "agent_hard_delete",
+        "agent_list_order",
+        "agent_revision_pin",
+        "artifact_input",
+        "artifacts",
+        "binary_inline_source",
+        "cancel",
+        "conflicting_runtime_price",
+        "conversation_only_workspace",
+        "custom_tools_or_tool_permissions",
+        "daimon_tool_rules",
+        "environment_list_order",
+        "environment_sources",
+        "event_history",
+        "expected_turn",
+        "explicit_send_decision",
+        "file_turn_or_order_filter",
+        "function_error_content",
+        "function_result_action",
+        "host_approval_root_identity",
+        "host_cancel_root_identity",
+        "host_confirmation_call_identity",
+        "host_deployment_authorization",
+        "host_initial_input_batch",
+        "host_input_content",
+        "host_input_image",
+        "host_neutral_error_reducer",
+        "host_one_root_per_turn",
+        "host_origin_confirmation_identity",
+        "host_output_content",
+        "host_required_action_executor",
+        "host_turn_backend",
+        "host_turn_codec",
+        "host_turn_input",
+        "host_turn_input_batch",
+        "input_content",
+        "input_mode_precondition",
+        "legacy_event_codec",
+        "mcp_allowed_tools",
+        "mcp_tool_policy",
+        "mcp_tool_policy_scope",
+        "memory_list_order",
+        "memory_store_list_order",
+        "memory_update_by_path",
+        "model_controls",
+        "model_discovery",
+        "model_interaction_resources",
+        "models",
+        "mux_turn_path",
+        "session_add_non_file_resource",
+        "neutral_retained_skill_ownership",
+        "neutral_retained_skill_bundle",
+        "neutral_resource_host_provider",
+        "neutral_resource_host_profile",
+        "neutral_resource_host_after_g2",
+        "neutral_concrete_skill_pin",
+        "native_worker_resource_projection",
+        "mcp_tool_policy_widens_allowlist",
+        "native_authentication_action",
+        "native_content_input",
+        "origin_approval_action",
+        "pinned_inline_skill",
+        "session_archive",
+        "session_create_initial_message",
+        "session_delete",
+        "session_export",
+        "session_reads",
+        "session_resource",
+        "session_restore",
+        "session_update_plan",
+        "single_inline_skill",
+        "skill_bundle_gcs_deployment",
+        "skill_list_order",
+        "skill_versions_order",
+        "skills_bundle",
+        "snapshot_artifact_mount",
+        "source_representation",
+        "steer",
+        "stream_cursor",
+        "turn_input",
+        "typed_provider_action_surface",
+        "unknown_cancel_root",
+        "unknown_function_action",
+        "unseeded_skill",
+        "unseeded_skill_upload",
+        "unseeded_usage",
+        "unsupported_worker_source",
+        "usage",
+        "vault_conditional_or_native_credential",
+        "vault_list_order",
+        "worker_token_envelope",
+        "workspace_source",
+    }
+)
+#: Provider-specific names our code raises: "<provider>_<suffix>" for these suffixes
+#: only (kept free of provider literals; the provider comes from the contract).
+_RAISED_PROVIDER_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "changed_admission",
+        "durable_accounting",
+        "durable_runtime",
+        "explicit_runtime",
+        "host_controls_and_durable_state",
+        "host_deployment_policy",
+        "host_flash_primary",
+        "host_input",
+        "host_model",
+        "host_runtime",
+        "native_message_display",
+        "native_required_action",
+        "native_tool_result_display",
+        "pinned_deployment",
+        "private_transport",
+        "resource_catalog_transport",
+        "turn_codec",
+    }
+)
+
+
+def _raised_capability(item: str) -> bool:
+    from mux.contracts.ids import Provider
+    from mux.profiles import PROFILES
+
+    if item in _RAISED_CAPABILITIES:
+        return True
+    provider, _, suffix = item.partition("_")
+    if provider in get_args(Provider) and suffix in _RAISED_PROVIDER_SUFFIXES:
+        return True
+    # A native extension namespace a profile declares.
+    return any(
+        extension.namespace == item
+        for profile in PROFILES.values()
+        for extension in profile.extensions
+    )
 
 
 def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object]]:
@@ -546,7 +682,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         if isinstance(error, UnsupportedCapability):
             cause["missing"] = sorted(
                 {
-                    item if item in safe_missing or _CODE_CAPABILITY.fullmatch(item) else "redacted"
+                    item if item in safe_missing or _raised_capability(item) else "redacted"
                     for item in error.missing
                 }
             )

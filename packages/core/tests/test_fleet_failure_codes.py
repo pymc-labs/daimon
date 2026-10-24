@@ -344,8 +344,55 @@ def test_refusal_causes_name_our_capabilities_and_redact_user_names():
     from daimon.core.channel_backend import backend_refusal_causes
 
     error = UnsupportedCapability(
-        ("session_resource", "environment_sources", "mcp_tool:acme:secret_tool", "Bad Name"),
+        (
+            "session_resource",
+            "environment_sources",
+            "gemini_host_flash_primary",
+            "anthropic.model_config",
+            "mcp_tool:acme:secret_tool",
+            "Bad Name",
+            # A plain lowercase name our code never raises (e.g. a skill or agent name
+            # passed without its kind: prefix) stays redacted: an explicit list, no
+            # pattern.
+            "my_research_skill",
+            "gemini_my_research_skill",
+        ),
         "anthropic.managed_agents",
     )
     (cause,) = backend_refusal_causes(error)
-    assert cause["missing"] == ["environment_sources", "redacted", "session_resource"]
+    assert cause["missing"] == [
+        "anthropic.model_config",
+        "environment_sources",
+        "gemini_host_flash_primary",
+        "redacted",
+        "session_resource",
+    ]
+
+
+def test_every_capability_our_code_raises_is_on_the_log_allowlist():
+    """A new UnsupportedCapability name must be added deliberately, never redacted by
+    accident (Carlos's Opus worker: native_worker_resource_projection was hidden)."""
+    import pathlib
+    import re
+    import subprocess
+
+    from daimon.core.channel_backend import backend_refusal_causes
+
+    files = subprocess.run(
+        ["git", "ls-files", "packages"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    names: set[str] = set()
+    for name in files:
+        if not name.endswith(".py") or "/tests/" in name or "/testing/" in name:
+            continue
+        source = pathlib.Path(name).read_text()
+        for match in re.finditer(
+            r'UnsupportedCapability\(\s*\(\s*((?:"[^"]+"\s*,?\s*)+)\)', source
+        ):
+            names.update(re.findall(r'"([^"]+)"', match.group(1)))
+    plain = sorted(n for n in names if ":" not in n and n != "x")
+    assert "native_worker_resource_projection" in plain
+    (cause,) = backend_refusal_causes(
+        UnsupportedCapability(tuple(plain), "anthropic.managed_agents")
+    )
+    assert "redacted" not in cause["missing"], sorted(set(plain) - set(cause["missing"]))
