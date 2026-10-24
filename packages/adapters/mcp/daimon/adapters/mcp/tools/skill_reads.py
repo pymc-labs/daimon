@@ -24,7 +24,7 @@ What it costs, all bounded per turn on the credential's row:
   `SKILL_READ_TURN_BYTES` together;
 - `skill_list` reads names only, never a skill's files;
 - a version's files are cached per tenant (`_FILES`): a version never changes,
-  so a loop of reads downloads it once.
+  so a loop of reads downloads it once. One over `_CACHE_MAX_BYTES` isn't cached.
 A retried turn mints a new credential and so starts a new budget, bounded by
 the turn's own retries.
 """
@@ -61,6 +61,9 @@ SKILL_CALLS_PER_TURN = 40
 #: How long a downloaded version's files stay cached, and how many are kept.
 _CACHE_SECONDS = 600
 _CACHE_ENTRIES = 64
+#: A version larger than this is read but not cached, so the cache holds at most
+#: `_CACHE_ENTRIES` times this.
+_CACHE_MAX_BYTES = 2 * 1024 * 1024
 _FILES: dict[tuple[uuid.UUID, str, str], tuple[float, dict[str, bytes]]] = {}
 
 _NOT_HERE = (
@@ -156,6 +159,8 @@ async def _files(runtime: McpRuntime, auth: AuthIdentity, pin: tuple[str, str]) 
         scope=resource_scope(tenant_id=str(auth.tenant_id)),
     )
     files = retained_archive_files(data)
+    if sum(len(body) for body in files.values()) > _CACHE_MAX_BYTES:
+        return files
     for stale in [k for k, (until, _) in _FILES.items() if until <= now]:
         del _FILES[stale]
     while len(_FILES) >= _CACHE_ENTRIES:

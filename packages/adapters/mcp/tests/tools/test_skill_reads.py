@@ -268,3 +268,12 @@ async def _counted(world) -> tuple[int, int]:
             )
         ).one()
     return int(row[0]), int(row[1])
+
+
+async def test_a_large_version_is_read_but_not_cached(world, monkeypatch):
+    """The cache holds at most 64 versions of a bounded size, never 64 large archives."""
+    monkeypatch.setattr(skill_reads, "_CACHE_MAX_BYTES", 1024)
+    for _ in range(2):
+        await _skill_read_impl(world.runtime, world.turn(), "research")
+    assert world.downloads == ["sk_mine", "sk_mine"]
+    assert not skill_reads._FILES  # pyright: ignore[reportPrivateUsage]
