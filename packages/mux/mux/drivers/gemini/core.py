@@ -344,6 +344,42 @@ class Base:
             self._same_workspace(record, raw)
             self._observe(record, raw, root)
 
+    def _regresses(self, record: SessionRecord, raw: Object, root: str) -> bool:
+        """A read no newer than the recorded one that would undo it.
+
+        Provider reads now run outside the records transaction, so an older read can
+        commit after a fresher one. A seconds-precision `updated` (or the `created`
+        fallback) can't order two such reads; their content can: a reading never
+        un-finalises, never lowers or un-measures a token count, and never re-opens
+        a finished turn.
+        """
+        interaction = string(raw["id"])
+        prior = record.observations.get(interaction)
+        if prior is not None:
+            fresh = observation_from_interaction(
+                raw,
+                record.session.ref,
+                revision=prior.revision,
+                observed_at=now(),
+                root_turn=root,
+                model=record.interaction_models.get(interaction, record.model),
+            )
+            if prior.final and not fresh.final:
+                return True
+            for before, after in (
+                (prior.input_tokens, fresh.input_tokens),
+                (prior.input_cached_tokens, fresh.input_cached_tokens),
+                (prior.output_tokens, fresh.output_tokens),
+                (prior.output_reasoning_tokens, fresh.output_reasoning_tokens),
+            ):
+                if before is not None and (after is None or after < before):
+                    return True
+        return (
+            interaction == record.current
+            and record.session.state == "idle"
+            and string(raw["status"]) not in OUTCOMES
+        )
+
     def _observe(self, record: SessionRecord, raw: Object, root: str) -> None:
         try:
             interaction = string(raw["id"])
@@ -359,7 +395,15 @@ class Base:
                 watermark = record.native_updated.get(interaction)
                 if watermark is not None and stamp < watermark:
                     return
+                if (
+                    watermark is not None
+                    and stamp == watermark
+                    and self._regresses(record, raw, root)
+                ):
+                    return
                 record.native_updated[interaction] = stamp
+            elif self._regresses(record, raw, root):
+                return
             env = raw.get("environment_id")
             if env is not None:
                 record.environment_id = string(env)
@@ -1216,7 +1260,10 @@ class GeminiEvents(Base):
                         # Status events alone have no saved final content. Fetch
                         # canonical steps; EOF or a child/native event is never an end.
                         await self.reconcile(scope, session)
-                        async with self._storage.transaction() as records:
+                        # The reconcile just committed this turn's events: read them from
+                        # the committed snapshot, never waiting behind the account's
+                        # writers again (J6g PAKM6G failed busy here).
+                        async with read_records(self._storage) as records:
                             current = self._record(records, scope, session)
                             batch = tuple(e for e in current.events.values() if e.turn_id == root)
                         for item in batch:
@@ -1364,11 +1411,19 @@ class GeminiEvents(Base):
             )
 
     async def _observe_stop(self, scope: Scope, receipt: CancelReceipt) -> StopObservation:
+        # The provider read runs holding no lock (a stop waits on it repeatedly), then a
+        # short transaction applies it to the same turn's same interaction only.
+        async with read_records(self._storage) as snapshot:
+            seen = self._record(snapshot, scope, receipt.session)
+            if seen.root != receipt.turn_id or seen.current is None:
+                raise ProviderError("conflict", retryable=False)
+            interaction = seen.current
+        raw = await self._get(seen, interaction)
         async with self._storage.transaction() as records:
             record = self._record(records, scope, receipt.session)
-            if record.root != receipt.turn_id or record.current is None:
+            if record.root != receipt.turn_id or record.current != interaction:
                 raise ProviderError("conflict", retryable=False)
-            raw = await self._get(record, record.current)
+            self._same_workspace(record, raw)
             self._observe(record, raw, receipt.turn_id)
             outcome = OUTCOMES.get(string(raw["status"]))
             return StopObservation(

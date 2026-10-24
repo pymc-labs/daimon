@@ -824,3 +824,29 @@ async def test_a_records_writer_that_gives_up_logs_which_acquisition_failed(
     named = [e for e in logs if e["event"] == "session_fence.unavailable"]
     assert [e["label"] for e in named] == ["gemini_state:records"]
     assert "advisory" in named[0]["reasons"], named
+
+
+async def test_a_snapshot_read_that_gets_no_connection_is_busy_and_named(
+    postgres_state, monkeypatch
+):
+    """#1557 review 3: the committed-snapshot read takes no lock, but may wait for a
+    pooled connection; that surfaces as the labelled busy error, not a raw pool error."""
+    from daimon.core.turn.errors import SessionBusyError
+    from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(gemini_runtime_state, "PRE_DISPATCH_BUSY_BOUND_S", 0.2)
+    sessions, scope, _, _ = postgres_state
+
+    def no_connection():
+        raise PoolTimeoutError("QueuePool limit reached")
+
+    database = gemini_runtime_state.PostgresPayloadDatabase(
+        no_connection, scope=scope, project="project", kind="records"
+    )
+    with capture_logs() as logs, pytest.raises(SessionBusyError):
+        await database.read()
+    named = [e for e in logs if e["event"] == "session_fence.unavailable"]
+    assert [(e["label"], e["reasons"]) for e in named] == [
+        ("gemini_state:records:read", ["pool_timeout"])
+    ]
