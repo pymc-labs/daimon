@@ -589,13 +589,13 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
 @pytest.mark.parametrize(
     ("gate", "active", "is_dm", "expected"),
     [
-        ("inherit", True, False, "Third-party write approvals: on (deployment default)."),
+        ("inherit", True, False, "Third-party write approvals: on (Daimon default)."),
         ("off", True, False, "Third-party write approvals: off (server)."),
         (
             "off",
             False,
             False,
-            "Stored write approvals: off (server); overrides disabled by deployment.",
+            "Stored write approvals: off (server); approval overrides are not enabled.",
         ),
         (
             "off",

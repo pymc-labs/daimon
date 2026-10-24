@@ -187,5 +187,5 @@ class HereApprovals:
             self.runtime.settings.tool_safety.enabled
             and self.runtime.settings.tool_safety.allow_gate_overrides
         ):
-            return toast("Saved but ignored: deployment overrides are disabled.")
+            return toast("Saved but ignored: approval overrides are not enabled.")
         return toast(f"Third-party write approvals: {value}.")

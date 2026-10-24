@@ -666,13 +666,13 @@ async def load_here_card(
         policy, platform=platform, channel_id=channel_id, thread_id=thread_id
     )
     effective = "on" if gate.value == "inherit" else gate.value
-    source = "deployment default" if gate.value == "inherit" else gate.scope
+    source = "Daimon default" if gate.value == "inherit" else gate.scope
     note = (
         f"Third-party write approvals: {effective} ({source})."
         if gate_overrides_active
         else (
             f"Stored write approvals: {gate.value} ({gate.scope}); "
-            "overrides disabled by deployment."
+            "approval overrides are not enabled."
         )
     )
     if is_dm:

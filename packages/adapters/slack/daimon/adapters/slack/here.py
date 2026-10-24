@@ -415,7 +415,7 @@ async def handle_here_approvals(runtime: SlackRuntime, payload: dict[str, Any]) 
             runtime.settings.tool_safety.enabled
             and runtime.settings.tool_safety.allow_gate_overrides
         ):
-            message += " Saved but ignored: deployment overrides are disabled."
+            message += " Saved but ignored: approval overrides are not enabled."
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
@@ -505,7 +505,7 @@ async def handle_here_approval_submission(runtime: SlackRuntime, payload: dict[s
             runtime.settings.tool_safety.enabled
             and runtime.settings.tool_safety.allow_gate_overrides
         ):
-            message += " Saved but ignored: deployment overrides are disabled."
+            message += " Saved but ignored: approval overrides are not enabled."
     except (DaimonError, SlackApiError) as exc:
         message = str(exc)
     await client.chat_postEphemeral(channel=channel_id, user=user_id, text=message, parse="none")  # pyright: ignore[reportUnknownMemberType]

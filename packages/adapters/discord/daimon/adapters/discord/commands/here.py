@@ -125,7 +125,7 @@ class ApprovalGateView(discord.ui.View):
             )
             message = f"Third-party write approvals: {value} ({target or 'server'})."
             if not active:
-                message += " Saved but ignored: deployment overrides are disabled."
+                message += " Saved but ignored: approval overrides are not enabled."
         except DaimonError as exc:
             message = str(exc)
         await interaction.followup.send(message, ephemeral=True)
