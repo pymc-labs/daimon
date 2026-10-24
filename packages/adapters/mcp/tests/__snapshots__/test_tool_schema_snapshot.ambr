@@ -3157,6 +3157,10 @@
         "Take over" alone is switch-only — null. Never restate finished work. A
         too-short, empty, or name-only value is auto-nulled — get the wording
         right regardless.
+        <blank line>
+        A destination on another provider (Gemini, OpenAI) can't read this
+        conversation: pass `summary`, and it starts there from that summary
+        instead. Its result says so; relay it verbatim.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3184,6 +3188,19 @@
           }),
           'origin_context_id': dict({
             'type': 'string',
+          }),
+          'summary': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 2000,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': 'A short summary of this conversation for the destination: what was asked, decided and still open, in plain words; no secrets, keys or tool output. Required when the destination runs on another provider. For a copy being switched, pass it to request_agent_backend_switch as handoff_summary instead.',
           }),
           'unsaved_work': dict({
             'anyOf': list([

@@ -12,7 +12,7 @@ import datetime
 import uuid
 from collections.abc import Mapping
 from functools import partial
-from typing import Any, Final, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
 
 import anthropic
 import httpx
@@ -1626,6 +1626,7 @@ async def _request_agent_backend_switch_impl(
     required_capabilities: tuple[Capability, ...] | None = None,
     for_everyone: bool = False,
     unsaved_work: Literal["copy", "leave"] | None = None,
+    handoff_summary: str | None = None,
 ) -> AgentBackendSwitchInfo:
     model = _resolve_agent_model(target_backend, model)
     _require_selectable_model(target_backend, model)
@@ -1722,6 +1723,7 @@ async def _request_agent_backend_switch_impl(
                 origin_context_id=str(origin.id),
                 agent_id=awaiting,
                 unsaved_work=unsaved_work,
+                summary=handoff_summary,
                 switch="check",
             )
         if thread_mode == "shared" and not (auth.is_admin and auth.agent_id is None):
@@ -1752,11 +1754,14 @@ async def _request_agent_backend_switch_impl(
                     "thread_mode": thread_mode,
                     "required_capabilities": required_capabilities,
                     "unsaved_work": unsaved_work,
+                    "handoff_summary": handoff_summary,
                 }
             )
+            bound = unsaved_work is not None or handoff_summary is not None
             if (
-                unsaved_work is not None
-                and switch_preview_digest(preview.digest, unsaved_work) != reference.preview_digest
+                bound
+                and switch_preview_digest(preview.digest, unsaved_work, handoff_summary)
+                != reference.preview_digest
             ):
                 # The answer is bound into the digest the card showed: a changed or
                 # invented one is a different request. (Omitting a bound answer fails
@@ -1786,6 +1791,7 @@ async def _request_agent_backend_switch_impl(
                     origin_context_id=str(origin.id),
                     agent_id=awaiting,
                     unsaved_work=unsaved_work,
+                    summary=handoff_summary,
                     switch="check",
                 )
             try:
@@ -1795,9 +1801,7 @@ async def _request_agent_backend_switch_impl(
                     reference.expected_revision,
                     actor,
                     # A bound digest was checked above; this one is the switch's own.
-                    expected_preview_digest=preview.digest
-                    if unsaved_work is not None
-                    else reference.preview_digest,
+                    expected_preview_digest=preview.digest if bound else reference.preview_digest,
                     model=reference.model,
                     settings=reference_settings(reference),
                     **(
@@ -1822,6 +1826,7 @@ async def _request_agent_backend_switch_impl(
                         origin_context_id=str(origin.id),
                         agent_id=awaiting,
                         unsaved_work=unsaved_work,
+                        summary=handoff_summary,
                         switch="commit",
                     )
                 except Exception as exc:
@@ -1865,7 +1870,7 @@ async def _request_agent_backend_switch_impl(
             model=preview.target_model,
             models=selectable_models(preview.target_backend),
             expected_revision=preview.setting_revision,
-            preview_digest=switch_preview_digest(preview.digest, unsaved_work),
+            preview_digest=switch_preview_digest(preview.digest, unsaved_work, handoff_summary),
             unsupported_skills=preview.unsupported_skills,
             unsupported_mcps=preview.unsupported_mcps,
             unsupported_capabilities=preview.unsupported_capabilities,
@@ -2165,6 +2170,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             required_capabilities: tuple[Capability, ...] | None = None,
             for_everyone: bool = False,
             unsaved_work: Literal["copy", "leave"] | None = None,
+            handoff_summary: Annotated[str | None, Field(max_length=2000)] = None,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
@@ -2188,6 +2194,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             copy, never an earlier one; use the name it returns from here on), then
             switch the copy here. Don't hand_off_task first: the confirmed switch hands
             this conversation to the copy and moves it to Gemini from the next message.
+            Pass ``handoff_summary`` on both calls: a short summary of this conversation
+            (what was asked, decided and still open; no secrets, keys or tool output),
+            which the copy starts from there, since the history itself can't move.
             If that preview asks the uncommitted-work question, pass the person's
             answer as ``unsaved_work`` on both calls.
             First call without preview_digest and show the returned compatibility,
@@ -2216,4 +2225,5 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 required_capabilities=required_capabilities,
                 for_everyone=for_everyone,
                 unsaved_work=unsaved_work,
+                handoff_summary=handoff_summary,
             )

@@ -236,6 +236,7 @@ _ADVERSARIAL = {
     "capability-paths": "/uploads/" * 7200,
     "path-segments": "/aB3" * 16000,
     "long-segment": "/" + "aB3" * 21000 + "x",
+    "opaque-run": "aB3" * 21000,
     "long-run-one-escape": "a" * 64000 + "%41",
     "encoded-runs": "%2Fuploads%2Fab" * 4300,
     "encoded-words": "x%20" * 16000,

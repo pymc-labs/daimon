@@ -48,6 +48,7 @@ import dataclasses
 import functools
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 
@@ -124,6 +125,11 @@ from mux.errors import ProviderError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
+
+# Set by the caller around a turn (`run_prepared_turn`): marked the moment the
+# user's message is handed to the provider, so the caller knows whether a failed
+# turn ever sent it (and may put back what it would have carried).
+SEND_ATTEMPTED: ContextVar[list[bool] | None] = ContextVar("turn_send_attempted", default=None)
 
 InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
 
@@ -649,6 +655,9 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
+            mark = SEND_ATTEMPTED.get()
+            if mark is not None:
+                mark.append(True)  # from here the message may have been delivered
             try:
                 await io.send(batch)
             except _anthropic.BadRequestError as err:

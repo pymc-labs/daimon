@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Collection
 from datetime import datetime
-from typing import Literal
+from typing import Literal, cast
 
 from daimon.core._models import ThreadAgentBinding
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
@@ -290,6 +291,8 @@ async def update_lifecycle(
     for name, value in (("archived", archived), ("locked", locked), ("deleted", deleted)):
         if value is not None:
             values[name] = value
+    if archived or deleted:
+        values["handoff_summary"] = None  # a released binding hands nothing on
     await session.execute(
         update(ThreadAgentBinding)
         .where(
@@ -318,6 +321,8 @@ async def update_channel_lifecycle(
         values["archived"] = archived
     if deleted is not None:
         values["deleted"] = deleted
+    if archived or deleted:
+        values["handoff_summary"] = None  # a released binding hands nothing on
     await session.execute(
         update(ThreadAgentBinding)
         .where(
@@ -393,6 +398,8 @@ async def upsert_responder_binding(
                 responder_name=responder_name,
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
+                # A summary belongs to the hand-off that wrote it, never a later one.
+                handoff_summary=None,
                 deleted=False,
                 updated_at=now,
             )
@@ -401,3 +408,89 @@ async def upsert_responder_binding(
     ).scalar_one()
     await session.flush()
     return ThreadAgentBindingRow.model_validate(updated)
+
+
+async def set_handoff_summary(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+    responder_ma_agent_id: str,
+    account_id: uuid.UUID,
+    from_name: str,
+    summary: str,
+) -> None:
+    """Leave `summary` for `responder_ma_agent_id`'s first turn with `account_id` here.
+
+    Written in the hand-off's own transaction, onto the row it just bound, so
+    it can never land on another responder's binding; and it is the handing
+    person's conversation, so only their turn takes it.
+    """
+    await session.execute(
+        update(ThreadAgentBinding)
+        .where(
+            ThreadAgentBinding.tenant_id == tenant_id,
+            ThreadAgentBinding.platform == platform,
+            ThreadAgentBinding.parent_channel_id == parent_channel_id,
+            ThreadAgentBinding.thread_id == thread_id,
+            ThreadAgentBinding.responder_ma_agent_id == responder_ma_agent_id,
+            ThreadAgentBinding.deleted.is_(False),
+            # An archived conversation is over: nothing is left for it, nor put back.
+            ThreadAgentBinding.archived.is_(False),
+        )
+        .values(
+            handoff_summary=json.dumps(
+                {"from": from_name, "summary": summary, "account": str(account_id)}
+            )
+        )
+    )
+    await session.flush()
+
+
+async def take_handoff_summary(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    parent_channel_id: str,
+    thread_id: str,
+    responder_ma_agent_id: str,
+    account_id: uuid.UUID,
+) -> tuple[str, str] | None:
+    """(from, summary) waiting for this responder and person here, cleared as read.
+
+    Another participant's turn in the same thread leaves it waiting. The row is
+    locked first, so two first turns racing take it once between them.
+    """
+    row = (
+        await session.execute(
+            select(ThreadAgentBinding)
+            .where(
+                ThreadAgentBinding.tenant_id == tenant_id,
+                ThreadAgentBinding.platform == platform,
+                ThreadAgentBinding.parent_channel_id == parent_channel_id,
+                ThreadAgentBinding.thread_id == thread_id,
+                ThreadAgentBinding.responder_ma_agent_id == responder_ma_agent_id,
+                ThreadAgentBinding.deleted.is_(False),
+                ThreadAgentBinding.handoff_summary.is_not(None),
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None or row.handoff_summary is None:
+        return None
+    try:
+        data = json.loads(row.handoff_summary)
+    except ValueError:
+        data = None
+    record = cast("dict[str, object]", data) if isinstance(data, dict) else {}
+    if record and record.get("account") != str(account_id):
+        return None  # someone else's conversation: theirs to take
+    row.handoff_summary = None
+    await session.flush()
+    origin, summary = record.get("from"), record.get("summary")
+    if not isinstance(origin, str) or not isinstance(summary, str) or not summary:
+        return None
+    return origin, summary

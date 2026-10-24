@@ -158,6 +158,18 @@ _FREE_TEXT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Fernet tokens and keys.
     (re.compile(_TOKEN_START + r"()gAAAAA[A-Za-z0-9_-]{20,}={0,2}"), r"\1"),
     (re.compile(r"()\b[A-Za-z0-9_-]{43}=(?![A-Za-z0-9_-])"), r"\1"),
+    # AWS access key ids (long-lived and temporary).
+    (re.compile(_TOKEN_START + r"()(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Za-z])"), r"\1"),
+    # A long opaque run mixing upper case, lower case and digits (an unlabelled
+    # base64 secret). Hex digests and git SHAs are single-case, so they stay.
+    (
+        re.compile(
+            _TOKEN_START
+            + r"()(?=[A-Za-z0-9+_-]*[a-z])(?=[A-Za-z0-9+_-]*[A-Z])(?=[A-Za-z0-9+_-]*\d)"
+            r"[A-Za-z0-9+_-]{48,}={0,2}"
+        ),
+        r"\1",
+    ),
 )
 # Any `name = value` / `name: value` / `name%3Dvalue`. The value sits in a
 # lookahead so a non-secret pair never swallows the pair after it
