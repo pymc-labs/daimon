@@ -59,7 +59,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "APPROVAL_TOOLS",
-    "NATIVE_FLEET_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
@@ -232,15 +231,6 @@ PUBLISH_TOOLS: Final[frozenset[str]] = frozenset(
 
 #: Daimon's tools a session can hold on `always_ask` by their own name.
 APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS})
-
-#: The fleet tools a GPT or Gemini turn sees by name. Its native catalogue is the
-#: search-collapsed list, and a model that has to search for fleet tools reached for
-#: saved copies instead (M07; diagnosis credit: dsh). The rest (kill, resume,
-#: cross_review) stay reachable through search_tools / call_tool: fleet_spawn alone is
-#: ~5k tokens of schema, so only what starting and reading a fleet needs is pinned.
-NATIVE_FLEET_TOOLS: Final[frozenset[str]] = frozenset(
-    {"fleet_spawn", "fleet_collect", "fleet_status", "fleet_agents"}
-)
 
 #: The proxy a GPT or Gemini turn reaches Daimon MCP's skill_list/skill_read through
 #: (J6 b): its catalogue lists `call_tool`, never every tool.
