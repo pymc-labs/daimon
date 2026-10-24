@@ -468,6 +468,7 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             id="server_field",
         ),
         pytest.param(_coordinator_session, id="multiagent"),
+        pytest.param(lambda: _mutated(lambda s: s.update(sandbox={})), id="session_field"),
         pytest.param(lambda: _with_agent_field(sandbox_policy={}), id="empty_agent_field"),
         pytest.param(lambda: _with_agent_field(sandbox_policy=None), id="null_agent_field"),
         pytest.param(
@@ -1112,7 +1113,7 @@ def test_known_telemetry_values_keep_their_shape_checks(path: str, value: object
         "budget.new_ceiling",
         "agent.model.new_inference_setting",
         "agent.model.effort.new_inference_setting",
-        "new_session_metadata",
+        "usage.new_counter",
     ],
 )
 def test_additive_non_capability_fields_are_ignored(path: str) -> None:
@@ -1130,6 +1131,13 @@ def test_additive_non_capability_fields_are_ignored(path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "sandbox",
+        "tools",
+        "mcp_servers",
+        "credential_ids",
+        "network_access",
+        "callable_agents",
+        "environment",
         "agent.tools.1.new_field",
         "agent.tools.1.default_config.new_field",
         "agent.tools.1.configs.0.permission_policy.new_field",

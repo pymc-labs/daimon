@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Daimon hub session reads and agent listings now verify Discord admin permissions freshly; agent-chat confirmations stop when caller membership or invoker access is revoked.
 
-- Daimon unattended turns accept new provider telemetry and metadata fields while continuing to refuse unreviewed fields in tools, MCP servers, skills, execution identity and session resources.
+- Daimon unattended turns accept new provider telemetry and metadata fields while continuing to refuse unreviewed fields in the session envelope, tools, MCP servers, skills, execution identity and session resources. New top-level provider fields require review.
 
 - Preserve unattended sandbox restrictions across native providers: refuse workers and wakes that require automatic sandbox/custom tools or other ungated capabilities before a provider message; retain conversation-only workers, attended native execution and guarded selfhosted tools.
 

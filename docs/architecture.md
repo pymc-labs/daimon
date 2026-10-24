@@ -1221,19 +1221,20 @@ attempt; a failed gate stops the send. The gate builds the session through
 (`ENTRY_POINT_POLICY`; `session_gate`, `gate_session_snapshot` and
 `unattended_posture` take an `entry_point`, and one that names none gets no
 built-ins and no skills). `require_allowed_capabilities` is a pure check on the
-snapshot that refuses a coordinator (`multiagent`) and disallowed skills, and
-checks every capability-bearing node (session, resources and checkouts,
-agent, model, skills, servers, tools, toolset defaults, per-tool configs,
-permission policies) and the telemetry (stats, usage and its cache creation,
-outcome evaluations) against a field allowlist frozen in the module rather
-than read from the SDK, before any update: an unknown field, empty or not,
-and an unknown tool, resource or policy type are refused. A private
-attribute on any model under the snapshot is refused too
-(`_no_private_attributes`); only the SDK's `_request_id` is allowed. The snapshot's raw
-form is also checked against the reviewed value shapes (`_SESSION_SHAPE`): a
-scalar leaf must be that scalar or null, objects and lists are walked to the
-bottom, and only metadata and a custom tool's `input_schema` stay
-opaque, so a field cannot hide in a value that turned into an object.
+snapshot that refuses a coordinator (`multiagent`) and disallowed skills. One
+schema walker checks parsed SDK fields and response extras, or raw provider
+objects. Unknown fields are refused in the session and agent capability
+containers, execution identity, resources and repository checkouts, skills,
+MCP servers, tools, toolset defaults, per-tool configs and permission policies.
+Unknown tool, resource, skill, identity and policy types are refused too.
+The refusal names the field path and explains that its capability behavior
+has not been reviewed. The session envelope stays strict because it carries
+resource, vault and environment references: even a new top-level bookkeeping
+field refuses unattended turns until reviewed. Additive fields within usage
+(including cache, server-use and cost counters), stats, budget/cost, outcome
+evaluations, metadata and model/inference settings are ignored. Known values
+retain their shape checks; metadata and custom tool `input_schema` contents
+remain opaque. SDK private instance attributes are not checked.
 `constrain_capabilities` computes the arrays to send (custom tools removed
 and built-ins disabled except in isolated `long_job` worker sessions; the admin opt-in is
 `Routine.sandbox_tools_enabled`, which an admin sets per routine and which
@@ -2641,10 +2642,12 @@ before model/confirmation sends and report writes. Deleted threads have no fallb
 unsupported backends and implicit session replacement are refused.
 
 `core.turn.unattended_capabilities` supplies the `watch` policy and shared
-validation (including telemetry and private fields), tool projection, cache
+validation of capability fields, tool projection, cache
 invalidation, send and restore. The thin watch wrapper refuses duplicate server
 toolsets and retains only enabled, exact-name third-party read configs. Skills, multiagent coordinators and
-unknown fields (including newly parsed SDK fields) refuse before mutation. Built-ins,
+unknown fields in capability containers (including newly parsed SDK fields) refuse
+before mutation. Telemetry and other non-capability sub-parts accept additive
+fields, and SDK private instance attributes are not checked. Built-ins,
 custom tools, management endpoints and writes are unavailable; defaults are disabled
 and every retained tool asks the live read/report decider. Default-only toolsets
 provide no tools. Mounted data/vaults grant no native or delegated execution.

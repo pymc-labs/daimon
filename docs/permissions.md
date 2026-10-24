@@ -157,20 +157,21 @@ the turn, before anything is sent or changed, when the session:
   roster's agents carry their own tools and MCP servers, which the gate cannot
   rewrite, and Managed Agents cannot remove a roster from a live session or
   override it when one is created.
-- carries a field this release has not reviewed, at any level that can grant
-  a capability: the session and its resources (files, repositories, memory
-  stores), the agent, its model, skills and MCP servers, each tool, a
-  toolset's default and per-tool settings, and their permission policies.
-  The session's telemetry (timing, token usage and its cache creation,
-  outcome evaluations) is held to a reviewed schema the same way.
-  A private attribute on any part of the session is refused too; only the
-  request ID the SDK records on the response it returns is allowed.
-  An unknown field is refused even when it is empty, and so is one a newer
-  SDK has started to parse. A known field must also hold its reviewed shape:
-  a setting that should be a word, number or true/false is refused when it
-  arrives as an object or a list, so nothing new can hide inside it. A tool
-  type, resource type or permission policy type it does not know is refused
-  the same way.
+- carries an unreviewed field in a capability-bearing part: the session and
+  agent containers, resources (files, repositories and their checkouts, memory
+  stores), execution identity, skills, MCP servers, tools, toolset defaults,
+  per-tool settings and permission policies. Unknown fields are refused even
+  when empty or newly parsed by an SDK update. The refusal names the path and
+  explains that the capability behavior has not been reviewed. The session
+  envelope stays strict because it carries resource, vault and environment
+  references; a new top-level bookkeeping field also refuses unattended turns
+  until reviewed. Additions within usage/cache/server-use/cost counters, stats,
+  budget/cost, outcome evaluations, metadata and model/inference settings are
+  ignored. Known fields retain their value-shape checks; unknown tool, resource,
+  skill, identity and permission-policy types are refused. One walker checks
+  SDK model fields and response extras or raw provider objects. Metadata and
+  custom tool argument schemas remain opaque, and SDK private instance
+  attributes are not checked.
 - carries skills on an entry point that does not allow them.
 - has an MCP server whose name contains `/`. Tool keys join a server and a
   tool with `/`, so such a name could stand for a tool on another server.

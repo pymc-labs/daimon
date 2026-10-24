@@ -348,7 +348,6 @@ def _server_name(value: object, path: str) -> str | None:
 
 
 _SESSION_SHAPE = _object(
-    strict=False,
     id=_TEXT,
     type=_TEXT,
     archived_at=_TIMESTAMP,
@@ -484,9 +483,9 @@ def require_allowed_capabilities(
 
     Pure: reads only `snapshot`. Raises `AdmissionDenied` for a coordinator
     roster, for skills unless `allow_skills`, for a server name holding `/`,
-    and for unknown fields in the agent capability container, execution
+    and for unknown fields in the session and agent capability containers, execution
     identity, tools/configs/policies, MCP servers, skills and resources/files.
-    Unknown fields elsewhere are ignored: telemetry, session metadata and
+    Unknown fields in non-capability sub-parts are ignored: telemetry, metadata and
     inference settings cannot grant tools or change their authority. Known
     values retain their shape checks. The refusal names the field path and
     explains that its capability behavior has not been reviewed.
