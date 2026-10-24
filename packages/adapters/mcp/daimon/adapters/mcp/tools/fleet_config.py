@@ -154,6 +154,14 @@ def fleet_status_summary(kind: str, platform: str | None, *, obstacle: str | Non
     )
 
 
+#: How a change is made, after reading the current limits.
+FLEET_CHANGE_STEPS = (
+    "To change them, call request_fleet_config with the new config and no "
+    "preview_digest: that previews the change and returns the preview_digest to "
+    "confirm it with."
+)
+
+
 async def _request_fleet_config_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -217,14 +225,18 @@ async def _request_fleet_config_impl(
                 agent_name=agent_name,
                 config=saved,
                 expected_revision=preview.setting_revision,
-                preview_digest=preview.digest,
+                # Reading the current limits previews no change: a digest here was
+                # confirmed with other settings and refused (Carlos, 2026-10-24).
+                preview_digest="",
                 details=fleet_detail_lines(preview, worker_names=saved.worker_agents),
                 # Say "on" only when this agent's turns can actually start one.
                 summary=fleet_status_summary(
                     setting.kind,
                     auth.platform,
                     obstacle=await fleet_root_obstacle_for(runtime, auth, agent),
-                ),
+                )
+                + " "
+                + FLEET_CHANGE_STEPS,
             )
         if config is not None:
             config = await complete_fleet_config(

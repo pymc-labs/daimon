@@ -90,6 +90,8 @@ async def test_fleet_preview_confirm_read_replay_and_revoke(active_chat):
     assert current.status == "current" and any(
         "Shared across providers" in line for line in current.details
     )
+    # Reading the limits previews no change: no digest a change could be confirmed with.
+    assert current.preview_digest == "" and "with the new config and no" in current.summary
     gate()
     agent()
     revoke = await _request_fleet_config_impl(

@@ -28,7 +28,7 @@ import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 from urllib.parse import unquote
 
@@ -137,6 +137,9 @@ class BackendSwitchReference(BaseModel):
     handoff_summary: str | None = Field(
         default=None, max_length=2000, exclude_if=lambda value: value is None
     )
+    # Set only by the card (never a tool argument): the stale preview digest this card
+    # re-previewed (J5). Its Confirm approves that one refresh (`approve_refresh`).
+    refreshed_from: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("accepted_drops", mode="before")
     @classmethod
@@ -146,6 +149,18 @@ class BackendSwitchReference(BaseModel):
         return TypeAdapter(
             AgentSpec.model_fields["declared_drops"].rebuild_annotation()
         ).validate_python(value)
+
+
+def _forked_copy(agent: BackendAgent) -> bool:
+    """A copy fork_agent made in a conversation: its switch may hand it that
+    conversation (J1), so its answers are bound to the preview they answered."""
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_FORKED_FROM,
+        MA_METADATA_KEY_FORKED_IN,
+    )
+
+    stamp = (agent.source.spec.metadata if agent.source is not None else None) or {}
+    return MA_METADATA_KEY_FORKED_FROM in stamp and MA_METADATA_KEY_FORKED_IN in stamp
 
 
 def switch_preview_digest(
@@ -715,8 +730,12 @@ STALE_SWITCH_TEXT: Final[str] = (
     "The agent changed since the preview (for example, a tool was turned off). Preview "
     "the switch again, then confirm. Nothing changed."
 )
+#: A settings card whose confirm doesn't match its preview: something changed since,
+#: or the confirm carries other settings than the preview did (a digest from reading
+#: the current limits, say). Retryable, worded for the person and the model alike.
 STALE_SETTING_TEXT: Final[str] = (
-    "This changed since the preview. Preview it again, then confirm. Nothing changed."
+    "This doesn't match its preview. Preview these exact settings again, then confirm. "
+    "Nothing changed."
 )
 
 
@@ -827,8 +846,10 @@ def backend_switch_callbacks(
         if current_digest != reference.preview_digest:
             # A hand-off answer (unsaved work, summary) is bound to the preview it
             # answered: one changed after it is another request, never re-previewed.
+            # A copy made in a conversation can be handed it by its switch, with
+            # or without answers: never re-previewed either (fails closed).
             answered = reference.unsaved_work is not None or reference.handoff_summary is not None
-            if not refresh or answered:
+            if not refresh or answered or _forked_copy(agent):
                 raise StalePreview(STALE_SWITCH_TEXT)
             # The agent changed since the preview. The same request (agent, provider,
             # model, settings, answers) against what it is now: the card shows these
@@ -838,6 +859,7 @@ def backend_switch_callbacks(
                     "expected_revision": preview.setting_revision,
                     "preview_digest": current_digest,
                     "accepted_drops": tuple(preview.declared_drops) or None,
+                    "refreshed_from": reference.preview_digest,
                 }
             )
         elif (preview.declared_drops and reference.accepted_drops != preview.declared_drops) or (
@@ -994,9 +1016,10 @@ def backend_switch_callbacks(
                     ),
                 )
         except AgentBackendRefused as exc:
-            if exc.reason == "fleet_raise_admin_required":
-                raise ValueError(configuration_refusal(exc.reason)) from exc
-            raise StalePreview(STALE_SETTING_TEXT) from exc
+            if exc.reason in ("stale_preview", "stale_revision"):
+                raise StalePreview(STALE_SETTING_TEXT) from exc
+            # Any other refusal keeps its own reason: previewing again won't help.
+            raise ValueError(configuration_refusal(exc.reason)) from exc
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
@@ -1166,7 +1189,25 @@ def backend_switch_callbacks(
             if prompt.configuration is not None:
                 await verified_configuration(prompt, clicker)
             else:
-                await verified(prompt, clicker)
+                agent, _, reference = await verified(prompt, clicker)
+                if reference.refreshed_from is not None:
+                    # Confirm on this card (a click that passed every check; a Deny
+                    # never gets here) is what lets the approved call apply it.
+                    from daimon.core.stores import backend_switch_cards as cards
+
+                    async with sessionmaker.begin() as session:
+                        approved = await cards.approve_refresh(
+                            session,
+                            tenant_id=tenant_id,
+                            account_id=account_id,
+                            agent_name=agent.name,
+                            stale_digest=reference.refreshed_from,
+                            fresh_digest=reference.preview_digest,
+                            fresh_revision=reference.expected_revision,
+                            now=datetime.now(UTC),
+                        )
+                    if not approved:
+                        raise StalePreview(STALE_SWITCH_TEXT)
         except CardRefusal as exc:
             return str(exc)
         except ValueError:

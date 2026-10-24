@@ -12,7 +12,6 @@ admitted to the copy on OpenAI. Any refusal on this path is a product bug.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import re
 import uuid
@@ -713,13 +712,8 @@ async def test_the_unsaved_work_answer_is_bound_to_the_card(fresh_chat):
     card = await _card(chat, copy.name, preview, unsaved_work="leave")
     assert "Uncommitted changes in the repo are left where they are" in (card.consequence or "")
     for changed in ("copy", None):
-        # A changed answer is refused by the card; a dropped one re-previews (J5),
-        # and the hand-off's switch still refuses it below.
-        with (
-            contextlib.nullcontext()
-            if changed is None
-            else pytest.raises(ValueError, match="(?i)preview the switch again")
-        ):
+        # Changed or dropped, the answer is bound to its preview: never re-previewed.
+        with pytest.raises(ValueError, match="(?i)preview the switch again"):
             await _card(chat, copy.name, preview, unsaved_work=changed)
         with pytest.raises(ToolError):
             await _switch(

@@ -92,3 +92,83 @@ async def test_j5_a_change_between_preview_and_confirm_posts_one_fresh_card(owne
     assert shown.expected_revision == fresh.setting_revision
     assert shown.accepted_drops == (tuple(fresh.declared_drops) or None)
     assert shown.target_backend == "openai"
+
+
+async def test_j5_new_fleet_limits_confirmed_with_another_previews_digest_are_retried(
+    owned_preview,
+):
+    """Carlos's server, 2026-10-24 (rid 01M5PVBJQXBVSKJ3VN4VZMZCG6): the model read the
+    current fleet limits, then confirmed new ones ($6 a run) with that read's digest.
+    The card refused, and the model was told the card could not be shown, do not
+    retry. It is told to preview these exact settings again, and that preview's
+    confirm posts the card."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core.confirmation import STALE_SETTING_TEXT
+    from daimon.core.fleet_configuration import FleetConfigInput, configured_fleet_grant
+
+    service, agent, actor, sessions, client, trace, _, reply, _ = owned_preview
+    now = datetime.now(UTC)
+    expires = now + timedelta(days=90)
+
+    def limits(budget: str) -> FleetConfigInput:
+        return FleetConfigInput.model_validate(
+            {
+                "max_workers": 4,
+                "budget_usd": budget,
+                "max_worker_seconds": 600,
+                "expires_at": expires.isoformat(),
+            }
+        )
+
+    async def digest(value: FleetConfigInput):
+        grant = await configured_fleet_grant(value, service, client, sessions, agent, now=now)
+        return await service.preview_fleet_grant(agent, grant, now=now)
+
+    def confirm_call(value: FleetConfigInput, preview) -> ToolCall:
+        return ToolCall(
+            tool_use_id="fleet-call",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="request_fleet_config",
+            input={
+                "agent_name": "Researcher",
+                "config": value.model_dump(mode="json", exclude_none=True),
+                "expected_revision": preview.setting_revision,
+                "preview_digest": preview.digest,
+            },
+        )
+
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+    )
+    posted: list[object] = []
+
+    async def confirm(prompt):
+        trace.queue(reply())
+        posted.append(await prepare(prompt))
+        return "approved"
+
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=confirm,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=backend_switch_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    current = await digest(limits("2"))
+    wanted = limits("6")
+    result = await posture.decide(confirm_call(wanted, current))
+    assert result.allow is False
+    said = result.deny_message or ""
+    assert said == STALE_SETTING_TEXT, said
+    assert "could not be shown" not in said and "not retry" not in said.lower()
+    assert posted == []
+    retried = await posture.decide(confirm_call(wanted, await digest(wanted)))
+    assert retried.allow is True, retried.deny_message
+    assert len(posted) == 1

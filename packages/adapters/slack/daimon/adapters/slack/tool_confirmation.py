@@ -339,7 +339,7 @@ class SlackConfirmationCards:
         if posted is None:
             await _ephemeral_from_payload(payload, clicker, self._controls.missing_message(token))
             return
-        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin)
+        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin, answer)
         if refusal is not None:
             await _ephemeral(posted, clicker, refusal)
             return
