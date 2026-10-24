@@ -151,11 +151,17 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
 
     watch_lock = "SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"
     held, release = asyncio.Event(), asyncio.Event()
+    # Advisory locks are database-wide: scope this test-only key to the test's own schema,
+    # or a parallel CI worker running the other parametrization (same fixture tenant)
+    # holds the same key and this holder waits out that whole test (CI TimeoutError).
+    async with sessionmaker() as session:
+        schema = (await session.execute(real_text("SELECT current_schema()"))).scalar_one()
+    busy_key = f"|watch-busy|{schema}"
 
     def text(sql: str, *args, **kwargs):
         if sql == watch_lock:
             sql = sql.replace(
-                "hashtextextended(:key, 0)", "hashtextextended(:key || '|watch-busy', 0)"
+                "hashtextextended(:key, 0)", f"hashtextextended(:key || '{busy_key}', 0)"
             )
         return real_text(sql, *args, **kwargs)
 
@@ -174,21 +180,24 @@ async def _watch_lock_busy(sessionmaker, tenant_id, monkeypatch):
         async with engine.begin() as connection:
             await connection.execute(
                 real_text(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(:key || '|watch-busy', 0))"
+                    f"SELECT pg_advisory_xact_lock(hashtextextended(:key || '{busy_key}', 0))"
                 ),
                 {"key": f"fleet:{tenant_id}"},
             )
             held.set()
             await release.wait()
 
-    monkeypatch.setattr(channel_budget, "text", text)
-    monkeypatch.setattr(channel_budget, "_lock_holder", holder)
     task = asyncio.create_task(hold())
     ready = asyncio.create_task(held.wait())
-    async with asyncio.timeout(10):
+    # A fresh connection on a loaded CI database can take a while; the lock itself is
+    # free (nothing else uses this key), so this only bounds the connection.
+    async with asyncio.timeout(30):
         await asyncio.wait({task, ready}, return_when=asyncio.FIRST_COMPLETED)
     if task.done():
         task.result()  # The holder failed: say why, never wait on it.
+    # Redirect the watch only once the key is held, so no watch can take it first.
+    monkeypatch.setattr(channel_budget, "text", text)
+    monkeypatch.setattr(channel_budget, "_lock_holder", holder)
     try:
         yield
     finally:
