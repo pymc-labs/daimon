@@ -348,6 +348,11 @@ def _sweep_due() -> ColumnElement[bool]:
 #: How long the scheduler's sweep waits for one tenant's fleet lock before it leaves
 #: that tenant to the next tick.
 SWEEP_LOCK_TIMEOUT = "2s"
+#: How long a pool claim waits for the tenant fleet lock and the rows its sweep locks.
+#: Longer than any hold seen on staging (7.1 s, lockwatch 455c58a6): a shorter wait gives
+#: up behind every long holder, and the workers waiting for a slot never start. Finite,
+#: so a stuck holder can't pin a pooled connection for good.
+CLAIM_LOCK_TIMEOUT = "10s"
 
 
 async def sweep_expired(
@@ -488,58 +493,86 @@ async def claim_worker(
     the budget owner's admission.
 
     The tenant's starting and running workers are counted under a per-tenant
-    advisory lock, so concurrent claims (any process) never exceed `cap`.
+    advisory lock, so concurrent claims (any process) never exceed `cap`. A claim
+    that owns its transaction waits for that lock (and the sweep's row locks) only
+    CLAIM_LOCK_TIMEOUT: busy, it claims nothing this poll and its caller polls again,
+    rather than queueing a pooled connection behind every other fleet step.
     """
-    async with _transaction(sessionmaker) as session:
-        await sweep_expired(session, tenant_id=tenant_id)
-        active = (
-            await session.execute(
-                select(func.count())
-                .select_from(FleetWorkerRow)
-                .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.status.in_(_ACTIVE))
-            )
-        ).scalar_one()
-        if active >= cap:
+    if not isinstance(sessionmaker, AsyncSession):
+        try:
+            async with sessionmaker.begin() as session:
+                await session.execute(text(f"SET LOCAL lock_timeout = '{CLAIM_LOCK_TIMEOUT}'"))
+                return await _claim_locked(
+                    session, tenant_id=tenant_id, run_id=run_id, cap=cap, worker_id=worker_id
+                )
+        except DBAPIError as error:
+            if not lock_timed_out(error):
+                raise
+            log.info("fleet.claim_tenant_busy", tenant_id=str(tenant_id), run_id=str(run_id))
             return None
-        row = (
-            await session.execute(
-                update(FleetWorkerRow)
+    async with _transaction(sessionmaker) as session:
+        return await _claim_locked(
+            session, tenant_id=tenant_id, run_id=run_id, cap=cap, worker_id=worker_id
+        )
+
+
+async def _claim_locked(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    cap: int,
+    worker_id: uuid.UUID | None,
+) -> FleetWorker | None:
+    await sweep_expired(session, tenant_id=tenant_id)
+    active = (
+        await session.execute(
+            select(func.count())
+            .select_from(FleetWorkerRow)
+            .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.status.in_(_ACTIVE))
+        )
+    ).scalar_one()
+    if active >= cap:
+        return None
+    row = (
+        await session.execute(
+            update(FleetWorkerRow)
+            .where(
+                FleetWorkerRow.id
+                == select(FleetWorkerRow.id)
+                .join(
+                    FleetRunRow,
+                    (FleetRunRow.id == FleetWorkerRow.run_id)
+                    & (FleetRunRow.tenant_id == FleetWorkerRow.tenant_id),
+                )
                 .where(
-                    FleetWorkerRow.id
-                    == select(FleetWorkerRow.id)
-                    .join(
-                        FleetRunRow,
-                        (FleetRunRow.id == FleetWorkerRow.run_id)
-                        & (FleetRunRow.tenant_id == FleetWorkerRow.tenant_id),
-                    )
-                    .where(
-                        FleetWorkerRow.tenant_id == tenant_id,
-                        FleetWorkerRow.run_id == run_id,
-                        FleetWorkerRow.status == "pending",
-                        or_(
-                            FleetWorkerRow.error_code.is_(None),
-                            FleetWorkerRow.error_code != "stop_requested",
-                        ),
-                        *([FleetWorkerRow.id == worker_id] if worker_id is not None else []),
-                        FleetWorkerRow.deadline_at > func.now(),
-                        FleetRunRow.status == "running",
-                        FleetRunRow.deadline_at > func.now(),
-                    )
-                    .order_by(FleetWorkerRow.ordinal)
-                    .limit(1)
-                    .with_for_update(of=FleetWorkerRow, skip_locked=True)
-                    .scalar_subquery()
+                    FleetWorkerRow.tenant_id == tenant_id,
+                    FleetWorkerRow.run_id == run_id,
+                    FleetWorkerRow.status == "pending",
+                    or_(
+                        FleetWorkerRow.error_code.is_(None),
+                        FleetWorkerRow.error_code != "stop_requested",
+                    ),
+                    *([FleetWorkerRow.id == worker_id] if worker_id is not None else []),
+                    FleetWorkerRow.deadline_at > func.now(),
+                    FleetRunRow.status == "running",
+                    FleetRunRow.deadline_at > func.now(),
                 )
-                .values(
-                    status="starting",
-                    started_at=func.now(),
-                    updated_at=func.now(),
-                    version=FleetWorkerRow.version + 1,
-                )
-                .returning(FleetWorkerRow)
+                .order_by(FleetWorkerRow.ordinal)
+                .limit(1)
+                .with_for_update(of=FleetWorkerRow, skip_locked=True)
+                .scalar_subquery()
             )
-        ).scalar_one_or_none()
-        return _worker(row) if row is not None else None
+            .values(
+                status="starting",
+                started_at=func.now(),
+                updated_at=func.now(),
+                version=FleetWorkerRow.version + 1,
+            )
+            .returning(FleetWorkerRow)
+        )
+    ).scalar_one_or_none()
+    return _worker(row) if row is not None else None
 
 
 async def _move_worker(
@@ -1224,6 +1257,28 @@ async def lock_budget(
             (_run(run), tuple(_worker(w) for w in workers if w.run_id == run.id)) for run in runs
         ),
         {w.id: w.started_at for w in workers},
+    )
+
+
+def with_worker(
+    graph: BudgetGraph, started_at: Mapping[uuid.UUID, datetime | None], worker: FleetWorker
+) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
+    """The locked graph as `lock_budget` would re-read it after `add_worker` returned
+    `worker` in this transaction: in its run, in id order (a no-op when already there)."""
+    if worker.id in started_at:
+        return graph, started_at
+    return (
+        tuple(
+            (
+                run,
+                tuple(sorted((*workers, worker), key=lambda w: w.id))
+                if run.id == worker.run_id
+                else workers,
+            )
+            for run, workers in graph
+        ),
+        # Just inserted by add_worker: it has not started.
+        {**started_at, worker.id: None},
     )
 
 

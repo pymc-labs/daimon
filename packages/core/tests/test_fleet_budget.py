@@ -1447,6 +1447,59 @@ async def test_unrelated_open_ordinary_write_does_not_cancel_actual_budget_watch
             await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_a_watch_holding_the_tenant_lock_waits_on_a_row_lock_briefly_then_reads_the_snapshot(
+    sm, monkeypatch
+):
+    """P2 lockwatch 455c58a6: once the watch held the tenant fleet lock it waited on a
+    run/worker row lock with no timeout, holding the tenant lock for every other fleet
+    step meanwhile. It now lets go after BUDGET_ROW_LOCK_WAIT_MS and decides from the
+    lock-free snapshot, well before its read timeout."""
+    from daimon.core import channel_budget
+    from daimon.core._models import FleetWorker as WorkerRow
+    from sqlalchemy import select
+
+    parent, _ = await setup(sm)
+    worker = await add(sm, parent)
+    assert (await reserve(sm, parent, worker)).admitted
+    finished, cancelled, snapshot = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = channel_budget.read_fleet_budget_snapshot
+
+    async def observed_snapshot(*args, **kwargs):
+        value = await original(*args, **kwargs)
+        snapshot.set()
+        return value
+
+    monkeypatch.setattr(channel_budget, "read_fleet_budget_snapshot", observed_snapshot)
+    # A run/worker writer that never takes the tenant lock (e.g. a card or settle write).
+    async with sm() as writer, writer.begin():
+        await writer.execute(select(WorkerRow).where(WorkerRow.id == worker.id).with_for_update())
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        task = asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled={worker.id: cancelled},
+                finished=finished,
+                read_timeout=30,
+            )
+        )
+        try:
+            await asyncio.wait_for(snapshot.wait(), 6)
+            waited = loop.time() - began
+        finally:
+            finished.set()
+    try:
+        assert await asyncio.wait_for(task, 10) == "finished"
+        assert not cancelled.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert waited < channel_budget.BUDGET_ROW_LOCK_WAIT_MS / 1000 + 2.5, waited
+
+
 async def test_atomic_spawn_reservation_and_audit_roll_back_together(sm):
     from daimon.core.channel_budget import admit_fleet_worker
 
@@ -1487,6 +1540,79 @@ async def test_atomic_spawn_reservation_and_audit_roll_back_together(sm):
             markup=Decimal(1),
         )
     assert admitted.admitted and admitted.worker_exposure_usd == 1
+
+
+def count_budget_locks(monkeypatch) -> dict[int, int]:
+    """lock_budget calls per transaction (session): an admission reads the tenant graph
+    once, then passes it down (P2 lockwatch 455c58a6: it was read three times)."""
+    import collections
+
+    counts: collections.Counter[int] = collections.Counter()
+    # Held so no session id is reused by a later session while the test runs.
+    sessions: list[object] = []
+    original = fleet.lock_budget
+
+    async def counted(session, **kwargs):
+        sessions.append(session)
+        counts[id(session)] += 1
+        return await original(session, **kwargs)
+
+    monkeypatch.setattr(fleet, "lock_budget", counted)
+    return counts
+
+
+async def test_a_pool_claim_gives_up_on_a_busy_tenant_lock_instead_of_queueing(sm):
+    """P2 lockwatch 455c58a6: a claim polled every 0.5-2 s per pending worker queued on
+    the tenant fleet lock with no timeout. Past CLAIM_LOCK_TIMEOUT it now claims nothing
+    this poll, and the next poll claims once the lock is free."""
+    parent, run = await setup(sm)
+    worker = await add(sm, parent)
+    async with sm() as holder, holder.begin():
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"fleet:{run.tenant_id}"},
+        )
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        busy = await asyncio.wait_for(
+            fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3), 20
+        )
+        waited = loop.time() - began
+    timeout_s = float(fleet.CLAIM_LOCK_TIMEOUT.removesuffix("s"))
+    assert busy is None and timeout_s <= waited < timeout_s + 3, waited
+    claimed = await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=3)
+    assert claimed is not None and claimed.id == worker.id and claimed.status == "starting"
+
+
+async def test_an_admission_reads_the_tenant_graph_once(sm, monkeypatch):
+    from daimon.core.channel_budget import admit_fleet_worker
+
+    parent, run = await setup(sm)
+    sibling = await add(sm, parent)
+    assert (await reserve(sm, parent, sibling)).admitted
+    resolved = resolve_worker_spec(
+        parent,
+        parent.spec,
+        policy=POLICY,
+        now=datetime.now(UTC),
+        limits=parent.limits.model_copy(update={"budget_usd": Decimal(1)}),
+    )
+    counts = count_budget_locks(monkeypatch)
+    async with sm() as db, db.begin():
+        admitted = await admit_fleet_worker(
+            db,
+            parent=parent,
+            policy=POLICY,
+            resolved=resolved,
+            ordinal=1,
+            role="worker",
+            prices=tariffs(parent),
+            markup=Decimal(1),
+        )
+    assert list(counts.values()) == [1]
+    # The reservation still sees the worker it just added and its funded sibling.
+    assert admitted.admitted and admitted.worker.ordinal == 1
+    assert admitted.worker_exposure_usd == 1 and admitted.run_exposure_usd == 2
 
 
 async def test_one_run_watch_fans_out_floors_without_cancelling_a_funded_sibling(sm, monkeypatch):

@@ -1194,6 +1194,7 @@ async def _reserve_fleet_worker(
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
     roots: tuple[OperationRecord, ...],
+    locked: tuple[fleet_store.BudgetGraph, Mapping[uuid.UUID, datetime | None]] | None = None,
 ) -> FleetBudgetUsage:
     """Financial admission in the SAME caller transaction as canonical spawn.
 
@@ -1217,12 +1218,16 @@ async def _reserve_fleet_worker(
         # Read again after the caller's add_worker, which this graph must include. The
         # roots are the caller's: they were read and locked under this same lock, and
         # add_worker does not write them.
-        graph, started_at = await fleet_store.lock_budget(
-            session,
-            tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
-            actor_id=parent.fleet.account_id,
-            run_id=parent.fleet.run_id,
-            persisted=True,
+        graph, started_at = (
+            locked
+            if locked is not None
+            else await fleet_store.lock_budget(
+                session,
+                tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
+                actor_id=parent.fleet.account_id,
+                run_id=parent.fleet.run_id,
+                persisted=True,
+            )
         )
         pair = next((p for p in graph if p[0].id == parent.fleet.run_id), None)
         if pair is None:
@@ -1282,6 +1287,9 @@ BUDGET_LOCKED_REFRESH_S = 2.0
 #: behind admissions' short holds, short enough never to park a pooled connection for
 #: long (it held one for up to 1.5 s per poll before, and starved the workers').
 BUDGET_LOCK_WAIT_MS = 150
+#: The longest the watch, holding the tenant fleet lock, waits on one run or worker row
+#: lock before it lets go and decides the poll from the lock-free snapshot.
+BUDGET_ROW_LOCK_WAIT_MS = 2000
 #: The least time one budget read may take before it counts as slow. A full producer
 #: read under a fleet spawn burst can take seconds without the usage being unknown.
 BUDGET_READ_TIMEOUT_MIN_S = 5.0
@@ -1309,6 +1317,13 @@ _LOCK_HOLDER = text(
 
 class _BudgetSnapshotDue(Exception):
     """This poll decides from the lock-free snapshot; the locked refresh ran recently."""
+
+
+def _lock_timed_out(error: DBAPIError) -> bool:
+    return (
+        "lock timeout" in str(error.orig).lower()
+        or getattr(error.orig, "sqlstate", None) == "55P03"
+    )
 
 
 class _BudgetLockBusy(Exception):
@@ -1467,19 +1482,27 @@ async def watch_fleet_budget(
                                     {"key": lock_key},
                                 )
                         except DBAPIError as error:
-                            if (
-                                "lock timeout" not in str(error.orig).lower()
-                                and getattr(error.orig, "sqlstate", None) != "55P03"
-                            ):
+                            if not _lock_timed_out(error):
                                 raise
                             raise _BudgetLockBusy(await _lock_holder(session, lock_key)) from None
-                        await session.execute(text("SET LOCAL lock_timeout = 0"))
-                        usages = await produce_fleet_budget(
-                            session,
-                            parent=parent,
-                            prices=prices,
-                            markup=markup,
+                        # Holding the tenant lock, a row lock (a run or worker another
+                        # writer holds) is waited on only briefly too: an unbounded wait
+                        # here held the tenant lock for every other fleet step meanwhile.
+                        # Busy past it: the same snapshot decides this poll.
+                        await session.execute(
+                            text(f"SET LOCAL lock_timeout = '{BUDGET_ROW_LOCK_WAIT_MS}ms'")
                         )
+                        try:
+                            usages = await produce_fleet_budget(
+                                session,
+                                parent=parent,
+                                prices=prices,
+                                markup=markup,
+                            )
+                        except DBAPIError as error:
+                            if not _lock_timed_out(error):
+                                raise
+                            raise _BudgetLockBusy(None) from None
                         if any(worker_id not in usages for worker_id, _ in watched):
                             raise FleetConflict("watched worker is unavailable")
             except (_BudgetLockBusy, _BudgetSnapshotDue) as skipped:
@@ -1661,12 +1684,16 @@ async def admit_fleet_worker(
     markup: Decimal,
     reviewer_of: uuid.UUID | None = None,
     result_contract: Mapping[str, JsonValue] | None = None,
+    locked: tuple[fleet_store.BudgetGraph, Mapping[uuid.UUID, datetime | None]] | None = None,
 ) -> FleetBudgetUsage:
     """Canonical spawn plus reservation in the financial lock order.
 
     The host supplies a freshly resolved spec from the sole owner resolver.
     Lock before add_worker; taking run locks first across two runs could invert
     the tenant money lock. Native creation starts only after this commits.
+    `locked` is the graph this transaction's own `lock_budget` already returned
+    (persisted=True, before any write): the tenant-wide graph is read once per
+    admission, not re-read for each step.
     """
     decision = authorize(
         policy,
@@ -1689,12 +1716,16 @@ async def admit_fleet_worker(
         raise FleetConflict("resolved worker belongs to another root")
     tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
     with session.no_autoflush:
-        await fleet_store.lock_budget(
-            session,
-            tenant_id=tenant_id,
-            actor_id=parent.fleet.account_id,
-            run_id=parent.fleet.run_id,
-            persisted=True,
+        graph, started_at = (
+            locked
+            if locked is not None
+            else await fleet_store.lock_budget(
+                session,
+                tenant_id=tenant_id,
+                actor_id=parent.fleet.account_id,
+                run_id=parent.fleet.run_id,
+                persisted=True,
+            )
         )
         roots = await mux_state.list_fleet_root_finances(session, tenant_id=tenant_id)
         # Refuse before add_worker writes; the reservation reads the money.
@@ -1731,6 +1762,9 @@ async def admit_fleet_worker(
             prices=prices,
             markup=markup,
             roots=roots,
+            # add_worker writes no run row, only (maybe) this worker: the graph locked
+            # above, plus the worker as inserted, is what a re-read would return.
+            locked=fleet_store.with_worker(graph, started_at, worker),
         )
         if not usage.admitted and usage.worker.status == "pending":
             ended = await fleet_store.finish(

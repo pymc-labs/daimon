@@ -302,9 +302,12 @@ async def _measure(sm, db_engine, graph: Graph) -> dict[str, tuple[int, float]]:
 # Statements per call on 3 runs; the same at 3 and at 6 workers per run.
 # Before batching, on 3 runs: 135 / 117 / 103 / 102 statements at 3 workers per run and
 # 213 / 195 / 181 / 180 at 6 (about 9 more per worker).
+# An admission reads the tenant graph once and passes it down (P2 lockwatch 455c58a6):
+# 5 fewer than the 34 / 23 when the reservation re-read it (advisory lock, tenant,
+# account, runs, workers).
 PINNED = {
-    "admit_fleet_worker_first": 34,
-    "admit_fleet_worker_replay": 23,
+    "admit_fleet_worker_first": 29,
+    "admit_fleet_worker_replay": 18,
     "require_fleet_worker_admission": 18,
     "watch_locked_refresh": 17,
 }
