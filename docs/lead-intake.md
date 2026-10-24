@@ -22,7 +22,17 @@ Configuration contains the executing `agent_id` (the tenant-derived agent UUID),
 `guild_id`, restricted sales `channel_id`, `source_connection_id`, actual
 `gmail_mailbox`, `crm_connection_id`, HubSpot `portal_id`, recipient allowlist,
 optional `routine_id`, notifier and resolver **user** IDs, pipeline, stage and
-optional deal-field mappings. `reconciliation_start` is a timezone-aware cutover
+optional `deal_fields` mappings and `attribution_property`. Set `deal_fields` to
+the HubSpot property/value pairs required by your deployment, such as deal type
+and source channel. Set `attribution_property` to the HubSpot deal property that
+records how the enquirer heard about your organization. With this configured,
+attribution submissions need `attribution_value` and a verbatim
+`attribution_evidence` quote supporting it. Attribution without a verbatim
+supporting quote is dropped. Daimon checks the property's visible
+HubSpot options before recording a deal creation intent; a missing property,
+hidden option or invalid value requires review. An empty `attribution_property`
+disables attribution; supplied attribution is ignored.
+`reconciliation_start` is a timezone-aware cutover
 checkpoint; choose the current time to start without historical import. Names,
 addresses, portal IDs and CRM field mappings are deployment-specific.
 `gmail_mailbox` is required: unclassified discoveries and scan coverage are kept

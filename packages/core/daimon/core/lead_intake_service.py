@@ -119,21 +119,30 @@ class IntakeService:
             )
         ):
             raise ValueError("recipient_mismatch")
-        evidence = verify_lead_evidence(
-            LeadEvidence(
-                original_text=verified.text,
-                raw_source=verified.raw,
-                **draft.model_dump(
-                    exclude={
-                        "source",
-                        "classification",
-                        "opportunity_description",
-                        "thread_title",
-                        "thread_content",
-                    }
-                ),
-            )
+        evidence = LeadEvidence(
+            original_text=verified.text,
+            raw_source=verified.raw,
+            **draft.model_dump(
+                exclude={
+                    "source",
+                    "classification",
+                    "opportunity_description",
+                    "thread_title",
+                    "thread_content",
+                }
+            ),
         )
+        if (
+            not config.attribution_property
+            or not evidence.attribution_evidence
+            or evidence.attribution_evidence not in evidence.original_text
+            or (evidence.attribution_value or "").casefold()
+            not in evidence.attribution_evidence.casefold()
+        ):
+            evidence = evidence.model_copy(
+                update={"attribution_value": None, "attribution_evidence": None}
+            )
+        evidence = verify_lead_evidence(evidence)
         submission = LeadSubmission(
             source=verified.source,
             evidence=evidence,
@@ -351,10 +360,12 @@ class IntakeService:
                             record,
                             "deal",
                             {
+                                "attribution_value": e.attribution_value or "",
                                 "description": submission.opportunity_description,
-                                "name": f"{e.company_name}: {submission.opportunity_description}"[
-                                    :200
-                                ],
+                                "name": (
+                                    f"{e.company_name or 'Lead'}: "
+                                    f"{submission.opportunity_description}"
+                                )[:200],
                                 "company": p.company_id,
                                 "contact": p.contact_id,
                                 "domain": e.company_domain or "",

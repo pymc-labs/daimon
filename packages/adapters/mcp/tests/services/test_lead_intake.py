@@ -13,7 +13,14 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.services.lead_intake import HttpIntakePorts
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.lead_intake import IntakeConfig, LeadDraft, LeadSource
+from daimon.core.lead_intake import (
+    IntakeConfig,
+    IntakeResolution,
+    LeadClassification,
+    LeadDraft,
+    LeadSource,
+    LeadSourceKind,
+)
 from daimon.core.lead_intake_service import (
     EffectRequest,
     IntakeAccess,
@@ -61,6 +68,7 @@ class ProviderReplay:
         self.company_candidates: list[dict[str, Any]] = []
         self.portal = "3"
         self.unique = True
+        self.attribution_options: list[dict[str, Any]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
@@ -126,6 +134,8 @@ class ProviderReplay:
             return httpx.Response(200, json=row)
         if path.endswith("account-info/v3/details"):
             return httpx.Response(200, json={"portalId": self.portal})
+        if path.endswith("how_they_heard_about_pymc_labs"):
+            return httpx.Response(200, json={"options": self.attribution_options})
         if "properties" in path:
             return httpx.Response(200, json={"hasUniqueValue": self.unique})
         parts = path.split("/")
@@ -217,8 +227,10 @@ async def test_full_active_http_replay_without_duplicate_effects(
         )
         intake = IntakeService(store, ports, noop, authorize_read=readable)
         draft = LeadDraft(
-            source=LeadSource(kind="gmail", mailbox="owner@example.test", message_id="immutable-1"),
-            classification="project",
+            source=LeadSource(
+                kind=LeadSourceKind.GMAIL, mailbox="owner@example.test", message_id="immutable-1"
+            ),
+            classification=LeadClassification.PROJECT,
             opportunity_description="Demand forecasting",
             thread_title="Synthetic",
             thread_content="Research summary\nDRAFT: Thank you. <@7> <@&42> @everyone",
@@ -302,7 +314,7 @@ async def test_manual_source_is_verified_from_provider(
         ports = HttpIntakePorts(
             client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
         )
-        source = LeadSource(kind="manual", channel_id="500", message_id="600")
+        source = LeadSource(kind=LeadSourceKind.MANUAL, channel_id="500", message_id="600")
         if accepted:
             assert (await ports.source(config(), source, "7")).text == content
         else:
@@ -331,7 +343,9 @@ async def test_manual_thread_source_verifies_parent_guild() -> None:
             client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
         )
         result = await ports.source(
-            config(), LeadSource(kind="manual", channel_id="502", message_id="600"), "7"
+            config(),
+            LeadSource(kind=LeadSourceKind.MANUAL, channel_id="502", message_id="600"),
+            "7",
         )
     assert result.text == "Register this lead: Synthetic"
 
@@ -401,3 +415,186 @@ async def test_approved_crm_selection_cannot_be_replaced_by_recovery(
         else:
             assert await ports.recover(config(), effect) == "201"
     assert replay.events == [], "Conflicting recovery cannot create or associate any record"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "invalid",
+        "hidden",
+        "missing_quote",
+        "unsupported",
+        "non_verbatim",
+        "disabled",
+        "adopt_disabled",
+        "identity_review",
+    ],
+)
+async def test_deal_preserves_only_source_supported_allowed_attribution(
+    db_nullpool_engine: AsyncEngine, db_clean: None, case: str
+) -> None:
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    async with sessions() as session, session.begin():
+        tenant = await make_tenant(session)
+    store = IntakeStore(sessions, build_multifernet((Fernet.generate_key().decode(),)), tenant.id)
+    settings = config().model_copy(
+        update={
+            "mode": "capture" if case == "adopt_disabled" else "active",
+            "deal_fields": {"dealtype": "newbusiness", "channel": "Cold in-mail"},
+            "attribution_property": "" if case == "disabled" else "how_they_heard_about_pymc_labs",
+        }
+    )
+    await store.configure(settings, {"hubspot_access_token": "synthetic"})
+    replay = ProviderReplay()
+    replay.attribution_options = [{"value": "forecasting", "hidden": case == "hidden"}]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(replay.handle)) as client:
+        ports = HttpIntakePorts(
+            client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
+        )
+        intake = IntakeService(store, ports, noop, authorize_read=readable)
+        proposal = LeadDraft(
+            source=LeadSource(
+                kind=LeadSourceKind.GMAIL, mailbox="owner@example.test", message_id="immutable-1"
+            ),
+            classification=LeadClassification.PROJECT,
+            opportunity_description="Demand forecasting",
+            thread_title="Synthetic",
+            thread_content="DRAFT: Thank you",
+            enquirer_email="ada@synthetic.example",
+            company_name="Synthetic",
+            company_domain="synthetic.example",
+            enquirer_evidence="From: Ada <ada@synthetic.example>",
+            company_evidence=(
+                "invented company quote"
+                if case == "identity_review"
+                else "Ada, Synthetic synthetic.example"
+            ),
+            attribution_value="demand" if case == "invalid" else "forecasting",
+            attribution_evidence=(
+                None
+                if case == "missing_quote"
+                else "Ada, Synthetic synthetic.example"
+                if case in {"unsupported", "identity_review"}
+                else "I heard forecasting elsewhere"
+                if case == "non_verbatim"
+                else "Please scope a demand forecasting project."
+            ),
+        )
+        result = await intake.submit(proposal, "7")
+        assert result.submission is not None
+        if case == "adopt_disabled":
+            assert result.status == "pending"
+            assert result.submission.evidence.attribution_value == "forecasting"
+            await store.configure(
+                settings.model_copy(
+                    update={"revision": 2, "mode": "active", "attribution_property": ""}
+                ),
+                {"hubspot_access_token": "synthetic"},
+            )
+            await store.adopt(result.id, 2)
+            result = await intake.resume(result.id)
+            assert result.submission is not None
+        if case == "identity_review":
+            assert result.status == "review"
+            assert not result.submission.evidence.identity_verified
+            assert result.submission.evidence.verification_notes == (
+                "Company identity needs a verbatim source quote"
+            )
+            replay.objects["companies"].append({"id": "901", "properties": {}})
+            replay.objects["contacts"].append({"id": "902", "properties": {}})
+            result = await intake.resolve(
+                result.id,
+                IntakeResolution(
+                    company_id="901",
+                    contact_id="902",
+                    evidence="Verified company 901 and contact 902 by hand.",
+                ),
+                "7",
+            )
+        else:
+            assert result.submission.evidence.identity_verified
+        if case not in {"invalid", "hidden"}:
+            assert result.status == "completed", result.error_code
+            properties = replay.objects["deals"][0]["properties"]
+            if case == "valid":
+                assert properties["how_they_heard_about_pymc_labs"] == "forecasting"
+            else:
+                assert result.submission is not None
+                if case == "adopt_disabled":
+                    assert result.submission.evidence.attribution_value == "forecasting"
+                else:
+                    assert result.submission.evidence.attribution_value is None
+                    assert result.submission.evidence.attribution_evidence is None
+                assert "how_they_heard_about_pymc_labs" not in properties
+            assert "" not in properties
+            assert properties["dealtype"] == "newbusiness"
+            assert properties["channel"] == "Cold in-mail"
+        else:
+            assert result.status == "review", result.error_code
+            assert await store.effect(result.id, "deal") is None
+            assert replay.objects["deals"] == []
+            assert result.progress.review_reason == (
+                "Attribution is not a valid HubSpot option; review the explicit evidence"
+            )
+            replay.objects["deals"].append({"id": "900", "properties": {}})
+            resolved = await intake.resolve(
+                result.id,
+                IntakeResolution(deal_id="900", evidence="Verified existing deal 900 by hand."),
+                "7",
+            )
+            assert resolved.status == "completed", resolved.error_code
+            assert resolved.progress.deal_id == "900"
+            assert len(replay.objects["deals"]) == 1
+
+
+@pytest.mark.parametrize("case", ["company_domain", "company_name", "orphan", "opportunity"])
+async def test_crm_review_identifies_candidates(case: str) -> None:
+    replay = ProviderReplay()
+    payload = {
+        "domain": "synthetic.example",
+        "name": "Synthetic",
+        "company": "201",
+        "contact": "202",
+        "company_name": "Synthetic",
+        "description": "Forecast project",
+        "separate": "False",
+    }
+    if case.startswith("company"):
+        replay.company_candidates = [
+            {
+                "id": str(n),
+                "properties": {
+                    "name": "Synthetic",
+                    "domain": "synthetic.example" if case == "company_domain" else "other.example",
+                },
+            }
+            for n in (301, 302)
+        ]
+        step, reason = "company", "company_ambiguous"
+        expected = ["Synthetic (301)", "Synthetic (302)"]
+    else:
+        replay.objects["deals"] = [
+            {
+                "id": str(n),
+                "properties": {
+                    "dealname": f"Synthetic project {n}",
+                    "description": "Different project",
+                    "hs_is_closed": "false",
+                },
+            }
+            for n in (301, 302)
+        ]
+        if case == "opportunity":
+            replay.associations[("201", "deals")] = {"301", "302"}
+        step = "deal"
+        reason = "orphan_opportunity_review" if case == "orphan" else "opportunity_ambiguous"
+        expected = ["Synthetic project 301 (301)", "Synthetic project 302 (302)"]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(replay.handle)) as client:
+        ports = HttpIntakePorts(
+            client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
+        )
+        with pytest.raises(ReviewRequired, match=reason) as exc:
+            await ports.recover(config(), EffectRequest(step=step, key="stable", payload=payload))
+    assert all(candidate in str(exc.value) for candidate in expected)
+    assert replay.events == []

@@ -6128,6 +6128,30 @@
             'additionalProperties': False,
             'description': 'Model proposal; original text and verification flags are fetched server-side.',
             'properties': dict({
+              'attribution_evidence': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+                'description': 'Verbatim quote from the enquiry containing the attribution value.',
+              }),
+              'attribution_value': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+                'description': 'Exact HubSpot option value of the configured attribution property.',
+              }),
               'classification': dict({
                 '$ref': '#/$defs/LeadClassification',
               }),
