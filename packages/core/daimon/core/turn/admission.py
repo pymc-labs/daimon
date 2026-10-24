@@ -999,9 +999,14 @@ async def admit_impl(
                         reason="backend_unsupported", cause="agent_backend"
                     ) from error
 
+                attempts = 0
+                enabled_backends = policy.enabled_backends
+
                 async def select(
                     channel: ChannelRef = channel,
                 ) -> tuple[ConfigRevision | None, bool, Literal["channel", "agent", "default"]]:
+                    nonlocal attempts, enabled_backends
+                    attempts += 1
                     # Its own session per attempt: a missed policy fence rolls it back
                     # (retry_fences), so nothing is held while waiting for a writer.
                     async with deps.sessionmaker() as selection_session:
@@ -1014,6 +1019,13 @@ async def admit_impl(
                                 verify_origin if deps.agent_backends else _require_backend_origin
                             ),
                         )
+                        if attempts > 1:
+                            # It waited out a policy write: check the backend against the
+                            # policy that write left, read under the fence, not the one
+                            # admission read before it (reauthorize re-checks the rest).
+                            enabled_backends = (
+                                await load_access_policy(selection_session, tenant_id=tenant_id)
+                            ).enabled_backends
                         # Preparation uses another transaction. Publish the immutable
                         # effective revision and its origin before that transaction.
                         await selection_session.commit()
@@ -1028,14 +1040,14 @@ async def admit_impl(
                         select, busy_error=PolicyBusyError
                     )
                     backend = (
-                        check_backend(backend_revision, enabled_backends=policy.enabled_backends)
+                        check_backend(backend_revision, enabled_backends=enabled_backends)
                         if backend_revision is not None
                         else None
                     )
                 except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
                     _log_backend_unsupported("agent_preference", error)
                     raise _backend_refusal(
-                        backend_revision, source, policy.enabled_backends, error
+                        backend_revision, source, enabled_backends, error
                     ) from error
                 backend_revision_origin = source if source != "default" else None
                 if backend_revision is not None:
