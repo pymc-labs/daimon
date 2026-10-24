@@ -119,21 +119,24 @@ class IntakeService:
             )
         ):
             raise ValueError("recipient_mismatch")
-        evidence = verify_lead_evidence(
-            LeadEvidence(
-                original_text=verified.text,
-                raw_source=verified.raw,
-                **draft.model_dump(
-                    exclude={
-                        "source",
-                        "classification",
-                        "opportunity_description",
-                        "thread_title",
-                        "thread_content",
-                    }
-                ),
-            )
+        evidence = LeadEvidence(
+            original_text=verified.text,
+            raw_source=verified.raw,
+            **draft.model_dump(
+                exclude={
+                    "source",
+                    "classification",
+                    "opportunity_description",
+                    "thread_title",
+                    "thread_content",
+                }
+            ),
         )
+        if not config.attribution_property:
+            evidence = evidence.model_copy(
+                update={"attribution_value": None, "attribution_evidence": None}
+            )
+        evidence = verify_lead_evidence(evidence)
         submission = LeadSubmission(
             source=verified.source,
             evidence=evidence,
@@ -352,8 +355,6 @@ class IntakeService:
                             "deal",
                             {
                                 "attribution_value": e.attribution_value or "",
-                                "attribution_evidence": e.attribution_evidence or "",
-                                "original_text": e.original_text if e.attribution_value else "",
                                 "description": submission.opportunity_description,
                                 "name": (
                                     f"{e.company_name or 'Lead'}: "

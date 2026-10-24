@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Preserve source-supported lead attribution in configured HubSpot fields; document deal type and channel mappings, use “Lead” for manually selected companies without a name, and include candidate names and IDs in CRM review reasons.
+- Validate source-supported lead attribution before recording a HubSpot deal creation intent, keeping reviews resolvable; ignore attribution when its property is unconfigured; document deal type and channel mappings, use “Lead” for manually selected companies without a name, and include candidate names and IDs in CRM review reasons.
 
 - Preserve unattended sandbox restrictions across native providers: refuse workers and wakes that require automatic sandbox/custom tools or other ungated capabilities before a provider message; retain conversation-only workers, attended native execution and guarded selfhosted tools.
 

@@ -15,6 +15,7 @@ from daimon.adapters.mcp.services.lead_intake import HttpIntakePorts
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.lead_intake import (
     IntakeConfig,
+    IntakeResolution,
     LeadClassification,
     LeadDraft,
     LeadSource,
@@ -416,7 +417,9 @@ async def test_approved_crm_selection_cannot_be_replaced_by_recovery(
     assert replay.events == [], "Conflicting recovery cannot create or associate any record"
 
 
-@pytest.mark.parametrize("case", ["valid", "invalid", "hidden", "missing_quote", "unsupported"])
+@pytest.mark.parametrize(
+    "case", ["valid", "invalid", "hidden", "missing_quote", "unsupported", "disabled"]
+)
 async def test_deal_preserves_only_source_supported_allowed_attribution(
     db_nullpool_engine: AsyncEngine, db_clean: None, case: str
 ) -> None:
@@ -427,7 +430,7 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
     settings = config().model_copy(
         update={
             "deal_fields": {"dealtype": "newbusiness", "channel": "Cold in-mail"},
-            "attribution_property": "how_they_heard_about_pymc_labs",
+            "attribution_property": "" if case == "disabled" else "how_they_heard_about_pymc_labs",
         }
     )
     await store.configure(settings, {"hubspot_access_token": "synthetic"})
@@ -454,27 +457,44 @@ async def test_deal_preserves_only_source_supported_allowed_attribution(
             attribution_value="demand" if case == "invalid" else "forecasting",
             attribution_evidence=(
                 None
-                if case == "missing_quote"
+                if case in {"missing_quote", "disabled"}
                 else "Ada, Synthetic synthetic.example"
                 if case == "unsupported"
                 else "Please scope a demand forecasting project."
             ),
         )
         result = await intake.submit(proposal, "7")
-    if case == "valid":
-        assert result.status == "completed", result.error_code
-        properties = replay.objects["deals"][0]["properties"]
-        assert properties["how_they_heard_about_pymc_labs"] == "forecasting"
-        assert properties["dealtype"] == "newbusiness"
-        assert properties["channel"] == "Cold in-mail"
-    else:
-        assert result.status == "review", result.error_code
-        assert result.progress.review_reason == (
-            "Attribution requires an explicit source quote supporting the value"
-            if case in {"missing_quote", "unsupported"}
-            else "Attribution is not a valid HubSpot option; review the explicit evidence"
-        )
-        assert replay.objects["deals"] == []
+        if case in {"valid", "disabled"}:
+            assert result.status == "completed", result.error_code
+            properties = replay.objects["deals"][0]["properties"]
+            if case == "valid":
+                assert properties["how_they_heard_about_pymc_labs"] == "forecasting"
+            else:
+                assert "how_they_heard_about_pymc_labs" not in properties
+            assert properties["dealtype"] == "newbusiness"
+            assert properties["channel"] == "Cold in-mail"
+        else:
+            assert result.status == "review", result.error_code
+            assert await store.effect(result.id, "deal") is None
+            assert replay.objects["deals"] == []
+            if case in {"missing_quote", "unsupported"}:
+                assert result.submission is not None
+                assert result.submission.evidence.verification_notes == (
+                    "Attribution requires an explicit source quote supporting the value"
+                )
+            else:
+                assert result.progress.review_reason == (
+                    "Attribution is not a valid HubSpot option; review the explicit evidence"
+                )
+                replay.objects["deals"].append({"id": "900", "properties": {}})
+                resolved = await intake.resolve(
+                    result.id,
+                    IntakeResolution(deal_id="900", evidence="Verified existing deal 900 by hand."),
+                    "7",
+                )
+                assert resolved.status == "completed", resolved.error_code
+                assert resolved.progress.deal_id == "900"
+                assert len(replay.objects["deals"]) == 1
 
 
 @pytest.mark.parametrize("case", ["company_domain", "company_name", "orphan", "opportunity"])

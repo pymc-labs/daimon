@@ -430,6 +430,25 @@ class HttpIntakePorts:
                     "opportunity_ambiguous. Candidate deals: "
                     + ", ".join(f"{c.name} ({c.id})" for c in candidates)
                 )
+            if (
+                not match.deal_id
+                and config.attribution_property
+                and (value := p.get("attribution_value"))
+            ):
+                definition = await self.request(
+                    "hubspot",
+                    "GET",
+                    f"crm/v3/properties/deals/{quote(config.attribution_property, safe='')}",
+                    missing=True,
+                )
+                if not definition or value not in {
+                    option["value"]
+                    for option in definition.get("options", [])
+                    if not option.get("hidden")
+                }:
+                    raise ReviewRequired(
+                        "Attribution is not a valid HubSpot option; review the explicit evidence"
+                    )
             return match.deal_id
         return None
 
@@ -509,32 +528,7 @@ class HttpIntakePorts:
                 "daimon_intake_identity": effect.key,
                 "discord_lead_thread": p["thread_url"],
             }
-        if step == "deal" and (value := p.get("attribution_value")):
-            evidence = p.get("attribution_evidence")
-            if (
-                not evidence
-                or evidence not in p["original_text"]
-                or value.casefold() not in evidence.casefold()
-            ):
-                raise ReviewRequired(
-                    "Attribution requires an explicit source quote supporting the value"
-                )
-            if not config.attribution_property:
-                raise ReviewRequired("attribution_property_required")
-            definition = await self.request(
-                "hubspot",
-                "GET",
-                f"crm/v3/properties/deals/{quote(config.attribution_property, safe='')}",
-                missing=True,
-            )
-            if not definition or value not in {
-                option["value"]
-                for option in definition.get("options", [])
-                if not option.get("hidden")
-            }:
-                raise ReviewRequired(
-                    "Attribution is not a valid HubSpot option; review the explicit evidence"
-                )
+        if step == "deal" and config.attribution_property and (value := p.get("attribution_value")):
             properties[config.attribution_property] = value
         response = await self.request(
             "hubspot", "POST", f"crm/v3/objects/{kind}", {"properties": properties}
