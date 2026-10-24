@@ -664,6 +664,23 @@ async def get_operation(session: AsyncSession, scope: Scope, key: str) -> Operat
     return record
 
 
+async def operation_status(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, key: str
+) -> str | None:
+    """An operation's status by its stored identity (tenant, owning account, key).
+
+    For a reader that holds the tenant's financial lock and must see another
+    account's run, not only the caller's scope. None when no such operation exists.
+    """
+    return await session.scalar(
+        select(MuxOperation.status).where(
+            MuxOperation.tenant_id == tenant_id,
+            MuxOperation.account_id == str(account_id),
+            MuxOperation.key == key,
+        )
+    )
+
+
 async def get_fleet_root_operation(
     session: AsyncSession,
     scope: Scope,
@@ -1175,6 +1192,18 @@ async def pending_outbox_for_profiles(
         (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
         for row, tenant_id, binding in rows
     ]
+
+
+async def binding_has_pending_outbox(session: AsyncSession, binding_id: str) -> bool:
+    """Whether any usage revision of this binding is not yet applied to the ledger."""
+    return (
+        await session.scalar(
+            select(AccountingOutbox.revision)
+            .where(AccountingOutbox.binding_id == binding_id, AccountingOutbox.applied_at.is_(None))
+            .limit(1)
+        )
+        is not None
+    )
 
 
 async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:

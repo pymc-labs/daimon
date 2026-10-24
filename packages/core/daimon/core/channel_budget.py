@@ -28,7 +28,15 @@ import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Decision, Place, Subject, Surface, authorize
 from daimon.core.errors import DaimonError
-from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, spawn_operation_key, worker_slot
+from daimon.core.fleet import (
+    RUN_TRANSITIONS,
+    TERMINAL,
+    FleetConflict,
+    FleetRun,
+    FleetWorker,
+    spawn_operation_key,
+    worker_slot,
+)
 from daimon.core.neutral_resources import (
     ResolvedWorkerSpec,
     WorkerPermissions,
@@ -59,6 +67,8 @@ from pydantic import JsonValue
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+type UsageState = Literal["none", "pending", "settled"]
 
 log = structlog.get_logger()
 
@@ -369,9 +379,12 @@ async def _fleet_worker_money(
     markup: Decimal,
     price_floor: bool,
     prefetch: AccountingPrefetch | None = None,
-) -> tuple[Decimal, Decimal, bool, bool]:
-    """One worker's (floor, debit, unpriced usage, no native evidence).
+) -> tuple[Decimal, Decimal, bool, bool, UsageState]:
+    """One worker's (floor, debit, unpriced usage, no native evidence, usage state).
 
+    The usage state: "none" (no usage revision recorded), "pending" (a revision not
+    yet applied to the ledger: unknown spend) or "settled" (every revision applied, so
+    the debit is the worker's whole recorded spend).
     With the graph's `prefetch` it answers from those rows, with the same checks.
     """
     slot = worker_slot(run, worker)
@@ -383,7 +396,7 @@ async def _fleet_worker_money(
     if binding is None:
         if worker.binding_id is not None:
             raise FleetConflict("accepted worker binding is unavailable")
-        return Decimal(0), Decimal(0), False, True
+        return Decimal(0), Decimal(0), False, True, "none"
     if (
         binding.provider != worker.backend
         or binding.profile != worker.profile
@@ -398,8 +411,15 @@ async def _fleet_worker_money(
         debit = -sum((row.delta_usd for row in rows.ledger), Decimal(0))
         if debit < 0:
             raise FleetConflict("worker ledger cannot prove nonnegative spend")
+        state: UsageState = (
+            "none"
+            if not rows.revisions and not rows.outbox
+            else "settled"
+            if rows.revisions and rows.outbox and all(o.settled for o in rows.outbox)
+            else "pending"
+        )
         if not rows.revisions or not price_floor:
-            return debit, debit, False, False
+            return debit, debit, False, False, state
         native = rows.revisions[0].observation.session
         # The rows just read are this binding's revisions; prefetched, they are not re-read.
         usage = await read_delegated_usage(
@@ -412,7 +432,27 @@ async def _fleet_worker_money(
         floor = (usage.token_floor_usd * markup).quantize(
             Decimal("0.000001"), rounding=ROUND_CEILING
         )
-        return max(floor, debit), debit, bool(usage.unpriced_observations), False
+        return max(floor, debit), debit, bool(usage.unpriced_observations), False, state
+
+
+async def _input_sent(
+    session: AsyncSession, tenant_id: uuid.UUID, run: FleetRun, worker: FleetWorker
+) -> bool:
+    """Whether the worker may have been sent its input (and so made a model call).
+
+    Never sent needs both records to agree: the worker store counted no accepted input
+    or claim attempt, and its send operation is absent or still pending. Some send
+    paths keep no operation row, so an absent row alone proves nothing.
+    """
+    if worker.turns_used or worker.attempts:
+        return True
+    status = await mux_state.operation_status(
+        session,
+        tenant_id=tenant_id,
+        account_id=run.orchestrator_account_id,
+        key=spawn_operation_key(run.id, worker.ordinal) + ":send:0",
+    )
+    return status not in (None, "pending")
 
 
 async def _prefetch_fleet_money(
@@ -445,6 +485,26 @@ def _root_money(record: OperationRecord) -> tuple[Decimal, Decimal]:
     return exposure, debit
 
 
+async def _root_released(session: AsyncSession, record: OperationRecord, now: datetime) -> bool:
+    """A root past its deadline whose usage is all on the ledger holds nothing more.
+
+    Its turn can no longer spend, and what it spent is already debited from the
+    balance. A root without a readable deadline, or with usage not yet applied (unknown
+    price or infrastructure), keeps its hold.
+    """
+    controls = record.result.get("root_controls")
+    if not isinstance(controls, dict) or record.slot is None:
+        return False
+    try:
+        deadline = datetime.fromisoformat(str(controls["deadline"]))
+    except (KeyError, ValueError):
+        return False
+    if deadline.tzinfo is None or deadline > now:
+        return False
+    binding = await mux_state.get_binding(session, record.slot)
+    return binding is None or not await mux_state.binding_has_pending_outbox(session, binding.id)
+
+
 async def _financial_room(
     session: AsyncSession,
     *,
@@ -458,8 +518,13 @@ async def _financial_room(
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         held = [(r.platform, r.channel_id, r.reserved_usd - r.observed_usd) for r, _ in graph]
+        now = await mux_state.database_clock(session) if roots else None
         for root in roots:
             exposure, debit = _root_money(root)
+            assert now is not None
+            if await _root_released(session, root, now):
+                # Its spend is in the balance already; the rest of its cash returns.
+                continue
             assert root.slot is not None
             channel = root.slot.thread.channel
             held.append((channel.platform, channel.channel_id, exposure - debit))
@@ -751,6 +816,7 @@ async def _produce_fleet_budget(
         exposures: dict[uuid.UUID, Decimal] = {}
         debits: dict[uuid.UUID, Decimal] = {}
         zero_spend: set[uuid.UUID] = set()
+        settled_spend: dict[uuid.UUID, Decimal] = {}
         unpriced_usage = False
         prefetch = await _prefetch_fleet_money(session, graph, tenant_id=tenant_id)
         with localcontext() as arithmetic:
@@ -758,7 +824,7 @@ async def _produce_fleet_budget(
             for other_run, members in graph:
                 debit_total = Decimal(0)
                 for member in members:
-                    floor, debit, unpriced, no_native_evidence = await _fleet_worker_money(
+                    floor, debit, unpriced, no_native_evidence, usage = await _fleet_worker_money(
                         session,
                         other_run,
                         member,
@@ -781,13 +847,35 @@ async def _produce_fleet_budget(
                     ):
                         zero_spend.add(member.id)
                         exposures[member.id] = debit
+                    elif (
+                        other_run.status not in RUN_TRANSITIONS
+                        and member.status in TERMINAL
+                        and usage != "pending"
+                        and (
+                            usage == "settled"
+                            or not await _input_sent(session, tenant_id, other_run, member)
+                        )
+                    ):
+                        # A finished worker of a finished run has spent exactly its debit
+                        # when every usage revision is on the ledger, or when it was never
+                        # sent its input (no processed send operation: no model call). The
+                        # rest of its reservation returns to the tenant (SMOKE fc0fa16a: 74
+                        # finished runs held $102 of a $104 balance). Pending usage, or
+                        # input sent with no usage recorded (spend may exist provider-side),
+                        # keeps the hold.
+                        settled_spend[member.id] = debit
+                        exposures[member.id] = debit
                     else:
                         exposures[member.id] = max(member.reserved_usd, floor)
                     debit_total += debit
                 debits[other_run.id] = debit_total
             graph = (
                 fleet_store.project_budget(
-                    graph, exposures=exposures, debits=debits, zero_spend=frozenset(zero_spend)
+                    graph,
+                    exposures=exposures,
+                    debits=debits,
+                    zero_spend=frozenset(zero_spend),
+                    settled=settled_spend,
                 )
                 if snapshot
                 else await fleet_store.save_budget(
@@ -797,6 +885,7 @@ async def _produce_fleet_budget(
                     exposures=exposures,
                     debits=debits,
                     zero_spend=frozenset(zero_spend),
+                    settled=settled_spend,
                 )
             )
             run, workers = next(pair for pair in graph if pair[0].id == run.id)
@@ -996,7 +1085,7 @@ async def read_fleet_run_cost(
         with localcontext() as arithmetic:
             arithmetic.prec = 80
             for worker in workers:
-                spent, _debit, unpriced, _ = await _fleet_worker_money(
+                spent, _debit, unpriced, _, _ = await _fleet_worker_money(
                     session,
                     run,
                     worker,

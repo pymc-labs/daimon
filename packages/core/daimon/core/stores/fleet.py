@@ -1233,6 +1233,7 @@ def project_budget(
     exposures: Mapping[uuid.UUID, Decimal],
     debits: Mapping[uuid.UUID, Decimal],
     zero_spend: frozenset[uuid.UUID] = frozenset(),
+    settled: Mapping[uuid.UUID, Decimal] | None = None,
 ) -> BudgetGraph:
     """What `save_budget` would persist, computed without writing, for a snapshot read.
 
@@ -1243,7 +1244,16 @@ def project_budget(
         projected: list[FleetWorker] = []
         for worker in workers:
             amount = _amount(exposures[worker.id])
-            if amount < worker.reserved_usd and worker.id not in zero_spend:
+            if (
+                amount < worker.reserved_usd
+                and worker.id not in zero_spend
+                # A finished worker whose usage is all on the ledger: down to its debit.
+                and (
+                    settled is None
+                    or worker.id not in settled
+                    or _amount(settled[worker.id]) != amount
+                )
+            ):
                 raise FleetConflict("unknown worker exposure cannot be released")
             projected.append(replace(worker, reserved_usd=amount))
         with localcontext() as arithmetic:
@@ -1266,13 +1276,15 @@ async def save_budget(
     exposures: Mapping[uuid.UUID, Decimal],
     debits: Mapping[uuid.UUID, Decimal],
     zero_spend: frozenset[uuid.UUID] = frozenset(),
+    settled: Mapping[uuid.UUID, Decimal] | None = None,
 ) -> BudgetGraph:
     """Persist exposure selected by the sole monetary producer.
 
     Caller has lock_budget's transaction/graph. Run sums are derived in SQL,
     with the same exact Numeric basis as the rows, never ambient Decimal math.
     No status, result, usage outbox or tenant debit is changed here.
-    Only the producer's proven never-allocated evidence class may decrease.
+    Only the producer's proven never-allocated evidence class may decrease, and a
+    finished worker whose usage is all settled, to exactly its ledger debit (`settled`).
 
     The graph's rows are locked, so they are the stored rows: a run none of whose
     workers changed writes nothing when its stored sum and debit already match
@@ -1287,7 +1299,16 @@ async def save_budget(
         saved: list[FleetWorker] = []
         for worker in workers:
             amount = _amount(exposures[worker.id])
-            if amount < worker.reserved_usd and worker.id not in zero_spend:
+            if (
+                amount < worker.reserved_usd
+                and worker.id not in zero_spend
+                # A finished worker whose usage is all on the ledger: down to its debit.
+                and (
+                    settled is None
+                    or worker.id not in settled
+                    or _amount(settled[worker.id]) != amount
+                )
+            ):
                 raise FleetConflict("unknown worker exposure cannot be released")
             if amount == worker.reserved_usd:
                 saved.append(worker)
