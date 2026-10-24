@@ -886,26 +886,34 @@ async def claim_import_notice(
     session: AsyncSession, *, now: datetime
 ) -> tuple[WatchRow, str] | None:
     """Claim import and lifecycle notices on the existing adapter notice cadence."""
-    await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
+    reason = Watch.source_state["reason"].astext
+    pending = Watch.source_state["notice_pending"].as_boolean().is_(True)
+    lifecycle = or_(
+        Watch.status == "expired",
+        (Watch.status == "paused")
+        & or_(reason.in_(("access_revoked", "cap_reached")), reason.startswith("Watch paused:")),
+    )
+    capped = (
+        (Watch.status == "active")
+        & Watch.max_fires.is_not(None)
+        & (Watch.fire_count >= Watch.max_fires)
+    )
     row = await session.scalar(
         select(Watch)
         .where(
             Watch.platform == "discord",
             or_(
-                Watch.source_state["notice_pending"].as_boolean().is_(True),
-                Watch.status.in_(("active", "paused")) & (Watch.expires_at <= now),
-                (Watch.status == "active")
-                & (Watch.max_fires.is_not(None))
-                & (Watch.fire_count >= Watch.max_fires)
-                & ~select(WatchFiring.wake_key)
-                .join(TaskContinuation, TaskContinuation.idempotency_key == WatchFiring.wake_key)
-                .where(
-                    WatchFiring.watch_id == Watch.id,
-                    TaskContinuation.status.in_(("pending", "claimed")),
-                )
-                .exists(),
-                Watch.status.in_(("paused", "expired"))
-                & Watch.source_state["notice_state"].astext.is_distinct_from(Watch.status),
+                pending & (reason == "source_unmapped"),
+                lifecycle
+                & or_(
+                    pending,
+                    Watch.source_state["notice_state"].astext.is_distinct_from(Watch.status),
+                ),
+                capped
+                & or_(
+                    pending,
+                    Watch.source_state["notice_state"].astext.is_distinct_from("cap_reached"),
+                ),
             ),
             or_(
                 Watch.source_state["notice_lease_until"].astext.is_(None),
@@ -918,14 +926,6 @@ async def claim_import_notice(
     )
     if row is None:
         return None
-    if row.status in {"active", "paused"} and row.expires_at <= now:
-        await _cancel_queued(session, [row.id])
-        row.status = "expired"
-        row.revision += 1
-        row.lease_owner = None
-        row.lease_expires_at = None
-    elif row.status == "active" and row.max_fires is not None and row.fire_count >= row.max_fires:
-        await pause_watch(session, row.id, reason="cap_reached")
     state = dict(row.source_state)
     until = state.get("notice_lease_until")
     if until is not None and datetime.fromisoformat(str(until)) > now:
@@ -934,7 +934,7 @@ async def claim_import_notice(
     row.source_state = {
         **state,
         "notice_pending": True,
-        "notice_state": row.status,
+        "notice_state": "cap_reached" if row.status == "active" else row.status,
         "notice_lease": token,
         "notice_lease_until": (now + timedelta(minutes=2)).isoformat(),
     }

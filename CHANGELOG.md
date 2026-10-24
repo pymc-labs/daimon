@@ -384,7 +384,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound lock waits to five seconds when upgrading cold-DM agent selection and routine DM destinations, so busy tables cannot stall Daimon startup indefinitely.
 
 - Watch turns show their status card until the answer is posted; a brief Discord outage no longer pauses the watch.
-- Daimon watches retry capped polls at their normal interval and send owners a private notice when paused or expired.
+- Daimon watches retry capped polls at their normal interval and privately notify owners of firing limits, revoked access, and expiry.
 - Concurrent routines for the same owner reuse their platform identity when enrollment is still committing, instead of failing with a duplicate-principal error.
 
 - Bind signed session-origin authority only while a turn owns its conversation lease, so queued or stopped attended turns cannot replace an unattended holder’s grant or attendance.

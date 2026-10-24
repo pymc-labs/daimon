@@ -131,7 +131,12 @@ async def test_mapped_import_requires_exact_confirmation_before_poll_claim(
     )
     async with db_session_factory.begin() as db:
         row = await watches.import_watch(db, mapped, now=datetime.now(UTC))
-        assert row.status == "paused"
+        assert row.status == "paused" and row.source_state["reason"] == "awaiting_confirmation"
+    deliver = AsyncMock(return_value=True)
+    await poll_watch_notices(db_session_factory, deliver=deliver)
+    await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_not_awaited()
+    async with db_session_factory.begin() as db:
         with pytest.raises(ValueError, match="confirmation mismatch"):
             await watches.confirm_import(
                 db,
