@@ -409,3 +409,47 @@ def test_create_names_models_on_any_provider_and_never_says_claude_first():
 
     tool = asyncio.run(mcp.get_tool("create_agent"))
     assert "never create it on Claude first" in (tool.description or "")
+
+
+async def test_a_session_opened_before_a_switch_does_not_continue_on_claude(j10_root, monkeypatch):
+    """An agent-key session is a Managed Agents session: once its agent runs on another
+    provider, a follow-up is refused plainly, never answered (and billed) on Claude."""
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools import agent_chat
+    from daimon.adapters.mcp.tools.agent_chat import (
+        _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    deps, prepared, *_ = j10_root
+    transport = j10_root[7]
+    stateful_agents(
+        transport,
+        prepared.admission.agent.model_dump(mode="json"),
+        prepared.admission.environment,
+    )
+    async with member_chat(j10_root) as (runtime_, auth, origin):
+        made = await create_from_chat(runtime_, auth, origin, "flash-agent", "flash")
+    # The key's own session, opened before the agent moved (its ownership checks are
+    # agent_chat's own tests).
+    opened = SimpleNamespace(
+        id="sess_before_switch", agent=SimpleNamespace(id=made.id, name="flash-agent"), metadata={}
+    )
+
+    async def owned(*args, **kwargs):
+        return opened
+
+    monkeypatch.setattr(agent_chat, "_verify_agent_owns_session", owned)
+    key = replace(
+        auth,
+        chat_agent_id=None,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=made.id),
+    )
+    before = len(transport.requests)
+    with pytest.raises(ToolError, match="flash-agent runs on Gemini") as refused:
+        await _continue_turn_impl(runtime_, key, "sess_before_switch", "and now?")
+    assert "Nothing was sent" in str(refused.value)
+    assert not any(
+        request.method == "POST" and "/events" in request.path
+        for request in transport.requests[before:]
+    )
