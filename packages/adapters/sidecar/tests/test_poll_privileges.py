@@ -8,11 +8,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from . import test_polling, test_review_watch_audit
+from . import test_polling, test_watch_privilege_audit
 
 # Effective privilege audits deliberately inspect all accessible schemas.
-db_engine = test_review_watch_audit.db_engine
-db_session_factory = test_review_watch_audit.db_session_factory
+db_engine = test_watch_privilege_audit.db_engine
+db_session_factory = test_watch_privilege_audit.db_session_factory
 poll_watch = test_polling.poll_watch
 pytestmark = [pytest.mark.fresh_schema, pytest.mark.usefixtures("watch_privilege_audit_lock")]
 
