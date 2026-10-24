@@ -530,6 +530,8 @@ async def test_public_start_turn_keeps_bundle_probe_send_and_clock(
 ) -> None:
     isolated = ma_agent(id="agent", tenant_id=TENANT, metadata={"daimon_isolated": "true"})
     monkeypatch.setattr(agent_chat, "_resolve_ma_agent", AsyncMock(return_value=isolated))
+    # A Claude agent (the provider guard's own read is tested in test_j4_create_*).
+    monkeypatch.setattr(agent_chat, "_refuse_another_provider", AsyncMock(return_value=None))
     monkeypatch.setattr(agent_chat, "_resolve_environment_name", AsyncMock(return_value="env"))
     monkeypatch.setattr(
         agent_chat,

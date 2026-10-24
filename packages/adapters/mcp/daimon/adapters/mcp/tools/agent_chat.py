@@ -504,7 +504,6 @@ async def _describe_agent_impl(
     )
 
 
-@observed_agent_turn
 async def _refuse_another_provider(
     runtime: McpRuntime, auth: AuthIdentity, ma_agent: BetaManagedAgentsAgent
 ) -> None:
@@ -531,6 +530,7 @@ async def _refuse_another_provider(
         )
 
 
+@observed_agent_turn
 async def _start_turn_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
