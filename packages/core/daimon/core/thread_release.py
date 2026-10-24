@@ -110,36 +110,65 @@ async def release_now(
     pending request is never touched. A slot that moved meanwhile (another message,
     a card, a later switch) is left alone. True when released.
     """
+    from daimon.core.stores import mux_state
+
     if slot.account_id is None:
         return False
+    if isinstance(store, mux_state.PostgresStateStore):
+        # One transaction: the slot is never released without its fresh-start flag.
+        async with sessionmaker.begin() as session:
+            current = await mux_state.get_binding(session, slot, include_released=True)
+            if not _still_at(current, generation):
+                return False
+            released, expected = _released(slot, current)
+            try:
+                await mux_state.put_binding(session, released, expected_generation=expected)
+            except BindingConflict:
+                log.info("thread_release_lost_race", generation=expected)
+                return False
+            await _fresh_start(session, slot, tenant_id=tenant_id, account_id=account_id, now=now)
+        return True
     current = await store.get_binding(slot, include_released=True)
-    if is_released(current) or (current.generation if current is not None else 0) != generation:
-        log.info("thread_follow_stale", requested=generation)
-        return False
-    if not await _write_release(store, slot, current):
+    if not _still_at(current, generation) or not await _write_release(store, slot, current):
         return False
     async with sessionmaker.begin() as session:
         await _fresh_start(session, slot, tenant_id=tenant_id, account_id=account_id, now=now)
     return True
 
 
-async def _write_release(store: StateStore, slot: Slot, current: ProviderBinding | None) -> bool:
-    """Mark `slot` released at its next generation; False when another write won."""
+def _still_at(current: ProviderBinding | None, generation: int) -> bool:
+    """Whether the slot is still the unreleased binding a message read at `generation`."""
+    if is_released(current) or (current.generation if current is not None else 0) != generation:
+        log.info("thread_follow_stale", requested=generation)
+        return False
+    return True
+
+
+def _released(slot: Slot, current: ProviderBinding | None) -> tuple[ProviderBinding, int]:
+    """The released next generation of `slot`, and the generation it replaces."""
     if current is None:
         # Pinned only by an older Managed Agents session: a released first generation.
-        released = ProviderBinding(
-            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}")),
-            thread=slot.thread,
-            provider=MANAGED_AGENTS.provider,
-            profile=MANAGED_AGENTS.profile_id,
-            native_refs={RELEASED_REF: "1"},
-            generation=1,
-            config_revision=0,
-            legacy_account_id=slot.account_id,
+        return (
+            ProviderBinding(
+                id=str(
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}")
+                ),
+                thread=slot.thread,
+                provider=MANAGED_AGENTS.provider,
+                profile=MANAGED_AGENTS.profile_id,
+                native_refs={RELEASED_REF: "1"},
+                generation=1,
+                config_revision=0,
+                legacy_account_id=slot.account_id,
+            ),
+            0,
         )
-        expected = 0
-    else:
-        released, expected = released_successor(current), current.generation
+    return released_successor(current), current.generation
+
+
+async def _write_release(store: StateStore, slot: Slot, current: ProviderBinding | None) -> bool:
+    """Mark `slot` released at its next generation; False when another write won."""
+    released, expected = _released(slot, current)
     try:
         await store.put_binding(released, expected_generation=expected)
     except BindingConflict:

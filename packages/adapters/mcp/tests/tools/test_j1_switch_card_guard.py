@@ -1181,3 +1181,128 @@ async def test_m03_a_card_confirmed_mid_message_keeps_its_move_when_the_follow_f
         assert await thread_provider_releases.requested_generation(session, slot) == 0, (
             "the card's move request is still pending"
         )
+
+
+def _own_slot(chat: Chat):
+    from mux.contracts.ids import ChannelRef, ThreadRef
+    from mux.state.lease import Slot
+
+    return Slot(
+        thread=ThreadRef(
+            channel=ChannelRef(
+                tenant_id=str(chat.auth.tenant_id), platform="discord", channel_id="fresh-channel"
+            ),
+            thread_id="thread",
+        ),
+        account_id=str(chat.auth.account_id),
+    )
+
+
+async def test_m03_a_move_that_loses_the_slot_meanwhile_runs_where_the_slot_is(
+    fresh_chat, monkeypatch
+):
+    """#1495 review follow-up 1: between this message's follow decision and its own
+    release, another message rewrote the slot's binding (a newer generation, still on
+    Claude). The move is not written, so the message is admitted again from where the
+    slot now is; no error reaches the person. (Before: admission still
+    said "moved" and preparation failed closed against the Claude binding.)"""
+    import uuid as uuid_module
+    from dataclasses import replace
+
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.turn import admission as admission_module
+    from daimon.core.turn.admission import admit
+    from daimon.core.turn.runtimes import build_channel_runtime
+    from daimon.core.turn_hold import RequesterOrg
+    from daimon.testing.turn_fakes import deps_for_pinned_mux
+    from mux.contracts.resources import ProviderBinding
+
+    chat = fresh_chat
+    await _switch_outside_chat(chat, "Daimon", "gemini", "gemini-3.8-flash")
+    slot = _own_slot(chat)
+    store = PostgresStateStore(chat.runtime.session_factory)
+    follow = admission_module._thread_follow  # pyright: ignore[reportPrivateUsage]
+    rewrote: list[bool] = []
+
+    async def rewritten_meanwhile(*args, **kwargs):
+        decided = await follow(*args, **kwargs)
+        if not rewrote:
+            rewrote.append(True)
+            # Another message bound this slot on Claude first: generation 0 -> 1.
+            await store.put_binding(
+                ProviderBinding(
+                    id=str(uuid_module.uuid4()),
+                    thread=slot.thread,
+                    provider="anthropic",
+                    profile="anthropic.managed_agents",
+                    native_refs={
+                        "session": f"sess_rival_{uuid_module.uuid4().hex}",
+                        "agent": "agent_daimon",
+                    },
+                    generation=1,
+                    config_revision=0,
+                    legacy_account_id=slot.account_id,
+                ),
+                expected_generation=0,
+            )
+        return decided
+
+    monkeypatch.setattr(admission_module, "_thread_follow", rewritten_meanwhile)
+    sm = chat.runtime.session_factory
+    deps = replace(
+        deps_for_pinned_mux(chat.runtime.client, sm),
+        agent_backends=True,
+        deployment_default=chat.runtime.deployment_default,
+        state_store=store,
+        turn_runtimes={},
+        turn_runtime_factory=build_channel_runtime,
+    )
+    # Gemini can serve this agent, so only the lost race can keep it off Gemini.
+    wires = _wires(chat, monkeypatch)
+    try:
+        admission = await admit(
+            deps,
+            tenant_id=chat.auth.tenant_id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="123",
+            channel_id="fresh-channel",
+            thread_id="thread",
+            now=datetime.now(UTC),
+        )
+    finally:
+        await wires.close()  # pyright: ignore[reportCallIssue]
+    assert rewrote, "the slot was rewritten mid-message"
+    # Admitted again where the slot is: on Claude, with no move claimed.
+    assert admission.backend_follow is None and admission.backend_revision is None
+    current = await store.get_binding(slot)
+    assert current is not None and (current.provider, current.generation) == ("anthropic", 1), (
+        "the slot stays as the other message left it: nothing was released over it"
+    )
+
+
+async def test_m03_a_slot_is_never_released_without_its_fresh_start(fresh_chat, monkeypatch):
+    """#1495 review follow-up 2: the release and the fresh-start flag are one
+    transaction; a failure writing the flag leaves the slot as it was."""
+    from daimon.core import thread_release
+    from daimon.core.stores.mux_state import PostgresStateStore
+
+    chat = fresh_chat
+    slot = _own_slot(chat)
+    store = PostgresStateStore(chat.runtime.session_factory)
+
+    async def fails(*args, **kwargs):
+        raise RuntimeError("fresh-start write failed")
+
+    monkeypatch.setattr(thread_release, "_fresh_start", fails)
+    with pytest.raises(RuntimeError, match="fresh-start"):
+        await thread_release.release_now(
+            chat.runtime.session_factory,
+            store,
+            slot,
+            generation=0,
+            tenant_id=chat.auth.tenant_id,
+            account_id=chat.auth.account_id,
+            now=datetime.now(UTC),
+        )
+    assert await store.get_binding(slot, include_released=True) is None, "nothing released"
