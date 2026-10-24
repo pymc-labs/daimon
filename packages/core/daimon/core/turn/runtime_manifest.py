@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Annotated,
-    Final,
     Literal,
     Protocol,
     Self,
@@ -2740,11 +2739,6 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     return target
 
 
-#: The template drop a provider turn's consent named before Daimon posted the
-#: switch card itself (`tool_safety.self_carded_tools`).
-_SWITCH_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:request_agent_backend_switch"
-
-
 def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
     return (
         target is not None
@@ -2753,36 +2747,59 @@ def _consented(target: AgentSpec | None, consent: _BackendDropConsent) -> bool:
     )
 
 
-def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
-    """`target` as a consent recorded before the switch tool was offered names it.
+def _consented_before_self_cards(
+    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+) -> bool:
+    """Whether `consent` was recorded before some self-carded tools were offered.
 
-    That consent declared the tool a loss: not allowed on Daimon's MCP, one more
-    drop, and the drops line in the instructions. Only that one difference is
-    rebuilt; anything else still differs and still needs a fresh confirmation.
+    Such a consent declared them losses (`tool_safety.self_carded_tools`): not
+    allowed on Daimon's MCP, more drops, and the drops line in the instructions.
+    Every subset of the ones `target` now allows is rebuilt that way; any other
+    difference still needs a fresh confirmation.
     """
-    if _SWITCH_TOOL_DROP in target.declared_drops:
-        return None
-    tool = _SWITCH_TOOL_DROP.rsplit(":", 1)[1]
+    from itertools import combinations
+
+    from daimon.core.tool_safety import self_carded_tools
+
+    allowed: set[str] = set()
+    for server in target.mcp_servers or ():
+        listed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
+        if server.name == DAIMON_SERVER_NAME and isinstance(listed, list):
+            allowed.update(str(name) for name in listed)
+    offered = sorted(
+        tool
+        for tool in self_carded_tools() & allowed
+        if f"mcp_tool:{DAIMON_SERVER_NAME}:{tool}" not in target.declared_drops
+    )
+    return any(
+        _consented(_with_tools_dropped(target, source_system, dropped), consent)
+        for size in range(1, len(offered) + 1)
+        for dropped in combinations(offered, size)
+    )
+
+
+def _with_tools_dropped(
+    target: AgentSpec, source_system: str | None, tools: tuple[str, ...]
+) -> AgentSpec:
+    """`target` with Daimon MCP `tools` declared losses instead of allowed."""
     from mux.contracts.resources import MCPConnection
 
     servers: list[MCPConnection] = []
-    found = False
     for server in target.mcp_servers or ():
         allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list) and tool in allowed:
-            found = True
+        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
             server = server.model_copy(
                 update={
                     "tool_policy": {
                         **server.tool_policy,
-                        "allowed_tools": [name for name in allowed if name != tool],
+                        "allowed_tools": [name for name in allowed if name not in tools],
                     }
                 }
             )
         servers.append(server)
-    if not found:
-        return None
-    drops = tuple(sorted((*target.declared_drops, _SWITCH_TOOL_DROP)))
+    drops = tuple(
+        sorted((*target.declared_drops, *(f"mcp_tool:{DAIMON_SERVER_NAME}:{t}" for t in tools)))
+    )
     return target.model_copy(
         update={
             "mcp_servers": tuple(servers),
@@ -2965,8 +2982,8 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not _consented(target, consent) and not _consented(
-            _with_switch_tool_dropped(target, spec.system), consent
+        if not _consented(target, consent) and not _consented_before_self_cards(
+            target, spec.system, consent
         ):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
