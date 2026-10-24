@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0134_thread_binding_owner_kind"
-down_revision: str | None = "0131_usage_obs_tenant_idx"
+down_revision: str | None = "0133_backend_switch_cards"
 branch_labels: str | None = None
 depends_on: str | None = None
 
