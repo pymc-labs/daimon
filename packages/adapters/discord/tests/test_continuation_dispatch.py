@@ -754,13 +754,6 @@ async def test_skip_copy_is_posted_only_where_the_agent_may_post(
 
     async with db_session_factory() as session:
         settled = await get_continuation(session, idempotency_key=key)
-    if path == "turn_running":
-        # J6g: a hand-off behind its own running turn waits and runs after it; nobody
-        # is told to send another message.
-        assert settled is not None and settled.status == "pending"
-        assert settled.available_at is not None
-        thread.send.assert_not_called()
-        return
     assert settled is not None and settled.status == "skipped"
     if may_post:
         thread.send.assert_awaited_once()

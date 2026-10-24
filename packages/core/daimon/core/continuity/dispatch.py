@@ -254,14 +254,8 @@ async def dispatch_pending_continuations(
                 log.warning("continuation.context_unavailable", row_id=str(row.id), reason=str(exc))
                 await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
                 continue
-            if decision.action == "skip_turn_running" and (
-                row.available_at is not None or row.reason == "task_handoff"
-            ):
-                # A wake has nobody waiting to be told; it runs after the turn in
-                # progress. A hand-off's queued work was recorded by the very turn
-                # that is still marked active, so it must be retried too: settling
-                # it here is what left J6g with only "takes over from your next
-                # message" and no answer.
+            if decision.action == "skip_turn_running" and row.available_at is not None:
+                # A wake has nobody waiting to be told; it runs after the turn in progress.
                 await release_wake(sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY)
                 continue
             seed = decision.seed_user_message
