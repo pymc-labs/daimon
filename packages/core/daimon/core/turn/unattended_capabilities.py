@@ -192,8 +192,8 @@ def _value_at(path: str) -> str:
 
 
 # One walker checks parsed models and raw provider objects alike. Unknown keys are refused
-# only in capability containers; non-capability nodes keep known value checks
-# but accept additive provider fields. Custom input schemas are opaque data.
+# only in capability containers. Non-capability nodes and custom input schemas
+# are opaque: neither their fields nor their values are checked.
 type _Shape = Callable[[object, str], str | None]
 
 
@@ -212,22 +212,13 @@ def _scalar(*kinds: type) -> _Shape:
     return check
 
 
-def _one_of(*values: str) -> _Shape:
-    return lambda value, path: (
-        None if value is None or (isinstance(value, str) and value in values) else _value_at(path)
-    )
-
-
 def _exactly(*values: str) -> _Shape:
     """A required tag: one of `values`, never null."""
     return lambda value, path: (
-        None if isinstance(value, str) and value in values else _value_at(path)
+        None
+        if isinstance(value, str) and value in values
+        else f"unreviewed provider type at {path}: capability behavior has not been reviewed"
     )
-
-
-def _digits(value: object, path: str) -> str | None:
-    fits = isinstance(value, str) and value.isascii() and value.isdigit()
-    return None if fits else _value_at(path)
 
 
 def _entries(value: object) -> Mapping[str, object] | None:
@@ -259,12 +250,12 @@ def _list(item: _Shape, *, unique: str | None = None, duplicate: str = "") -> _S
     return check
 
 
-def _object(*, strict: bool = True, **fields: _Shape) -> _Shape:
+def _object(**fields: _Shape) -> _Shape:
     def check(value: object, path: str) -> str | None:
         entries = _entries(value)
         if entries is None:
             return _value_at(path)
-        if strict and (unknown := sorted(set(entries) - set(fields))):
+        if unknown := sorted(set(entries) - set(fields)):
             return _field_at(f"{path}.{unknown[0]}")
         for key, check_field in fields.items():
             if (
@@ -303,7 +294,10 @@ def _tagged(**variants: _Shape) -> _Shape:
             return _value_at(path)
         kind = entries.get("type")
         if not isinstance(kind, str) or kind not in variants:
-            return _value_at(f"{path}.type")
+            return (
+                f"unreviewed provider type at {path}.type: "
+                "capability behavior has not been reviewed"
+            )
         return variants[kind](entries, path)
 
     return check
@@ -312,14 +306,9 @@ def _tagged(**variants: _Shape) -> _Shape:
 _TEXT = _scalar(str)
 _TIMESTAMP = _scalar(str, datetime)
 _FLAG = _scalar(bool)
-_COUNT = _scalar(int)
-_NUMBER = _scalar(int, float)
-_LEVELS = ("low", "medium", "high", "xhigh", "max")
 _POLICY_SHAPE = _tagged(always_allow=_object(type=_TEXT), always_ask=_object(type=_TEXT))
 _DEFAULT_SHAPE = _object(enabled=_FLAG, permission_policy=_POLICY_SHAPE)
 _CONFIG_SHAPE = _object(name=_TEXT, enabled=_FLAG, permission_policy=_POLICY_SHAPE)
-# Minor units as a decimal string ("2500" is $25.00), never a float.
-_MONEY_SHAPE = _object(strict=False, amount=_digits, currency=_TEXT)
 
 
 def _builtin_config(value: object, path: str) -> str | None:
@@ -329,14 +318,8 @@ def _builtin_config(value: object, path: str) -> str | None:
         return _value_at(path)
     config = dict(entries)
     if "type" in config and config.pop("type") != config.get("name"):
-        return _value_at(f"{path}.type")
+        return f"unreviewed provider type at {path}.type: capability behavior has not been reviewed"
     return _CONFIG_SHAPE(config, path)
-
-
-def _effort(value: object, path: str) -> str | None:
-    if _one_of(*_LEVELS)(value, path) is None:
-        return None
-    return _object(strict=False, type=_one_of(*_LEVELS))(value, path)
 
 
 def _server_name(value: object, path: str) -> str | None:
@@ -351,11 +334,7 @@ _SESSION_SHAPE = _object(
     id=_TEXT,
     type=_TEXT,
     archived_at=_TIMESTAMP,
-    budget=_nullable(
-        _requiring(
-            "type", _object(strict=False, type=_exactly("limit"), max_list_cost=_MONEY_SHAPE)
-        )
-    ),
+    budget=_opaque,
     created_at=_TIMESTAMP,
     updated_at=_TIMESTAMP,
     deployment_id=_TEXT,
@@ -363,35 +342,9 @@ _SESSION_SHAPE = _object(
     status=_TEXT,
     title=_TEXT,
     metadata=_opaque,
-    outcome_evaluations=_list(
-        _object(
-            strict=False,
-            type=_TEXT,
-            outcome_id=_TEXT,
-            description=_TEXT,
-            result=_TEXT,
-            iteration=_scalar(int),
-            explanation=_TEXT,
-            completed_at=_TIMESTAMP,
-        )
-    ),
-    stats=_object(strict=False, active_seconds=_NUMBER, duration_seconds=_NUMBER),
-    usage=_object(
-        strict=False,
-        active_seconds=_NUMBER,
-        cache_creation=_nullable(
-            _object(
-                strict=False, ephemeral_1h_input_tokens=_COUNT, ephemeral_5m_input_tokens=_COUNT
-            )
-        ),
-        cache_read_input_tokens=_COUNT,
-        input_tokens=_COUNT,
-        list_cost=_nullable(_MONEY_SHAPE),
-        output_tokens=_COUNT,
-        server_tool_use=_nullable(
-            _object(strict=False, web_fetch_requests=_COUNT, web_search_requests=_COUNT)
-        ),
-    ),
+    outcome_evaluations=_opaque,
+    stats=_opaque,
+    usage=_opaque,
     vault_ids=_list(_TEXT),
     resources=_list(
         _tagged(
@@ -439,13 +392,7 @@ _SESSION_SHAPE = _object(
         execution_identity=_nullable(
             _requiring("type", _object(type=_exactly(*_EXECUTION_IDENTITY_TYPES)))
         ),
-        model=_object(
-            strict=False,
-            id=_TEXT,
-            speed=_one_of("standard", "fast"),
-            inference_geo=_one_of("us", "global"),
-            effort=_effort,
-        ),
+        model=_opaque,
         skills=_list(
             _object(skill_id=_TEXT, type=_exactly(*_SKILL_TYPES), version=_scalar(str, int))
         ),
@@ -485,8 +432,8 @@ def require_allowed_capabilities(
     roster, for skills unless `allow_skills`, for a server name holding `/`,
     and for unknown fields in the session and agent capability containers, execution
     identity, tools/configs/policies, MCP servers, skills and resources/files.
-    Unknown fields in non-capability sub-parts are ignored: telemetry, metadata and
-    inference settings cannot grant tools or change their authority. Known
+    Non-capability parts (budget, outcomes, stats, usage, metadata and model)
+    are opaque: neither their keys nor their values are checked. Capability
     values retain their shape checks. The refusal names the field path and
     explains that its capability behavior has not been reviewed.
     """

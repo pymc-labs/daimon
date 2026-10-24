@@ -1230,11 +1230,12 @@ Unknown tool, resource, skill, identity and policy types are refused too.
 The refusal names the field path and explains that its capability behavior
 has not been reviewed. The session envelope stays strict because it carries
 resource, vault and environment references: even a new top-level bookkeeping
-field refuses unattended turns until reviewed. Additive fields within usage
-(including cache, server-use and cost counters), stats, budget/cost, outcome
-evaluations, metadata and model/inference settings are ignored. Known values
-retain their shape checks; metadata and custom tool `input_schema` contents
-remain opaque. SDK private instance attributes are not checked.
+field refuses unattended turns until reviewed. Non-capability parts are opaque:
+usage and all its sub-objects, stats, budget, outcome evaluations, metadata and
+`agent.model` have neither their keys nor their values checked. Capability
+fields retain their reviewed value shapes, and unknown capability keys or type
+tags refuse the turn. Custom tool `input_schema` contents remain opaque.
+SDK private instance attributes are not checked.
 `constrain_capabilities` computes the arrays to send (custom tools removed
 and built-ins disabled except in isolated `long_job` worker sessions; the admin opt-in is
 `Routine.sandbox_tools_enabled`, which an admin sets per routine and which
@@ -2646,8 +2647,8 @@ validation of capability fields, tool projection, cache
 invalidation, send and restore. The thin watch wrapper refuses duplicate server
 toolsets and retains only enabled, exact-name third-party read configs. Skills, multiagent coordinators and
 unknown fields in capability containers (including newly parsed SDK fields) refuse
-before mutation. Telemetry and other non-capability sub-parts accept additive
-fields, and SDK private instance attributes are not checked. Built-ins,
+before mutation. Non-capability sub-parts are opaque: neither their keys nor
+their values are checked. SDK private instance attributes are not checked. Built-ins,
 custom tools, management endpoints and writes are unavailable; defaults are disabled
 and every retained tool asks the live read/report decider. Default-only toolsets
 provide no tools. Mounted data/vaults grant no native or delegated execution.

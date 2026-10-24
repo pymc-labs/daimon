@@ -138,12 +138,6 @@ _ASKING = {"enabled": True, "permission_policy": {"type": "always_ask"}}
 
 # A reviewed scalar that became an object or a list, at each kind of node.
 _HIDDEN_SHAPES: dict[str, Callable[[dict[str, Any]], object]] = {
-    "effort_list": _set("agent.model.effort", [_HIDDEN]),
-    "effort_type_object": _set("agent.model.effort", {"type": _HIDDEN}),
-    "effort_unknown_level": _set("agent.model.effort", "unbounded"),
-    "inference_geo_object": _set("agent.model.inference_geo", _HIDDEN),
-    "speed_list": _set("agent.model.speed", ["fast", _HIDDEN]),
-    "model_id_object": _set("agent.model.id", _HIDDEN),
     "agent_version_object": _set("agent.version", _HIDDEN),
     "system_list": _set("agent.system", [_HIDDEN]),
     "server_url_object": _set("agent.mcp_servers.0.url", _HIDDEN),
@@ -1086,20 +1080,41 @@ def test_reviewed_telemetry_passes() -> None:
 @pytest.mark.parametrize(
     ("path", "value"),
     [
+        ("agent.model.inference_geo", "eu"),
+        ("usage.input_tokens", 1.5),
+        ("budget", {"type": "future_limit"}),
+        ("agent.model.effort", [_HIDDEN]),
+        ("agent.model.effort", {"type": _HIDDEN}),
+        ("agent.model.effort", "unbounded"),
+        ("agent.model.inference_geo", _HIDDEN),
+        ("agent.model.speed", ["fast", _HIDDEN]),
+        ("agent.model.id", _HIDDEN),
         ("stats.active_seconds", _HIDDEN),
         ("usage.input_tokens", [_HIDDEN]),
         ("usage.cache_creation", [_HIDDEN]),
         ("usage.cache_creation.ephemeral_1h_input_tokens", _HIDDEN),
         ("outcome_evaluations.0.iteration", _HIDDEN),
         ("outcome_evaluations.0", [_HIDDEN]),
+        ("budget", {}),
+        ("budget", {"max_list_cost": {"amount": "1.5", "currency": "USD"}}),
+        *(
+            (node, value)
+            for node in (
+                "budget",
+                "outcome_evaluations",
+                "stats",
+                "usage",
+                "metadata",
+                "agent.model",
+            )
+            for value in (None, "future", 1.5, [_HIDDEN], _HIDDEN)
+        ),
     ],
 )
-def test_known_telemetry_values_keep_their_shape_checks(path: str, value: object) -> None:
-    """Known value checks remain; additive telemetry fields are ignored."""
+def test_non_capability_values_are_opaque(path: str, value: object) -> None:
     change = _set(path, value)
     session = _mutated(lambda s: (_with_telemetry(s), change(s)))
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        require_allowed_capabilities(session)
+    require_allowed_capabilities(session)
 
 
 @pytest.mark.parametrize(
@@ -1324,7 +1339,8 @@ async def test_every_unattended_entry_point_runs_a_real_shaped_session(
         ),
         pytest.param(
             _set("agent.execution_identity", {"type": "user"}),
-            "unreviewed value at session.agent.execution_identity.type",
+            "unreviewed provider type at session.agent.execution_identity.type: "
+            "capability behavior has not been reviewed",
             id="identity_of_another_kind",
         ),
         pytest.param(
@@ -1337,27 +1353,14 @@ async def test_every_unattended_entry_point_runs_a_real_shaped_session(
             "missing provider field session.agent.execution_identity.type",
             id="identity_empty",
         ),
-        pytest.param(
-            _set("budget", {}),
-            "missing provider field session.budget.type",
-            id="budget_empty",
-        ),
-        pytest.param(
-            _set("budget", {"max_list_cost": {"amount": "2500", "currency": "USD"}}),
-            "missing provider field session.budget.type",
-            id="budget_without_type",
-        ),
-        pytest.param(
-            _set("budget", {"type": "unlimited"}),
-            "unreviewed value at session.budget.type",
-            id="budget_of_another_kind",
-        ),
-        pytest.param(
-            _set(
-                "budget", {"type": "limit", "max_list_cost": {"amount": "1.5", "currency": "USD"}}
-            ),
-            "unreviewed value at session.budget.max_list_cost.amount",
-            id="budget_not_in_minor_units",
+        *(
+            pytest.param(
+                _set(path, "future_type"),
+                f"unreviewed provider type at session.{path}: "
+                "capability behavior has not been reviewed",
+                id=path,
+            )
+            for path in ("agent.tools.0.type", "agent.tools.1.configs.0.permission_policy.type")
         ),
         pytest.param(
             _set("agent.tools.1.configs.0.scope", "all"),
@@ -1383,7 +1386,7 @@ def test_only_a_coordinator_is_refused_as_delegation() -> None:
         require_allowed_capabilities(_coordinator_session(), allow_skills=True)
     assert refused.value.detail == caps.COORDINATOR_DETAIL
     with pytest.raises(AdmissionDenied) as refused:
-        require_allowed_capabilities(_mutated(_set("budget", {"type": "unlimited"})))
+        require_allowed_capabilities(_mutated(_set("agent.execution_identity", {"type": "user"})))
     assert "delegat" not in str(refused.value.detail)
 
 
@@ -1415,7 +1418,10 @@ def test_a_later_sdk_parsing_the_reviewed_fields_is_admitted() -> None:
     require_allowed_capabilities(_later_sdk_session())
     with pytest.raises(AdmissionDenied) as refused:
         require_allowed_capabilities(_later_sdk_session(identity="user"))
-    assert refused.value.detail == "unreviewed value at session.agent.execution_identity.type"
+    assert refused.value.detail == (
+        "unreviewed provider type at session.agent.execution_identity.type: "
+        "capability behavior has not been reviewed"
+    )
 
 
 def test_builtin_tool_names_match_the_sdk_toolset() -> None:

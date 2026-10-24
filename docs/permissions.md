@@ -165,10 +165,11 @@ the turn, before anything is sent or changed, when the session:
   explains that the capability behavior has not been reviewed. The session
   envelope stays strict because it carries resource, vault and environment
   references; a new top-level bookkeeping field also refuses unattended turns
-  until reviewed. Additions within usage/cache/server-use/cost counters, stats,
-  budget/cost, outcome evaluations, metadata and model/inference settings are
-  ignored. Known fields retain their value-shape checks; unknown tool, resource,
-  skill, identity and permission-policy types are refused. One walker checks
+  until reviewed. Non-capability parts are opaque: usage and all its sub-objects,
+  stats, budget, outcome evaluations, metadata and `agent.model` have neither
+  their keys nor their values checked. Capability fields retain their reviewed
+  value shapes; unknown tool, resource, skill, identity and permission-policy
+  types are refused. One walker checks
   SDK model fields and response extras or raw provider objects. Metadata and
   custom tool argument schemas remain opaque, and SDK private instance
   attributes are not checked.
