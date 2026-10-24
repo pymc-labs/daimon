@@ -450,7 +450,7 @@ async def test_an_owners_card_can_not_raise_fleet_limits_above_the_default(owned
         current_admin=AsyncMock(return_value=False),
     )
     trace.queue(reply())
-    with pytest.raises(ValueError, match="Only an admin can raise fleet limits"):
+    with pytest.raises(ValueError, match="an admin can raise them"):
         await prepare(prompt)
     # The same card from an admin prepares.
     admin_prepare, _ = backend_switch_callbacks(

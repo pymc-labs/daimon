@@ -3894,6 +3894,8 @@ class AgentBackendRevisionRecord(Base):
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     previous_local: Mapped[int | None] = mapped_column(Integer)
     fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # The limit an admin set (the off marker or a grant); carried forward, admin-written.
+    admin_fleet_ceiling: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -957,7 +957,11 @@ def backend_switch_callbacks(
                     ),
                 )
         except AgentBackendRefused as exc:
-            if exc.reason == "fleet_raise_admin_required":
+            if exc.reason in (
+                "fleet_raise_admin_required",
+                "fleet_admin_decision",
+                "fleet_admin_expired",
+            ):
                 raise ValueError(configuration_refusal(exc.reason)) from exc
             raise ValueError("This preview changed. Preview and confirm again.") from exc
         async with sessionmaker() as session:
