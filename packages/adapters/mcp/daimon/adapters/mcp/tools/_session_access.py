@@ -188,11 +188,7 @@ def session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdent
     A routine's private stamp is its owner's own: no grant is needed, and no
     one else's hub read opens it.
     """
-    return metadata_belongs_to_caller(session.metadata or {}, auth)
-
-
-def metadata_belongs_to_caller(metadata: Mapping[str, str], auth: AuthIdentity) -> bool:
-    """Apply the same account and private execution-grant check to retained provenance."""
+    metadata = session.metadata or {}
     if metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
         # hub read opens it (never a private DM, never to continue).
         return _admin_may_read_other(metadata)

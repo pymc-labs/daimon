@@ -117,6 +117,8 @@ from daimon.core.turn.unattended import (
     session_gate,
 )
 from daimon.core.turn.unattended_capabilities import (
+    ServerTool,
+    capability_policy,
     capability_posture,
     protected_tools,
     unattended_entry_point,
@@ -134,6 +136,8 @@ from mux.profiles import MANAGED_AGENTS, get_profile
 from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
 from mux.state.lease import Lease
 from sqlalchemy.exc import SQLAlchemyError
+
+_JOB_ALLOWLIST = frozenset({ServerTool("daimon-mcp", "get_long_job")})
 
 
 class _TurnPortKwargs(TypedDict, total=False):
@@ -1060,9 +1064,6 @@ async def run_prepared_turn_impl(
         raise AdmissionDenied(reason="invoker_not_allowed")
     if watch_row is not None and (watch_row.reason != "watch_fired" or attended is not False):
         raise ValueError("Watch turns must be explicitly unattended")
-    from daimon.core.turn.unattended_capabilities import ServerTool
-
-    job_allowlist = frozenset({ServerTool("daimon-mcp", "get_long_job")})
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
     unattended = not (attended if attended is not None else origin != "routine")
     # Tracks the session/mapping id (and whether recovery has taken over) the
@@ -1244,24 +1245,23 @@ async def run_prepared_turn_impl(
                         )
                         stack.enter_context(unattended_sends(dm_gate))
                     elif gateable:
-                        gate = session_gate(
-                            deps.anthropic,
-                            session_id,
-                            deps.tool_safety,
-                            scope=gate_scope,
-                            public_url=deps.public_url,
-                            session_factory=deps.sessionmaker,
-                            tenant_id=tenant_id,
-                            read_session=read_session,
-                            entry_point=unattended_entry_point(origin),
-                            tool_allowlist=job_allowlist if job_row is not None else None,
-                        )
-                        if watch_row is not None:
-                            from daimon.core.continuity.watch_turn import (
-                                watch_capabilities,
+                        if watch_row is None and job_row is None:
+                            gate = session_gate(
+                                deps.anthropic,
+                                session_id,
+                                deps.tool_safety,
+                                scope=gate_scope,
+                                public_url=deps.public_url,
+                                session_factory=deps.sessionmaker,
+                                tenant_id=tenant_id,
+                                read_session=read_session,
+                                entry_point=unattended_entry_point(origin),
                             )
+                        else:
+                            from daimon.core.continuity.watch_turn import watch_capabilities
                             from daimon.core.session_ports_compat import retrieve_session_record
                             from daimon.core.turn.unattended_capabilities import (
+                                constrain_capabilities,
                                 invalidate_cached_tools,
                                 restore_capabilities,
                                 send_capabilities,
@@ -1269,10 +1269,10 @@ async def run_prepared_turn_impl(
 
                             original_snapshot: BetaManagedAgentsSession | None = None
 
-                            async def watch_gate() -> None:
+                            async def _fenced_wake_gate() -> None:
                                 nonlocal original_snapshot
-                                assert watch_row is not None
-                                await authorize_watch(admission, session_id)
+                                if job_row is None:
+                                    await authorize_watch(admission, session_id)
                                 snapshot = (
                                     await read_session()
                                     if read_session is not None
@@ -1282,20 +1282,32 @@ async def run_prepared_turn_impl(
                                         scope=gate_scope,
                                     )
                                 )
+                                row = job_row if job_row is not None else watch_row
+                                assert row is not None
                                 if (
                                     snapshot.id != session_id
-                                    or snapshot.agent.id != watch_row.target_ma_agent_id
+                                    or snapshot.agent.id != row.target_ma_agent_id
                                 ):
-                                    from daimon.core.turn.errors import AdmissionDenied
-
                                     raise AdmissionDenied(reason="invoker_not_allowed")
-                                constrained = await watch_capabilities(
-                                    snapshot,
-                                    deps.tool_safety,
-                                    public_url=deps.public_url,
-                                    sessions=deps.sessionmaker,
-                                    tenant_id=tenant_id,
-                                )
+                                if job_row is not None:
+                                    constrained = await constrain_capabilities(
+                                        snapshot,
+                                        deps.tool_safety,
+                                        public_url=deps.public_url,
+                                        session_factory=deps.sessionmaker,
+                                        tenant_id=tenant_id,
+                                        allow_builtins=False,
+                                        allow_skills=capability_policy("wake").allow_skills,
+                                        tool_allowlist=_JOB_ALLOWLIST,
+                                    )
+                                else:
+                                    constrained = await watch_capabilities(
+                                        snapshot,
+                                        deps.tool_safety,
+                                        public_url=deps.public_url,
+                                        sessions=deps.sessionmaker,
+                                        tenant_id=tenant_id,
+                                    )
                                 if original_snapshot is None and constrained.changed:
                                     await invalidate_cached_tools(
                                         snapshot, constrained, session_factory=deps.sessionmaker
@@ -1315,65 +1327,7 @@ async def run_prepared_turn_impl(
                                     scope=gate_scope,
                                 )
 
-                            gate = watch_gate
-                        if job_row is not None:
-                            from daimon.core.session_ports_compat import retrieve_session_record
-                            from daimon.core.turn.unattended_capabilities import (
-                                constrain_capabilities,
-                                invalidate_cached_tools,
-                                restore_capabilities,
-                                send_capabilities,
-                            )
-
-                            job_original: BetaManagedAgentsSession | None = None
-
-                            async def job_gate() -> None:
-                                nonlocal job_original
-                                snapshot = (
-                                    await read_session()
-                                    if read_session is not None
-                                    else await retrieve_session_record(
-                                        deps.anthropic.with_options(max_retries=0),
-                                        session_id,
-                                        scope=gate_scope,
-                                    )
-                                )
-                                assert job_row is not None
-                                if (
-                                    snapshot.id != session_id
-                                    or snapshot.agent.id != job_row.target_ma_agent_id
-                                ):
-                                    raise AdmissionDenied(reason="invoker_not_allowed")
-                                constrained = await constrain_capabilities(
-                                    snapshot,
-                                    deps.tool_safety,
-                                    public_url=deps.public_url,
-                                    session_factory=deps.sessionmaker,
-                                    tenant_id=tenant_id,
-                                    allow_builtins=False,
-                                    allow_skills=True,
-                                    tool_allowlist=job_allowlist,
-                                )
-                                if job_original is None and constrained.changed:
-                                    await invalidate_cached_tools(
-                                        snapshot, constrained, session_factory=deps.sessionmaker
-                                    )
-                                    job_original = snapshot
-                                    stack.push_async_callback(
-                                        restore_capabilities,
-                                        deps.anthropic.with_options(max_retries=0, timeout=30),
-                                        snapshot,
-                                        constrained.original,
-                                        scope=gate_scope,
-                                    )
-                                await send_capabilities(
-                                    deps.anthropic.with_options(max_retries=0),
-                                    snapshot,
-                                    constrained,
-                                    scope=gate_scope,
-                                )
-
-                            gate = job_gate
+                            gate = _fenced_wake_gate
                         stack.enter_context(unattended_sends(gate))
                     else:
                         # Selfhosted pauses every declared tool at the host boundary,
@@ -1508,7 +1462,7 @@ async def run_prepared_turn_impl(
             )
 
             tool_confirmation = capability_posture(
-                tool_confirmation, tool_allowlist=job_allowlist if job_row is not None else None
+                tool_confirmation, tool_allowlist=_JOB_ALLOWLIST if job_row is not None else None
             )
         else:
             tool_confirmation = chat_tool_confirmation(

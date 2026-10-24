@@ -791,17 +791,16 @@ def _allowlisted(
     allowlist: frozenset[ServerTool],
     *,
     public_url: str | None,
+    own_reads: frozenset[ServerTool],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Only the MCP tools `allowlist` names, each enabled alone.
 
     An entry whose server name holds `/` is refused rather than skipped: a
     caller that built one has already confused a composite key for a server.
 
-    Daimon's own management server is removed except for an explicitly
-    allowlisted `get_long_job` on the verified deployment endpoint:
-    `daimon-mcp`, a server named `sandbox`, and any server whose URL is the
-    deployment's endpoint under a query, duplicate-parameter or path alias
-    (`same_mcp_endpoint`).
+    Daimon's own management servers are removed unless an allowlisted pair
+    is also in the caller's verified `own_reads`: `daimon-mcp`, `sandbox`,
+    and any URL alias of the deployment endpoint (`same_mcp_endpoint`).
     """
     own = {DAIMON_SERVER_NAME, "sandbox"} | {
         s["name"]
@@ -812,18 +811,7 @@ def _allowlisted(
     for server, name in sorted(allowlist):
         if SERVER_SEPARATOR in server:
             _refuse(f"a server name holding '/' (tool allowlist entry {server!r})")
-        job_reader = (
-            server == DAIMON_SERVER_NAME
-            and name == "get_long_job"
-            and public_url is not None
-            and any(
-                s["name"] == server
-                and isinstance(s.get("url"), str)
-                and same_mcp_endpoint(s["url"], public_url)
-                for s in servers
-            )
-        )
-        if server and name and (server not in own or job_reader):
+        if server and name and (server not in own or ServerTool(server, name) in own_reads):
             wanted.setdefault(server, []).append(name)
     kept: list[dict[str, Any]] = []
     for tool in tools:
@@ -884,8 +872,19 @@ async def constrain_capabilities(
         for tool in tools
         if tool.get("type") != CUSTOM_TOOL
     ]
+    # Only this read on the verified deployment endpoint may retain own-server access.
+    own_reads = frozenset(
+        ServerTool(server["name"], "get_long_job")
+        for server in servers
+        if server["name"] == DAIMON_SERVER_NAME
+        and public_url is not None
+        and isinstance(server.get("url"), str)
+        and same_mcp_endpoint(server["url"], public_url)
+    )
     if tool_allowlist is not None:
-        tools, servers = _allowlisted(tools, servers, tool_allowlist, public_url=public_url)
+        tools, servers = _allowlisted(
+            tools, servers, tool_allowlist, public_url=public_url, own_reads=own_reads
+        )
     rules = (
         await daimon_rule_tools_for(
             session_factory, policy, tenant_id=tenant_id, agent_id=snapshot.agent.id
@@ -910,7 +909,7 @@ async def constrain_capabilities(
     # Reapply the explicit authority boundary after those rewrites.
     if tool_allowlist is not None:
         kept_tools, kept_servers = _allowlisted(
-            send.tools, send.mcp_servers, tool_allowlist, public_url=public_url
+            send.tools, send.mcp_servers, tool_allowlist, public_url=public_url, own_reads=own_reads
         )
         send = SessionToolConfig(tools=kept_tools, mcp_servers=kept_servers)
     return ConstrainedSession(send=send, original=original, changed=send != original)
