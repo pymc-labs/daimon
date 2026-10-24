@@ -938,10 +938,13 @@ def test_a_provider_word_alone_means_the_provider_default(backend, word):
 
 @pytest.mark.parametrize(("name", "provider"), [("gemini 4 argon", "gemini"), ("astra", "openai")])
 def test_creating_on_another_providers_model_says_how(name, provider):
+    """An existing agent moves with the switch; a new one is made there directly."""
     from daimon.adapters.mcp.tools.agents import _resolve_native_agent_model
 
-    with pytest.raises(ToolError, match="then switch it to"):
+    with pytest.raises(ToolError, match="request_agent_backend_switch") as refused:
         _resolve_native_agent_model(name)
+    assert f"target_backend={provider}" in str(refused.value)
+    assert "Create the agent on a Claude model" not in str(refused.value)
 
 
 def test_an_unknown_claude_id_is_not_waved_through():

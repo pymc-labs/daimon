@@ -855,6 +855,11 @@
         asks for Sonnet and ``"claude-opus-5-5"`` when they ask for Opus — always
         the current generation. Only pass an older id (``claude-sonnet-5``,
         ``claude-opus-5``, …) when the user names that version themselves.
+        Any other provider's model works the same way, by name: ``"flash"``,
+        ``"argon"``, ``"luna"``, ``"astra"`` (or its id). The agent is created on that
+        provider directly: never create it on Claude first, and nothing else is needed
+        afterwards. The result's ``applies`` says where it runs and what it won't have
+        there: post it.
         Optional: ``description``, ``system`` (the system prompt), ``tools``,
         ``mcp_servers``, and ``skill_repos`` — GitHub repos to sync skills from,
         e.g. ``[{"url": "https://github.com/owner/repo", "branch": "main"}]``.

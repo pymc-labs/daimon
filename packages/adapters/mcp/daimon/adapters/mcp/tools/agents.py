@@ -573,15 +573,45 @@ def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
             other = resolve_model(choice)
             if other.provider != MANAGED_AGENTS.provider:
                 raise ToolError(
-                    f"{model_name(other)} is a {provider_name(other.provider)} model. Create "
-                    "the agent on a Claude model such as sonnet, then switch it to "
-                    f"{provider_name(other.provider)} ({other.id}). Nothing was created yet."
+                    f"{model_name(other)} is a {provider_name(other.provider)} model. Move "
+                    f"an existing agent to it with request_agent_backend_switch "
+                    f"(target_backend={other.provider}, model={other.id}); create_agent "
+                    "makes a new agent on it directly. Nothing was changed."
                 ) from exc
         if "could mean" not in str(exc):
             # Unknown (not ambiguous): the refusal lists what this deployment offers.
             _reject_unknown_model(model)
         raise ToolError(str(exc)) from exc
     return resolved if isinstance(model, str) else {**model, "id": resolved}
+
+
+def _create_model(model: ModelSelection) -> tuple[ModelSelection, tuple[Provider, str] | None]:
+    """create_agent's model: a Claude model as it is, or another provider's model by its
+    name or id ("flash", "luna", "gemini-4-argon"), returned as the backend to start on.
+
+    An agent's definition (prompt, tools, skills) is a Managed Agents record, so one
+    on another provider is saved on the default Claude model as its source only; its
+    backend revision is what every turn runs on.
+    """
+    from daimon.core.agent_model_names import resolve_model
+    from daimon.core.constants import DEFAULT_AGENT_MODEL
+    from mux.profiles import MANAGED_AGENTS
+
+    choice = model_choice_id(model)
+    if choice in ALLOWED_MODEL_IDS:
+        return model, None
+    try:
+        other = resolve_model(choice)
+    except ValueError:
+        return model, None  # the Claude path names the choices
+    if other.provider == MANAGED_AGENTS.provider:
+        return model, None
+    if not isinstance(model, str):
+        raise ToolError(
+            "Model options apply only to Claude models: pass this model by name. "
+            "Nothing was created."
+        )
+    return DEFAULT_AGENT_MODEL, (other.provider, other.id)
 
 
 def _build_create_spec(
@@ -624,22 +654,91 @@ def _build_create_spec(
         ) from exc
 
 
+async def _start_on_backend(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow | None,
+    name: str,
+    backend: Provider,
+    model: str,
+) -> str:
+    """Give a just-created agent its backend revision, through the switch's own preview
+    and write (policy, enabled providers, selectable models, what it can't carry).
+
+    No card: the agent is brand new, so nobody else's conversations change, and the
+    person asked for that provider. What it won't have there is said in the answer.
+    """
+    from daimon.core.agent_model_names import model_name
+    from daimon.core.confirmation import drop_words
+    from daimon.core.turn.notices import provider_name
+    from mux.contracts.ids import ModelRef
+
+    del origin  # A new agent answers nowhere yet: its own source is the one read.
+    service = channel_backend.make_backend_service(
+        runtime.session_factory,
+        runtime.settings.turn,
+        capture_source=partial(_capture_backend_source, runtime, auth, None),
+    )
+    actor = channel_backend.BackendActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+    )
+    try:
+        agent = await channel_backend.load_backend_agent(
+            runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name=name
+        )
+        preview = await service.preview(agent, backend, model)
+        if not preview.allowed:
+            raise ToolError(f"{provider_name(backend)} isn't turned on here. Nothing was created.")
+        await service.set_backend(
+            agent,
+            backend,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+            model=model,
+            accepted_drops=preview.declared_drops,
+        )
+    except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
+        refusal = str(_backend_switch_refusal(exc, name, backend, auth))
+        raise ToolError(
+            refusal.removesuffix(" Nothing changed.") + " Nothing was created."
+        ) from exc
+    words = f"{name} runs on {model_name(ModelRef(provider=backend, id=model))}."
+    if preview.declared_drops:
+        words += f" On {provider_name(backend)} it won't have {drop_words(preview.declared_drops)}."
+    return words
+
+
 async def _create_agent_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     spec: AgentSpec,
     origin_context_id: str | None = None,
+    *,
+    backend: tuple[Provider, str] | None = None,
 ) -> AgentInfo:
+    """Create `spec`; `backend` (from `_create_model`) starts it on another provider."""
     if spec.skills:
         raise ToolError(
             "create_agent: skills must be empty. To add skills, either sync a "
             "repo via skill_repos or use sync_skills after the agent "
             "is created."
         )
+    if backend is not None:
+        # Before anything is created: the switch's own model and provider gates.
+        if not channel_backend.backend_selection_enabled(runtime.settings.turn):
+            raise ToolError(
+                "Choosing a model provider is turned off here, so only Claude models "
+                "are available. Nothing was created."
+            )
+        _require_selectable_model(*backend)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     await require_agent_creatable(
         runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
     )
+    started: str | None = None
     owner = may_own(auth)
     async with contextlib.AsyncExitStack() as stack:
         if owner:
@@ -688,6 +787,17 @@ async def _create_agent_impl(
                 ),
                 account_id=auth.account_id,
             )
+        if backend is not None and outcome.action == ReconcileAction.CREATED:
+            created_id = outcome.anthropic_id
+            try:
+                started = await _start_on_backend(
+                    runtime, auth, origin, spec.name, backend[0], backend[1]
+                )
+            finally:
+                if started is None:
+                    # Never left behind on a provider it couldn't start on (or on
+                    # the Claude source model it was only saved with).
+                    await _discard_created(runtime, auth, created_id)
     queue_agent_face(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -724,7 +834,27 @@ async def _create_agent_impl(
     info = await _build_agent_info(
         runtime.client, ma_agent, tenant_id=auth.tenant_id, sync_warnings=warnings
     )
+    if backend is not None:
+        # The model it runs on, never the Claude record it is saved with.
+        info = info.model_copy(update={"model": backend[1], "applies": started})
     return await _with_answering_note(runtime, auth, info)
+
+
+async def _discard_created(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str) -> None:
+    """Archive an agent create_agent made in this call and couldn't finish."""
+    try:
+        await archive_agent(
+            runtime.client,
+            ma_agent_id,
+            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        )
+    except Exception as exc:
+        log.error(
+            "create_agent.discard_failed",
+            agent_id=ma_agent_id,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
 
 
 def _reject_reserved_servers(
@@ -1987,6 +2117,11 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         asks for Sonnet and ``"claude-opus-5-5"`` when they ask for Opus — always
         the current generation. Only pass an older id (``claude-sonnet-5``,
         ``claude-opus-5``, …) when the user names that version themselves.
+        Any other provider's model works the same way, by name: ``"flash"``,
+        ``"argon"``, ``"luna"``, ``"astra"`` (or its id). The agent is created on that
+        provider directly: never create it on Claude first, and nothing else is needed
+        afterwards. The result's ``applies`` says where it runs and what it won't have
+        there: post it.
         Optional: ``description``, ``system`` (the system prompt), ``tools``,
         ``mcp_servers``, and ``skill_repos`` — GitHub repos to sync skills from,
         e.g. ``[{"url": "https://github.com/owner/repo", "branch": "main"}]``.
@@ -1998,16 +2133,19 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
         without it is refused while a channel in the workspace is confidential, and with
         """
+        source_model, backend = _create_model(model)
         spec = _build_create_spec(
             name=name,
-            model=model,
+            model=source_model,
             description=description,
             system=system,
             tools=tools,
             mcp_servers=mcp_servers,
             skill_repos=skill_repos,
         )
-        return await _create_agent_impl(runtime, await _auth(ctx), spec, origin_context_id)
+        return await _create_agent_impl(
+            runtime, await _auth(ctx), spec, origin_context_id, backend=backend
+        )
 
     @mcp.tool
     async def update_agent(  # pyright: ignore[reportUnusedFunction]
