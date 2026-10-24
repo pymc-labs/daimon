@@ -1649,16 +1649,6 @@ async def _consume_with_reconnect(
                 # race) is now abandoned -- the `finally` below closes it
                 # unconditionally, so this cancel doesn't leak the connection.
                 raise
-            # The input went with the session create (OpenAI conversation-only), so
-            # the turn can be over before this stream connected; a stream that
-            # replays nothing would then wait out the deadline. Already idle means
-            # replay and finalize now, through the same status-checked path.
-            if getattr(io, "input_sent_before_stream", False) and await io.status() not in {
-                "running",
-                "rescheduling",
-            }:
-                log.info("turn.ended_before_stream", session_id=session_id)
-                raise _EventlessCycle(reason="read_timeout")
 
         # Race each next-event fetch against the same `cancel_task` so the
         # inner loop is reactive to the interrupt signal even while the
@@ -1673,7 +1663,9 @@ async def _consume_with_reconnect(
         while True:
             if cancel.is_set():
                 raise _InterruptInConsume()
-            if next_task is None or next_task.done():
+            # A new fetch only once the last one's result was taken: a fetch that
+            # finished during a status check still holds its event.
+            if next_task is None:
                 next_coro = cast(Any, stream_iter).__anext__()
                 next_task = asyncio.create_task(
                     next_coro,
@@ -1687,7 +1679,19 @@ async def _consume_with_reconnect(
             if not done:
                 # Only keep-alives for `idle_check_s`: the same status-checked path
                 # as a clean close. Still running keeps waiting on the same fetch.
-                if await io.status() in {"running", "rescheduling"}:
+                try:
+                    status = await io.status()
+                except (*_CONNECTION_LOST, _anthropic.APIError, ProviderError) as error:
+                    # A lost connection or a 429/5xx on the check is no verdict, so it
+                    # never ends the turn: keep waiting, and the turn's deadline still
+                    # bounds it. A scope violation still propagates.
+                    log.warning(
+                        "turn.idle_check_failed",
+                        session_id=session_id,
+                        error_type=type(error).__name__,
+                    )
+                    continue
+                if status in {"running", "rescheduling"}:
                     continue
                 log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
                 raise _EventlessCycle(reason="read_timeout")
@@ -1696,8 +1700,9 @@ async def _consume_with_reconnect(
                 with _suppress_task_exc():
                     await next_task
                 raise _InterruptInConsume()
+            fetched, next_task = next_task, None
             try:
-                item = next_task.result()
+                item = fetched.result()
                 event = item.native
             except StopAsyncIteration:
                 # Clean close, no terminal event: not itself completion.

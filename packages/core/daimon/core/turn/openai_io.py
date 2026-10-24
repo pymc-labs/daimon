@@ -228,9 +228,6 @@ class OpenAITurnIO:
         self._displayed: dict[str, str] = {}
         self._terminal: str | None = None
         self._terminated = False
-        # The turn's input went with the session create (conversation-only), so
-        # the turn may already have ended before any stream opened.
-        self.input_sent_before_stream = False
 
     def _validate(self, event: Event) -> None:
         if event.session_id != self._session.id or event.native.provider != "openai":
@@ -377,7 +374,6 @@ class OpenAITurnIO:
             if await self._initial_input_loader(self._session, message):
                 if len(inputs) != 1:
                     raise UnsupportedCapability(("host_initial_input_batch",), PROFILE)
-                self.input_sent_before_stream = True
                 return
 
         async def deliver(key: str) -> SendReceipt:

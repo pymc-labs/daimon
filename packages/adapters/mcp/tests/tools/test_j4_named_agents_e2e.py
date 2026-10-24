@@ -422,7 +422,7 @@ class _EndedBeforeConnectStream(_EndMissedStream):
             yield b": keepalive\n\n"
 
 
-@pytest.mark.parametrize("stream", ["end_missed", "ended_before_connect"])
+@pytest.mark.parametrize("stream", ["end_missed", "ended_before_connect", "running_then_idle"])
 async def test_j4_a_gpt_worker_whose_stream_never_reports_the_end_still_succeeds(
     j10_root, monkeypatch, stream
 ):
@@ -437,9 +437,25 @@ async def test_j4_a_gpt_worker_whose_stream_never_reports_the_end_still_succeeds
 
     # The status check runs after this much silence (15 s live).
     monkeypatch.setattr(OpenAITurnIO, "idle_check_s", 0.2, raising=False)
-    variant = _EndMissedStream if stream == "end_missed" else _EndedBeforeConnectStream
+    variant = _EndedBeforeConnectStream if stream == "ended_before_connect" else _EndMissedStream
     monkeypatch.setattr(test_openai_host, "Stream", variant)
+    running_reads: list[int] = []
+    if stream == "running_then_idle":
+        # The session still reports running once the stream is open, then idle:
+        # the silence check keeps waiting, then finishes from the saved turn.
+        answer = AstraWire.session
+
+        def session(self):
+            value = answer(self)
+            if self.sources and len(running_reads) < 3:
+                running_reads.append(1)
+                value = {**value, "status": "in_progress"}
+            return value
+
+        monkeypatch.setattr(AstraWire, "session", session)
     _, settled, collected, *_ = await _run_named_fleet(j10_root, monkeypatch)
+    if stream == "running_then_idle":
+        assert len(running_reads) == 3, "the check saw it running before it went idle"
     assert [(row.role, row.backend, row.status) for row in settled] == [
         ("fleet-claude", "anthropic", "succeeded"),
         ("fleet-openai", "openai", "succeeded"),
