@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from daimon.core._models import BackendSwitchCard
+from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -185,3 +186,88 @@ async def finish(
         .where(BackendSwitchCard.id == card_id, BackendSwitchCard.status == "claimed")
         .values(status=status, outcome=outcome)
     )
+
+
+async def record_refresh(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_id: str,
+    requester_platform_user_id: str,
+    agent_name: str,
+    stale_digest: str,
+    fresh: BaseModel,
+    expires_at: datetime,
+) -> None:
+    """A switch card re-previewed when it was built (J5): the stale preview it was asked
+    with, and the one it showed. Never pressable (no message) and never a waiting card
+    (no top-level agent); the approved call spends it once (`consume_refresh`)."""
+    fresh_reference = fresh.model_dump(mode="json")
+    record = BackendSwitchCard(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        platform=platform,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        requester_platform_user_id=requester_platform_user_id,
+        reference={
+            "refresh": {
+                "agent": agent_name,
+                "of": stale_digest,
+                "fresh": fresh_reference["preview_digest"],
+                "revision": fresh_reference["expected_revision"],
+            },
+            "reference": fresh_reference,
+        },
+        expires_at=expires_at,
+        status="pending",
+    )
+    session.add(record)
+    await session.flush()
+
+
+async def consume_refresh(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    agent_name: str,
+    stale_digest: str,
+    fresh_digest: str,
+    fresh_revision: int,
+    now: datetime,
+) -> bool:
+    """Spend one card refresh: the approved call's stale preview, re-previewed to exactly
+    the agent's current one. False when none matches (the agent changed again)."""
+    target = (
+        select(BackendSwitchCard.id)
+        .where(
+            BackendSwitchCard.tenant_id == tenant_id,
+            BackendSwitchCard.account_id == account_id,
+            BackendSwitchCard.reference.contains(
+                {
+                    "refresh": {
+                        "agent": agent_name,
+                        "of": stale_digest,
+                        "fresh": fresh_digest,
+                        "revision": fresh_revision,
+                    }
+                }
+            ),
+            BackendSwitchCard.status == "pending",
+            BackendSwitchCard.expires_at > now,
+        )
+        .limit(1)
+        .with_for_update(skip_locked=True)
+        .scalar_subquery()
+    )
+    spent = await session.scalar(
+        update(BackendSwitchCard)
+        .where(BackendSwitchCard.id == target, BackendSwitchCard.status == "pending")
+        .values(status="applied", outcome="Switched by a card re-previewed when it was built.")
+        .returning(BackendSwitchCard.id)
+    )
+    return spent is not None
