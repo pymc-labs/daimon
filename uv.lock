@@ -1150,6 +1150,7 @@ source = { editable = "packages/core" }
 dependencies = [
     { name = "alembic" },
     { name = "anthropic" },
+    { name = "anyio" },
     { name = "asyncpg" },
     { name = "azure-identity" },
     { name = "cachetools" },
@@ -1176,6 +1177,7 @@ dependencies = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "anthropic", specifier = ">=0.117" },
+    { name = "anyio", specifier = ">=4" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "azure-identity", specifier = ">=1.25,<2" },
     { name = "cachetools", specifier = ">=7,<8" },

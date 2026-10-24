@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from collections.abc import AsyncIterator
@@ -1193,7 +1194,7 @@ async def test_a_chat_copy_that_cant_start_on_its_sources_provider_is_archived(
     assert scope is not None and scope.agent_name == "shared", "the channel keeps its agent"
 
 
-@pytest.mark.parametrize("failure", ("archive_fails", "cancelled"))
+@pytest.mark.parametrize("failure", ("archive_fails", "archive_raises", "cancelled"))
 async def test_a_chat_copy_whose_start_and_archive_go_wrong_is_never_silent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1229,9 +1230,19 @@ async def test_a_chat_copy_whose_start_and_archive_go_wrong_is_never_silent(
 
     async def archive_over_the_network(*args: Any, **kwargs: Any) -> Any:
         await anyio.sleep(0.01)  # a real archive yields, so a cancelled scope reaches it
+        if failure == "archive_raises":
+            raise RuntimeError("an error that isn't the provider's")
         return await real_archive(*args, **kwargs)
 
     monkeypatch.setattr(channel_rules, "archive_agent", archive_over_the_network)
+    shields: list[object] = []
+    real_shield = asyncio.shield
+
+    def counted(task: Any) -> Any:
+        shields.append(task)
+        return real_shield(task)
+
+    monkeypatch.setattr(asyncio, "shield", counted)
     scope = anyio.CancelScope()
 
     async def start_copy(source: str, source_id: str, copy: str, copy_id: str) -> None:
@@ -1247,6 +1258,13 @@ async def test_a_chat_copy_whose_start_and_archive_go_wrong_is_never_silent(
             )
         assert scope.cancelled_caught
         assert len(archived) == 1, "the removal finished despite the cancellation"
+        ours = [
+            task
+            for task in shields
+            if getattr(getattr(task, "get_coro", lambda: None)(), "__name__", "")
+            == "_archive_unused_copy"
+        ]
+        assert len(ours) == 1, "one shielded wait, not one per event-loop tick"
     else:
         with pytest.raises(DaimonError, match="may still exist on Claude"):
             await _set_rule(
@@ -1256,3 +1274,22 @@ async def test_a_chat_copy_whose_start_and_archive_go_wrong_is_never_silent(
         db_session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1")
     )
     assert scope_row is not None and scope_row.agent_name == "shared", "the channel keeps its agent"
+
+
+async def test_a_panel_copy_of_an_agent_gone_since_it_was_named_is_refused(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#1510 review (c): a source the panel pre-check can't find is refused, never
+    copied unread (its provider was never checked)."""
+    tenant = await make_tenant(db_session)
+    client, state = _client(tenant.id, ("shared", False))
+    await _bind(db_session, tenant.id, "c1", "shared")
+    await _bind(db_session, tenant.id, "c2", "shared")
+    await db_session.commit()
+
+    with pytest.raises(DaimonError, match="couldn't find gone-agent"):
+        await _set_rule(
+            client, db_session_factory, tenant.id, "c1", copy=True, copy_from="gone-agent"
+        )
+    assert list(state.agents) == ["agent_0"], "nothing was copied"
